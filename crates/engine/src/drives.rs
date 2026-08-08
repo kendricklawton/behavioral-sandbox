@@ -15,7 +15,7 @@ use bsx_channel::{INPUT_LABEL, OUTPUT_LABEL};
 use crate::VmmError;
 use crate::paths::path_str;
 
-/// Size of the blank writable output image. A fixed cap for now, it's the natural bulk-output
+/// Size of the blank writable output image. A fixed cap, and the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
 /// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
 /// metadata: a fresh image is ~a few MiB of real host blocks, growing only with what's written.

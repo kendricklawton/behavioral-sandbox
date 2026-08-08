@@ -257,8 +257,8 @@ mod tests {
 
     #[test]
     fn a_silent_failure_is_described_by_its_status() {
-        // The regression this exists to hold: a helper killed by a signal writes no stderr, and
-        // an error built from stderr alone ends in a bare colon, naming no cause at all.
+        // A helper killed by a signal writes no stderr, so an error built from stderr alone ends
+        // in a bare colon, naming no cause at all.
         let killed = Command::new("sh")
             .args(["-c", "kill -9 $$"])
             .output()

@@ -85,9 +85,8 @@ pub fn guest_rootfs_config() -> BootConfig {
 
 /// The guest rootfs booted **under the jailer**, with the vsock exec channel: the convergence of
 /// the jail with a code channel (a jailed VM that can actually run code). Deliberately *not*
-/// `read_only_root`, the jailer refuses the overlay for now (a later step stages a read-only base +
-/// per-run tmpfs into the chroot), so this boots a plain read-write rootfs copy inside the chroot,
-/// which is enough to reach the agent's readiness marker and serve an exec. Needs real root (see
+/// `read_only_root`, so this exercises the plain read-write rootfs copy inside the chroot;
+/// [`jailed_ro_agent_config`] covers the shared-base path. Needs real root (see
 /// [`have_jailer_privileges`]).
 pub fn jailed_agent_config() -> BootConfig {
     let mut cfg = guest_rootfs_config();

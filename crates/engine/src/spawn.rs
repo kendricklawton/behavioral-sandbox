@@ -246,8 +246,8 @@ impl Spawned {
         };
 
         // Cgroup-owned lifetime: enroll the VMM in a per-VM lifetime cgroup and arm the
-        // sentinel, so from here even a SIGKILLed driver can't leak it. Named by the scratch dir,
-        // so a VM's cgroup and scratch identities match.
+        // sentinel, so from here a SIGKILLed driver's death wakes the sentinel instead. Named by the
+        // scratch dir, so a VM's cgroup and scratch identities match.
         let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
 
         // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
@@ -1143,7 +1143,7 @@ mod tests {
         assert!(matches!(probed, FcProbe::Unavailable), "got {probed:?}");
         // Generous slack over the wall, since what would make this flake is a slow spawn or a
         // descheduled poll, neither of which is the property under test. It still fails loudly if
-        // the wall stops being honoured at all, which is the regression that matters: `sleep 60`
+        // the wall stops being honoured at all, which is the failure that matters: `sleep 60`
         // would take a full minute.
         assert!(
             started.elapsed() < wall + Duration::from_secs(3),
@@ -1437,7 +1437,7 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "staged disk must be owner-only");
-        // A second stage to the same baked-in path must not clobber (the single-flight guarantee).
+        // A second stage to the same baked-in path must not clobber (the single-flight rule).
         assert!(
             stage_restore_disk(&src, &backing).is_err(),
             "re-staging over an existing disk must fail, not overwrite"

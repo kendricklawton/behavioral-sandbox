@@ -180,7 +180,7 @@ impl Pool {
     /// (`POWER_OFF_TIMEOUT`), not N: shutting each down in turn serializes the grace, so a pool of
     /// guests ignoring `SendCtrlAltDel` would pay it per clone. A guest
     /// still alive at the deadline is hard-killed by its `Drop` when `self.ready` drops below, the same
-    /// no-leak guarantee `drop(pool)` gives, just without the polite ask.
+    /// teardown `drop(pool)` runs, just without the polite ask.
     pub fn shutdown(mut self) {
         use std::time::Instant;
         for vm in &mut self.ready {

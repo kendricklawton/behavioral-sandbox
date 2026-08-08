@@ -335,10 +335,9 @@ pub(crate) fn run_exec<S: Read + Write>(
 
 /// Whether a guest-returned artifact path is safe to hand an embedder: a non-empty **relative** path
 /// whose every component is a plain name or `.`, no absolute root, no `..` climb. The guest names
-/// these paths and the guest agent is not the trust boundary, so this is the public API's containment
-/// guarantee: `RunResult.files` never carries a path that would write outside a caller's working
-/// tree. The CLI's `write_artifacts` relies on this rather than
-/// repeating it, so every embedder is covered once.
+/// these paths and the guest agent is not the trust boundary, so this predicate is what keeps a
+/// path that would write outside a caller's working tree out of `RunResult.files`. The CLI's
+/// `write_artifacts` relies on it rather than repeating it, so every embedder is covered once.
 fn artifact_path_is_safe(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)

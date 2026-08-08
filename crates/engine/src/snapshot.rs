@@ -256,7 +256,7 @@ impl RunningVm {
     }
 
     /// Write the snapshot state + memory files, and (for a private-copy disk) copy the root disk into
-    /// the bundle. Split out so `snapshot` can run it between the pause and the guaranteed resume
+    /// the bundle. Split out so `snapshot` can run it between the pause and the unconditional resume
     /// without an early return skipping the resume. A shared read-only base is referenced in place, so
     /// there is nothing to copy.
     fn write_snapshot_bundle(

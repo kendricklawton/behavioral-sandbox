@@ -1,5 +1,5 @@
 //! Privileged integration tests for the raw microVM lifecycle: boot to userspace, the vsock device,
-//! the read-only base + overlay, and the no-leak guarantee across repeated boots.
+//! the read-only base + overlay, and the absence of residue across repeated boots.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
 //! `cargo xtask ci-privileged` or `cargo test -p bsx-engine -- --ignored`.
@@ -25,7 +25,7 @@ fn boots_to_userspace_and_shuts_down() {
     let marker = cfg.userspace_marker.clone();
     let vm = Vm::boot(cfg).expect("microVM should boot to userspace");
 
-    // Boot returns only after the marker is seen, so this is guaranteed, but assert it anyway to
+    // Boot returns only after the marker is seen, so this already holds, but assert it anyway to
     // document what "reached userspace" means, and that the console was actually captured.
     assert!(
         vm.console().contains(&marker),
@@ -265,8 +265,8 @@ fn overlay_is_writable_and_base_is_untouched() {
         vm.shutdown().expect("shutdown should succeed");
     }
 
-    // The read-only block device makes this a guarantee, not a hope: the guest opened the base
-    // `O_RDONLY`, so it cannot have changed size or been rewritten.
+    // The base is attached read-only, so the guest opened it `O_RDONLY` and the kernel refused
+    // any write: this asserts that rather than assuming it.
     let after = std::fs::metadata(&base).expect("stat base again");
     assert_eq!(after.len(), before_len, "base image size must not change");
     assert_eq!(

@@ -1,33 +1,30 @@
-//! Cgroup-owned VM lifetime: make **host-process death unable to leak a VM**, and give the
+//! Cgroup-owned VM lifetime: reclaim the VM process tree on **host-process death**, and give the
 //! embedder a **kill handle** that forces teardown from outside a blocked call.
 //!
 //! `Drop`-based teardown is correct on every path the driver *survives*, but a `SIGKILL`ed /
 //! OOM-killed / Ctrl-C'd driver never runs `Drop`, and its Firecracker child would live on. No
-//! in-process mechanism can fix that (a signal handler can't catch `SIGKILL`), so teardown is
-//! crash-only: the VM's lifetime is owned by things that survive the driver's death.
+//! in-process mechanism can fix that (a signal handler can't catch `SIGKILL`), so the VM's lifetime
+//! is owned by things that survive the driver's death.
 //!
 //! - **A per-VM lifetime cgroup.** Each directly-spawned VMM is enrolled in a fresh child cgroup of
-//!   the driver's own cgroup (`cgroup.procs`; no controllers enabled, so the cgroup v2
-//!   "no internal processes" rule never applies). The cgroup gives the whole VMM tree one kernel
-//!   handle: writing `1` to `cgroup.kill` SIGKILLs every member atomically, no pid races. A jailed
-//!   VMM instead lives in the cgroup its jailer creates; the driver precomputes that path rather
-//!   than duplicating a cgroup.
+//!   the driver's own cgroup (`cgroup.procs`; no controllers enabled, so the cgroup v2 "no internal
+//!   processes" rule never applies), which gives the whole VMM tree one kernel handle: writing `1`
+//!   to `cgroup.kill` SIGKILLs every member atomically, no pid races. A jailed VMM instead lives in
+//!   the cgroup its jailer creates, whose path the driver precomputes.
 //! - **A sentinel that outlives the driver.** A tiny `sh` child, in its own process group (so a
 //!   terminal Ctrl-C aimed at the driver's group misses it), blocks reading a pipe whose write end
-//!   only the driver holds. The kernel closes that write end on *any* driver death, clean exit,
-//!   `SIGKILL`, OOM, so the sentinel wakes exactly then, kills the VM's cgroup(s), and removes
-//!   them. On a clean teardown the cgroups are already gone and the sentinel exits without acting.
-//! - **A [`KillHandle`].** Cheap to clone, `Send + Sync`, and detached from the `RunningVm` borrow:
-//!   it kills via the same `cgroup.kill` file, so a thread blocked in `exec` is unblocked (the VMM
-//!   dies, the vsock peer closes) by another thread that holds no reference to the VM at all.
+//!   only the driver holds. The kernel closes that write end on *any* driver death, so the sentinel
+//!   wakes exactly then, kills the VM's cgroup(s), and removes them.
+//! - **A [`KillHandle`].** Detached from the `RunningVm` borrow and firing that same `cgroup.kill`,
+//!   so a thread blocked in `exec` is unblocked by one holding no reference to the VM.
 //!
-//! **Honest limits.** The unprotected window is spawn → cgroup enrollment (microseconds; a driver
-//! killed inside it leaks that one VMM, as before). A host that offers no writable cgroup v2 (no
-//! `/sys/fs/cgroup`, or an unwritable one) degrades to `Drop`-only teardown with a warning, the
-//! caps here are leak-proofing, not the isolation boundary, so they fail open. And
-//! the sentinel reclaims the VM *process tree* and its cgroups; scratch dirs and taps left by a
-//! `SIGKILL`ed driver are inert residue (no CPU, no RAM, no KVM), reclaimed by the next boot's leak
-//! checks or a reboot, not by the sentinel.
+//! **Honest limits.** The unprotected window is spawn → cgroup enrollment (microseconds). A host
+//! with no writable cgroup v2 degrades to `Drop`-only teardown with a warning: the caps here are
+//! leak-proofing, not the isolation boundary, so they fail open. Closing the pid fallback's
+//! check-then-act window needs a `pidfd` captured at spawn, which the `unsafe`-free host path cannot
+//! take. And the sentinel reclaims the VM *process tree* and its cgroups; scratch dirs and taps left
+//! by a `SIGKILL`ed driver are inert residue (no CPU, no RAM, no KVM), reclaimed by the next boot's
+//! leak checks or a reboot.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -67,17 +64,12 @@ done
 /// own worst case is its bounded rmdir retry loop (~2 s); the driver must never hang on it.
 const SENTINEL_REAP_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A cloneable, `Send + Sync` handle that force-kills one VM from *outside* its owning borrow, the
-/// host-gave-up path. `exec` blocks on the vsock socket; killing the VMM closes the peer, so the
-/// blocked call returns a typed error instead of waiting out its budget.
+/// A cloneable, `Send + Sync` handle that force-kills one VM from *outside* its owning borrow, so a
+/// thread blocked in `exec` is unblocked by one holding no reference to the VM.
 ///
-/// The kill is the cgroup: writing `1` to the VM's `cgroup.kill` SIGKILLs the whole VMM tree with no
-/// pid math, which is why this handle is safe to hold and fire from any thread at any time. Where
-/// the VM has no cgroup (a degraded host), it falls back to signalling the VMM's pid, safe while
-/// the VM exists (an unreaped child's pid can't be recycled) and a no-op once teardown has begun.
-///
-/// Killing is not tearing down: host residue (scratch dir, cgroup dirs) is still reclaimed by the
-/// owner's `Drop`/`shutdown`, which is unblocked by exactly the death this handle causes.
+/// Kills via `cgroup.kill` (the whole VMM tree in one write, no pid math), falling back to
+/// signalling the VMM's pid on a cgroup-less host. Killing is not tearing down: host residue is
+/// reclaimed by the owner's `Drop`/`shutdown`, which this handle's kill unblocks.
 #[derive(Debug, Clone)]
 pub struct KillHandle {
     /// The cgroup dirs whose `cgroup.kill` reaches the VMM (usually one; a jailed VM lists the
@@ -114,11 +106,8 @@ impl KillHandle {
         // Degraded-host fallback, where no cgroup accepted the kill: signal the pid via `sh`'s builtin
         // `kill`, since the host path is `unsafe`-free and so has neither `kill(2)` nor `pidfd`.
         //
-        // Every reap path marks teardown *before* it waits the child, so `torn_down` is set by the time a
-        // pid could be recycled and the checks above short-circuit. What remains is the inherent
-        // microsecond check-then-act window of an *actively racing* teardown; closing it fully needs a
-        // `pidfd` captured at spawn, which the no-`unsafe` host path cannot take. Best-effort by
-        // construction.
+        // Every reap path marks teardown *before* it waits the child, so `torn_down` is set by the
+        // time a pid could be recycled and the checks above short-circuit.
         let killed = Command::new("sh")
             .arg("-c")
             .arg(format!("kill -9 {}", self.pid))
@@ -185,11 +174,9 @@ impl VmLifetime {
         }
     }
 
-    /// Adopt a **jailed** VMM: the jailer creates (and moves the VMM into) its own cgroup, so
-    /// enrolling the pid in a driver cgroup would *race the jailer's placement*, whichever write
-    /// lands last would win membership and could yank the VMM out of its limits. Instead the
-    /// sentinel and kill handle watch the jailer's (precomputed) cgroup dir. The unprotected window
-    /// is spawn → the jailer's self-placement (milliseconds).
+    /// Adopt a **jailed** VMM by watching the jailer's precomputed cgroup dirs, since enrolling the
+    /// pid in a driver cgroup instead would race the jailer's own placement and could yank the VMM
+    /// out of its limits. The unprotected window is spawn → that self-placement (milliseconds).
     pub(crate) fn watch(pid: u32, dirs: Vec<PathBuf>) -> Self {
         let watched: Arc<[PathBuf]> = dirs.into();
         Self {
@@ -201,8 +188,8 @@ impl VmLifetime {
         }
     }
 
-    /// A placeholder that owns nothing and does nothing, what `into_running` leaves behind in the
-    /// `Spawned` guard so the real machinery moves to the `RunningVm` unmolested.
+    /// A placeholder that owns nothing and does nothing: what `into_running` leaves in the `Spawned`
+    /// guard so the real machinery moves to the `RunningVm` untouched.
     pub(crate) fn disarmed() -> Self {
         Self {
             own_cgroup: None,
@@ -213,9 +200,9 @@ impl VmLifetime {
         }
     }
 
-    /// Whether `dir` is one of the cgroups the sentinel guards, the boot path cross-checks the
-    /// jailer's *actual* cgroup against the precomputed one and warns on a mismatch (an unguarded
-    /// VM is a recorded degradation, not a silent one).
+    /// Whether `dir` is one of the cgroups the sentinel guards. The boot path cross-checks the
+    /// jailer's *actual* cgroup against the precomputed one and warns on a mismatch, so an unguarded
+    /// VM is a recorded degradation rather than a silent one.
     pub(crate) fn watches(&self, dir: &Path) -> bool {
         self.watched.iter().any(|w| w == dir)
     }
@@ -241,14 +228,12 @@ impl VmLifetime {
         self.torn_down.store(true, Ordering::Release);
     }
 
-    /// Clean-path teardown, after the VMM is killed and reaped: remove the lifetime cgroup (now
-    /// empty), then disarm the sentinel, dropping its stdin delivers the same EOF a driver death
-    /// would, the sentinel finds the dirs already gone and exits, and a bounded reap keeps a
-    /// wedged sentinel from ever hanging the driver (kill it instead; best-effort throughout).
+    /// Clean-path teardown, after the VMM is killed and reaped: remove the now-empty lifetime cgroup,
+    /// then disarm the sentinel by dropping its stdin (the same EOF a driver death delivers), with a
+    /// bounded reap so a wedged sentinel cannot hang the driver.
     ///
-    /// Idempotent: it takes both owned handles, so a second call (or the [`Drop`] net below) is a
-    /// no-op. Callers invoke it explicitly to get the bounded sentinel reap *before* the scratch dir
-    /// is removed; the `Drop` impl is only the safety net for a drop that skipped it.
+    /// Idempotent, since it takes both owned handles. Call it explicitly to get the bounded reap
+    /// *before* the scratch dir is removed; [`Drop`] is only the net for a path that skipped it.
     pub(crate) fn teardown(&mut self) {
         self.mark_down();
         if let Some(dir) = self.own_cgroup.take() {
@@ -276,20 +261,18 @@ impl VmLifetime {
 }
 
 impl Drop for VmLifetime {
-    /// The safety net that makes leak-freedom structural, not a manual invariant (mirroring
-    /// [`Spawned`](crate::vm)'s and [`RunningVm`](crate::RunningVm)'s own `Drop` guards): any path
-    /// that drops a live `VmLifetime` without an explicit [`teardown`](Self::teardown) still reaps
-    /// the sentinel `sh` and its cgroup, so a dropped-but-not-torn-down VM can never leak a zombie
-    /// sentinel or a cgroup dir. A no-op after an explicit teardown (both handles already taken).
+    /// The net for a drop that skipped [`teardown`](Self::teardown):
+    /// `drop_reaps_the_sentinel_without_an_explicit_teardown` drops a live `VmLifetime` and asserts
+    /// the sentinel `sh` leaves no zombie. A no-op after an explicit teardown.
     fn drop(&mut self) {
         self.teardown();
     }
 }
 
-/// Create the per-VM lifetime cgroup as a child of the **driver's own** cgroup (the one place an
-/// unprivileged driver is guaranteed write access when anything is, e.g. its delegated systemd
-/// session scope) and enroll `pid`. No controllers are enabled, so this works with zero delegation
-/// (like the guest agent's exec cgroups) and never trips the no-internal-processes rule.
+/// Create the per-VM lifetime cgroup as a child of the **driver's own** cgroup (the path an
+/// unprivileged driver is likeliest to be able to write, e.g. its delegated systemd session scope)
+/// and enroll `pid`. Enables no controllers, so it needs zero delegation and cannot trip the
+/// cgroup v2 no-internal-processes rule.
 fn create_lifetime_cgroup(pid: u32, name: &str) -> Result<PathBuf, String> {
     let own = read_cgroup_dir(std::process::id())
         .ok_or_else(|| "no cgroup v2 entry for this process".to_string())?;
@@ -304,8 +287,8 @@ fn create_lifetime_cgroup(pid: u32, name: &str) -> Result<PathBuf, String> {
 
 /// Arm the sentinel over `dirs`: `sh` in its **own process group** (a terminal Ctrl-C signals the
 /// driver's group; the sentinel must survive it to do its job), stdin piped (the write end, held
-/// only by the driver, is the death notification), stdout/stderr discarded. `None` (with a warning)
-/// if there is nothing to watch or `sh` can't spawn, degraded, never fatal.
+/// only by the driver, is the death notification), stdout/stderr discarded. Returns `None` with a
+/// warning if there is nothing to watch or `sh` can't spawn: degraded, never fatal.
 pub(crate) fn arm_sentinel(dirs: &[PathBuf]) -> Option<Child> {
     use std::os::unix::process::CommandExt as _;
 
@@ -339,8 +322,8 @@ mod tests {
     use bsx_test_support::ScratchDir;
 
     /// The core crash-safety mechanism, without a VM or privileges: the sentinel acts on pipe EOF.
-    /// A plain directory stands in for the cgroup, `echo 1 > cgroup.kill` creates the file there
-    /// (a real cgroup already has it), so "the kill was written" is observable as file content.
+    /// A plain directory stands in for the cgroup, so `echo 1 > cgroup.kill` creates the file (a real
+    /// cgroup already has it) and "the kill was written" is observable as file content.
     #[test]
     fn sentinel_kills_watched_cgroups_on_driver_death() {
         let dir = ScratchDir::created("bsx-sentinel");
@@ -384,8 +367,7 @@ mod tests {
     }
 
     /// The `Drop` safety net: a `VmLifetime` dropped *without* an explicit `teardown()` must still
-    /// reap its sentinel `sh` (no zombie), so no drop path can leak one. Capture the sentinel's pid,
-    /// drop the lifetime, and assert the process is gone, not lingering as our zombie child.
+    /// reap its sentinel `sh`, asserted as the pid being gone rather than lingering as our zombie.
     #[test]
     fn drop_reaps_the_sentinel_without_an_explicit_teardown() {
         let dir = ScratchDir::created("bsx-sentinel-drop");

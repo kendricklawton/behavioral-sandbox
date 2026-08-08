@@ -407,9 +407,9 @@ pub struct RunResult {
 /// One returned artifact: a working-directory file the run asked for back, named + its bytes. A
 /// named struct (not a `(String, Vec<u8>)` pair) so the public seam documents itself and can grow
 /// (a mode, a truncation flag) without a tuple-shape break; `#[non_exhaustive]` for the same
-/// reason, with [`new`](Self::new) as the construction seam. The `path` is guaranteed relative and
-/// non-climbing by the exec layer, the containment every embedder that writes artifacts to disk
-/// inherits.
+/// reason, with [`new`](Self::new) as the construction seam. The `path` is relative and
+/// non-climbing, checked by the exec layer, so every embedder that writes artifacts to disk
+/// inherits that containment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Artifact {
@@ -645,9 +645,9 @@ impl Sandbox {
     /// Close the sandbox: shut the microVM down and reclaim its resources.
     ///
     /// # Errors
-    /// Currently never returns `Err`, teardown is best-effort and the guarantee lives in `Drop`
-    /// (see [`RunningVm::shutdown`]), but the signature stays fallible for the jailed/cgroup
-    /// teardown that lands later.
+    /// Currently never returns `Err`: teardown is best-effort and the killing lives in `Drop`
+    /// (see [`RunningVm::shutdown`]). The signature stays fallible so a teardown step that can
+    /// report failure is an additive change rather than a breaking one.
     pub fn shutdown(self) -> Result<(), VmmError> {
         self.vm.shutdown()
     }

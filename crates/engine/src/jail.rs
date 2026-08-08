@@ -21,7 +21,7 @@
 //!   [`stage_ro_base_into_chroot`], a NIC whose tap lives in a per-VM netns the jailer joins, bulk IO
 //!   built in place inside the chroot, and snapshot restore from a bundle staged into it.
 //! - **Teardown** lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's cgroup at
-//!   its precomputed path, so host death can't leak a jailed VMM either.
+//!   its precomputed path, so host death reaches a jailed VMM the same way.
 
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
@@ -336,7 +336,7 @@ pub(crate) fn stage_ro_base_into_chroot(
 /// stderr captured into the error:
 /// mount-family syscalls can wedge in D-state (the hazard `unmount_base` already defends against),
 /// and an unbounded one would hang the boot past the `Timeout` the wall promises. If the remount
-/// fails, the half-made bind mount is detached before returning, so a failure never leaks a mount.
+/// fails, the half-made bind mount is detached before returning rather than left behind.
 fn bind_ro(src: &Path, dst: &Path, deadline: Instant) -> Result<(), VmmError> {
     match run_mount(
         Command::new("mount").arg("--bind").arg(src).arg(dst),

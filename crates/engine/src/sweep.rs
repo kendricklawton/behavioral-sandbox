@@ -287,8 +287,8 @@ mod tests {
     use super::*;
     use bsx_test_support::ScratchDir;
 
-    /// A pid guaranteed dead: spawn a short-lived child and reap it. Immediate recycling of a
-    /// just-freed pid is effectively impossible (the kernel allocates pids cyclically).
+    /// A pid that is certainly dead: spawn a short-lived child and reap it. Immediate recycling of
+    /// a just-freed pid is very unlikely (the kernel allocates pids cyclically).
     fn dead_pid() -> u32 {
         let mut child = std::process::Command::new("true")
             .spawn()

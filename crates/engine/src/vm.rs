@@ -4,8 +4,8 @@
 //! [`Vm::boot`] spawns a `firecracker` child, drives its API socket through the boot sequence
 //! (boot-source → root drive → machine-config → `InstanceStart`), and waits until the guest's
 //! serial console shows it reached userspace. [`RunningVm`] owns the running child; dropping it,
-//! or calling [`RunningVm::shutdown`], kills the VMM and reclaims its scratch dir, so a run can
-//! never leak a process or socket.
+//! or calling [`RunningVm::shutdown`], kills the VMM and reclaims its scratch dir; the
+//! cgroup-owned lifetime covers the paths `Drop` never runs on.
 //!
 //! **Host path only, `unsafe`-free.** Firecracker wires the guest's `ttyS0` to its own stdout, so
 //! "read the child's stdout" is "read the guest console". The jailer ([`Jail`],
@@ -87,7 +87,7 @@ pub(crate) const VSOCK_UDS: &str = "v.sock";
 pub(crate) const IFACE_ID: &str = "eth0";
 
 /// How long a graceful `SendCtrlAltDel` power-off is given to land before teardown stops waiting
-/// (the guaranteed kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
+/// (the unconditional kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
 pub(crate) const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How long a SIGKILLed VMM is given to be reaped before teardown detaches it and moves on
@@ -457,9 +457,9 @@ fn default_scratch_dir() -> PathBuf {
 }
 
 /// A booted-and-ready microVM: the `firecracker` child, its API socket, scratch dir, and the
-/// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM,
-/// and the cgroup-owned lifetime (the sentinel behind [`KillHandle`]) covers the paths `Drop`
-/// can't: losing the whole *process* (Ctrl-C, SIGKILL, OOM) can't leak it either.
+/// captured console. `Drop` kills the VMM and reclaims its residue, and the cgroup-owned lifetime
+/// (the sentinel behind [`KillHandle`]) covers the paths `Drop` never runs on: losing the whole
+/// *process* to Ctrl-C, SIGKILL, or OOM. The `lifetime` module records that path's own limits.
 #[derive(Debug)]
 #[must_use = "dropping a RunningVm kills its microVM"]
 pub struct RunningVm {
@@ -602,8 +602,8 @@ impl Vm {
     /// By default copies the base rootfs into a fresh per-VM scratch dir and boots the copy
     /// read-write, so repeated runs stay independent and the pinned base is never mutated. With
     /// [`read_only_root`](BootConfig::read_only_root) it instead shares the base read-only (no copy)
-    /// and the guest layers a per-run tmpfs overlay over it, same "base never mutated" guarantee,
-    /// far less per-VM cost.
+    /// and the guest layers a per-run tmpfs overlay over it, so the base is still not written and
+    /// each VM costs far less.
     /// # Errors
     /// [`VmmError::LimitsUnavailable`] if [`require_limits`](BootConfig::require_limits) is set on an
     /// unjailed boot (nothing can enforce the caps), [`VmmError::UnsupportedVcpus`] if
@@ -627,10 +627,6 @@ impl Vm {
         // And a gateway the guest could never reach, which would otherwise boot into a sandbox that
         // looks configured and is sealed.
         refuse_offlink_gateway(&config)?;
-        // The jail composes with every boot feature: vsock staged chroot-relative under the dropped uid,
-        // the read-only overlay bind-mounted into the chroot, a NIC whose tap lives in a per-VM netns the
-        // jailer joins, and bulk IO built in place inside the chroot. A new not-yet-jailed feature must
-        // reinstate a deny-by-default refusal here rather than boot half-confined.
         // KVM checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
         // on hosts without KVM (a fake "firecracker" needs no VM).
         if !Path::new("/dev/kvm").exists() {
@@ -823,7 +819,8 @@ impl RunningVm {
     /// **Env scope.** The variables are set on the **spawned command only**, the guest agent
     /// applies them via `Command::env`, never its own process, so one run's environment can't
     /// bleed into the agent or a later run.
-    /// **Secret hygiene, a pinned contract.** Injected file contents and env *values* never appear in an
+    /// **Secret hygiene**, held by `injected_secrets_reach_no_observable_surface`. Injected file
+    /// contents and env *values* do not appear in an
     /// engine log line, in any [`VmmError`]'s rendering, or on the serial console: an error path may name
     /// a file *path* or an env *key*, never a value, and the wire copies the driver builds are zero-wiped
     /// after send. Best-effort, since the caller's own buffers and the kernel's socket buffers are out of
@@ -908,7 +905,7 @@ impl RunningVm {
     /// and then poll them all against one shared grace, paying one [`POWER_OFF_TIMEOUT`], not one per
     /// VM. Marks teardown begun (so a `KillHandle` no-ops on the soon-to-be-reaped pid), like
     /// [`power_off_and_wait`](Self::power_off_and_wait). A guest still alive at the caller's deadline
-    /// is hard-killed by `Drop`, the same guaranteed teardown, just without the wait.
+    /// is hard-killed by `Drop`, the same teardown, just without the wait.
     pub(crate) fn request_power_off(&mut self) {
         self.lifetime.mark_down();
         let _ = self.api.put("/actions", &Action::SendCtrlAltDel);
@@ -917,7 +914,7 @@ impl RunningVm {
     /// Ask the guest to power off (best-effort `SendCtrlAltDel`, an x86 ACPI-ish nicety over i8042),
     /// then poll for the VMM to exit until `deadline`. Returns `true` if it exited on its own. The
     /// shared core of `shutdown` and `stop_and_reap`, so the action and the poll cadence live once;
-    /// the *guaranteed* kill is the caller's (or `Drop`'s), never this.
+    /// the unconditional kill is the caller's (or `Drop`'s), never this.
     fn power_off_and_wait(&mut self, deadline: Instant) -> bool {
         // Flag teardown before any reap below (this loop's `try_wait`, or the caller's kill). A
         // degraded-host `KillHandle` falls back to signalling a raw pid, and `collect_outputs` reaps
@@ -942,9 +939,9 @@ impl RunningVm {
         }
     }
 
-    /// Best-effort power-off, then **guarantee** the VMM is dead and reaped, so its fd to the output
-    /// image is released before readback. Idempotent with `Drop`'s teardown (a second kill/wait on an
-    /// already-reaped child is a harmless no-op).
+    /// Best-effort power-off, then a hard kill bounded by `VMM_REAP_GRACE`, so the VMM's fd to the
+    /// output image is released before readback. Returns early on a VMM that outlives the grace,
+    /// leaving it unreaped rather than parking teardown. Idempotent with `Drop`'s teardown.
     fn stop_and_reap(&mut self) {
         if !self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT) {
             // A wedged (or unwaitable) guest: hard-kill so the fd to the output image is released
@@ -963,13 +960,13 @@ impl RunningVm {
     }
 
     /// Shut the microVM down and reclaim its resources.
-    /// Asks the guest to power off (`SendCtrlAltDel`) and waits briefly; the guaranteed teardown
-    /// (kill + scratch-dir removal) then runs in `Drop`, so this is best-effort and infallible.
+    /// Asks the guest to power off (`SendCtrlAltDel`) and waits briefly; the kill and scratch-dir
+    /// removal then run in `Drop`, so this is best-effort and infallible.
     /// # Errors
-    /// Currently never returns `Err`, teardown is best-effort, but the signature stays fallible
-    /// for the jailed/cgroup teardown that lands later.
+    /// Currently never returns `Err`: teardown is best-effort. The signature stays fallible so a
+    /// teardown step that can report failure is an additive change rather than a breaking one.
     pub fn shutdown(mut self) -> Result<(), VmmError> {
-        // The kill in `Drop` is what actually guarantees no leak; this is just the polite ask.
+        // `Drop` does the killing; this is just the polite ask.
         let _ = self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT);
         Ok(()) // `Drop` finishes the teardown.
     }
@@ -988,7 +985,7 @@ impl Drop for RunningVm {
     }
 }
 
-/// Guaranteed, best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
+/// Best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
 /// (which ends once the killed child's stdout closes), delete the per-VM tap and the jailer's cgroup
 /// (both live outside the scratch dir, so `remove_dir_all` can't reclaim them), then remove the
 /// scratch dir (which reclaims the chroot, since its base is `workdir`).
@@ -1081,7 +1078,7 @@ mod tests {
     #[test]
     fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {
         // The no-tap path: nothing gates the reclaim, so the scratch dir goes. Both `teardown` and
-        // `abort` now route through this one helper, so a failed boot reclaims exactly as a drop does.
+        // `abort` route through this one helper, so a failed boot reclaims exactly as a drop does.
         // (The netns-lingers branch needs CAP_NET_ADMIN to make `netns_exists` meaningful; the
         // privileged suite covers the sweep reclaiming a stranded netns+dir pair.)
         let base = ScratchDir::created("bsx-reclaim");
@@ -1171,11 +1168,9 @@ mod tests {
 
     #[test]
     fn a_host_wide_gateway_does_not_break_a_boot_that_wants_no_nic() {
-        // The regression this guards. A gateway is a host fact: `BSX_GATEWAY` and `.bsx.toml`
-        // exist so an operator sets it once for the whole host. If that made a NIC-less boot fail,
-        // configuring an uplink would break `bsx run` with no `--net`, every `bsx shell`, and
-        // every daemon session from a client that predates the network fields, which is to say
-        // nearly everything on a host that followed its own documentation.
+        // A gateway is a host fact: `BSX_GATEWAY` and `.bsx.toml` exist so an operator sets it
+        // once for the whole host. A NIC-less boot must therefore ignore it rather than fail, or
+        // configuring an uplink would break every run that asks for no network.
         let mut cfg = BootConfig::from_env_with(|key| match key {
             "BSX_GATEWAY" => Some(std::ffi::OsString::from("10.200.0.1")),
             _ => None,

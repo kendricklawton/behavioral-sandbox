@@ -940,8 +940,8 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     // a well-behaved run on the *same host* can neither **starve** it (the victim's work still
     // completes, correctly and within a bound) nor **observe** it (distinct VMMs; network isolation is
     // the per-VM netns's job, net.rs). Each run is capped at its own cgroup, so the attacker cannot
-    // take more than its quota, the victim's share is protected *by construction*; the wall-clock
-    // ceiling is a sanity check layered on top of that guarantee, not the guarantee itself.
+    // take more than its quota, so the victim's share is bounded by that cap; the wall-clock
+    // ceiling is a sanity check layered on top of it, not the mechanism itself.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping a_hostile_run_cannot_starve_or_observe_a_co_resident_run: needs real root"
@@ -1042,7 +1042,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     );
 
     // Not slowed past a bound: a generous ceiling that only trips on gross starvation (timing is
-    // host-dependent, so the real guarantee is the cap above; this is the sanity check).
+    // host-dependent, so the actual bound is the cap above; this is the sanity check).
     const SLOWDOWN_MAX: u32 = 10;
     let ceiling = solo_wall * SLOWDOWN_MAX + Duration::from_secs(5);
     eprintln!(
@@ -1060,7 +1060,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
 }
 
 /// A private tmpfs mounted with the given options, unmounted and removed on drop, so a failing
-/// assertion can't leak a mount on the host (the no-leak rule applies to the tests too).
+/// assertion leaves no mount behind on the host (the no-leak rule applies to the tests too).
 struct FlaggedMount {
     dir: PathBuf,
 }

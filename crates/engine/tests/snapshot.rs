@@ -529,7 +529,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     // issues no `PUT /machine-config`) and nothing forces the restoring `config` to agree. A
     // 2-vCPU source restored under a default (1-vCPU) config must be capped at 2 cores' worth,
     // not silently throttled to 1, the CPU analogue of `restore_mem_mib`'s never-below-the-true-RAM
-    // guarantee.
+    // rule.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping restored_clone_cpu_cap_follows_the_snapshot_not_the_config: needs real root"

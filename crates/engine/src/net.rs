@@ -215,8 +215,8 @@ impl Tap {
     /// `owner` sets the tap's `user`/`group` to the jailed uid/gid when the VMM is jailed: a jailed
     /// Firecracker runs unprivileged (no `CAP_NET_ADMIN`), so it can only attach a tap it owns. A
     /// direct boot runs Firecracker with the driver's own privilege, which can attach any tap, so it
-    /// passes `None` (root-owned). On any setup failure the half-built netns is reclaimed, so a failed
-    /// create never leaks a netns or tap.
+    /// passes `None` (root-owned). On any setup failure the `Err` arm below reclaims the half-built
+    /// netns, taking any tap in it with it.
     pub(crate) fn create(netns: &str, owner: Option<(u32, u32)>) -> Result<Tap, VmmError> {
         netns_add(netns)?;
         let v6_up = match Self::build_tap(netns, owner) {

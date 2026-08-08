@@ -395,8 +395,7 @@ pub(crate) fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmE
         ensure_private_staging_dir(parent)?;
     }
     // `create_new` reserves the path **atomically**: if it already exists (a still-live source's
-    // disk) the open fails rather than clobbering it, the "never overwrite" guarantee, race-free,
-    // not a check-then-copy TOCTOU. `mode(0o600)` keeps the staged disk unreadable to other local
+    // disk) the open fails rather than clobbering it: atomic, not a check-then-copy TOCTOU. `mode(0o600)` keeps the staged disk unreadable to other local
     // users during the copy→`PUT /snapshot/load` window (the private-0700 parent already blocks a
     // rename-swap; this is defense in depth on the file itself). A missing parent or any other
     // error is surfaced as-is.
