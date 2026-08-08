@@ -41,9 +41,13 @@ a design error rather than a trade-off.
    containing the guest is a design error.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no route out and
    minimal capability, and each allowance is recorded in the audit log.
-4. **Engine, not platform.** A self-hostable runtime and a driver API; tenancy, billing, and
-   scheduling are the hoster's. The **AI model is out too**: it is always the *caller* driving
-   the engine from outside, never an engine component. A recorded non-goal.
+4. **Engine, not platform.** A self-hostable runtime and a driver API. **The unit of isolation is
+   the sandbox, not the tenant**: the engine isolates each sandbox and records nothing about whose
+   it is, so a hoster maps tenants onto sandboxes and deploys multi-tenant without the engine ever
+   learning what a tenant is. Mechanism that makes such a deployment safe is engine work; policy
+   that has to know who is paying (tenancy, auth, billing, fleet scheduling, image management) is
+   the hoster's, and `docs/embedding-scope.md` draws that line exactly. The **AI model is out too**:
+   it is always the *caller* driving the engine from outside, never an engine component.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is the rule the code is written against and
    the property the confinement suite exercises; it is an aim, not a proven property.
