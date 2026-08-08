@@ -49,23 +49,32 @@ itself, so that is engine work whether or not the two belong to different tenant
 its own scratch directory, its own cgroup under the jailer, and, when networking is enabled, its own
 network namespace and tap.
 
-**The jail uid is the axis this does not hold yet.** `DEFAULT_JAIL_UID` is one id, and every jailed
-VMM lands on it unless a caller varies `Jail::uid`.
+**The jail uid is the axis that needs configuring.** By default `DEFAULT_JAIL_UID` is one id and
+every jailed VMM lands on it, which matters because same-uid processes can always signal each other:
+one guest that escapes into its own VMM can kill every other sandbox's VMM on the host, and nothing
+gates that. Reading their memory needs `ptrace`, which Yama does gate at
+`/proc/sys/kernel/yama/ptrace_scope` 1 and above, so that half is a property of the host rather than
+of the engine and is not something to rely on either way (`bsx doctor` reports it).
 
-Two consequences, and they are not equally strong. Same-uid processes can always signal each other,
-so one guest that escapes into its own VMM can kill every other sandbox's VMM on the host; nothing
-gates that. Reading their memory needs `ptrace`, which Yama does gate: at
-`/proc/sys/kernel/yama/ptrace_scope` 0 a sibling can attach, at 1 or above it cannot, so that half
-is a property of the host rather than of the engine and is not something to rely on either way.
+**Set [`JailIds::span`] and each sandbox gets its own pair.** The operator declares the range,
+because uids are a host-wide namespace shared with real accounts and which of them are free is
+administration; the engine hands one out per sandbox and returns it on teardown, the same allocation
+it already does for netns names, tap names, and cgroup paths. Cloning the config shares the
+allocator, so a `Pool` gives every clone it restores a distinct pair rather than a copy of one.
+Exhausting the span is a typed error naming it, never a quiet fallback onto a shared id. Neither
+half learns what a tenant is.
 
-Who can vary the id today is narrower than it looks. `bsx run` and `bsx serve` both build the jail
-with `Jail::default()` and expose no flag, `BSX_*` variable, or `.bsx.toml` key for it, so every
-sandbox either starts is uid 10000, and a second `bsx serve` on the same host is uid 10000 too:
-running one daemon per tenant does not separate them. A Rust embedder can set `Jail::uid` per
-sandbox, but not per pooled clone, since a `Pool` is built from one `BootConfig`.
+```rust
+let mut jail = Jail::default();
+jail.ids = Some(JailIds::span(20_000, 64)?);   // 64 concurrent sandboxes, 20000..=20063
+config.jail = Some(jail);
+```
 
-Closing this is mechanism, not policy: which ids are spendable is the operator's to declare, and
-handing one to each sandbox is the engine's.
+Leaving `ids` unset keeps the single fixed pair, which `--jail-uid` / `BSX_JAIL_UID` /
+`.bsx.toml`'s `jail_uid` select for operators who separate tenants by running a daemon each rather
+than by spanning one.
+
+[`JailIds::span`]: ./embedding.md
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 
