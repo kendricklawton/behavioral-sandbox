@@ -153,8 +153,9 @@ the mechanism serving it; the full text is [docs/architecture.md](docs/architect
   host-kernel hooks; the in-guest agent carries exec and IO, never containment.
 * **Deny by default**: no explicit policy means no route out and minimal capability, and every
   allowance lands in the record.
-* **Engine, not platform**: a runtime and a driver API. Tenancy, billing, and scheduling are the
-  hoster's: a recorded [non-goal][embedding], not a gap.
+* **Engine, not platform**: a runtime and a driver API. The unit of isolation is the sandbox, not
+  the tenant, so a hoster maps tenants onto sandboxes and owns tenancy, billing, and scheduling: a
+  recorded [non-goal][embedding], not a gap.
 * **No panic, hang, or leak on the host path**: a hostile guest, a failed probe, or a broken
   channel surfaces as a typed error. The rule the code is written against and the confinement suite
   exercises; an aim, not a proven property.

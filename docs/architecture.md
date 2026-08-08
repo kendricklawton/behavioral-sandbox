@@ -36,8 +36,11 @@ verified outcome.
    responsible for containing the guest is a design error.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no network route out
    and minimal capability, and each allowance is recorded in the audit log.
-4. **Engine, not platform.** A self-hostable runtime and a driver API. Tenancy, auth, billing, and
-   fleet scheduling belong to whoever hosts the engine.
+4. **Engine, not platform.** A self-hostable runtime and a driver API. The unit of isolation is the
+   sandbox, not the tenant: the engine isolates each sandbox and records nothing about whose it is,
+   so a hoster maps tenants onto sandboxes. Mechanism that makes a multi-tenant deployment safe is
+   engine work; tenancy, auth, billing, fleet scheduling, and image management belong to whoever
+   hosts the engine. See [Where the engine ends](./embedding-scope.md#where-the-engine-ends-the-enginepaas-line).
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is what the code is written against and what
    the confinement suite exercises; it is an aim, not a proven property.

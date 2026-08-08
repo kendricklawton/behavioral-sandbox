@@ -6,8 +6,14 @@ The line this project refuses to cross, and the surface it intends to pin. A run
 
 **This is an engine, not a PaaS.** The engine is the boring, embeddable core:
 a runtime plus a clean driver API you self-host. The moment it grows opinions about *whose* code
-runs and *who pays*, it stops being embeddable in anything with its own opinions. So, explicit
-non-goals, these belong to whatever hosts the engine, and PRs adding them are wrong by design:
+runs and *who pays*, it stops being embeddable in anything with its own opinions.
+
+**The line is mechanism against policy.** The unit of isolation is the **sandbox**, not the tenant:
+the engine isolates each sandbox and records nothing about whose it is, which is exactly what lets a
+hoster run it multi-tenant without the engine learning what a tenant is. Mechanism that makes such a
+deployment safe is engine work, and asking for it is not asking for a platform. Policy that has to
+know who is paying is the hoster's, so these are explicit non-goals and PRs adding them are wrong by
+design:
 
 - **No tenancy or auth.** The engine trusts its caller completely. Multi-user identity, quotas,
   and authorization live in the hoster's layer.
@@ -35,6 +41,31 @@ hostile-guest path, GC for crashed embedders' residue (`sweep_orphans`), depende
 fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe), measured budgets
 (fd, boot, restore, memory-sharing), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
+
+### Sandbox-against-sandbox, the mechanism half
+
+What a hoster cannot build from outside is separation between two sandboxes the engine started
+itself, so that is engine work whether or not the two belong to different tenants. Each sandbox gets
+its own scratch directory, its own cgroup under the jailer, and, when networking is enabled, its own
+network namespace and tap.
+
+**The jail uid is the axis this does not hold yet.** `DEFAULT_JAIL_UID` is one id, and every jailed
+VMM lands on it unless a caller varies `Jail::uid`.
+
+Two consequences, and they are not equally strong. Same-uid processes can always signal each other,
+so one guest that escapes into its own VMM can kill every other sandbox's VMM on the host; nothing
+gates that. Reading their memory needs `ptrace`, which Yama does gate: at
+`/proc/sys/kernel/yama/ptrace_scope` 0 a sibling can attach, at 1 or above it cannot, so that half
+is a property of the host rather than of the engine and is not something to rely on either way.
+
+Who can vary the id today is narrower than it looks. `bsx run` and `bsx serve` both build the jail
+with `Jail::default()` and expose no flag, `BSX_*` variable, or `.bsx.toml` key for it, so every
+sandbox either starts is uid 10000, and a second `bsx serve` on the same host is uid 10000 too:
+running one daemon per tenant does not separate them. A Rust embedder can set `Jail::uid` per
+sandbox, but not per pooled clone, since a `Pool` is built from one `BootConfig`.
+
+Closing this is mechanism, not policy: which ids are spendable is the operator's to declare, and
+handing one to each sandbox is the engine's.
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 
