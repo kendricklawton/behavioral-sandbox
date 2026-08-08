@@ -26,6 +26,7 @@
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::VmmError;
@@ -74,10 +75,17 @@ pub struct Jail {
     /// The `jailer` binary (a bare name resolved via `PATH`, or an absolute path). Ships alongside
     /// `firecracker`.
     pub jailer: PathBuf,
-    /// The uid the jailer switches to after building the chroot.
+    /// The uid the jailer switches to after building the chroot. Shared by every sandbox this
+    /// config starts; set [`ids`](Jail::ids) to give each one its own instead.
     pub uid: u32,
-    /// The gid the jailer switches to after building the chroot.
+    /// The gid the jailer switches to after building the chroot. See [`uid`](Jail::uid).
     pub gid: u32,
+    /// A range of ids to spend one pair at a time, overriding [`uid`](Jail::uid)/[`gid`](Jail::gid).
+    ///
+    /// `None` (the default) runs every sandbox under the one fixed pair, and processes sharing a uid
+    /// can signal each other: a guest that escaped into its own VMM would land beside its
+    /// neighbours' VMMs at the same id. A span separates them at that layer.
+    pub ids: Option<JailIds>,
 }
 
 impl Jail {
@@ -87,6 +95,146 @@ impl Jail {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Lease the uid/gid this boot runs under: one pair from [`ids`](Jail::ids) when a span is set,
+    /// else the fixed [`uid`](Jail::uid)/[`gid`](Jail::gid) shared by every sandbox.
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] when a span is set and every pair in it is already leased.
+    pub(crate) fn lease(&self) -> Result<JailLease, VmmError> {
+        match &self.ids {
+            Some(ids) => ids.lease(),
+            None => Ok(JailLease {
+                uid: self.uid,
+                gid: self.gid,
+                span: None,
+            }),
+        }
+    }
+}
+
+/// A range of host uid/gid pairs the engine may spend, one pair per jailed sandbox.
+///
+/// **The operator declares the range and the engine spends it.** Uids are a host-wide namespace
+/// shared with real accounts, so which of them are free is administration; handing one to each
+/// sandbox is the allocation the engine already does for netns names, tap names, and cgroup paths.
+/// Neither half learns what a tenant is.
+///
+/// Cloning shares the allocator, so a [`BootConfig`](crate::BootConfig) cloned into a
+/// [`Pool`](crate::Pool) gives every clone it restores a distinct pair rather than a copy of one.
+/// Set it on [`Jail::ids`]; leaving it `None` keeps the single fixed pair.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct JailIds {
+    base: u32,
+    /// One slot per pair, `true` while leased. A `Vec` scan rather than a free list: a span is
+    /// small, and always handing out the lowest free slot keeps the ids a reader sees predictable.
+    taken: Arc<Mutex<Box<[bool]>>>,
+}
+
+impl JailIds {
+    /// A span of `count` consecutive pairs from `base`: the sandbox holding slot `i` runs as uid and
+    /// gid `base + i`. Pick a range that owns nothing else on the host; the jailer chowns each
+    /// chroot to its pair, so the ids need no `/etc/passwd` entry.
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if `base` is 0 (the id the jail exists to leave), if `count` is 0, or if
+    /// the range would run past `u32::MAX`.
+    pub fn span(base: u32, count: u32) -> Result<Self, VmmError> {
+        if base == 0 {
+            return Err(VmmError::Vmm(
+                "jail id span cannot start at 0: root is the id the jail exists to leave".into(),
+            ));
+        }
+        if count == 0 {
+            return Err(VmmError::Vmm(
+                "jail id span must hold at least one pair".into(),
+            ));
+        }
+        // A span running past u32 would wrap into ids it never asked for, including 0.
+        base.checked_add(count - 1).ok_or_else(|| {
+            VmmError::Vmm(format!(
+                "jail id span {base}..+{count} runs past the end of the uid range"
+            ))
+        })?;
+        Ok(Self {
+            base,
+            taken: Arc::new(Mutex::new(vec![false; count as usize].into_boxed_slice())),
+        })
+    }
+
+    /// Take the lowest free pair, or fail naming the span: exhaustion is a typed error rather than
+    /// a fallback onto a shared id, which would silently undo the separation the span buys.
+    fn lease(&self) -> Result<JailLease, VmmError> {
+        // The guard is confined to this block so nothing that could take the same lock runs while
+        // it is held. `self.clone()` below is the case that matters: today it only bumps an `Arc`,
+        // but a `Clone` that read the slot table would deadlock a non-reentrant `Mutex`.
+        let slot = {
+            let mut taken = lock(&self.taken);
+            let last = self.base + taken.len() as u32 - 1;
+            let slot = taken.iter().position(|t| !t).ok_or_else(|| {
+                VmmError::Vmm(format!(
+                    "every jail id in {}..={last} is in use; widen the span or run fewer sandboxes \
+                     at once",
+                    self.base
+                ))
+            })?;
+            taken[slot] = true;
+            slot
+        };
+        // `slot < count`, and `span` refused a range whose last id would overflow.
+        let id = self.base + slot as u32;
+        Ok(JailLease {
+            uid: id,
+            gid: id,
+            span: Some((self.clone(), slot)),
+        })
+    }
+
+    /// Give a slot back. Called only from [`JailLease`]'s drop.
+    fn release(&self, slot: usize) {
+        if let Some(t) = lock(&self.taken).get_mut(slot) {
+            *t = false;
+        }
+    }
+}
+
+/// Lock a span's slot table, recovering from a poisoned mutex rather than propagating the panic.
+/// A holder that panicked mid-lease leaves the table structurally intact (one `bool` written), and
+/// refusing to allocate afterwards would turn one panic into every later boot failing.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The uid/gid one jailed sandbox runs under, held for as long as its chroot exists.
+///
+/// Returned to its span on drop. [`Chroot`] owns it, and `RunningVm`'s `Drop` runs `teardown`
+/// before its fields drop, so the pair is only reusable once the VMM is gone and the scratch dir
+/// (whose chroot is chowned to that pair) has been reclaimed.
+#[derive(Debug)]
+pub(crate) struct JailLease {
+    uid: u32,
+    gid: u32,
+    /// The span to give the slot back to, and which slot. `None` for the fixed
+    /// [`Jail::uid`]/[`Jail::gid`] pair, which is shared and so was never taken from anything.
+    span: Option<(JailIds, usize)>,
+}
+
+impl JailLease {
+    pub(crate) fn uid(&self) -> u32 {
+        self.uid
+    }
+    pub(crate) fn gid(&self) -> u32 {
+        self.gid
+    }
+}
+
+impl Drop for JailLease {
+    fn drop(&mut self) {
+        if let Some((ids, slot)) = &self.span {
+            ids.release(*slot);
+        }
+    }
 }
 
 impl Default for Jail {
@@ -95,6 +243,7 @@ impl Default for Jail {
             jailer: PathBuf::from("jailer"),
             uid: DEFAULT_JAIL_UID,
             gid: DEFAULT_JAIL_GID,
+            ids: None,
         }
     }
 }
@@ -109,6 +258,9 @@ pub(crate) struct Chroot {
     pub(crate) root: PathBuf,
     pub(crate) uid: u32,
     pub(crate) gid: u32,
+    /// The leased pair, held so it cannot be handed to another sandbox while this chroot exists.
+    /// Dropped after `teardown` has reclaimed the tree those ids own (see [`JailLease`]).
+    _lease: JailLease,
     /// The cgroup dir the jailer created for this VMM (`/sys/fs/cgroup/<...>`), learned from
     /// `/proc/<pid>/cgroup` once the VMM is up. Removed (best-effort) on teardown; `None` until read.
     pub(crate) cgroup_dir: Option<PathBuf>,
@@ -121,14 +273,19 @@ pub(crate) struct Chroot {
 }
 
 impl Chroot {
-    /// A fresh chroot record for a just-spawned jail: `root` on the host, the jail's dropped
-    /// uid/gid, no cgroup learned yet, and no mounts staged yet (`run_boot`/`run_restore` record
+    /// A fresh chroot record for a just-spawned jail: `root` on the host, the pair the jailer
+    /// dropped to, no cgroup learned yet, and no mounts staged yet (`run_boot`/`run_restore` record
     /// those as they bind them). One constructor so both jailed launch paths assemble it identically.
-    pub(crate) fn new(root: PathBuf, jail: &Jail) -> Self {
+    ///
+    /// Takes the **lease** rather than the [`Jail`], so the ids a chroot reports are the ones its
+    /// VMM actually runs under: re-reading `jail.uid` here would report the fixed pair for a boot
+    /// that leased a different one from a span.
+    pub(crate) fn new(root: PathBuf, lease: JailLease) -> Self {
         Self {
             root,
-            uid: jail.uid,
-            gid: jail.gid,
+            uid: lease.uid(),
+            gid: lease.gid(),
+            _lease: lease,
             cgroup_dir: None,
             mounts: Vec::new(),
         }
@@ -153,6 +310,7 @@ impl Chroot {
 /// On a spawn failure nothing is left running; the caller owns `workdir` cleanup.
 pub(crate) fn spawn_jailer(
     jail: &Jail,
+    ids: (u32, u32),
     firecracker: &Path,
     workdir: &Path,
     id: &str,
@@ -184,9 +342,9 @@ pub(crate) fn spawn_jailer(
         .arg("--exec-file")
         .arg(&exec)
         .arg("--uid")
-        .arg(jail.uid.to_string())
+        .arg(ids.0.to_string())
         .arg("--gid")
-        .arg(jail.gid.to_string())
+        .arg(ids.1.to_string())
         .arg("--chroot-base-dir")
         .arg(workdir)
         // This host is cgroup v2 only; the jailer defaults to v1 and would fail to find the
@@ -668,6 +826,89 @@ pub(crate) fn restore_mem_mib(config_mem_mib: NonZeroU32, mem_file_len: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_span_hands_every_pair_out_once_then_refuses_by_name() {
+        let ids = JailIds::span(20_000, 3).expect("a valid span");
+        let held: Vec<JailLease> = (0..3).map(|_| ids.lease().expect("a free pair")).collect();
+        // Distinct, and each uid equals its gid: one identity per sandbox, not a shared pool.
+        let uids: Vec<u32> = held.iter().map(JailLease::uid).collect();
+        assert_eq!(uids, vec![20_000, 20_001, 20_002]);
+        assert!(held.iter().all(|l| l.uid() == l.gid()));
+
+        // Exhaustion is a typed refusal naming the span, never a quiet fallback onto a shared id:
+        // falling back would undo the separation the span was configured to buy, invisibly.
+        let err = ids
+            .lease()
+            .expect_err("a full span has nothing to hand out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("20000") && msg.contains("20002"),
+            "the refusal must name the span it exhausted: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_released_pair_is_handed_to_the_next_sandbox() {
+        let ids = JailIds::span(20_000, 2).expect("a valid span");
+        let first = ids.lease().expect("a free pair");
+        let second = ids.lease().expect("a free pair");
+        assert_eq!((first.uid(), second.uid()), (20_000, 20_001));
+
+        // A torn-down sandbox gives its id back, so a long-lived pool churns inside its span rather
+        // than exhausting it.
+        drop(first);
+        let third = ids.lease().expect("the released pair is free again");
+        assert_eq!(third.uid(), 20_000);
+        assert!(ids.lease().is_err(), "only the released one came back");
+    }
+
+    #[test]
+    fn a_cloned_span_shares_its_allocator_but_a_fixed_jail_leases_the_same_pair_forever() {
+        // The property the pool depends on: a `BootConfig` cloned per clone must not clone the
+        // allocator's state, or every pooled sandbox would be handed the same first id.
+        let ids = JailIds::span(20_000, 2).expect("a valid span");
+        let a = ids.clone().lease().expect("a free pair");
+        let b = ids.clone().lease().expect("a free pair");
+        assert_ne!(a.uid(), b.uid(), "clones must share the allocator");
+
+        // Without a span, `Jail`'s fixed pair is what every sandbox gets, which is exactly the
+        // sharing a span exists to end. Unchanged behaviour for a caller that sets no span.
+        let jail = Jail::default();
+        let one = jail.lease().expect("the fixed pair");
+        let two = jail.lease().expect("the fixed pair again");
+        assert_eq!((one.uid(), two.uid()), (DEFAULT_JAIL_UID, DEFAULT_JAIL_UID));
+    }
+
+    #[test]
+    fn a_span_refuses_a_range_it_could_not_safely_spend() {
+        // 0 is the id the jail exists to leave, so a span may not start there or contain it.
+        assert!(JailIds::span(0, 4).is_err());
+        // An empty span would refuse every boot; say so at construction, not at the first lease.
+        assert!(JailIds::span(20_000, 0).is_err());
+        // A range running past u32 would wrap into ids nobody asked for, including 0.
+        assert!(JailIds::span(u32::MAX, 2).is_err());
+        assert!(JailIds::span(u32::MAX, 1).is_ok(), "the last id alone fits");
+    }
+
+    // Poisoning a mutex takes a panic while its guard is held, so the state under test cannot be
+    // reached without one. The workspace's `clippy::panic` deny does not exempt a closure passed to
+    // `thread::spawn`, even inside a `#[test]`.
+    #[allow(clippy::panic)]
+    #[test]
+    fn a_poisoned_span_still_allocates() {
+        // One panicking holder must not turn every later boot into a failure: the slot table is
+        // structurally intact after a poison, so the lock is recovered rather than propagated.
+        let ids = JailIds::span(20_000, 2).expect("a valid span");
+        let poisoner = ids.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = lock(&poisoner.taken);
+            panic!("poison the allocator");
+        })
+        .join();
+        assert!(ids.taken.is_poisoned(), "the panic must have poisoned it");
+        assert_eq!(ids.lease().expect("still allocates").uid(), 20_000);
+    }
 
     // A slice of real `/proc/self/mountinfo`: `/` and `/tmp` are shared peers, `/mnt/private` is a
     // private mount (no `shared:` tag), and `/mnt/slave` receives from a master but is not itself

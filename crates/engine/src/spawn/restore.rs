@@ -158,7 +158,7 @@ impl Spawned {
             input_image: None,
             output: None,
             tap: s.tap,
-            chroot: Some(Chroot::new(s.chroot_root, jail)),
+            chroot: Some(Chroot::new(s.chroot_root, s.lease)),
             lifetime: s.lifetime,
         })
     }

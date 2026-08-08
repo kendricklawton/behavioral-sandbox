@@ -25,7 +25,7 @@ use crate::firecracker::{
     Action, ApiClient, BootSource, Drive, MachineConfig, NetworkInterface, RateLimiter, Vsock,
 };
 use crate::jail::{
-    Chroot, JAILED_VSOCK_UDS, Jail, cgroup_limit_args, give_to_jail, jailer_cgroup_dir,
+    Chroot, JAILED_VSOCK_UDS, Jail, JailLease, cgroup_limit_args, give_to_jail, jailer_cgroup_dir,
     read_cgroup_dir, remove_cgroup, spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot,
 };
 use crate::lifetime::VmLifetime;
@@ -118,6 +118,9 @@ struct JailedSpawn {
     chroot_root: PathBuf,
     tap: Option<Tap>,
     lifetime: VmLifetime,
+    /// The pair this VMM was jailed under, moved into the [`Chroot`] so it is held for the VM's
+    /// whole life. Dropping it on an error path inside `spawn_jailed` returns the id at once.
+    lease: JailLease,
 }
 
 impl Drop for Spawned {
@@ -302,7 +305,7 @@ impl Spawned {
             input_image: None,
             output: None,
             tap: s.tap,
-            chroot: Some(Chroot::new(s.chroot_root, jail)),
+            chroot: Some(Chroot::new(s.chroot_root, s.lease)),
             lifetime: s.lifetime,
         })
     }
@@ -320,6 +323,11 @@ impl Spawned {
         networked: bool,
         cgroup_args: &[String],
     ) -> Result<JailedSpawn, VmmError> {
+        // One lease for this sandbox, taken before anything is chowned to it: the tap owner, the
+        // jailer's `--uid`/`--gid`, and every staged file must name the *same* pair, so it is
+        // resolved once here rather than re-read from `jail` at each site.
+        let lease = jail.lease()?;
+        let (uid, gid) = (lease.uid(), lease.gid());
         let workdir = create_workdir(&config.scratch_dir)?;
         // The jail id is the scratch-dir name: process-unique, a valid jailer id (alphanumeric + `-`),
         // and the netns name, one name finds all of a VM's residue. The jailer nests the chroot under
@@ -330,7 +338,7 @@ impl Spawned {
         // unprivileged (no `CAP_NET_ADMIN`) and can only attach a tap it owns. A failed create reclaims
         // its own netns; we still own the workdir.
         let tap = if networked {
-            match Tap::create(&id, Some((jail.uid, jail.gid))) {
+            match Tap::create(&id, Some((uid, gid))) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
                     // Gate the dir removal on the netns actually being gone (a failed create's own
@@ -345,6 +353,7 @@ impl Spawned {
         let netns = tap.as_ref().map(|t| t.netns_path());
         let (child, console, socket, chroot_root) = match spawn_jailer(
             jail,
+            (uid, gid),
             &config.firecracker,
             &workdir,
             &id,
@@ -379,6 +388,7 @@ impl Spawned {
             chroot_root,
             tap,
             lifetime,
+            lease,
         })
     }
 
