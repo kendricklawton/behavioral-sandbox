@@ -92,6 +92,16 @@ pub struct ServeArgs {
     /// controllers. Also settable via `BSX_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
     #[arg(long)]
     require_limits: bool,
+    /// The uid the jailer drops each session's VMM to (default 10000). Every session on this daemon
+    /// shares it, and so does a second daemon left at the default, so two daemons meant to separate
+    /// tenants need different ids. A hoster posture, no client chooses it: the wire carries no
+    /// identity, and a client that could name its own id could name a neighbour's. Also settable via
+    /// `BSX_JAIL_UID`.
+    #[arg(long, value_name = "UID", value_parser = crate::parse_jail_id)]
+    jail_uid: Option<u32>,
+    /// The gid the jailer drops each session's VMM to (default 10000). See `--jail-uid`.
+    #[arg(long, value_name = "GID", value_parser = crate::parse_jail_id)]
+    jail_gid: Option<u32>,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
     /// scrape (`GET /metrics`). Plain HTTP, no auth, bind loopback or a private scrape network. Off
     /// when omitted.
@@ -237,6 +247,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     if args.require_limits {
         base.require_limits = true;
     }
+    crate::apply_jail_ids(&mut base, args.jail_uid, args.jail_gid);
     let jailed = !args.unjailed;
 
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an

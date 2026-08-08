@@ -87,6 +87,11 @@ pub struct BsxToml {
     max_output_cap: Option<usize>,
     /// Withdraw the `--unjailed` opt-out on this host.
     require_jail: Option<bool>,
+    /// The uid the jailer drops the VMM to. An operator fact, not a caller's: on a host running
+    /// more than one sandbox, a caller who chose its own could name a neighbour's.
+    jail_uid: Option<u32>,
+    /// The gid the jailer drops the VMM to. See [`jail_uid`](Self::jail_uid).
+    jail_gid: Option<u32>,
     /// Whether a caller may attach a guest NIC at all; unset permits it.
     allow_net: Option<bool>,
     /// Refuse a run without an audit record on this host.
@@ -179,6 +184,10 @@ impl BsxToml {
             "BSX_REQUIRE_LIMITS" => self
                 .require_limits
                 .map(|b| OsString::from(if b { "true" } else { "false" })),
+            // Rendered as decimal text, so the file goes through `from_env_with`'s own id parse
+            // (which is what refuses zero) rather than a second validation path that could drift.
+            "BSX_JAIL_UID" => self.jail_uid.map(|u| OsString::from(u.to_string())),
+            "BSX_JAIL_GID" => self.jail_gid.map(|g| OsString::from(g.to_string())),
             // Rendered back to the dotted-quad text `from_env_with` parses, so the file slots under
             // the env in the same composed lookup rather than needing a second path into the config.
             "BSX_GATEWAY" => self.gateway.map(|a| OsString::from(a.to_string())),
@@ -377,6 +386,31 @@ mod tests {
             "unset key falls through"
         );
         assert_eq!(toml.log(), Some("debug"));
+    }
+
+    #[test]
+    fn jail_ids_render_env_tokens_the_engine_parses_back_onto_the_jail() {
+        // The file ids slot under the env in one composed lookup, like every other key: `env_value`
+        // renders decimal text and `from_env_with` parses it back, so the file never gets a second
+        // validation path that could accept an id the env layer refuses.
+        let set =
+            BsxToml::parse("jail_uid = 20001\njail_gid = 20002\n").expect("valid toml parses");
+        assert_eq!(set.env_value("BSX_JAIL_UID"), Some(OsString::from("20001")));
+        assert_eq!(set.env_value("BSX_JAIL_GID"), Some(OsString::from("20002")));
+        let jail = bsx_engine::BootConfig::from_env_with(|k| set.env_value(k))
+            .jail
+            .expect("an id in the file materialises the jail it names");
+        assert_eq!((jail.uid, jail.gid), (20001, 20002));
+
+        // Unset leaves the jail alone: the CLI's own `unwrap_or_default()` supplies the pinned ids,
+        // and an unjailed boot drops the whole `Jail` regardless.
+        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        assert!(bare.env_value("BSX_JAIL_UID").is_none());
+        assert!(
+            bsx_engine::BootConfig::from_env_with(|k| bare.env_value(k))
+                .jail
+                .is_none()
+        );
     }
 
     #[test]

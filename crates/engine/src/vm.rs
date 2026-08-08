@@ -224,8 +224,8 @@ pub struct BootConfig {
 
 impl BootConfig {
     /// Layer the environment overrides, `BSX_FIRECRACKER`, `BSX_KERNEL`, `BSX_ROOTFS`,
-    /// `BSX_MARKER`, `BSX_SCRATCH_DIR`, `BSX_REQUIRE_LIMITS`, `BSX_GATEWAY`, `BSX_RESOLVER`,
-    /// onto [`BootConfig::default`]. The
+    /// `BSX_MARKER`, `BSX_SCRATCH_DIR`, `BSX_REQUIRE_LIMITS`, `BSX_JAIL_UID`, `BSX_JAIL_GID`,
+    /// `BSX_GATEWAY`, `BSX_RESOLVER`, onto [`BootConfig::default`]. The
     /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
     /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
     /// not a quantity, so it does take an env key here.
@@ -259,6 +259,20 @@ impl BootConfig {
         }
         if let Some(v) = lookup("BSX_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
             cfg.require_limits = v;
+        }
+        // The id the jailer drops to. A host fact the operator owns, never a caller's: on a host
+        // running more than one sandbox, a caller who chose its own id could name a neighbour's.
+        // Set here it survives the CLI's `jail.unwrap_or_default()`, and an unjailed boot discards
+        // the whole `Jail` anyway, so an id set for a boot that does not jail is inert.
+        if let Some(uid) =
+            lookup("BSX_JAIL_UID").and_then(|v| parse_env_jail_id(&v, "BSX_JAIL_UID"))
+        {
+            cfg.jail.get_or_insert_default().uid = uid;
+        }
+        if let Some(gid) =
+            lookup("BSX_JAIL_GID").and_then(|v| parse_env_jail_id(&v, "BSX_JAIL_GID"))
+        {
+            cfg.jail.get_or_insert_default().gid = gid;
         }
         // A host posture like `require_limits`, not a per-run quantity: which uplink this host has
         // is the operator's fact, the same for every sandbox on it. The resolver is only read when a
@@ -311,6 +325,24 @@ fn parse_env_ipv4(v: &std::ffi::OsStr, key: &str) -> Option<Ipv4Addr> {
 /// Parse an `BSX_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
 /// value is `None` (the caller keeps the default) rather than a silent `false`, so a typo'd
 /// `BSX_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
+/// Parse a `BSX_JAIL_UID`/`BSX_JAIL_GID` value. Zero is refused by name: the jailer's whole job on
+/// that axis is to leave root, and an id of 0 would `setuid(0)` and drop nothing. An unparseable or
+/// zero value is `None` **and a warning**, so the boot falls back to [`DEFAULT_JAIL_UID`] (which
+/// still jails) rather than to no drop at all, and the operator hears about it.
+fn parse_env_jail_id(v: &std::ffi::OsStr, key: &str) -> Option<u32> {
+    match v.to_str().and_then(|s| s.trim().parse::<u32>().ok()) {
+        Some(0) | None => {
+            tracing::warn!(
+                %key,
+                value = %v.to_string_lossy(),
+                "not a usable jail id (a non-zero uid/gid); ignoring it and keeping the default"
+            );
+            None
+        }
+        id => id,
+    }
+}
+
 fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
     match v.to_str()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -1321,6 +1353,31 @@ mod tests {
         let default = BootConfig::default();
         assert_eq!(cfg.rootfs, default.rootfs, "unset keys keep the default");
         assert_eq!(cfg.firecracker, default.firecracker);
+    }
+
+    #[test]
+    fn a_jail_id_the_env_names_lands_on_the_jail_but_root_never_does() {
+        let cfg = BootConfig::from_env_with(|key| match key {
+            "BSX_JAIL_UID" => Some("20001".into()),
+            "BSX_JAIL_GID" => Some("20002".into()),
+            _ => None,
+        });
+        let jail = cfg.jail.expect("an id materialises the jail it names");
+        assert_eq!((jail.uid, jail.gid), (20001, 20002));
+
+        // Zero would `setuid(0)` and drop nothing, which is the one id the jail exists to leave.
+        // It falls back to the pinned default rather than to no drop at all, and never silently:
+        // `parse_env_jail_id` warns. Same for a value that is not an id.
+        for bad in ["0", "-1", "root", ""] {
+            let cfg = BootConfig::from_env_with(|key| {
+                (key == "BSX_JAIL_UID").then(|| std::ffi::OsString::from(bad))
+            });
+            assert!(
+                cfg.jail
+                    .is_none_or(|j| j.uid == crate::jail::DEFAULT_JAIL_UID),
+                "{bad:?} must not become the jail uid"
+            );
+        }
     }
 
     #[test]
