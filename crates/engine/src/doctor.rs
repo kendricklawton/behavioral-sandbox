@@ -282,6 +282,15 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "kernel same-page merging across guests is a timing side channel the engine does not \
              need: cross-clone memory sharing already comes from the snapshot COW",
         ),
+        Check::new(
+            "yama ptrace_scope restricts same-uid ptrace",
+            ptrace_scope_restricts_at(Path::new(PROC_YAMA_PTRACE_SCOPE)),
+            true,
+            "concurrent sandboxes share one jail uid, so a guest that escapes into its own VMM \
+             could attach to a co-resident sandbox's VMM and read its guest memory: \
+             `sysctl -w kernel.yama.ptrace_scope=1`. Signalling between them is not gated by this \
+             and is bounded only by giving each sandbox its own id (docs/embedding-scope.md)",
+        ),
     ]
 }
 
@@ -531,6 +540,7 @@ const MAC_LSMS: [&str; 4] = ["selinux", "apparmor", "smack", "tomoyo"];
 const SYS_CPU_VULNERABILITIES: &str = "/sys/devices/system/cpu/vulnerabilities";
 const SYS_SMT_ACTIVE: &str = "/sys/devices/system/cpu/smt/active";
 const SYS_KSM_RUN: &str = "/sys/kernel/mm/ksm/run";
+const PROC_YAMA_PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
 /// The entries under `dir` (one file per CPU vulnerability) whose content reports `Vulnerable`,
 /// sorted so the advisory note is stable. A missing or unreadable dir reads as no exposure: an
@@ -565,6 +575,20 @@ fn sys_toggle_at(path: &Path) -> bool {
 fn sys_toggle_on(content: &str) -> bool {
     let t = content.trim();
     !t.is_empty() && t != "0"
+}
+
+/// Whether Yama restricts `ptrace` between processes that share a uid but no ancestry.
+fn ptrace_scope_restricts_at(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|s| ptrace_scope_restricts(&s))
+}
+
+/// The pure parse behind [`ptrace_scope_restricts_at`]. `0` is the classic behavior where any
+/// same-uid process may attach; `1` (descendants only), `2` (admin only) and `3` (nobody) all deny a
+/// sibling. Anything unreadable or unparseable reads as unrestricted, so an absent fact raises the
+/// advisory rather than silently clearing it (the [`vulnerable_entries`] posture, inverted because
+/// here the safe direction is to warn).
+fn ptrace_scope_restricts(content: &str) -> bool {
+    content.trim().parse::<u32>().is_ok_and(|level| level >= 1)
 }
 
 /// Whether cgroup v2 `cpu`+`memory` are delegated at the root (a systemd host does this by default),
@@ -1005,6 +1029,24 @@ mod tests {
         let ghost = Path::new("/definitely/not/a/real/sysfs/dir/xyzzy");
         assert!(vulnerable_entries(ghost).is_empty());
         assert!(!sys_toggle_at(ghost));
+    }
+
+    #[test]
+    fn ptrace_scope_reads_every_documented_level_and_fails_toward_the_warning() {
+        // 0 is the classic same-uid-may-attach behavior; 1 (descendants), 2 (admin) and 3 (nobody)
+        // each deny a sibling, which is the whole question this check asks.
+        assert!(!ptrace_scope_restricts("0\n"));
+        for level in ["1\n", "2\n", "3\n"] {
+            assert!(ptrace_scope_restricts(level), "{level:?} denies a sibling");
+        }
+        // A kernel built without Yama has no file at all, which is scope-0 behavior. Unreadable and
+        // unparseable both have to warn: reading them as restricted would clear an advisory on the
+        // strength of a fact nobody established.
+        assert!(!ptrace_scope_restricts(""));
+        assert!(!ptrace_scope_restricts("banana\n"));
+        assert!(!ptrace_scope_restricts_at(Path::new(
+            "/definitely/not/a/real/sysctl/xyzzy"
+        )));
     }
 
     #[test]
