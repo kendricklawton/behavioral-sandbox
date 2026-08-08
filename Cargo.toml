@@ -71,6 +71,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Statistical micro-benchmarking framework for in-memory operations (record signing, JSON, wire types).
 criterion = { version = "0.5", features = ["html_reports"] }
+# Reads the guest-written output image in-process. Read-only by the crate's own stated non-goal, and
+# `#![forbid(unsafe_code)]` like the host path it runs on, which is what puts the bulk-output parser
+# in the same memory-safety class as the rest of the driver. Its journal support replays a dirty
+# image, the case a hard-killed guest leaves behind.
+ext4-view = { version = "0.9", features = ["std"] }
 
 # No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`

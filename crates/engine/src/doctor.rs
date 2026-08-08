@@ -255,12 +255,6 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "bulk `input_dir` and `cargo xtask build-rootfs` fail; per-frame files are unaffected",
         ),
-        Check::new(
-            "e2fsck + debugfs (e2fsprogs: bulk output readback)",
-            command_on_path("e2fsck") && command_on_path("debugfs"),
-            true,
-            "bulk `output_dir` readback fails; per-frame `--get` artifacts are unaffected",
-        ),
         // Host hardening, advisory: micro-architectural side channels between
         // co-resident guests live in the layer beneath the engine, so doctor advises the
         // multi-tenant baseline (`docs/security-threat-model.md`) and never refuses.

@@ -105,7 +105,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn kill_handle_stays_inert_during_output_readback() {
-    // `collect_outputs` reaps the VMM, then runs a multi-second `e2fsck`/`debugfs` readback before
+    // `collect_outputs` reaps the VMM, then walks the whole output image before
     // the sandbox drops into teardown. `power_off_and_wait` marks teardown down *before* that reap,
     // so a `KillHandle` fired across the readback finds `torn_down` already set and no-ops, it can
     // never signal the reaped (recyclable) pid (the degraded-host `kill -9 <pid>` fallback). Fire it

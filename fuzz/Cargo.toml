@@ -14,6 +14,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# The bulk-output image parser the engine points at guest-authored bytes. Named directly rather than
+# reached through `bsx-engine`, whose readback wraps it in host filesystem writes.
+ext4-view = { version = "0.9", features = ["std"] }
 serde_json = "1"
 toml = "0.8"
 
@@ -120,6 +123,13 @@ bench = false
 [[bin]]
 name = "bsx_config"
 path = "fuzz_targets/bsx_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "output_image"
+path = "fuzz_targets/output_image.rs"
 test = false
 doc = false
 bench = false

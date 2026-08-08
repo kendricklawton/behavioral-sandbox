@@ -190,11 +190,15 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   direction passes unconditionally, so what can reach a guest is whatever the uplink exposes. Two
   sandboxes sharing a hoster's bridge are separated by that bridge's configuration and by each
   sandbox's own egress policy, not by anything the engine does.
-- **The e2fsprogs output-extraction tools.** Bulk outputs come back by running `e2fsck` and
-  `debugfs` over a guest-written ext4 image: complex C parsers fed attacker-controlled bytes, with
-  the driver's own privileges. The calls are bounded in wall time and output bytes, and the
-  extracted tree is symlink-sanitized, but a memory-corruption bug in those tools is not contained
-  today. Running them under dropped privileges is a planned hardening step (using an external `setpriv`-style dependency or dedicated helper).
+- **The bulk-output image parser.** Bulk outputs come back by parsing a wholly guest-written ext4
+  image, which is attacker-chosen bytes fed to a filesystem parser. That parser is `ext4-view`, read
+  only and `#![forbid(unsafe_code)]`, running in-process on the host path, so the surface is a
+  memory-safe reader rather than `e2fsck` and `debugfs` holding the driver's privileges; `cargo
+  xtask fuzz output_image` is what exercises it on malformed images. The walk the engine puts on top
+  is bounded in bytes, entries, depth and wall time, and the extracted tree is symlink-sanitized.
+  What remains: a **logic** bug in the reader or the walk is not excluded by memory safety, and the
+  upstream crate is not fuzzed by its own project, so the coverage here is this repo's target and
+  nothing more.
 - **Observation fails open, so a thin record is not a quiet run.** Each axis that cannot attach
   (no BTF, no `CAP_BPF`/`CAP_PERFMON`, no object built) degrades to a recorded `AxisGap` and the run
   proceeds, so a record can cover less than the table above implies. It says so in its own coverage

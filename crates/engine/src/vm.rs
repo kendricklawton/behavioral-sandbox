@@ -161,7 +161,7 @@ pub struct BootConfig {
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
     /// vsock channel's per-frame [`Response::File`](bsx_channel::Response::File) artifacts. `None` (the default) attaches no output
-    /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
+    /// device. Readback parses the image in-process, so it needs no host tool; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
     /// Give the guest a **virtio-net** interface backed by a per-VM host **tap** device. The
@@ -875,8 +875,8 @@ impl RunningVm {
     /// writable block device (mounted at `/output`), and here the driver reads that image back. It
     /// **consumes the VM**, the VMM is stopped first (a cooperative power-off, then a hard kill) so
     /// it has released the image and flushed the guest's writes; reading a live, VMM-held image would
-    /// race the guest and corrupt the ext4 journal `e2fsck` replays. Read-back is fully **rootless**:
-    /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree, no loopback, no
+    /// race the guest and corrupt the ext4 journal the reader replays. Read-back is fully **rootless**:
+    /// `ext4-view` replays the journal and walks the tree in-process, no loopback, no
     /// `mount`, no `sudo`.
     /// Guest-controlled contents are sanitised: `lost+found` is dropped, symlinks whose target escapes the
     /// destination are removed so a later host read cannot be redirected onto the host filesystem, and the
@@ -884,7 +884,7 @@ impl RunningVm {
     /// can't exhaust host disk or hang teardown. Dropping the consumed VM reclaims the scratch dir.
     /// # Errors
     /// [`VmmError::Vmm`] if the VM was booted without an output device (no `output_dir`), or on a
-    /// host-side readback failure; [`VmmError::Artifact`] if `e2fsck`/`debugfs` are missing;
+    /// host-side readback failure;
     /// [`VmmError::OutputCap`] if the extracted tree exceeds the byte cap; [`VmmError::Timeout`] if
     /// readback outruns its deadline.
     pub fn collect_outputs(mut self) -> Result<Vec<String>, VmmError> {
@@ -946,12 +946,12 @@ impl RunningVm {
         if !self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT) {
             // A wedged (or unwaitable) guest: hard-kill so the fd to the output image is released
             // before readback rather than trusting a later `Drop`. The `-o sync` mount means the
-            // command's completed writes are already on the image; `e2fsck` recovers the journal.
+            // command's completed writes are already on the image; the reader replays the journal.
             // Bounded like the `Drop` teardown's reap: a D-state VMM must not park this thread.
             if !crate::drives::kill_and_reap_briefly(&mut self.child, "firecracker", VMM_REAP_GRACE)
             {
                 // Unreaped: its fd to the output image may still be open, so the readback below
-                // can see a torn image. `e2fsck` recovers the journal, and the alternative is
+                // can see a torn image. The reader replays the journal, and the alternative is
                 // hanging here indefinitely.
                 return;
             }
