@@ -64,10 +64,17 @@ allocator, so a `Pool` gives every clone it restores a distinct pair rather than
 Exhausting the span is a typed error naming it, never a quiet fallback onto a shared id. Neither
 half learns what a tenant is.
 
-```rust,ignore
-let mut jail = Jail::default();
-jail.ids = Some(JailIds::span(20_000, 64)?);   // 64 concurrent sandboxes, 20000..=20063
-config.jail = Some(jail);
+```rust,no_run
+# extern crate bsx_engine;
+use bsx_engine::{BootConfig, Jail, JailIds, VmmError};
+
+fn main() -> Result<(), VmmError> {
+    let mut config = BootConfig::from_env();
+    let mut jail = Jail::default();
+    jail.ids = Some(JailIds::span(20_000, 64)?); // 64 concurrent sandboxes, 20000..=20063
+    config.jail = Some(jail);
+    Ok(())
+}
 ```
 
 Leaving `ids` unset keeps the single fixed pair, which `--jail-uid` / `BSX_JAIL_UID` /
