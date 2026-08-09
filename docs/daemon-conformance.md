@@ -99,8 +99,8 @@ covers the daemon's half.
 ### 9. An unknown field is ignored
 
 Send an `open` carrying a field this schema does not define. It must decode and behave as if the
-field were absent. This is compatibility rule 1 and the most common way a strict decoder breaks on a
-routine daemon upgrade.
+field were absent. This is compatibility rule 1 and the most common way a strict decoder breaks when
+a daemon adds fields.
 
 ### 10. An unknown `reply` is a hard error
 

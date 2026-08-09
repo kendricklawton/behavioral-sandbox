@@ -18,6 +18,8 @@ bsx run [FLAGS] -- <cmd> [args…]
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer. Default is confined. |
 | `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped. Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also [`require_limits`](./cli-config.md#setting-require_limits). |
+| `--jail-uid UID` | The uid the jailer drops the VMM to (default 10000). An operator setting rather than a caller's, since sandboxes sharing an id can signal each other's VMMs. Zero is refused by name. Also [`jail_uid`](./cli-config.md#setting-jail_uid-and-jail_gid) / `BSX_JAIL_UID`. |
+| `--jail-gid GID` | The gid the jailer drops the VMM to (default 10000), on the same terms as `--jail-uid`. |
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the code paths that log or render a run omit them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
@@ -65,7 +67,8 @@ written on line 1, or a package installed on line 2, is there on line 3.
 
 Shell *process* state (`cd`, variables) does not persist: each line is its own exec. The prompt and
 diagnostics go to stderr and command output to stdout, so a piped script of lines stays clean.
-`--unjailed`, `--vcpus`, `--mem`, and `--require-limits` work the same as on [`run`](#bsx-run).
+`--unjailed`, `--vcpus`, `--mem`, `--require-limits`, and `--jail-uid` / `--jail-gid` work the same
+as on [`run`](#bsx-run).
 
 `bsx shell` cannot record, so a host that sets
 [`require_record`](./cli-config.md#setting-require_record) refuses it.

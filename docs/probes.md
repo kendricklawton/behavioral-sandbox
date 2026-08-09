@@ -323,7 +323,8 @@ turns that into a real **stream of per-event records**:
   (a user `char *` path, a `sockaddr *`) uses `bpf_probe_read_user_*`.
 - **A shared, single-sourced record.** `SyscallEvent` lives in one dependency-free `#![no_std]` crate
   (`crates/probes-common`) that both the kernel writer and the userspace reader depend on, so the
-  `#[repr(C)]` layout can't drift between them, the reader parses it field by field, no `unsafe`.
+  `#[repr(C)]` layout has one definition rather than a copy on each side; the reader parses it field
+  by field, no `unsafe`.
 - **Filter to one sandbox.** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;

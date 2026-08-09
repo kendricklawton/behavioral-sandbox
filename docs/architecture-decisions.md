@@ -178,8 +178,8 @@ code the sandbox exists to contain.
 process.** The alternative, and what the engine did before, is shelling out to `e2fsck -fy` and
 `debugfs -R rdump`: mature C parsers, but C parsers nonetheless, running with whatever privileges
 the driver holds, which on the normal path is root because the jailer needs it. The exposure is not
-the microVM failing. The guest never escapes; the host walks up to the boundary afterwards and reads
-attacker-authored bytes with a tool that was never written for that adversary.
+the microVM failing. This attack needs no escape at all: the host walks up to the boundary afterwards
+and reads attacker-authored bytes with a tool that was never written for that adversary.
 
 `ext4-view` is read-only by its own stated non-goal and carries `#![forbid(unsafe_code)]`, the same
 attribute as the host path it runs on, so the bulk-output parser sits in the same memory-safety class

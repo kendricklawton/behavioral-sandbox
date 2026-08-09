@@ -56,7 +56,7 @@ gates that. Reading their memory needs `ptrace`, which Yama does gate at
 `/proc/sys/kernel/yama/ptrace_scope` 1 and above, so that half is a property of the host rather than
 of the engine and is not something to rely on either way (`bsx doctor` reports it).
 
-**Set [`JailIds::span`] and each sandbox gets its own pair.** The operator declares the range,
+**Set `JailIds::span` and each sandbox gets its own pair.** The operator declares the range,
 because uids are a host-wide namespace shared with real accounts and which of them are free is
 administration; the engine hands one out per sandbox and returns it on teardown, the same allocation
 it already does for netns names, tap names, and cgroup paths. Cloning the config shares the
@@ -80,8 +80,6 @@ fn main() -> Result<(), VmmError> {
 Leaving `ids` unset keeps the single fixed pair, which `--jail-uid` / `BSX_JAIL_UID` /
 `.bsx.toml`'s `jail_uid` select for operators who separate tenants by running a daemon each rather
 than by spanning one.
-
-[`JailIds::span`]: ./embedding.md
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 
