@@ -28,7 +28,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "xtask",
-    about = "dev orchestration for the agent sandbox engine"
+    version,
+    about = "dev orchestration for the agent sandbox engine",
+    // Bare `cargo xtask` prints the command list instead of a terse "subcommand required" error.
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -40,6 +43,7 @@ enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
     /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
+    #[command(visible_alias = "ci-priv")]
     CiPrivileged {
         /// Run the test phase this many times (setup runs once): the release-readiness soak, so
         /// "N consecutive clean privileged runs" is one command. Fails fast, naming the run that
@@ -75,6 +79,7 @@ enum Cmd {
     /// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`, under the
     /// crate's own nightly toolchain (`build-std`). Host-safe; skips with a note when `bpf-linker` or
     /// `rustup` is missing. The object lands at `crates/probes/target/bpfel-unknown-none/release/probes`.
+    #[command(visible_alias = "probes")]
     BuildProbes,
     /// Check the pinned API surface against a baseline git rev with `cargo-semver-checks`, naming
     /// each crate explicitly (the default set silently drops every `publish = false` package, which
@@ -111,6 +116,7 @@ enum Cmd {
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
     /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-guest.ext4` (needs `curl`,
     /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
+    #[command(visible_alias = "rootfs")]
     BuildRootfs {
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
         /// package closure has drifted from the committed lockfile. The reproducibility gate.
@@ -167,6 +173,7 @@ enum Cmd {
     /// methodology stated and the host recorded. Sections whose host prerequisite is missing
     /// (`/dev/kvm`, or `CAP_BPF`+`CAP_PERFMON` + the built object) are skipped with the reason
     /// printed. `docs/benchmarks.md` explains why no numbers are published at present.
+    #[command(visible_alias = "bench")]
     BenchAll {
         /// How many runs/bursts for the percentile benches (the concurrency benches use fixed cohort
         /// sizes). Default 30 to keep the full suite tractable; bump the individual command for tails.
@@ -1596,7 +1603,17 @@ fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use clap::CommandFactory;
+
     use super::*;
+
+    /// The clap command tree is internally consistent: no colliding subcommand alias, no malformed
+    /// argument. `debug_assert` is clap's own audit of the definition, so a bad `visible_alias` or
+    /// `value_parser` fails a unit test instead of the first person to type `--help`.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
 
     /// Every workspace the root `cargo deny check` cannot walk must still get an advisory scan.
     ///
