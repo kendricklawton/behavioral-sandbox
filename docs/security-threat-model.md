@@ -196,9 +196,20 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   memory-safe reader rather than `e2fsck` and `debugfs` holding the driver's privileges; `cargo
   xtask fuzz output_image` is what exercises it on malformed images. The walk the engine puts on top
   is bounded in bytes, entries, depth and wall time, and the extracted tree is symlink-sanitized.
-  What remains: a **logic** bug in the reader or the walk is not excluded by memory safety, and the
-  upstream crate is not fuzzed by its own project, so the coverage here is this repo's target and
-  nothing more.
+
+  **Memory safety does not exclude an allocation sized from attacker bytes, and that class is not
+  hypothetical here.** The parser reads through a trait, so it never learns an image's real length
+  and sizes its block-group table from the superblock's own claim; separately, `read_link` sizes a
+  buffer from an inode's claimed length. Either allocation **aborts** the process rather than
+  unwinding, which no `catch_unwind` converts back into a typed error and which takes every sandbox
+  sharing that driver down with it. Both are refused before they reach an allocator:
+  `refuse_impossible_geometry` rejects a filesystem larger than the file holding it, and the walk
+  skips a symlink claiming a target longer than `PATH_MAX`. `cargo xtask fuzz output_image` applies
+  the same two bounds through `bsx-engine`'s `fuzzing` feature rather than its own copies, so a
+  target cannot go green on a bound production has lost. Both were found by that target.
+
+  What remains: further logic bugs in the reader or the walk, and upstream does not fuzz, so the
+  coverage here is this repo's target and nothing more.
 - **Observation fails open, so a thin record is not a quiet run.** Each axis that cannot attach
   (no BTF, no `CAP_BPF`/`CAP_PERFMON`, no object built) degrades to a recorded `AxisGap` and the run
   proceeds, so a record can cover less than the table above implies. It says so in its own coverage

@@ -34,6 +34,10 @@ use bsx_channel::ChannelError;
 
 pub use bsx_channel::{ClientConnection, GUEST_READY_MARKER, MAX_PAYLOAD, Request, Response};
 pub use jail::{DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, Jail, JailIds, VMM_PIDS_MAX};
+
+/// The output-image bound the readback applies before parsing, for the fuzz target only.
+#[cfg(feature = "fuzzing")]
+pub use drives::fuzz;
 pub use lifetime::KillHandle;
 pub use net::{GuestEgress, GuestLink};
 pub use pool::Pool;
