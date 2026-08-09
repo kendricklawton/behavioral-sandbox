@@ -167,8 +167,8 @@ pub struct ServeArgs {
 pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     pub(crate) base: BootConfig,
-    /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
-    pub(crate) jailed: bool,
+    /// The confinement posture no client can weaken.
+    pub(crate) isolation: crate::policy::IsolationMode,
     /// The operator's per-run policy, built from the daemon's own flags at startup (a daemon
     /// deliberately reads no `.bsx.toml` out of its cwd; see [`serve`]). This is the enforcing
     /// copy: a client controls neither those flags nor this process's environment, so the ceilings
@@ -248,13 +248,13 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         base.require_limits = true;
     }
     crate::apply_jail_ids(&mut base, args.jail_uid, args.jail_gid);
-    let jailed = !args.unjailed;
+    let isolation = crate::policy::IsolationMode::from_unjailed(args.unjailed);
 
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
     // unjailed daemon could never satisfy it and would accept connections only to refuse every
     // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
     // `BSX_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
-    if base.require_limits && !jailed {
+    if base.require_limits && isolation.is_unjailed() {
         tracing::error!(
             "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
              cgroup to cap. Drop --unjailed (and BSX_REQUIRE_LIMITS) or don't require limits."
@@ -323,7 +323,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
-    let pool = build_optional_pool(args.prewarm, &base, jailed);
+    let pool = build_optional_pool(args.prewarm, &base, isolation);
     // The pool's clones hold real guest RAM before any session exists, so they charge the
     // committed ceilings from the start (the gauges then show true headroom, and admission can't
     // overcommit the host by the pool's footprint). A --prewarm the ceiling can't even hold is a
@@ -361,7 +361,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     };
     let server = Arc::new(Server {
         base,
-        jailed,
+        isolation,
         policy,
         observ: Observability::load(),
         signing_key,
@@ -388,7 +388,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     }
     tracing::info!(
         socket = %args.socket.display(),
-        jailed,
+        jailed = isolation.is_jailed(),
         prewarmed = server.pool.is_some(),
         metrics = args.metrics.as_ref().map(tracing::field::display),
         "bsx listening"
@@ -774,13 +774,13 @@ fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
 fn build_optional_pool(
     prewarm: Option<usize>,
     base: &BootConfig,
-    jailed: bool,
+    isolation: crate::policy::IsolationMode,
 ) -> Option<Mutex<Pool>> {
     let target = prewarm?;
     if target == 0 {
         return None;
     }
-    match build_pool(base, jailed, target) {
+    match build_pool(base, isolation, target) {
         Ok(pool) => {
             tracing::info!(target, "pre-warmed pool ready");
             Some(Mutex::new(pool))
@@ -800,7 +800,11 @@ fn build_optional_pool(
 /// snapshotted, it lives in the chroot), snapshot it, then restore `target` clones under the
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`crate::session::boot_session_vm`).
-fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
+fn build_pool(
+    base: &BootConfig,
+    isolation: crate::policy::IsolationMode,
+    target: usize,
+) -> Result<Pool, VmmError> {
     // Snapshot into a per-daemon dir under the engine's scratch knob (`BSX_SCRATCH_DIR`), the same
     // routing as the session bundles: guest-memory-sized files belong where the operator pointed
     // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
@@ -814,7 +818,7 @@ fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, Vm
             snap_dir.path().display()
         ))
     })?;
-    let built = build_pool_from(base, jailed, target, snap_dir.path());
+    let built = build_pool_from(base, isolation, target, snap_dir.path());
     if built.is_ok() {
         snap_dir.published();
     }
@@ -825,7 +829,7 @@ fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, Vm
 /// any error without a cleanup branch per `?`.
 fn build_pool_from(
     base: &BootConfig,
-    jailed: bool,
+    isolation: crate::policy::IsolationMode,
     target: usize,
     snap_dir: &Path,
 ) -> Result<Pool, VmmError> {
@@ -850,7 +854,7 @@ fn build_pool_from(
     // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). The
     //    clones inherit the snapshot's vsock, so sessions exec over it exactly like a cold boot.
     let mut pool_config = base.clone().with_limits(pool_clone_limits());
-    pool_config.jail = if jailed {
+    pool_config.jail = if isolation.is_jailed() {
         Some(pool_config.jail.unwrap_or_default())
     } else {
         None
@@ -1078,7 +1082,7 @@ mod tests {
     ) -> Arc<Server> {
         Arc::new(Server {
             base: bsx_engine::BootConfig::default(),
-            jailed: false,
+            isolation: crate::policy::IsolationMode::Unjailed,
             policy: Policy::default(),
             observ: Observability::load(),
             signing_key: bsx_probes_loader::HostKey::from_seed([7u8; 32]),

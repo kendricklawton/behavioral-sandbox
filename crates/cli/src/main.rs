@@ -463,7 +463,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
         })
         .map_err(|e| CliError::Cli(e.to_string()))?;
     host_policy
-        .check_jail(args.unjailed)
+        .check_jail(policy::IsolationMode::from_unjailed(args.unjailed))
         .map_err(|e| CliError::Cli(e.to_string()))?;
     host_policy
         .check_net(args.net)
@@ -549,7 +549,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
     // Captured before `config` moves into the boot: the record needs it, and an allowance means
     // something different with a route behind it than without.
     let gateway = config.egress.map(|e| e.gateway());
-    let sandbox = open(config, args.unjailed)?;
+    let sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
@@ -749,7 +749,7 @@ fn shell(args: ShellArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, Cl
         config.require_limits = true;
     }
     apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
-    let sandbox = open(config, args.unjailed)?;
+    let sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,
@@ -807,8 +807,8 @@ fn shell(args: ShellArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, Cl
 
 /// Open the sandbox jailed by default, unjailed on the explicit flag, the CLI face of the
 /// library's differently-named constructors.
-fn open(config: BootConfig, unjailed: bool) -> Result<Sandbox, VmmError> {
-    if unjailed {
+fn open(config: BootConfig, isolation: policy::IsolationMode) -> Result<Sandbox, VmmError> {
+    if isolation.is_unjailed() {
         Sandbox::open_unjailed(config)
     } else {
         Sandbox::open(config)
@@ -859,7 +859,7 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
         })
         .map_err(|e| CliError::Cli(e.to_string()))?;
     host_policy
-        .check_jail(args.unjailed)
+        .check_jail(policy::IsolationMode::from_unjailed(args.unjailed))
         .map_err(|e| CliError::Cli(e.to_string()))?;
     // A shell session writes no audit record, so a record-requiring host refuses it outright
     // rather than hosting an unauditable execution path.
