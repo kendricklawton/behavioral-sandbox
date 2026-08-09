@@ -241,11 +241,27 @@ pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
 pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
-    let fs = Ext4::load_from_path(image)
+    let fs = std::panic::catch_unwind(|| Ext4::load_from_path(image))
+        .map_err(|_| {
+            VmmError::Vmm(format!(
+                "read the output image {}: ext4 image parsing panicked",
+                image.display()
+            ))
+        })?
         .map_err(|e| VmmError::Vmm(format!("read the output image {}: {e}", image.display())))?;
-    Walk::new(dest, OUTPUT_EXTRACT_CAP).run(&fs)?;
-    // Guest-controlled tree: drop any symlink that would redirect a later host read onto the host
-    // filesystem, before the caller (or its tooling) touches the files.
+
+    let walk_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Walk::new(dest, OUTPUT_EXTRACT_CAP).run(&fs)
+    }));
+    match walk_res {
+        Ok(res) => res?,
+        Err(_) => {
+            return Err(VmmError::Vmm(format!(
+                "read the output image {}: ext4 tree walk panicked",
+                image.display()
+            )));
+        }
+    }
     sanitize_symlinks(dest)?;
     collect_paths(dest)
 }
@@ -1203,6 +1219,20 @@ mod tests {
         assert!(
             msg.contains("payload"),
             "the error must name the file it could not write: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_ext4_image_returns_a_typed_vmm_error_without_panicking() {
+        let dir = bsx_test_support::ScratchDir::created("corrupt-ext4");
+        let image_path = dir.path().join("corrupt.ext4");
+        let dest = dir.path().join("out");
+        std::fs::write(&image_path, vec![0xffu8; 4096]).expect("write corrupt image");
+        let err = collect_output_image(&image_path, &dest).expect_err("corrupt image must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read the output image"),
+            "expected typed Vmm error for corrupt ext4 image, got: {msg}"
         );
     }
 }
