@@ -1,101 +1,108 @@
 # BSX: engineering disciplines
 
-**A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
-**Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
-enforces what it does from the host side of the KVM boundary: its network and its cgroup directly,
-its syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its own
-kernel. The programs live outside the guest's address space and outside any namespace it can enter.
-Every run yields a host-observed **audit record** of what the host was able to see, and the paths
-that persist one sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
-`trace`). This file is the operating manual, read it every session.
+**A self-hostable, isolated code-execution sandbox.** Untrusted code runs in a **Firecracker**
+microVM. KVM gives the hardware isolation. **Host-side eBPF** (**aya**) observes and enforces the
+behavior of the guest from the host side of the KVM boundary. It sees the network and the cgroup of
+the guest directly. It sees the syscalls only as the host footprint of the VMM, because a microVM
+serves its guest syscalls in its own kernel. The eBPF programs stay outside the address space of the
+guest, and outside each namespace that the guest can enter. Each run makes a host-observed **audit
+record** of what the host saw. The paths that keep a record sign it with a host key (`--record`, the
+`records_dir` of an operator, the daemon's `trace`). This file is the operating manual. Read it every
+session.
 
-Rust, stable, one workspace, pinned in `rust-toolchain.toml`. Linux and `x86_64` only (it needs
-KVM). The host path is `#![forbid(unsafe_code)]`; `crates/probes` is the one exception and builds
-for its own target.
+The project uses stable Rust in one workspace. `rust-toolchain.toml` pins the version. It runs on
+Linux and `x86_64` only, because it needs KVM. The host path is `#![forbid(unsafe_code)]`.
+`crates/probes` is the one exception, and it builds for its own target.
 
-**Voice: claim nothing the project cannot back.** Pre-release, unaudited, one maintainer, no
-external review. Describe mechanisms (falsifiable by a diff) and state measurements with their date
-and host. Do not write outcome guarantees ("tamper-resistant", "never leaks", "the guest cannot
-subvert it", "guaranteed"), in docs, comments, or commit messages. Where a test backs a statement,
-make the test the subject: "`driver_death_cannot_leak_a_vm` kills a driver mid-boot and asserts no
-VMM, netns, or scratch dir survives." An absolute is fine when the sentence names its enforcer
-(`#![forbid(unsafe_code)]`, a wildcard-free `match`, an ordering inside one function); it is not
-fine when the enforcer is "the implementation being correct".
+**Voice: claim nothing the project cannot back.** The project is pre-release and unaudited. It has
+one maintainer and no external review. Describe mechanisms that a diff can disprove. State each
+measurement with its date and host. Do not write outcome guarantees in docs, comments, or commit
+messages. Examples of such guarantees are "tamper-resistant", "never leaks", "the guest cannot
+subvert it", and "guaranteed". When a test backs a statement, make the test the subject. For example:
+"`driver_death_cannot_leak_a_vm` kills a driver during boot and asserts that no VMM, netns, or
+scratch dir stays." An absolute is correct when the sentence names its enforcer, for example
+`#![forbid(unsafe_code)]`, a wildcard-free `match`, or an order inside one function. An absolute is
+not correct when the enforcer is only "the implementation is correct".
 
-The same rule runs the other way: do not write for users who do not exist. Migration notes, upgrade
-paths, and "if you pinned an older rev" guidance imply an installed base, which is a claim about
-adoption. Nobody outside this project has run it.
+The same rule runs the other way. Do not write for users who do not exist. Migration notes, upgrade
+paths, and "if you pinned an older rev" guidance imply an installed base. An installed base is a
+claim about adoption. No one outside this project has run it.
 
 ## Design rules (every change holds to all six)
 
-The single source. Exactly two places restate them for readers: `docs/architecture.md` for the book, and
-`README.md` for someone who never clones. Nothing else should, since a third copy is a third thing to
-drift. They state intent and the mechanism serving it, so a change that breaks one is recognisable as
-a design error rather than a trade-off.
+This is the single source of the design rules. Two other places restate them for readers.
+`docs/architecture.md` restates them for the book. `README.md` restates them for a person who never
+clones the repo. No other place restates them, because a third copy is a third thing that can drift.
+Each rule states an intent and the mechanism for that intent. Therefore a change that breaks one rule
+shows as a design error, not as a trade-off.
 
-1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the
-   boundary into guest-side software is a design error, not an optimisation, and a shared-kernel
-   shortcut taken to "make it simpler" is the same error.
-2. **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF attached to
-   host-kernel hooks. The in-guest agent carries exec and IO framing; making it responsible for
-   containing the guest is a design error.
-3. **Deny by default.** A sandbox with no explicit policy is configured with no route out and
-   minimal capability, and each allowance is recorded in the audit log.
-4. **Engine, not platform.** A self-hostable runtime and a driver API. **The unit of isolation is
-   the sandbox, not the tenant**: the engine isolates each sandbox and records nothing about whose
-   it is, so a hoster maps tenants onto sandboxes and deploys multi-tenant without the engine ever
-   learning what a tenant is. Mechanism that makes such a deployment safe is engine work; policy
-   that has to know who is paying (tenancy, auth, billing, fleet scheduling, image management) is
-   the hoster's, and `docs/embedding-scope.md` draws that line exactly. The **AI model is out too**:
-   it is always the *caller* driving the engine from outside, never an engine component.
-5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
-   broken channel should surface as a typed error. This is the rule the code is written against and
-   the property the confinement suite exercises; it is an aim, not a proven property.
-6. **Measure rather than assert.** Boot, restore, memory sharing, and overhead are reported as
-   nearest-rank percentiles with the host and date. A number that cannot be defended is withdrawn.
+1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. If you move the
+   boundary into guest-side software, this is a design error, not an optimisation. A shared-kernel
+   shortcut that you take to "make it simpler" is the same error.
+2. **Observe and enforce from the host.** Put the visibility and the policy in host-side eBPF on
+   host-kernel hooks. The in-guest agent carries the exec and IO framing. If you make the agent
+   responsible to contain the guest, this is a design error.
+3. **Deny by default.** A sandbox with no explicit policy has no route out and minimum capability.
+   The engine records each allowance in the audit log.
+4. **Engine, not platform.** The project is a self-hostable runtime and a driver API. **The unit of
+   isolation is the sandbox, not the tenant.** The engine isolates each sandbox. It records nothing
+   about the owner of a sandbox. Therefore a hoster maps its tenants onto sandboxes and deploys many
+   tenants, and the engine never learns what a tenant is. Mechanism that makes such a deployment safe
+   is engine work. Policy that must know who pays is the work of the hoster. This policy includes
+   tenancy, auth, billing, fleet scheduling, and image management. `docs/embedding-scope.md` draws
+   that line exactly. The **AI model is also outside the engine**. It is always the *caller*. It
+   drives the engine from outside. It is never a component of the engine.
+5. **No panic, hang, or leak on the host path.** A hostile guest, a guest that crashes, a probe that
+   fails, or a channel that breaks must show as a typed error. The code is written to this rule, and
+   the confinement suite tests this property. It is an aim, not a proven property.
+6. **Measure, do not assert.** Report boot, restore, memory sharing, and overhead as nearest-rank
+   percentiles. Give the host and the date with each number. Withdraw a number that you cannot
+   defend.
 
 ## Repo layout
 
-One workspace. **Directories stay short and packages carry the `bsx-` prefix**, so a package name is
-its directory plus that prefix, with **exactly one exception**: `crates/cli` builds `bsx`, because
-the bare name goes to the thing a user types. That one row is why `-p` takes the **package**
-(`-p bsx-engine`) and paths take the **directory** (`crates/engine`). `cargo xtask ci` checks every
-`-p` in every tracked text file against the real package list, so a stale one fails the gate rather
-than a reader's terminal. Before a non-trivial change to `bsx-engine`, read `docs/architecture.md`
-for the types worth knowing, the boot sequence, and the teardown layers.
+The project is one workspace. **Directories stay short, and packages carry the `bsx-` prefix.** Thus
+a package name is its directory plus that prefix. There is **exactly one exception**: `crates/cli`
+builds `bsx`, because the bare name is the word that a user types. This one exception is the reason
+that `-p` takes the **package** (`-p bsx-engine`) and that paths take the **directory**
+(`crates/engine`). `cargo xtask ci` checks every `-p` in every tracked text file against the real
+list of packages. Therefore a stale `-p` fails the gate, not the terminal of a reader. Before you
+make a large change to `bsx-engine`, read `docs/architecture.md`. It gives the types that you must
+know, the boot sequence, and the teardown layers.
 
 | Path | Package | What it is |
 |---|---|---|
-| `crates/engine` | `bsx-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
-| `crates/channel` | `bsx-channel` | Host↔guest framing. Near dependency-free (`zeroize`, for the secret wipe, is the one dependency), shared verbatim by driver and agent, so a wire change reaches both in one commit. |
-| `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
-| `crates/probes` | `bsx-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
-| `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
-| `crates/probes-loader` | `bsx-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble the record. |
-| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
-| `crates/protocol` | `bsx-protocol` | The daemon's wire types, versioned. |
+| `crates/engine` | `bsx-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, and the `Sandbox` API. `#![forbid(unsafe_code)]`. |
+| `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. The driver and the agent share it without change, so a wire change reaches both in one commit. |
+| `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO. It is static musl and is baked into the rootfs. It is not the security boundary. Its binary keeps the bare name `guest-agent`, because the rootfs build bakes in that path. |
+| `crates/probes` | `bsx-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` through `bpf-linker`). It is the only crate that can use `unsafe`. Its binary keeps the bare name `probes`, because the loader looks for that object filename. |
+| `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` records that cross the eBPF boundary. Zero dependencies, one source. |
+| `crates/probes-loader` | `bsx-probes-loader` | aya userspace. It attaches to one sandbox, reads the maps, and assembles the record. |
+| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing and verification. It has no aya, so a record verifies off-host. |
+| `crates/protocol` | `bsx-protocol` | The wire types of the daemon, with versions. |
 | `crates/client` | `bsx-client` | Rust reference client for `bsx serve`. |
-| `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`) plus `bsx serve`. Package, binary, and command are all `bsx`; its library half is the CLI's own internals, not the engine. |
-| `crates/test-support` | `bsx-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
-| `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, never renamed (`cargo xtask` is a `--package xtask` alias). |
-| `docs/` | | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
+| `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`) and `bsx serve`. The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not the engine. |
+| `crates/test-support` | `bsx-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, and the real-root guard. |
+| `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
+| `docs/` | | mdBook. `SUMMARY.md` is the index. The names are flat `topic-subtopic.md`. The hierarchy is in `SUMMARY.md`, not in directories. |
 
 ## Building from source
 
-Preparing a *host* (KVM access, Firecracker, the host tools) is `docs/cli-install.md`; this is the
-developer's side. `cargo xtask setup` is the first command on a new machine.
+`docs/cli-install.md` tells you how to prepare a *host* (KVM access, Firecracker, the host tools).
+This section is the developer's side. `cargo xtask setup` is the first command on a new machine.
 
 ```console
 rustup target add x86_64-unknown-linux-musl   # the static in-guest agent
 cargo install cargo-deny                      # run by the host-safe gate
 ```
 
-The eBPF toolchain is needed only for the probes, and both pieces are **pinned** deliberately: they
-install out of band, so an unpinned install takes whatever shipped that morning and a compiler
-change breaks the build with no commit from anyone. `bpf-linker` links against the pinned nightly's
-LLVM, so the two move together. The nightly's single source is `crates/probes/rust-toolchain.toml`,
-`bpf-linker`'s is `xtask`, and `ebpf_toolchain_pins_are_single_sourced` holds the workflows and this
-page's `bpf-linker` line to them.
+You need the eBPF toolchain only for the probes. Both pieces are **pinned** on purpose. They install
+out of band. Thus an unpinned install takes the version that shipped that morning, and a compiler
+change breaks the build with no commit from a person. `bpf-linker` links against the LLVM of the
+pinned nightly, so the two move together. The single source of the nightly is
+`crates/probes/rust-toolchain.toml`. The single source of `bpf-linker` is `xtask`.
+`ebpf_toolchain_pins_are_single_sourced` holds the workflows and the `bpf-linker` line on this page
+to these sources.
 
 ```console
 cargo install bpf-linker --locked --version 0.10.3
@@ -111,67 +118,70 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
 
 ## Conventions
 
-- **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
-  build · unit tests · docs · `deny` · eBPF object build) and runs everywhere. `cargo xtask
-  ci-privileged` runs the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + real root
-  (a stock cloud VM can't nest KVM). It *refuses* to run without root, BTF, or the eBPF object
-  rather than letting the capability-gated tests skip themselves into a hollow green, since a
-  skipped test is a pass to cargo. Never gate the everyday loop on a privileged runner.
-- **A test must be shown to fail.** Break the behavior under test, watch the new assertion fail, then
-  revert. A test never seen failing is not yet evidence, and this repo has a commit whose whole
-  purpose was two tests that passed on something other than their subject.
-- **Target kernels, not distros.** Never read `/etc/os-release`, branch on a distro name, or add a
-  per-distro code path (a gate test greps for this). Ask the kernel what it can *do*: `cgroup.kill`
-  rather than `>= 5.15`, `/sys/kernel/security/lsm` rather than "is this RHEL". A capability probe is
-  bounded, a distro list is not, and the probe is testable on a host that lacks the capability.
-  Host variance lives in `doctor.rs` preflight, never in the boot path: a conditional in
-  `spawn.rs`/`jail.rs` creates N boot paths and leaves N-1 untested. Full rationale:
-  `docs/architecture-decisions.md`, decision 8.
-- **A comment earns its lines. `crates/channel` and `crates/client` are the reference**, the two
-  crates to read before commenting a third. An item's rustdoc opens with **one line**, third-person
-  indicative ("Writes a single length-prefixed protocol frame.", "Returns `true` if the failure was
-  caused by clean EOF/disconnect."), and any constraint it carries rides in that line or a trailing
-  clause ("...to prevent unbounded allocations.", "Must fit within ext4's 16-byte limit."). Keep the
-  constraint, cut the essay: a standalone rationale paragraph on an item is the shape to avoid, since
-  the sentence naming the threat is the part a reader needs and the argument for it is the part git
-  already holds. A **body** comment appears only where it states something the code can't show (an
-  ordering, a kernel constraint, why the obvious form is wrong); one narrating what the next lines
-  visibly do comes out. State the threat-model framing once per module (the `//!` header, as a short
-  bolded-label bullet list), not at every call site. A prose *promise* ("can't drift", "never
-  logged") belongs in a type or a test rather than in prose asserting it. A drift claim that
-  *enumerates* what it covers ("shared by A, B and C") has made one more copy, the list, and it
-  drifts like every copy: name the mechanism a reader can grep instead and let the set be whatever
-  that admits. A comment states its constraint in the **present tense**, never the story of how it
-  was found: past-tense narration of prior code ("the earlier design", "used to", "no longer", "this
-  replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them,
-  where git keeps them attached to the diff.
-- `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
-  `bsx run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`BSX_*`) >
-  file (`.bsx.toml`, the nearest one walking up from the cwd) > defaults**.
+- **Two gates.** `cargo xtask ci` is host-safe and runs everywhere. It does fmt, the prose-drift
+  lint, clippy `-D warnings`, build, unit tests, docs, `deny`, and the eBPF object build.
+  `cargo xtask ci-privileged` runs the VM-boot and eBPF-load integration tests. It needs `/dev/kvm`
+  and real root. A standard cloud VM cannot nest KVM. This gate *refuses* to run without root, BTF,
+  or the eBPF object. If it ran, the capability-gated tests would skip themselves into a hollow
+  green, because cargo counts a skipped test as a pass. Never gate the everyday loop on a privileged
+  runner.
+- **You must show that a test can fail.** Break the behavior under test. Watch the new assertion
+  fail. Then revert. A test that you never saw fail is not yet evidence. This repo has a commit for
+  two tests that passed on something other than their subject.
+- **Target kernels, not distros.** Never read `/etc/os-release`. Never branch on the name of a
+  distro. Never add a per-distro code path. A gate test greps for this. Ask the kernel what it can
+  *do*. Use `cgroup.kill`, not ">= 5.15". Use `/sys/kernel/security/lsm`, not "is this RHEL". A
+  capability probe is bounded, but a distro list is not. You can test the probe on a host that does
+  not have the capability. Host variance lives in the `doctor.rs` preflight, never in the boot path.
+  A conditional in `spawn.rs` or `jail.rs` makes N boot paths and leaves N-1 untested. For the full
+  reason, see `docs/architecture-decisions.md`, decision 8.
+- **A comment must earn its lines. `crates/channel` and `crates/client` are the reference.** Read
+  these two crates before you comment a third. The rustdoc of an item starts with **one line** in
+  the third-person indicative, for example "Writes a single length-prefixed protocol frame." or
+  "Returns `true` if the failure was caused by clean EOF or disconnect." Put any constraint in that
+  line or in a trailing clause, for example "...to prevent unbounded allocations." or "Must fit in
+  the 16-byte limit of ext4." Keep the constraint, but cut the essay. Do not write a separate
+  rationale paragraph on an item. The reader needs the sentence that names the threat, and git
+  already holds the argument for it. Write a **body** comment only where it states something that the
+  code cannot show: an order, a kernel constraint, or the reason that the obvious form is wrong.
+  Remove a body comment that only narrates what the next lines show. State the threat-model framing
+  one time for each module, in the `//!` header, as a short bullet list with bold labels. Do not
+  state it at each call site. A prose *promise*, for example "can't drift" or "never logged", belongs
+  in a type or a test, not in prose that asserts it. A drift claim that lists what it covers, for
+  example "shared by A, B and C", makes one more copy: the list. This list drifts like every copy.
+  Name a mechanism that a reader can grep instead, and let the mechanism define the set. A comment
+  states its constraint in the **present tense**. It never tells the story of how you found it.
+  Past-tense narration of earlier code ("the earlier design", "used to", "no longer", "this
+  replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them.
+  Git keeps them attached to the diff there.
+- `tracing` logs to stderr. A run writes its structured result and audit log to stdout, so
+  `bsx run … 2>/dev/null` stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then file
+  (`.bsx.toml`, the nearest one above the cwd), then defaults.
 - **No em-dashes in prose.** Repo docs, code comments, and commit messages use colons, commas, or
-  parentheses instead. A genuine separator inside a code block or shown output stays; user-facing
-  output *strings* are a separate call.
-- **Pull requests are human-owned. Commits and pushes are the operator's call.** A **coding agent**
-  never opens, approves, or merges a pull request (`gh pr create` / `gh pr merge` / review approvals
-  included); that part is not configurable. Whether an agent runs `git commit` and `git push` is up
-  to whoever is running it, so do it when asked and not otherwise. Commits go to `main`. One logical
-  change per commit, **never an AI co-author or attribution trailer**. Release tags stay a human
-  step (`RELEASES.md`).
-- **Commit messages follow Conventional Commits.** `type(scope)?: subject` with the standard types
-  (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, `build`). Imperative, describing
-  **what was done** ("fix: bound session reads by a deadline"). A mixed change takes its most
-  significant type (`fix` over `refactor` over `test`). **Public-API changes carry the `api` scope**
-  (`feat(api):` / `fix(api)!:`), so a downstream pin bump is auditable from the log alone. The
-  surface is `bsx-engine`'s public API, the `bsx-channel` wire framing, `bsx-protocol`'s wire
-  types, and `bsx-record`'s signed-envelope surface; `docs/embedding-scope.md` names it exactly.
-- **Backwards compatibility follows the data's direction.** Structs the caller constructs
-  (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and invariants stay
-  checkable. Structs the engine returns (`RunResult`, `Artifact`, `ExecMetrics`) keep public fields,
-  so a caller can move the data out and new measurements land as new fields. Everything public is
-  `#[non_exhaustive]`; optional wire fields carry `#[serde(default)]`. Verify with
-  `cargo xtask semver-check`, which names each crate explicitly: run bare, `cargo-semver-checks`
-  drops every `publish = false` package (all of them) and exits `0` having checked nothing. It is
-  also inert until `0.1.0`, since cargo treats every `0.0.x` bump as already breaking.
-- **The wire carries no identity.** Anything that authenticates *users* stays out of
-  `bsx-protocol` by design: the daemon's access control is the socket's permissions, a recorded
-  non-goal stated on `serve`'s own flags.
+  parentheses instead. A true separator in a code block or in shown output stays. User-facing output
+  *strings* are a separate case.
+- **A human owns the pull requests. The operator decides the commits and the pushes.** A **coding
+  agent** never opens, approves, or merges a pull request. This includes `gh pr create`,
+  `gh pr merge`, and review approvals. You cannot configure this part. The person who runs an agent
+  decides if the agent runs `git commit` and `git push`. Do it when the person asks, and not at other
+  times. Commits go to `main`. Make one logical change for each commit. Never add an AI co-author or
+  an attribution trailer. A human makes the release tags (`RELEASES.md`).
+- **Commit messages follow Conventional Commits.** Use `type(scope)?: subject` with the standard
+  types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, and `build`. Use the
+  imperative and describe **what you did** ("fix: bound session reads by a deadline"). A mixed change
+  takes its most significant type (`fix` before `refactor` before `test`). **Public-API changes carry
+  the `api` scope** (`feat(api):` or `fix(api)!:`), so you can audit a downstream pin bump from the
+  log alone. The surface is the public API of `bsx-engine`, the wire framing of `bsx-channel`, the
+  wire types of `bsx-protocol`, and the signed-envelope surface of `bsx-record`.
+  `docs/embedding-scope.md` names it exactly.
+- **Backwards compatibility follows the direction of the data.** Structs that the caller constructs
+  (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and you can still
+  check the invariants. Structs that the engine returns (`RunResult`, `Artifact`, `ExecMetrics`) keep
+  their public fields, so a caller can move the data out and new measurements arrive as new fields.
+  Everything public is `#[non_exhaustive]`. Optional wire fields carry `#[serde(default)]`. Verify
+  with `cargo xtask semver-check`, which names each crate. If you run `cargo-semver-checks` bare, it
+  drops every `publish = false` package (all of them) and exits `0` with nothing checked. It is also
+  inert until `0.1.0`, because cargo treats every `0.0.x` bump as already breaking.
+- **The wire carries no identity.** By design, anything that authenticates *users* stays out of
+  `bsx-protocol`. The access control of the daemon is the permissions of the socket. This is a
+  recorded non-goal on the flags of `serve`.
