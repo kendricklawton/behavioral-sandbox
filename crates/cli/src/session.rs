@@ -550,14 +550,17 @@ fn boot_session_vm(
     }
     let mut config = server.base.clone().with_limits(limits);
     config.enable_network = nic;
-    Ok((cold_boot(config, server.jailed)?, false))
+    Ok((cold_boot(config, server.isolation)?, false))
 }
 
 /// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
 /// [`Sandbox::open`](bsx_engine::Sandbox::open) does before booting, force the vsock exec channel on,
 /// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
-fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError> {
-    config.jail = if jailed {
+fn cold_boot(
+    mut config: BootConfig,
+    isolation: crate::policy::IsolationMode,
+) -> Result<RunningVm, VmmError> {
+    config.jail = if isolation.is_jailed() {
         Some(config.jail.unwrap_or_default())
     } else {
         None

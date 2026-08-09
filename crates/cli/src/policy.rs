@@ -20,6 +20,39 @@ use std::time::Duration;
 
 use bsx_engine::Limits;
 use bsx_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
+/// The isolation mode of a sandbox: confined under Firecracker's jailer ([`IsolationMode::Jailed`]),
+/// or running Firecracker directly ([`IsolationMode::Unjailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationMode {
+    /// Confined in a chroot under a dropped UID/GID (needs root and the `jailer` binary).
+    Jailed,
+    /// Direct Firecracker execution without the jailer (needs no root).
+    Unjailed,
+}
+
+impl IsolationMode {
+    /// Whether this mode is unjailed.
+    #[must_use]
+    pub fn is_unjailed(self) -> bool {
+        matches!(self, Self::Unjailed)
+    }
+
+    /// Whether this mode is jailed.
+    #[must_use]
+    pub fn is_jailed(self) -> bool {
+        matches!(self, Self::Jailed)
+    }
+
+    /// Construct from an `unjailed` boolean flag (e.g. `--unjailed`).
+    #[must_use]
+    pub fn from_unjailed(unjailed: bool) -> Self {
+        if unjailed {
+            Self::Unjailed
+        } else {
+            Self::Jailed
+        }
+    }
+}
 
 /// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +61,6 @@ pub struct AllowRule {
     pub port: Option<u16>,
     pub proto: Option<Protocol>,
 }
-
 /// Parse one `--allow` value, `IP[/CIDR][:PORT][/PROTO]`, into an [`AllowRule`]. Parsed
 /// right-to-left so the grammar is unambiguous.
 pub fn parse_allow(s: &str) -> Result<AllowRule, String> {
@@ -280,9 +312,9 @@ impl Policy {
 
     /// Refuse an unjailed boot when the host requires the jail. Monotone: a caller never loosens it.
     /// # Errors
-    /// [`PolicyError::JailRequired`] when `unjailed` is asked for under `require_jail`.
-    pub fn check_jail(&self, unjailed: bool) -> Result<(), PolicyError> {
-        if unjailed && self.require_jail {
+    /// [`PolicyError::JailRequired`] when unjailed isolation is asked for under `require_jail`.
+    pub fn check_jail(&self, isolation: IsolationMode) -> Result<(), PolicyError> {
+        if isolation.is_unjailed() && self.require_jail {
             return Err(PolicyError::JailRequired);
         }
         Ok(())
@@ -562,16 +594,19 @@ mod tests {
     fn jail_posture_is_monotone() {
         let off = Policy::default();
         assert!(
-            off.check_jail(true).is_ok(),
+            off.check_jail(IsolationMode::Unjailed).is_ok(),
             "unset policy keeps the opt-out"
         );
         let on = Policy {
             require_jail: true,
             ..Policy::default()
         };
-        assert_eq!(on.check_jail(true), Err(PolicyError::JailRequired));
+        assert_eq!(
+            on.check_jail(IsolationMode::Unjailed),
+            Err(PolicyError::JailRequired)
+        );
         assert!(
-            on.check_jail(false).is_ok(),
+            on.check_jail(IsolationMode::Jailed).is_ok(),
             "asking for the jail is always fine, the posture only ever tightens"
         );
     }
