@@ -73,7 +73,8 @@ fn boots_under_the_jailer() {
     // This verifies the confinement is actually *in force*, not merely configured: below we read the
     // running VMM's `/proc` and assert each wall independently, so a guest that breached KVM into the
     // VMM lands in a chroot, as an unprivileged uid, holding no capabilities, under `no_new_privs` and
-    // seccomp, in its own mount namespace and cgroup. None of these can be escaped from inside the VMM.
+    // seccomp, in its own mount namespace and cgroup. Each wall is read back from the kernel's own
+    // view of the process, not from the config the driver passed in.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping boots_under_the_jailer: needs real root (euid 0 in the initial user namespace)"

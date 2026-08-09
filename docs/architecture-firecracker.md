@@ -109,7 +109,8 @@ network namespaces, in a cgroup, behind Firecracker's own seccomp filters.
 
 The jailer is a separate upstream binary. Given the VMM to exec and an id, it builds a chroot,
 `mknod`s the device nodes the VMM needs (`/dev/kvm`, `/dev/net/tun`), places the process in a
-cgroup, chroots, drops to uid/gid 10000, and execs Firecracker with its API socket at the
+cgroup, chroots, drops to the jail uid/gid (10000 by default, or one pair per sandbox when the
+operator declares a `JailIds` span), and execs Firecracker with its API socket at the
 chroot-relative `/run/firecracker.socket`. The driver never creates the device nodes itself, which
 is why the jailer needs real root: `mknod` of a device node is `EPERM` in a non-initial user
 namespace even holding `CAP_MKNOD`.

@@ -93,7 +93,7 @@ boot continues with a warning but is neither tested here nor patched upstream, w
 footing for running untrusted code.
 
 This range **moves with upstream, not with our release cadence**: when a series ages out of their
-table the floor rises, which a weekly CI job checks so it cannot drift unnoticed.
+table the floor rises, which a weekly CI job (`firecracker-pin.yml`) rechecks against their table.
 
 ```console
 VER=v1.16.1
@@ -186,8 +186,7 @@ from-source concern rather than a runtime one.
 
 > **`v0.0.3` is a checkpoint, not a supported release.** It is tagged to exercise the release path
 > end to end, so the URLs in this section resolve and the signature checks below are real once its
-> assets are published. The `v0.0.1` and `v0.0.2` assets carry this project's previous name and do
-> not match the paths below. Nothing about the API, the CLI, or the artifact layout is stable until
+> assets are published. Nothing about the API, the CLI, or the artifact layout is stable until
 > v0.1.0.
 
 Each release ships one `x86_64` release package tarball (`cargo xtask dist` refuses to package any

@@ -44,7 +44,7 @@ against it all speak exactly the same shapes.
 | `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
 | `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `bsx run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
-| `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true,"lossy":false}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). `content` is lossy UTF-8; `lossy:true` flags that the file's bytes were not valid UTF-8, so replacement characters stand in and the original bytes are not recoverable from this reply. Absent (an older daemon) reads as `false`. |
+| `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true,"lossy":false}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). `content` is lossy UTF-8; `lossy:true` flags that the file's bytes were not valid UTF-8, so replacement characters stand in and the original bytes are not recoverable from this reply. Absent (an omitted field) reads as `false`. |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/bsx-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
 | `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `bsx verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained**: each after the first carries a `prev` field (the SHA-256 of the previous record; the first is the unchained anchor), so the sequence is tamper-evident, not just each record alone. Save the replies one per line and `bsx verify` checks the whole chain, order and all; the library form is `verify_chain` in `bsx-record`. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
@@ -71,9 +71,9 @@ failed boot is fatal yet nothing about the caller's request was wrong.
 (`bsx_engine::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same
 way.
 
-**Treat an unrecognized `kind` as `infra`.** The set may grow; a value your client predates means
+**Treat an unrecognized `kind` as `infra`.** The set may grow; an unrecognized value means
 "unclassified", and assuming the host rather than the caller is the conservative read. An absent
-`kind` (a daemon older than the field) reads the same way.
+`kind` (an omitted field) reads the same way.
 
 ## Compatibility rules (what a client must do)
 
@@ -83,9 +83,9 @@ implementation's. Three rules, in decreasing order of how often you will hit the
 
 **1. Ignore fields you do not recognize.** Messages may grow fields within a `schema`, so a decoder
 must not reject an object because it carries something extra. This is how the wire evolves without a
-version bump: a new optional field is invisible to older clients and meaningful to newer ones. An
+version bump: a new optional field is invisible to clients that do not parse it and meaningful to ones that do. A
 client that rejects unknown fields (a strict struct decoder, a `deny_unknown_fields`-style setting)
-will break on a routine daemon upgrade. Note the direction: **omitted** optional fields keep the
+will break when a daemon adds optional fields. Note the direction: **omitted** optional fields keep the
 documented default, so absence and unfamiliarity are both safe.
 
 **2. Reject a `reply` you do not recognize, loudly.** Unlike fields, an unrecognized *reply kind* is
