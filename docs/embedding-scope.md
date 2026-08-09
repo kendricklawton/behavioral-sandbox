@@ -64,7 +64,7 @@ allocator, so a `Pool` gives every clone it restores a distinct pair rather than
 Exhausting the span is a typed error naming it, never a quiet fallback onto a shared id. Neither
 half learns what a tenant is.
 
-```rust
+```rust,ignore
 let mut jail = Jail::default();
 jail.ids = Some(JailIds::span(20_000, 64)?);   // 64 concurrent sandboxes, 20000..=20063
 config.jail = Some(jail);
