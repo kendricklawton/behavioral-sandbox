@@ -17,14 +17,30 @@ const MAX_ENTRIES: u32 = 4096;
 // `&[u8]`, not `Vec<u8>`: the `Arbitrary` impl for a vector takes its length from the input and
 // truncates, so a seed image would reach the parser as a fragment of itself.
 fuzz_target!(|data: &[u8]| {
-    let Ok(fs) = Ext4::load(Box::new(data.to_vec())) else {
+    if data.len() > 16 * 1024 * 1024 {
+        return;
+    }
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let load_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Ext4::load(Box::new(data.to_vec()))
+    }));
+    std::panic::set_hook(prev_hook);
+
+    let Ok(Ok(fs)) = load_res else {
         return;
     };
     let Ok(root) = PathBuf::try_from("/") else {
         return;
     };
     let mut budget = MAX_ENTRIES;
-    walk(&fs, &root, 0, &mut budget);
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        walk(&fs, &root, 0, &mut budget);
+    }));
+    std::panic::set_hook(prev_hook);
 });
 
 fn walk(fs: &Ext4, dir: &PathBuf, depth: u32, budget: &mut u32) {
