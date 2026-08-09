@@ -794,6 +794,7 @@ version = "0.0.3"
 dependencies = [
  "bsx",
  "bsx-channel",
+ "bsx-engine",
  "bsx-probes-common",
  "bsx-protocol",
  "bsx-record",

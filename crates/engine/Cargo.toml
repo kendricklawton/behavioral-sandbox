@@ -32,6 +32,11 @@ bsx-channel = { path = "../channel" }
 # Pinned to the 0.31 the workspace already carries so the build links one copy.
 nix = { version = "0.31", default-features = false, features = ["socket"] }
 
+[features]
+# Exposes the output-image geometry bound to `cargo xtask fuzz output_image`, so the target checks
+# the same thing the readback does instead of carrying its own copy that could drift from it.
+fuzzing = []
+
 [dev-dependencies]
 # The round-trip channel test runs the real guest agent behind a fake vsock socket, no VM needed.
 bsx-guest-agent = { path = "../guest-agent" }

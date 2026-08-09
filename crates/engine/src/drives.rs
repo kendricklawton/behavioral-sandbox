@@ -38,6 +38,10 @@ const MAX_OUTPUT_DEPTH: u32 = 64;
 /// How many directory entries the readback will visit. The other half of the cycle bound, and the
 /// one that also holds a wide tree of empty directories, which costs host inodes but no bytes.
 const MAX_OUTPUT_ENTRIES: u64 = 500_000;
+/// Longest symlink target the readback will materialise, `PATH_MAX`. The parser sizes `read_link`'s
+/// buffer from the inode's own claim, so this is the per-inode counterpart to
+/// [`refuse_impossible_geometry`]: a claim past what a path can be never reaches an allocator.
+const MAX_SYMLINK_TARGET: u64 = 4096;
 /// Copy buffer for one guest file. An upper bound, not a stride: the reader answers a `read` with at
 /// most one filesystem block, so the buffer is rarely filled. Each read is charged against the byte
 /// cap as it lands, which is what enforces the cap mid-file rather than at file boundaries.
@@ -241,6 +245,7 @@ pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
 pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
+    refuse_impossible_geometry(image)?;
     let fs = std::panic::catch_unwind(|| Ext4::load_from_path(image))
         .map_err(|_| {
             VmmError::Vmm(format!(
@@ -264,6 +269,99 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
     }
     sanitize_symlinks(dest)?;
     collect_paths(dest)
+}
+
+/// Byte offset of the ext4 superblock, and the fields inside it this check reads. Named rather than
+/// spelled inline so the one place that duplicates on-disk layout says which four values it needs.
+const SUPERBLOCK_OFFSET: u64 = 1024;
+const SUPERBLOCK_LEN: usize = 1024;
+const SB_BLOCKS_COUNT_LO: usize = 0x04;
+const SB_BLOCKS_PER_GROUP: usize = 0x20;
+const SB_INODES_PER_GROUP: usize = 0x28;
+const SB_MAGIC: usize = 0x38;
+/// ext4's smallest block size. Used as the conservative multiplier when sizing the filesystem's
+/// claim against the file: the real block size is this or larger, so a claim rejected under it would
+/// be rejected under any of them.
+const MIN_BLOCK_SIZE: u64 = 1024;
+
+/// Refuse an output image whose superblock describes a filesystem the file could not hold, before
+/// the parser sizes an allocation from that description.
+///
+/// **This is the one bound `catch_unwind` cannot provide.** `ext4-view` reads through a trait and so
+/// never learns the image's real length; its block-group descriptor table is sized from the
+/// superblock's own claim, so a 2 KiB image naming billions of blocks asks for tens of gigabytes in
+/// one `Vec::with_capacity`. A failed allocation of that size **aborts** the process rather than
+/// unwinding, which takes the driver and every sandbox sharing it down, so it has to be refused
+/// before it is attempted rather than caught after.
+///
+/// A bound, not a parse: it reads four fields and compares them against one fact the parser does not
+/// have. Anything that is not an ext4 superblock is passed straight through, so the parser stays the
+/// authority on what a valid image is and this never invents a second opinion about it.
+fn refuse_impossible_geometry(image: &Path) -> Result<(), VmmError> {
+    let len = std::fs::metadata(image)
+        .map_err(|e| VmmError::Vmm(format!("stat the output image {}: {e}", image.display())))?
+        .len();
+    let mut sb = [0u8; SUPERBLOCK_LEN];
+    {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut f = std::fs::File::open(image).map_err(|e| {
+            VmmError::Vmm(format!("open the output image {}: {e}", image.display()))
+        })?;
+        if f.seek(SeekFrom::Start(SUPERBLOCK_OFFSET)).is_err() || f.read_exact(&mut sb).is_err() {
+            // Too small to hold a superblock at all: the parser's own error names that better.
+            return Ok(());
+        }
+    }
+    superblock_admits_parsing(&sb, len)
+        .map_err(|why| VmmError::Vmm(format!("read the output image {}: {why}", image.display())))
+}
+
+/// The pure half of [`refuse_impossible_geometry`], over the 1 KiB superblock and the image's real
+/// length. `Ok(())` means "nothing here forces an impossible allocation or a division by zero", not
+/// "this image is valid"; judging validity stays the parser's job.
+fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
+    let le32 = |off: usize| -> u64 {
+        u32::from_le_bytes([sb[off], sb[off + 1], sb[off + 2], sb[off + 3]]) as u64
+    };
+    if sb.len() < SUPERBLOCK_LEN || u16::from_le_bytes([sb[SB_MAGIC], sb[SB_MAGIC + 1]]) != 0xEF53 {
+        return Ok(()); // Not an ext4 superblock; let the parser say so.
+    }
+    // Both are divisors in the parser's geometry maths, and zero is expressible on disk.
+    if le32(SB_BLOCKS_PER_GROUP) == 0 || le32(SB_INODES_PER_GROUP) == 0 {
+        return Err("corrupt superblock: a zero blocks- or inodes-per-group".into());
+    }
+    // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a lower
+    // bound on the claim's real size, so a legitimate image (whose blocks are that size or larger)
+    // always passes.
+    let claimed = le32(SB_BLOCKS_COUNT_LO).saturating_mul(MIN_BLOCK_SIZE);
+    if claimed > image_len {
+        return Err(format!(
+            "corrupt superblock: claims at least {claimed} bytes of filesystem in a {image_len}-byte image"
+        ));
+    }
+    Ok(())
+}
+
+/// The readback's pre-parse bound, for `cargo xtask fuzz output_image`.
+///
+/// The fuzz target must apply exactly what [`collect_output_image`] applies: a target carrying its
+/// own validator tests a path production does not have, and goes green while production keeps the
+/// bug. One function, one behaviour, both callers.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    /// `true` when the readback would hand this superblock to the parser.
+    #[must_use]
+    pub fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> bool {
+        super::superblock_admits_parsing(sb, image_len).is_ok()
+    }
+
+    /// The superblock's offset and length, so a target can slice one out of a candidate image.
+    pub const SUPERBLOCK_OFFSET: u64 = super::SUPERBLOCK_OFFSET;
+    pub const SUPERBLOCK_LEN: usize = super::SUPERBLOCK_LEN;
+    /// The walk's per-inode bound on a symlink target, so a target's own walk refuses the same
+    /// claims [`Walk::dir`](super::Walk::dir) refuses rather than reporting crashes the readback
+    /// cannot reach.
+    pub const MAX_SYMLINK_TARGET: u64 = super::MAX_SYMLINK_TARGET;
 }
 
 /// Remove a **symlink** already sitting at `host_path` before the walk creates anything there.
@@ -396,6 +494,19 @@ impl<'a> Walk<'a> {
                 }
                 FileType::Regular => self.file(fs, &guest_path, &host_path)?,
                 FileType::Symlink => {
+                    // `read_link` allocates the target from the inode's **claimed** size, so an
+                    // inode naming gigabytes aborts the process on the allocation, the same shape as
+                    // the superblock's block count and equally beyond `catch_unwind`. A real target
+                    // is a path, so anything past `PATH_MAX` is corrupt and is refused before the
+                    // claim is allowed to size an allocation.
+                    if meta.len() > MAX_SYMLINK_TARGET {
+                        tracing::warn!(
+                            path = %guest_path.display(),
+                            claimed = meta.len(),
+                            "output symlink claims a target longer than a path can be; skipped"
+                        );
+                        continue;
+                    }
                     let target = fs.read_link(&guest_path).map_err(|e| {
                         VmmError::Vmm(format!("read guest symlink {}: {e}", guest_path.display()))
                     })?;
@@ -846,6 +957,102 @@ mod tests {
         let dest = dir.join("out");
         let paths = collect_output_image(&image, &dest).expect("read the image back");
         Some((dest, paths))
+    }
+
+    /// Overwrite the superblock's geometry and repair its checksum, which is what a guest with write
+    /// access to its own `/output` block device can do with about twenty lines of code. Returns the
+    /// forged image's path.
+    fn forge_superblock(image: &Path, blocks_count: u32, blocks_per_group: u32) -> PathBuf {
+        fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
+            for b in data {
+                crc ^= u32::from(*b);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ if crc & 1 != 0 { 0x82F6_3B78 } else { 0 };
+                }
+            }
+            crc
+        }
+        let mut raw = std::fs::read(image).expect("read the image");
+        let sb = SUPERBLOCK_OFFSET as usize;
+        raw[sb + SB_BLOCKS_COUNT_LO..][..4].copy_from_slice(&blocks_count.to_le_bytes());
+        raw[sb + SB_BLOCKS_PER_GROUP..][..4].copy_from_slice(&blocks_per_group.to_le_bytes());
+        // `metadata_csum` is on, so an unrepaired edit is caught by the checksum rather than by the
+        // bound under test. Repairing it is what makes this the guest's real capability.
+        let csum = crc32c(!0, &raw[sb..sb + 0x3FC]);
+        raw[sb + 0x3FC..][..4].copy_from_slice(&csum.to_le_bytes());
+        let forged = image.with_extension("forged");
+        std::fs::write(&forged, &raw).expect("write the forged image");
+        forged
+    }
+
+    #[test]
+    fn a_superblock_claiming_more_than_the_image_holds_is_refused_before_it_allocates() {
+        // `ext4-view` reads through a trait and never learns the image's length, so it sizes its
+        // block-group descriptor table from the superblock's claim: a forged geometry asks for
+        // gigabytes in one `Vec::with_capacity`. That allocation **aborts** rather than unwinding,
+        // so `collect_output_image`'s `catch_unwind` cannot turn it into a typed error and the whole
+        // driver dies, taking every co-resident sandbox with it. It has to be refused before the
+        // parser is handed the image at all.
+        let dir = bsx_test_support::ScratchDir::created("readback-forged");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        std::fs::write(tree.join("f"), b"guest output").expect("seed file");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping a_superblock_claiming_more_than_the_image_holds: no mke2fs");
+            return;
+        };
+        // A genuine image passes: its blocks, at any real block size, fit the file that holds them.
+        let dest = dir.path().join("ok");
+        collect_output_image(&image, &dest).expect("an honest image still reads back");
+
+        // Claim ~4 billion blocks in a few-megabyte file, with a group size small enough that the
+        // descriptor table alone would run to gigabytes.
+        let forged = forge_superblock(&image, 0xFFFF_FFF0, 8);
+        let err = collect_output_image(&forged, &dir.path().join("forged"))
+            .expect_err("an impossible geometry is not a readable image");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("corrupt superblock"),
+            "the refusal must name the corruption, not a parser fault: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_geometry_bound_judges_only_what_it_can_and_defers_the_rest() {
+        let mut sb = [0u8; SUPERBLOCK_LEN];
+        // Not an ext4 superblock: the bound has no opinion, and the parser stays the authority on
+        // what a valid image is rather than this growing a second one.
+        assert!(superblock_admits_parsing(&sb, 1 << 20).is_ok());
+
+        sb[SB_MAGIC] = 0x53;
+        sb[SB_MAGIC + 1] = 0xEF;
+        sb[SB_BLOCKS_PER_GROUP..][..4].copy_from_slice(&8192u32.to_le_bytes());
+        sb[SB_INODES_PER_GROUP..][..4].copy_from_slice(&2048u32.to_le_bytes());
+        sb[SB_BLOCKS_COUNT_LO..][..4].copy_from_slice(&256u32.to_le_bytes());
+        assert!(
+            superblock_admits_parsing(&sb, 1 << 20).is_ok(),
+            "256 blocks fit comfortably in a MiB"
+        );
+
+        // Zero divisors are expressible on disk and are divisors in the parser's geometry maths.
+        for field in [SB_BLOCKS_PER_GROUP, SB_INODES_PER_GROUP] {
+            let mut z = sb;
+            z[field..][..4].copy_from_slice(&0u32.to_le_bytes());
+            assert!(
+                superblock_admits_parsing(&z, 1 << 20).is_err(),
+                "zero divisor"
+            );
+        }
+
+        // The claim is measured at ext4's *smallest* block size, so the bound never rejects an image
+        // whose blocks are larger, and a claim that fails it fails at every block size.
+        let mut big = sb;
+        big[SB_BLOCKS_COUNT_LO..][..4].copy_from_slice(&(1u32 << 20).to_le_bytes());
+        assert!(
+            superblock_admits_parsing(&big, 1 << 20).is_err(),
+            "a MiB of blocks cannot live in a MiB of file"
+        );
     }
 
     #[test]
