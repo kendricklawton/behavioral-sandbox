@@ -90,18 +90,8 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
         unsafe { *total += 1 };
     }
 
-    // Bounded loop: the bound is the `comm` array length (a compile-time constant) and the `break` is
-    // data-dependent, so the verifier can still prove termination; an unbounded `while` would be
-    // rejected.
     let comm = bpf_get_current_comm().unwrap_or_default();
-    let mut name_len = 0u32;
-    for &b in comm.iter() {
-        if b == 0 {
-            break;
-        }
-        name_len = name_len.saturating_add(1);
-    }
-    if name_len == 0 {
+    if comm[0] == 0 {
         return 0;
     }
 
@@ -515,14 +505,12 @@ fn record_denial6(key: &FlowKey6) {
 /// parser.
 #[inline(always)]
 fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
-    let mut i: u32 = 0;
-    while i < MAX_POLICY_RULES as u32 {
+    for i in 0..MAX_POLICY_RULES as u32 {
         if let Some(rule) = POLICY.get(i)
             && rule_matches(rule, dst_addr, dst_port, proto)
         {
             return true;
         }
-        i += 1;
     }
     false
 }
@@ -531,14 +519,12 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
 /// is [`rule_matches6`] (byte-wise, no `u128`).
 #[inline(always)]
 fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
-    let mut i: u32 = 0;
-    while i < MAX_POLICY_RULES as u32 {
+    for i in 0..MAX_POLICY_RULES as u32 {
         if let Some(rule) = POLICY6.get(i)
             && rule_matches6(rule, dst_addr, dst_port, proto)
         {
             return true;
         }
-        i += 1;
     }
     false
 }
