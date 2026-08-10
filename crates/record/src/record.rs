@@ -5,6 +5,9 @@
 //! `bsx-probes-loader`, so keeping this half pure is what lets the whole aggregation be unit-tested on
 //! the host gate with synthetic inputs, no KVM or caps. Every collection is deterministically sorted,
 //! so a record built from the same observations is byte-stable regardless of map-iteration order.
+//! [`MAX_NOTABLE`] is the one exception, and it is about **arrival** order rather than iteration
+//! order: past the cap, which distinct events the sample kept depends on which the ring buffer
+//! delivered first. Every count stays exact and order-independent at any size.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
@@ -20,6 +23,10 @@ use crate::{NetStats, ResourceSummary};
 /// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into a
 /// hit count, so this bounds cardinality: a run touching thousands of different paths keeps the first
 /// `MAX_NOTABLE` by arrival order and counts the rest, never growing the record without bound.
+///
+/// First-arrival is what makes the *membership* of the sample depend on ring-buffer order once a run
+/// exceeds the cap. The counts beside it do not: `total`, `by_kind`, and `overflow_events` are exact
+/// whatever the order.
 pub const MAX_NOTABLE: usize = 64;
 
 /// **What** a record is about and **when** it happened, both part of the signed bytes: a signature
@@ -394,8 +401,8 @@ pub struct SyscallCounts {
 
 /// A notable host syscall: its kind, the decoded detail, the `comm` that made it, and how many times this
 /// exact `(kind, detail)` occurred. Where several `comm`s produced the same pair the **lexicographically
-/// smallest** is kept, an order-independent choice, so the record stays byte-stable regardless of
-/// ring-buffer arrival order.
+/// smallest** is kept, so which `comm` a row credits does not depend on ring-buffer arrival order.
+/// Which rows exist can, past [`MAX_NOTABLE`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotableSyscall {
@@ -405,7 +412,7 @@ pub struct NotableSyscall {
     /// whole value when [`truncated`](Self::truncated) is set.
     pub detail: String,
     /// The `comm` credited with it, lexicographically smallest when several produced the same
-    /// `(kind, detail)`, so the record does not depend on ring-buffer arrival order.
+    /// `(kind, detail)`, so this field does not depend on ring-buffer arrival order.
     pub comm: String,
     /// How many times this exact `(kind, detail)` occurred.
     pub hits: u64,
@@ -487,9 +494,10 @@ impl SyscallFold {
             acc.hits += 1;
             acc.truncated |= ev.detail_truncated();
             // The smallest `comm` rather than the first to arrive: several processes commonly produce the
-            // same `(kind, detail)`, so a first-arrival choice would make the record depend on
-            // ring-buffer stream order and break the byte-stability signing rests on. The compare borrows
-            // `comm`; the owned copy is taken only on the rare replace.
+            // same `(kind, detail)`, so a first-arrival choice would make this field vary with
+            // ring-buffer stream order. Below `MAX_NOTABLE` distinct pairs that leaves the whole
+            // footprint order-independent. The compare borrows `comm`; the owned copy is taken only on
+            // the rare replace.
             let comm = ev.comm_lossy();
             if comm.as_ref() < acc.comm.as_str() {
                 acc.comm = comm.into_owned();
@@ -1058,7 +1066,10 @@ mod tests {
     }
 
     #[test]
-    fn full_record_is_stable_across_input_order() {
+    fn full_record_is_stable_across_flow_input_order() {
+        // The flow axis only: the syscall events below are passed unpermuted and are far under
+        // `MAX_NOTABLE`, so this says nothing about arrival order on that axis. The two tests below
+        // cover it.
         let cg_events = [
             ev(Syscall::Openat as u32, CG, b"/a", "sh"),
             ev(
@@ -1082,6 +1093,35 @@ mod tests {
         let one = build(vec![flow([8, 8, 8, 8], 443), flow([1, 1, 1, 1], 53)]);
         let two = build(vec![flow([1, 1, 1, 1], 53), flow([8, 8, 8, 8], 443)]);
         assert_eq!(one, two);
+    }
+
+    #[test]
+    fn a_whole_footprint_below_the_notable_cap_is_stable_across_arrival_order() {
+        // `notable_comm_is_independent_of_arrival_order` pins the tie-break on two events; this is the
+        // property the crate header claims, on a full-scale stream: every distinct pair contested by
+        // two `comm`s, the whole delivery reversed. Below the cap nothing is dropped, so the fold has
+        // to land on the same bytes either way.
+        //
+        // The cap is where that stops, and the header says so: past `MAX_NOTABLE` the sample keeps
+        // whichever distinct pairs arrived first. `footprint_dedups_repeats_and_caps_distinct` covers
+        // what the cap guarantees in place of that.
+        let mut events = Vec::new();
+        for i in 0..(MAX_NOTABLE - 4) {
+            let path = format!("/tmp/f-{i:04}");
+            events.push(ev(Syscall::Openat as u32, CG, path.as_bytes(), "zsh"));
+            events.push(ev(Syscall::Openat as u32, CG, path.as_bytes(), "bash"));
+        }
+        let forward = SyscallFootprint::from_events(CG, &events);
+        events.reverse();
+        let backward = SyscallFootprint::from_events(CG, &events);
+
+        assert_eq!(forward, backward, "reversing the stream changed the record");
+        assert_eq!(forward.notable.len(), MAX_NOTABLE - 4);
+        assert!(!forward.notable_truncated, "this stream is under the cap");
+        assert!(
+            forward.notable.iter().all(|n| n.comm == "bash"),
+            "and every row credits the smaller comm, not whichever arrived first"
+        );
     }
 
     #[test]

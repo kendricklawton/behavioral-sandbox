@@ -11,7 +11,9 @@
 //!   across the hardware boundary. [`RunRecord::host_syscalls`] is the **VMM's host footprint**,
 //!   explicitly not the guest's syscalls, which a microVM services in-guest.
 //! - **Deterministic.** Every collection is sorted, so a record built from the same observations is
-//!   byte-stable regardless of map-iteration order, which is what the JSON output rests on.
+//!   byte-stable regardless of map-iteration order, which is what the JSON output rests on. Past
+//!   [`MAX_NOTABLE`] distinct syscall events, *which* of them the bounded sample kept follows the
+//!   order the ring buffer delivered them in; every count stays exact.
 
 #![forbid(unsafe_code)]
 
