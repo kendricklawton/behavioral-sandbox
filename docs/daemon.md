@@ -70,6 +70,16 @@ memory for as long as it liked. The default is the ceiling the in-guest agent al
 command to, so it refuses only an ask a cooperating guest would never have run out; an `open` past it
 is refused rather than quietly clamped, and `0` restores the unbounded wall.
 
+**Snapshot disk is bounded by `--max-snapshots N` (default 16).** A `snapshot` bundle is roughly the
+session's guest RAM plus a copy of its root disk, and it **outlives the session**: the reply is a
+host path, and no wire verb consumes one, so nothing reclaims a bundle but you. That makes disk the
+one committed resource `--max-committed-mem-mib` does not cover, and an unbounded `snapshot` loop
+would fill the scratch filesystem. Past the ceiling a `snapshot` is refused (`refused`, and the
+session continues); the count is read from disk on each request, so removing a bundle you have
+consumed frees budget without restarting the daemon. `0` is unlimited. Only an `--unjailed` daemon
+reaches this at all: snapshotting a jailed session is a typed refusal, since its disk lives in the
+chroot.
+
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
 exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
 the same path a hard kill takes; the unlink just spares the next start the stale-socket check.

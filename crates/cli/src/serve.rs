@@ -76,6 +76,12 @@ pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
 /// run to completion anyway; a hoster who wants a tighter or looser bound sets the flag.
 const DEFAULT_MAX_WALL_SECS: u64 = 3600;
 
+/// The default `--max-snapshots`. Finite because a bundle **outlives its session** by design: the
+/// wire hands back a host path and carries no verb that consumes it, so nothing reclaims one but the
+/// operator. Sixteen matches the default `--max-sessions`, one bundle per session slot, which is the
+/// smallest ceiling that does not refuse a workload where every session snapshots once.
+const DEFAULT_MAX_SNAPSHOTS: usize = 16;
+
 /// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
 /// is the shared global flag on the `bsx` CLI, so it is not repeated here.
 #[derive(clap::Args)]
@@ -167,6 +173,15 @@ pub struct ServeArgs {
     /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
     #[arg(long, value_name = "N", default_value_t = 0)]
     max_committed_vcpus: u64,
+    /// Ceiling on the snapshot bundles this daemon holds on disk at once; a `snapshot` past it is
+    /// refused. Each bundle is roughly the session's guest RAM plus a copy of its root disk, and
+    /// bundles **persist after the session closes** (the reply is a host path, and no wire verb
+    /// consumes it), so this, not `--max-committed-mem-mib`, is what bounds the scratch filesystem.
+    /// Counted from disk on each request, so removing a bundle you have consumed frees budget.
+    /// Reachable only on an `--unjailed` daemon, since snapshotting a jailed session is a typed
+    /// refusal. Default 16, one per default session slot; `0` = unlimited.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_SNAPSHOTS)]
+    max_snapshots: usize,
 }
 
 /// The per-`open` ceilings, built from the daemon's own flags. The daemon takes policy from its
@@ -239,6 +254,9 @@ pub(crate) struct Server {
     /// Aggregate ceiling on [`committed_vcpus`](Self::committed_vcpus) (`0` = unlimited), from
     /// `--max-committed-vcpus`.
     pub(crate) max_committed_vcpus: u64,
+    /// Ceiling on the snapshot bundles held on disk at once (`0` = unlimited), from
+    /// `--max-snapshots`, checked against [`snapshot_bundles`](Self::snapshot_bundles).
+    pub(crate) max_snapshots: usize,
 }
 
 impl Server {
@@ -247,6 +265,23 @@ impl Server {
     pub(crate) fn next_snapshot_dir(&self) -> PathBuf {
         let n = self.snapshot_seq.fetch_add(1, Ordering::Relaxed);
         self.snapshot_base.join(format!("snap-{n}"))
+    }
+
+    /// How many snapshot bundles this daemon is holding, counted from the filesystem rather than
+    /// tallied: bundles outlive their sessions, so an operator who consumes one and removes it gets
+    /// the budget back, which a monotonic counter would not give. One `read_dir` is nothing beside
+    /// pausing a VM and copying its RAM and disk.
+    ///
+    /// # Errors
+    /// The base directory not existing yet is zero bundles, not an error. Any other read failure is
+    /// returned, so a daemon that cannot verify its headroom refuses rather than assuming it has any.
+    pub(crate) fn snapshot_bundles(&self) -> std::io::Result<usize> {
+        match std::fs::read_dir(&self.snapshot_base) {
+            // Counts unreadable entries too: for a ceiling, over-counting is the safe direction.
+            Ok(entries) => Ok(entries.count()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -394,6 +429,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         committed_vcpus: AtomicU64::new(pool_vcpus),
         max_committed_mem_mib: args.max_committed_mem_mib,
         max_committed_vcpus: args.max_committed_vcpus,
+        max_snapshots: args.max_snapshots,
     });
 
     // Reclaim the per-VM residue (scratch dirs + network namespaces) a crashed *driver* left
@@ -1071,6 +1107,40 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_bundles_are_counted_from_disk_so_a_removed_one_frees_budget() {
+        // A tally would only ever grow, so a daemon whose bundles the operator has consumed and
+        // removed would keep refusing with an empty disk. The count is the disk.
+        let scratch = bsx_test_support::ScratchDir::new("snapshot-count");
+        let base = scratch.path().join("bundles");
+        let mut server = build_test_server(1, 0, 0);
+        Arc::get_mut(&mut server)
+            .expect("sole owner before the server is shared")
+            .snapshot_base = base.clone();
+
+        assert_eq!(
+            server.snapshot_bundles().expect("a missing base is zero"),
+            0,
+            "nothing has snapshotted yet, which is not an error"
+        );
+        std::fs::create_dir_all(base.join("snap-0")).expect("stage a bundle");
+        std::fs::create_dir_all(base.join("snap-1")).expect("stage a bundle");
+        assert_eq!(server.snapshot_bundles().expect("readable"), 2);
+        std::fs::remove_dir_all(base.join("snap-0")).expect("consume a bundle");
+        assert_eq!(
+            server.snapshot_bundles().expect("readable"),
+            1,
+            "removing a consumed bundle must give the budget back"
+        );
+    }
+
+    #[test]
+    fn the_default_bounds_snapshot_disk_and_zero_opts_out() {
+        let args = serve_args(&[]);
+        assert_eq!(args.max_snapshots, DEFAULT_MAX_SNAPSHOTS);
+        assert_eq!(serve_args(&["--max-snapshots", "0"]).max_snapshots, 0);
+    }
+
+    #[test]
     fn a_mistyped_socket_path_is_refused_not_deleted() {
         // The daemon reclaims a stale socket by removing it, and it often runs as root, so a
         // `--socket` naming a real file (a config, a database) would have been a deletion of
@@ -1152,6 +1222,7 @@ mod tests {
             committed_vcpus: AtomicU64::new(0),
             max_committed_mem_mib,
             max_committed_vcpus,
+            max_snapshots: DEFAULT_MAX_SNAPSHOTS,
         })
     }
 
