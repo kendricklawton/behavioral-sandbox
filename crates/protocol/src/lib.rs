@@ -1025,11 +1025,91 @@ mod tests {
         );
     }
 
+    /// The pinned wire corpus: one JSON object per line, `{"name","dir","line"}`, where `line` is the
+    /// message **without** its `\n` terminator, which is also the unit both direction caps bound.
+    /// Held as an artifact rather than inline so a non-Rust client checks its own codec against the
+    /// bytes this crate produced instead of against its own encoder.
+    const WIRE_MESSAGES: &str = include_str!("../tests/fixtures/wire-messages.jsonl");
+
+    /// One parsed corpus entry.
+    struct Fixture {
+        name: String,
+        dir: String,
+        line: String,
+    }
+
+    /// Parses [`WIRE_MESSAGES`], rejecting a repeated `dir`/`name` so one fixture cannot shadow
+    /// another and leave its shape unchecked.
+    fn corpus() -> Vec<Fixture> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for (i, raw) in WIRE_MESSAGES.lines().enumerate() {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(raw).expect("every corpus line is a JSON object");
+            let f = Fixture {
+                name: v["name"].as_str().expect("`name`").to_string(),
+                dir: v["dir"].as_str().expect("`dir`").to_string(),
+                line: v["line"].as_str().expect("`line`").to_string(),
+            };
+            assert!(
+                f.dir == "request" || f.dir == "response",
+                "corpus line {}: `dir` is `{}`, not `request` or `response`",
+                i + 1,
+                f.dir
+            );
+            assert!(
+                seen.insert(format!("{}/{}", f.dir, f.name)),
+                "corpus line {}: `{}/{}` appears twice",
+                i + 1,
+                f.dir,
+                f.name
+            );
+            out.push(f);
+        }
+        out
+    }
+
+    /// One fixture's wire line with its `\n` terminator restored, since the corpus stores content.
+    fn fixture_line(corpus: &[Fixture], dir: &str, name: &str) -> String {
+        let found = corpus.iter().find(|f| f.dir == dir && f.name == name);
+        assert!(
+            found.is_some(),
+            "no `{dir}` fixture named `{name}` in wire-messages.jsonl"
+        );
+        format!("{}\n", found.expect("asserted present just above").line)
+    }
+
+    /// Every variant name the internally-tagged decoder for `T` accepts, read out of serde's own
+    /// "unknown variant" error rather than a hand-written list, so it cannot fall behind the enum.
+    /// A wording change in serde fails the `expect` below, rather than yielding an empty list that
+    /// every coverage assertion would then pass vacuously.
+    fn wire_tags<T: DeserializeOwned>(probe: &str) -> Vec<String> {
+        let err = serde_json::from_str::<T>(probe)
+            .err()
+            .expect("the probe names a tag no variant can have");
+        let msg = err.to_string();
+        let listed = msg
+            .split_once("expected one of ")
+            .expect("serde's unknown-variant error names the variants it expected")
+            .1;
+        let listed = listed
+            .split_once(" at line ")
+            .map_or(listed, |(head, _)| head);
+        listed
+            .split(',')
+            .map(|s| s.trim().trim_matches('`').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     /// The wire's compatibility contract, as bytes: the exact line every message shape serializes
     /// to, fully populated (plus the all-omitted `open`, whose absent knobs render as `null`s).
     /// This is what "the wire does not change" means mechanically, so a red assertion here is a
     /// **wire change**: either revert it, or bump [`WIRE_SCHEMA`] and update every client, never
-    /// re-bless the string. The Rust-side shape of these types is free to move (params structs,
+    /// re-bless the fixture. The Rust-side shape of these types is free to move (params structs,
     /// constructors, variant attributes) exactly as long as this test cannot tell.
     #[test]
     fn the_wire_bytes_of_every_message_shape_are_pinned() {
@@ -1041,9 +1121,13 @@ mod tests {
             String::from_utf8(wire).expect("the wire is UTF-8")
         }
 
+        let corpus = corpus();
+        let mut claimed = std::collections::BTreeSet::new();
+
         // Requests: every verb, payload-carrying ones fully populated.
-        for (msg, want) in [
+        for (name, msg) in [
             (
+                "open_all_knobs",
                 Request::Open(OpenParams {
                     vcpus: Some(2),
                     mem_mib: Some(512),
@@ -1052,11 +1136,10 @@ mod tests {
                     net: Some(true),
                     allow: Some(vec!["1.1.1.1:443/tcp".into()]),
                 }),
-                "{\"schema\":1,\"op\":\"open\",\"vcpus\":2,\"mem_mib\":512,\"wall_secs\":60,\
-                 \"output_cap\":16777216,\"net\":true,\"allow\":[\"1.1.1.1:443/tcp\"]}\n",
             ),
             (
                 // Every knob omitted: the conservative default an old client sends.
+                "open_defaults",
                 Request::Open(OpenParams {
                     vcpus: None,
                     mem_mib: None,
@@ -1065,118 +1148,158 @@ mod tests {
                     net: None,
                     allow: None,
                 }),
-                "{\"schema\":1,\"op\":\"open\",\"vcpus\":null,\"mem_mib\":null,\"wall_secs\":null,\
-                 \"output_cap\":null,\"net\":null,\"allow\":null}\n",
             ),
             (
+                "exec_full",
                 Request::Exec(ExecParams {
                     argv: vec!["echo".into(), "hi".into()],
                     stdin: Some("in\n".into()),
                     env: Some(vec![("K".into(), "V".into())]),
                 }),
-                "{\"schema\":1,\"op\":\"exec\",\"argv\":[\"echo\",\"hi\"],\"stdin\":\"in\\n\",\
-                 \"env\":[[\"K\",\"V\"]]}\n",
             ),
             (
+                "put",
                 Request::Put(PutParams {
                     path: "in.txt".into(),
                     content: "data\n".into(),
                 }),
-                "{\"schema\":1,\"op\":\"put\",\"path\":\"in.txt\",\"content\":\"data\\n\"}\n",
             ),
             (
+                "get",
                 Request::Get(GetParams {
                     path: "out.txt".into(),
                 }),
-                "{\"schema\":1,\"op\":\"get\",\"path\":\"out.txt\"}\n",
             ),
-            (Request::Snapshot, "{\"schema\":1,\"op\":\"snapshot\"}\n"),
-            (Request::Trace, "{\"schema\":1,\"op\":\"trace\"}\n"),
-            (
-                Request::TraceSummary,
-                "{\"schema\":1,\"op\":\"trace_summary\"}\n",
-            ),
-            (Request::Close, "{\"schema\":1,\"op\":\"close\"}\n"),
-            (Request::Cancel, "{\"schema\":1,\"op\":\"cancel\"}\n"),
+            ("snapshot", Request::Snapshot),
+            ("trace", Request::Trace),
+            ("trace_summary", Request::TraceSummary),
+            ("close", Request::Close),
+            ("cancel", Request::Cancel),
         ] {
-            assert_eq!(line(&msg), want, "request wire bytes moved");
+            assert_eq!(
+                line(&msg),
+                fixture_line(&corpus, "request", name),
+                "request `{name}` wire bytes moved"
+            );
+            claimed.insert(format!("request/{name}"));
         }
 
         // Responses: every reply, payload-carrying ones fully populated.
-        for (msg, want) in [
+        for (name, msg) in [
             (
+                "opened",
                 Response::Opened {
                     boot_ms: 120,
                     pooled: true,
                 },
-                "{\"schema\":1,\"reply\":\"opened\",\"boot_ms\":120,\"pooled\":true}\n",
             ),
             (
+                "result",
                 Response::Result {
                     exit_code: 3,
                     stdout: "out".into(),
                     stderr: "err".into(),
                     exec_wall_ms: 5,
                 },
-                "{\"schema\":1,\"reply\":\"result\",\"exit_code\":3,\"stdout\":\"out\",\
-                 \"stderr\":\"err\",\"exec_wall_ms\":5}\n",
             ),
             (
+                "put",
                 Response::Put {
                     path: "in.txt".into(),
                 },
-                "{\"schema\":1,\"reply\":\"put\",\"path\":\"in.txt\"}\n",
             ),
             (
+                "got",
                 Response::Got {
                     path: "out.txt".into(),
                     content: "data".into(),
                     present: true,
                     lossy: true,
                 },
-                "{\"schema\":1,\"reply\":\"got\",\"path\":\"out.txt\",\"content\":\"data\",\
-                 \"present\":true,\"lossy\":true}\n",
             ),
             (
+                "snapshotted",
                 Response::Snapshotted {
                     dir: "/var/lib/bsx/snap-1".into(),
                 },
-                "{\"schema\":1,\"reply\":\"snapshotted\",\"dir\":\"/var/lib/bsx/snap-1\"}\n",
             ),
             (
+                "trace",
                 Response::Trace {
                     record: serde_json::json!({"schema": 1}),
                 },
-                "{\"schema\":1,\"reply\":\"trace\",\"record\":{\"schema\":1}}\n",
             ),
             (
+                "trace_summary",
                 Response::TraceSummary {
                     summary: serde_json::json!({"schema": 1}),
                 },
-                "{\"schema\":1,\"reply\":\"trace_summary\",\"summary\":{\"schema\":1}}\n",
             ),
-            (Response::Closed, "{\"schema\":1,\"reply\":\"closed\"}\n"),
+            ("closed", Response::Closed),
+            ("cancelled", Response::Cancelled),
             (
-                Response::Cancelled,
-                "{\"schema\":1,\"reply\":\"cancelled\"}\n",
-            ),
-            (
+                "error",
                 Response::Error {
                     message: "boom".into(),
                     fatal: true,
                     kind: FaultKind::Guest,
                 },
-                "{\"schema\":1,\"reply\":\"error\",\"message\":\"boom\",\"fatal\":true,\
-                 \"kind\":\"guest\"}\n",
             ),
             (
+                "at_capacity",
                 Response::AtCapacity {
                     retry_after_ms: 1000,
                 },
-                "{\"schema\":1,\"reply\":\"at_capacity\",\"retry_after_ms\":1000}\n",
             ),
         ] {
-            assert_eq!(line(&msg), want, "response wire bytes moved");
+            assert_eq!(
+                line(&msg),
+                fixture_line(&corpus, "response", name),
+                "response `{name}` wire bytes moved"
+            );
+            claimed.insert(format!("response/{name}"));
+        }
+
+        // A fixture no shape above claims is a fixture nothing checks, and it would still read as
+        // coverage to an SDK vendoring the file.
+        for f in &corpus {
+            let key = format!("{}/{}", f.dir, f.name);
+            assert!(claimed.contains(&key), "`{key}` is pinned by no shape here");
+        }
+    }
+
+    /// Every verb and every reply the decoder accepts is covered by a fixture. The variant lists
+    /// come from serde rather than from this test, so a new verb without a fixture fails here
+    /// instead of reaching a client's codec untested.
+    #[test]
+    fn every_wire_verb_and_reply_has_a_pinned_fixture() {
+        let corpus = corpus();
+        for (dir, tag, variants) in [
+            (
+                "request",
+                "op",
+                wire_tags::<Request>(r#"{"op":"__no_such_variant__"}"#),
+            ),
+            (
+                "response",
+                "reply",
+                wire_tags::<Response>(r#"{"reply":"__no_such_variant__"}"#),
+            ),
+        ] {
+            assert!(!variants.is_empty(), "serde named no `{dir}` variants");
+            for want in variants {
+                let covered = corpus.iter().filter(|f| f.dir == dir).any(|f| {
+                    serde_json::from_str::<serde_json::Value>(&f.line)
+                        .ok()
+                        .and_then(|v| {
+                            v.get(tag)
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .is_some_and(|got| got == want)
+                });
+                assert!(covered, "no `{dir}` fixture carries `{tag}`: `{want}`");
+            }
         }
     }
 
