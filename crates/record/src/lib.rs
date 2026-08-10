@@ -20,6 +20,9 @@ pub use bsx_probes_common::{
     Syscall, SyscallEvent,
 };
 
+/// Which local uids this host trusts to have authored a file it reads, shared by the signing-key
+/// gate here and the user-config gate in `crates/cli/src/trust.rs`.
+mod ids;
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
 /// dependency-free. Pure, so it is golden-tested host-safe.
 mod json;
@@ -39,6 +42,7 @@ mod summary;
 #[cfg(test)]
 mod testutil;
 
+pub use ids::HostIds;
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use record::{
     AxisGap, DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, MAX_NOTABLE,

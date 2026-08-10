@@ -18,81 +18,27 @@
 //! service, not a substitution), and the hard-link count (creating one needs the writable parent
 //! this already refuses).
 //!
-//! **Where `SUDO_UID` stops being sound.** It is consulted only when the real *and* effective uid
-//! are both 0, which is the state `sudo` produces. A setuid-root `bsx` would leave the real uid at
-//! the caller's, so an unprivileged attacker could otherwise set `SUDO_UID` themselves and have
-//! their own file trusted. `su -` clears the environment and `doas` sets a name rather than a uid,
-//! so a root shell obtained either way reads a user-owned config as untrusted: a refusal naming a
-//! fix, not a silent acceptance.
+//! **Who counts as the author** is [`HostIds::trusts`], shared with the signing-key gate that reads
+//! the file this one names. Its module header carries the `SUDO_UID` reasoning.
 
 use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-/// This process's uids, plus the invoking uid when it is running under `sudo`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Ids {
-    real: u32,
-    effective: u32,
-    sudo: Option<u32>,
-}
+use bsx_record::HostIds;
 
-impl Ids {
-    /// Read from `/proc/self/status` and the environment, or `None` if `/proc` is unreadable.
-    fn current() -> Option<Self> {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        let (real, effective) = uids(&status)?;
-        // An unparseable value is not a claim, so it extends trust to nobody rather than refusing.
-        let sudo = std::env::var("SUDO_UID").ok().and_then(|v| v.parse().ok());
-        Some(Self {
-            real,
-            effective,
-            sudo,
-        })
-    }
-
-    /// Who this process would name as the config's expected owner, for a refusal message.
-    fn expected(self) -> String {
-        match (self.effective, self.sudo_invoker()) {
-            (0, Some(u)) => format!("root or uid {u} (SUDO_UID)"),
-            (0, None) => "root".to_string(),
-            (e, _) => format!("uid {e} or root"),
-        }
-    }
-
-    /// The uid a refusal should tell the reader to `chown` to.
-    fn primary(self) -> u32 {
-        self.sudo_invoker().unwrap_or(self.effective)
-    }
-
-    /// The invoking uid, but only in the state `sudo` produces. See the module header.
-    fn sudo_invoker(self) -> Option<u32> {
-        if self.effective == 0 && self.real == 0 {
-            self.sudo
-        } else {
-            None
-        }
+/// Who this process would name as the config's expected owner, for a refusal message.
+fn expected(ids: HostIds) -> String {
+    match (ids.effective(), ids.sudo_invoker()) {
+        (0, Some(u)) => format!("root or uid {u} (SUDO_UID)"),
+        (0, None) => "root".to_string(),
+        (e, _) => format!("uid {e} or root"),
     }
 }
 
-/// The `(real, effective)` uids from a `/proc/self/status` body.
-///
-/// `strip_prefix` consumes the `Uid:` token, so the remaining whitespace fields are
-/// `[real, effective, saved, fs]`. (A `starts_with` split would leave `Uid:` as field 0 and shift
-/// both indices by one, which is why the sibling helpers in this workspace differ.)
-fn uids(status: &str) -> Option<(u32, u32)> {
-    let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
-    let mut fields = line.split_whitespace();
-    let real = fields.next()?.parse().ok()?;
-    let effective = fields.next()?.parse().ok()?;
-    Some((real, effective))
-}
-
-/// Whether a file owned by `uid` was written by someone this process trusts to configure it.
-fn trusts(ids: &Ids, uid: u32) -> bool {
-    // Root is admitted because it can already replace the binary being configured, so a
-    // root-authored operator config grants nothing new. This is OpenSSH `StrictModes`'s rule.
-    uid == ids.effective || uid == 0 || ids.sudo_invoker() == Some(uid)
+/// The uid a refusal should tell the reader to `chown` to.
+fn primary(ids: HostIds) -> u32 {
+    ids.sudo_invoker().unwrap_or_else(|| ids.effective())
 }
 
 /// The facts about one config file that decide whether it is read.
@@ -121,21 +67,21 @@ pub(crate) enum Refusal {
 /// The order is fixed so a file wrong on two axes reports the same reason every time: what was
 /// opened (the link, then the file), then whether it can be rewritten, then whether its container
 /// lets someone swap it.
-fn judge(facts: &FileFacts, ids: &Ids) -> Result<(), Refusal> {
+fn judge(facts: &FileFacts, ids: HostIds) -> Result<(), Refusal> {
     // A symlink's own owner chooses which file gets read, so it needs the same trust as the target.
     // Its permission bits are always `0o777` on Linux and carry nothing.
     if let Some(link_uid) = facts.link_uid
-        && !trusts(ids, link_uid)
+        && !ids.trusts(link_uid)
     {
         return Err(Refusal::LinkOwner(link_uid));
     }
-    if !trusts(ids, facts.uid) {
+    if !ids.trusts(facts.uid) {
         return Err(Refusal::Owner(facts.uid));
     }
     if facts.mode & 0o022 != 0 {
         return Err(Refusal::Mode(facts.mode));
     }
-    if !trusts(ids, facts.dir_uid) {
+    if !ids.trusts(facts.dir_uid) {
         return Err(Refusal::DirOwner(facts.dir_uid));
     }
     // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel refuses to let one
@@ -149,7 +95,7 @@ fn judge(facts: &FileFacts, ids: &Ids) -> Result<(), Refusal> {
 
 /// The operator-facing sentence for a [`Refusal`]: what was found, what it lets another user do,
 /// and the one command that fixes it.
-fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: &Ids) -> String {
+fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: HostIds) -> String {
     let p = path.display();
     match refusal {
         Refusal::LinkOwner(uid) => format!(
@@ -159,8 +105,8 @@ fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: &Ids) -> Str
         Refusal::Owner(uid) => format!(
             "config file {p} is owned by uid {uid}, not {}: a config another local user owns sets \
              this run's kernel, rootfs, and signing key; `chown {}` it or remove it",
-            ids.expected(),
-            ids.primary()
+            expected(ids),
+            primary(ids)
         ),
         Refusal::Mode(mode) => format!(
             "config file {p} is mode {mode:03o}: group/world write lets another local user rewrite \
@@ -185,7 +131,7 @@ fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: &Ids) -> Str
 // is the caller that makes this live in the binary.
 #[cfg_attr(feature = "fuzzing", allow(dead_code))]
 pub(crate) fn own_euid() -> Option<u32> {
-    Ids::current().map(|i| i.effective)
+    HostIds::current().map(HostIds::effective)
 }
 
 /// Open `path` if this user's own config, `Ok(None)` if there is nothing there to read.
@@ -205,7 +151,7 @@ pub(crate) fn open_trusted(path: &Path) -> Result<Option<File>, String> {
 
     // Refusing without an identity would be worse than not checking: the check would depend on a
     // read that can fail. `sweep_orphans` takes the same line for the same reason.
-    let ids = Ids::current().ok_or_else(|| {
+    let ids = HostIds::current().ok_or_else(|| {
         format!(
             "cannot read /proc/self/status to check who owns {}; refusing to read it",
             path.display()
@@ -234,9 +180,9 @@ pub(crate) fn open_trusted(path: &Path) -> Result<Option<File>, String> {
         dir_uid: dir_meta.uid(),
         dir_mode: dir_meta.mode() & 0o7777,
     };
-    match judge(&facts, &ids) {
+    match judge(&facts, ids) {
         Ok(()) => Ok(Some(file)),
-        Err(r) => Err(refusal_message(&r, path, dir, &ids)),
+        Err(r) => Err(refusal_message(&r, path, dir, ids)),
     }
 }
 
@@ -246,12 +192,8 @@ mod tests {
 
     use super::*;
 
-    fn ids(effective: u32, real: u32, sudo: Option<u32>) -> Ids {
-        Ids {
-            real,
-            effective,
-            sudo,
-        }
+    fn ids(effective: u32, real: u32, sudo: Option<u32>) -> HostIds {
+        HostIds::from_parts(real, effective, sudo)
     }
 
     fn facts(uid: u32, mode: u32) -> FileFacts {
@@ -261,48 +203,6 @@ mod tests {
             link_uid: None,
             dir_uid: uid,
             dir_mode: 0o755,
-        }
-    }
-
-    #[test]
-    fn config_owner_is_the_euid_root_or_the_sudo_invoker() {
-        // (euid, ruid, SUDO_UID, file uid, trusted)
-        let cases = [
-            (1000, 1000, None, 1000, true, "our own file"),
-            (1000, 1000, None, 0, true, "a root-authored operator config"),
-            (1000, 1000, None, 1001, false, "another local user's"),
-            (0, 0, Some(1000), 1000, true, "the sudo workflow"),
-            (
-                0,
-                0,
-                Some(1000),
-                1001,
-                false,
-                "sudo widens by exactly one uid",
-            ),
-            (
-                0,
-                1001,
-                Some(1000),
-                1000,
-                false,
-                "setuid-root: the real uid is not 0, so SUDO_UID is the attacker's to set",
-            ),
-            (
-                1000,
-                1000,
-                Some(1001),
-                1001,
-                false,
-                "SUDO_UID is inert below root",
-            ),
-        ];
-        for (euid, ruid, sudo, file_uid, want, why) in cases {
-            assert_eq!(
-                trusts(&ids(euid, ruid, sudo), file_uid),
-                want,
-                "euid {euid}, ruid {ruid}, SUDO_UID {sudo:?}, file uid {file_uid}: {why}"
-            );
         }
     }
 
@@ -318,7 +218,7 @@ mod tests {
             (0o620, false),
             (0o602, false),
         ] {
-            let judged = judge(&facts(1000, mode), &me);
+            let judged = judge(&facts(1000, mode), me);
             assert_eq!(
                 judged.is_ok(),
                 ok,
@@ -347,7 +247,7 @@ mod tests {
                 dir_mode,
             };
             assert_eq!(
-                judge(&f, &me).is_ok(),
+                judge(&f, me).is_ok(),
                 ok,
                 "dir {dir_uid}/{dir_mode:04o}: {why}"
             );
@@ -366,7 +266,7 @@ mod tests {
             (Refusal::DirOwner(1001), "1001", "move"),
             (Refusal::DirMode(0o0777), "0777", "chmod"),
         ] {
-            let msg = refusal_message(&refusal, path, dir, &me);
+            let msg = refusal_message(&refusal, path, dir, me);
             assert!(msg.contains("/home/you/.bsx.toml"), "names the file: {msg}");
             assert!(msg.contains(needle), "names what was found: {msg}");
             assert!(msg.contains(fix), "names the fix: {msg}");
@@ -384,30 +284,9 @@ mod tests {
             dir_mode: 0o777,
         };
         assert_eq!(
-            judge(&f, &ids(1000, 1000, None)),
+            judge(&f, ids(1000, 1000, None)),
             Err(Refusal::LinkOwner(1002))
         );
-    }
-
-    #[test]
-    fn the_uid_line_parse_reads_the_real_and_effective_fields() {
-        // A setuid-shaped line on purpose: a live `/proc` read cannot tell `nth(1)` from `nth(2)`,
-        // because an ordinary process's four uid fields are all equal.
-        let status = "Name:\tbsx\nUid:\t1000\t0\t0\t0\nGid:\t1000\t1000\t1000\t1000\n";
-        assert_eq!(uids(status), Some((1000, 0)));
-        assert_eq!(uids("Name:\tbsx\n"), None, "no Uid: line");
-        assert_eq!(uids("Uid:\tnotanumber\t0\n"), None);
-    }
-
-    #[test]
-    fn own_euid_matches_the_owner_of_a_file_this_process_creates() {
-        // The kernel's own answer, cross-checking the `/proc` read's *format*. The field index is
-        // guarded by `the_uid_line_parse_reads_the_real_and_effective_fields`, which this cannot do.
-        let dir = ScratchDir::created("trust-euid");
-        let p = dir.path().join("owned");
-        std::fs::write(&p, b"x").expect("write");
-        let uid = std::fs::metadata(&p).expect("stat").uid();
-        assert_eq!(own_euid(), Some(uid));
     }
 
     #[test]
