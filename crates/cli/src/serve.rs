@@ -142,8 +142,9 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
     /// Ceiling on the vCPUs a session's `open` may ask for. Past it the `open` is **refused**, never
-    /// quietly clamped. A hoster posture, no client chooses it.
-    #[arg(long, value_name = "N")]
+    /// quietly clamped. A hoster posture, no client chooses it. Takes the same 1-or-even rule as
+    /// `run --vcpus`, since a ceiling no VM could boot at means the even number below it.
+    #[arg(long, value_name = "N", value_parser = crate::parse_vcpus)]
     max_vcpus: Option<NonZeroU8>,
     /// Ceiling on the guest memory (MiB) a session's `open` may ask for.
     #[arg(long, value_name = "MIB")]

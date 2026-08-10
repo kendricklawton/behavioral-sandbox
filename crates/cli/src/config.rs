@@ -27,6 +27,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
+use bsx_engine::{MAX_VCPUS, vcpus_supported};
 use bsx_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
@@ -80,6 +81,7 @@ pub struct UserConfig {
     // read from the user file alone. See `crate::policy` for where this binds and where it is only a
     // guardrail.
     /// House default vCPUs when a caller does not ask.
+    #[serde(default, deserialize_with = "vcpus_field")]
     vcpus: Option<NonZeroU8>,
     /// House default guest memory, MiB.
     mem_mib: Option<NonZeroU32>,
@@ -88,6 +90,7 @@ pub struct UserConfig {
     /// House default captured-output cap, bytes.
     output_cap: Option<usize>,
     /// Ceiling on vCPUs; a caller asking for more is refused.
+    #[serde(default, deserialize_with = "max_vcpus_field")]
     max_vcpus: Option<NonZeroU8>,
     /// Ceiling on guest memory, MiB.
     max_mem_mib: Option<NonZeroU32>,
@@ -112,6 +115,40 @@ pub struct UserConfig {
     max_egress_v4: Option<Vec<CidrV4>>,
     /// Operator ceiling on allowed IPv6 egress CIDRs.
     max_egress_v6: Option<Vec<CidrV6>>,
+}
+
+/// A vCPU count from the file, validated at deserialize time against what the VMM can actually boot.
+/// `NonZeroU8` already refuses `0`; [`vcpus_supported`] is the rest of the rule (1 or an even number
+/// up to [`MAX_VCPUS`]), which the `--vcpus` flag has always applied through `crate::parse_vcpus`.
+///
+/// `key` is passed in because `parse` keeps only the bare message from a TOML error, dropping the
+/// span that would otherwise point at the line; without it a file setting both keys would not say
+/// which one it meant.
+fn bootable_vcpus<'de, D>(key: &str, deserializer: D) -> Result<Option<NonZeroU8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let parsed = Option::<NonZeroU8>::deserialize(deserializer)?;
+    if let Some(v) = parsed
+        && !vcpus_supported(v.get())
+    {
+        return Err(serde::de::Error::custom(format!(
+            "{key} must be 1 or an even number in 1..={MAX_VCPUS}, got {v}"
+        )));
+    }
+    Ok(parsed)
+}
+
+/// [`bootable_vcpus`] for the `vcpus` key.
+fn vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU8>, D::Error> {
+    bootable_vcpus("vcpus", d)
+}
+
+/// [`bootable_vcpus`] for the `max_vcpus` key. The ceiling takes the same check, not for symmetry:
+/// [`Policy::resolve`] clamps a house default *down to* the ceiling, so an odd `max_vcpus` turns a
+/// legal `vcpus` into an illegal boot count, and the refusal then names a number nobody wrote.
+fn max_vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU8>, D::Error> {
+    bootable_vcpus("max_vcpus", d)
 }
 
 /// A `max_egress_v4` entry, validated at deserialize time: a typo'd ceiling entry must be a loud
@@ -1047,10 +1084,53 @@ mod tests {
 
     #[test]
     fn no_home_means_no_user_config_and_a_project_file_still_supplies_the_house_defaults() {
-        let (_dir, leaf) = tree("cfg-nohome", &[("a", "vcpus = 3\n")]);
+        // 4, not 3: an odd count above 1 is no longer a value this file may carry, and the number
+        // here is incidental to what the test is about.
+        let (_dir, leaf) = tree("cfg-nohome", &[("a", "vcpus = 4\n")]);
         let sources = Sources::discover_with(&leaf, None).expect("discover ok");
         assert!(sources.user_path().is_none());
-        assert_eq!(policy_of(&sources).vcpus.map(NonZeroU8::get), Some(3));
+        assert_eq!(policy_of(&sources).vcpus.map(NonZeroU8::get), Some(4));
+    }
+
+    #[test]
+    fn a_vcpu_count_the_vmm_cannot_boot_is_refused_by_the_file_that_named_it() {
+        // `--vcpus` has always applied this rule; the file keys applied only `NonZeroU8`'s rejection
+        // of `0`, so an odd count above 1 was carried all the way to `Vm::boot` and refused there,
+        // naming Firecracker's rule but not the file or the key that set it.
+        for bad in ["vcpus = 7\n", "vcpus = 33\n", "max_vcpus = 3\n"] {
+            let (_dir, leaf) = tree("cfg-vcpus-bad", &[("a", bad)]);
+            let msg = Sources::discover_with(&leaf, None)
+                .expect_err(&format!("{bad:?} names a count no VM can boot"))
+                .to_string();
+            let key = bad.split_whitespace().next().expect("the key");
+            assert!(
+                msg.contains(key) && msg.contains("1 or an even number"),
+                "the refusal names the key and states the rule: {msg}"
+            );
+        }
+
+        // The reason the *ceiling* takes the same check: `resolve` clamps a house default down to
+        // the ceiling, so `vcpus = 8` under `max_vcpus = 7` used to resolve to 7 and be refused at
+        // boot for a number the operator never wrote.
+        let (_dir, leaf) = tree("cfg-vcpus-clamp", &[("a", "vcpus = 8\nmax_vcpus = 7\n")]);
+        assert!(
+            Sources::discover_with(&leaf, None).is_err(),
+            "an odd ceiling silently turns a legal default into an illegal boot count"
+        );
+
+        // What the rule admits is untouched: 1, and the even numbers up to the cap.
+        for good in [
+            "vcpus = 1\n",
+            "vcpus = 2\n",
+            "vcpus = 32\n",
+            "max_vcpus = 8\n",
+        ] {
+            let (_dir, leaf) = tree("cfg-vcpus-ok", &[("a", good)]);
+            assert!(
+                Sources::discover_with(&leaf, None).is_ok(),
+                "{good:?} is a count the VMM boots"
+            );
+        }
     }
 
     #[test]
