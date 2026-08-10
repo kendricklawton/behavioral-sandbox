@@ -52,6 +52,14 @@ ceiling can't hold refuses to start, a refill only restores what current headroo
 warm take hands its clone's charge over to the session's own reservation). Sessions past the
 ceiling are refused with `at_capacity` before boot.
 
+**Size the daemon's own heap alongside the guests'.** Decoding one request costs a multiple of the
+line, because the wire is internally tagged JSON and serde buffers a message before it can dispatch
+on the tag. Measured 2026-08-10 on an `x86_64` host: up to **40x** a 4 MiB request at the
+request-line cap, so roughly **2.5 GiB** across the default 16 sessions, transient and reachable
+with nothing but well-formed, legally-sized lines. It is bounded on both axes and no client gets past
+it, but it is host memory that neither `--max-committed-mem-mib` (guest RAM) nor `--max-sessions`
+(a count) accounts for, so budget it separately or lower the session ceiling.
+
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
 bound: a session whose connection makes no *progress* for this long is dropped, whether the client
 stopped sending requests or stopped draining replies (the flag arms both the read and the write

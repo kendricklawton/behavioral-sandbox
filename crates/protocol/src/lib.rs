@@ -693,11 +693,23 @@ fn read_message<T: DeserializeOwned>(
 /// Decodes one already-framed line into a `T`, enforcing the schema gate. Split out so the framing and
 /// the decoding are each unit-testable in isolation.
 ///
-/// The direction's cap bounds the **line**, not this: parsing to a `Value` first costs a DOM some
-/// multiple of the line's size, so a session's peak is that multiple of its cap. Bounded rather than
-/// unbounded, since the cap and `--max-sessions` bound it on both axes. Depth is bounded separately by
-/// `serde_json`'s 128-deep recursion limit, which is what makes a line of nothing but `[` a
-/// [`ProtocolError::Malformed`] rather than a stack overflow
+/// The direction's cap bounds the **line**, not the decode, which costs a multiple of it. **Up to 40x**,
+/// measured 2026-08-10 on an `x86_64` host against a counting allocator, decoding a line at
+/// [`MAX_REQUEST_BYTES`]: 81 MiB for a valid `exec` whose `argv` fills the cap, 160 MiB for an array of
+/// empty arrays or of integers, 59 MiB for an object of many short keys. So a daemon's peak is
+/// `--max-sessions` times that, ~2.5 GiB at the default 16, transient and reachable with nothing but
+/// well-formed, legally-sized lines. Bounded on both axes, and a number an operator sizing a host has to
+/// hold.
+///
+/// **Two DOMs, and only one of them is this function's.** `Request`/`Response` are internally tagged
+/// (`#[serde(tag = "op")]`), so serde buffers the whole message into its own `Content` before it can
+/// dispatch on the tag. Checking the schema against a peek struct and then decoding the line directly
+/// was measured and does **not** help: 80.7 MiB against this path's 81.0 for that valid `exec`, since it
+/// trades `serde_json::Value` for `Content` and adds a second parse. The DOM follows from an internally
+/// tagged wire, not from the order of operations here.
+///
+/// Depth is bounded separately by `serde_json`'s 128-deep recursion limit, which is what makes a line of
+/// nothing but `[` a [`ProtocolError::Malformed`] rather than a stack overflow
 /// (`nesting_past_the_json_recursion_limit_is_a_typed_error` holds that).
 fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
     // Parse once to a generic value so the `schema` is checked *before* the body is trusted: a
