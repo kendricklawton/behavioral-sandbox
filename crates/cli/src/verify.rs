@@ -68,20 +68,42 @@ pub fn run(args: VerifyArgs, sources: &config::Sources) -> Result<ExitCode, CliE
     }
 }
 
+/// The most bytes this reads from a record **file**, as distinct from [`MAX_ENVELOPE_BYTES`], which
+/// bounds **one** envelope. A session chain is one envelope per line, so a file holding a long
+/// session legitimately exceeds the per-envelope bound while every envelope in it is inside it.
+///
+/// The whole file is read at once because [`verify_chain`] checks the sequence as a unit, so this is
+/// a memory bound on the verifying host rather than a claim about how long a chain may be. Sixteen
+/// envelopes' worth: envelopes run to kilobytes in practice ([`MAX_ENVELOPE_BYTES`] is itself
+/// headroom), so a real chain meets this long after it has stopped being one anybody reads.
+const MAX_RECORD_FILE_BYTES: usize = 16 * MAX_ENVELOPE_BYTES;
+
+/// Conflating the two bounds is the defect this constant exists to keep fixed: a chain is one
+/// envelope per line, so the file bound must exceed the envelope bound. A compile error rather than a
+/// test, since nothing here is worth deferring to run time.
+const _: () = assert!(MAX_RECORD_FILE_BYTES > MAX_ENVELOPE_BYTES);
+
 /// Read the record file, bounded: the envelope is untrusted input (relayed by a host the verifier
-/// deliberately doesn't trust), so the read stops at [`MAX_ENVELOPE_BYTES`] instead of swallowing an
-/// arbitrarily large file. Length is checked on bytes, before UTF-8 conversion, so an over-bound
-/// file reads as "too large" rather than a misleading encoding error.
+/// deliberately doesn't trust), so the read stops at [`MAX_RECORD_FILE_BYTES`] instead of swallowing
+/// an arbitrarily large file. The **per-envelope** bound stays where it belongs, inside `verify`.
 fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
+    read_bounded_to(path, MAX_RECORD_FILE_BYTES)
+}
+
+/// [`read_bounded`] against an explicit limit, so the boundary is testable without a file the size of
+/// the real one. Length is checked on bytes, before UTF-8 conversion, so an over-bound file reads as
+/// "too large" rather than a misleading encoding error.
+fn read_bounded_to(path: &std::path::Path, limit: usize) -> Result<String, CliError> {
     let file = std::fs::File::open(path)
         .map_err(|e| CliError::Cli(format!("read {}: {e}", path.display())))?;
     let mut bytes = Vec::new();
-    file.take(MAX_ENVELOPE_BYTES as u64 + 1)
+    file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| CliError::Cli(format!("read {}: {e}", path.display())))?;
-    if bytes.len() > MAX_ENVELOPE_BYTES {
+    if bytes.len() > limit {
         return Err(CliError::Cli(format!(
-            "{}: larger than the {MAX_ENVELOPE_BYTES}-byte envelope bound; not a signed record",
+            "{}: larger than the {limit}-byte bound on a record file (a single record, or a session \
+             chain of one record per line)",
             path.display()
         )));
     }
@@ -128,4 +150,32 @@ fn trusted_keys(args: &VerifyArgs, sources: &config::Sources) -> Result<Vec<Trus
             TrustedKey::from_hex(h).map_err(|e| CliError::Cli(format!("trusted key {h}: {e}")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_file_bound_admits_its_limit_and_names_a_record_file_past_it() {
+        let scratch = bsx_test_support::ScratchDir::created("verify-bound");
+        let path = scratch.path().join("record.jsonl");
+
+        std::fs::write(&path, "x".repeat(8)).expect("write a file at the limit");
+        assert_eq!(
+            read_bounded_to(&path, 8)
+                .expect("exactly the limit is admitted, not refused")
+                .len(),
+            8
+        );
+
+        std::fs::write(&path, "x".repeat(9)).expect("write a file past the limit");
+        let msg = read_bounded_to(&path, 8)
+            .expect_err("one byte past the limit is refused")
+            .to_string();
+        assert!(
+            msg.contains("record file"),
+            "the refusal names what was too big, not `not a signed record`: {msg}"
+        );
+    }
 }
