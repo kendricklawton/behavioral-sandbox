@@ -225,7 +225,8 @@ struct RunArgs {
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..), help_heading = "Guest resources")]
     wall: Option<u64>,
     /// Cap on captured stdout+stderr+artifacts, in bytes [default: 16 MiB].
-    #[arg(long, value_name = "BYTES", help_heading = "Guest resources")]
+    /// At least 1; zero is a typed CLI error, since a run that may capture nothing is not a run.
+    #[arg(long, value_name = "BYTES", value_parser = parse_output_cap, help_heading = "Guest resources")]
     output_cap: Option<usize>,
     /// Boot with a NIC (a per-VM tap the host-side probes observe).
     /// Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the
@@ -914,6 +915,18 @@ fn parse_mem_mib(s: &str) -> Result<NonZeroU32, String> {
         .map_err(|_| format!("expected guest memory in whole MiB (at least 1), got {s:?}"))
 }
 
+/// Parse `--output-cap`: the captured-output budget in whole bytes. `0` is refused for the reason
+/// every sibling knob refuses it: there is no "no limit" spelling here, so a zero read as one would
+/// be the opposite of what it says, and read literally it is a run that can capture nothing.
+fn parse_output_cap(s: &str) -> Result<usize, String> {
+    match s.parse() {
+        Ok(0) | Err(_) => Err(format!(
+            "expected a captured-output cap in whole bytes (at least 1), got {s:?}"
+        )),
+        Ok(n) => Ok(n),
+    }
+}
+
 /// A `KEY=VALUE` pair for `--env`. Values are secrets by presumption, so the error names only the
 /// malformed *key side* shape, never echoes a value.
 fn parse_env_pair(s: &str) -> Result<(String, String), String> {
@@ -1103,8 +1116,8 @@ fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
 mod tests {
     use super::{
         AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_jail_ids, build_egress,
-        parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_vcpus, shell_policy,
-        write_artifacts_in,
+        parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_output_cap, parse_vcpus,
+        shell_policy, write_artifacts_in,
     };
     use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use bsx_test_support::ScratchDir;
@@ -1242,6 +1255,19 @@ mod tests {
         assert!(parse_mem_mib("0").is_err(), "zero memory is unbootable");
         assert!(parse_mem_mib("").is_err());
         assert!(parse_mem_mib("lots").is_err());
+    }
+
+    #[test]
+    fn output_cap_parses_like_its_sibling_knobs_and_refuses_zero() {
+        assert_eq!(parse_output_cap("1"), Ok(1), "one byte is the floor");
+        assert_eq!(parse_output_cap("16777216"), Ok(16 << 20));
+        assert!(
+            parse_output_cap("0").is_err(),
+            "there is no `no limit` spelling here, so a zero read as one would invert the flag"
+        );
+        assert!(parse_output_cap("").is_err());
+        assert!(parse_output_cap("-1").is_err());
+        assert!(parse_output_cap("plenty").is_err());
     }
 
     #[test]
