@@ -229,6 +229,21 @@ reaches anything guest-visible is the detached signature. A record's
 `key_id` names the key that signed it, and key custody and rotation are the hoster's responsibility.
 See [`bsx verify`](./cli-commands.md#bsx-verify).
 
+The key file is gated like the config that names it, and refused when:
+
+- **it is not a regular file.** A FIFO planted at the path would block the read forever; a directory
+  or a device is not a key either. The file is stat'd before it is opened, so none of them is opened.
+- **it is owned by another local user** (or is a symlink another user owns). The same uids count as
+  you as for `~/.bsx.toml`, `SUDO_UID` included, so a key minted by a rootless `bsx` still loads
+  under `sudo -E`, and one minted under `sudo` still loads rootless.
+- **it is group- or world-accessible** (`chmod 600` it). Unlike the config file, *read* bits are
+  refused here: this file is a secret, and a secret leaks by being read.
+- **its directory is owned by another user, or is group/world-writable without the sticky bit.**
+  Checked on first-run generation too, so a key is never minted into a directory someone else can
+  write.
+
+The owner and mode are read from the opened file rather than from the path a second time.
+
 [`signing_key`]: #setting-signing_key
 
 ## Setting `trusted_keys`

@@ -20,6 +20,7 @@
 
 use std::fmt;
 use std::fmt::Write as _;
+use std::fs::File;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -34,6 +35,7 @@ use sha2::Digest as _;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use crate::HostIds;
 use crate::RunRecord;
 
 /// The version of the **signed delivery surface**, the envelope's own `schema` field. [`verify`] refuses
@@ -89,6 +91,20 @@ impl HostKey {
         if path.exists() {
             return Self::load(path);
         }
+        // The mint judges the directory the load would judge, and does it *after* creating a missing
+        // one (which is then ours) and *before* writing the seed. Without this the first run puts a
+        // fresh secret somewhere another local user can swap it, and only the second run says so.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(KeyError::Io)?;
+        }
+        let ids = HostIds::current().ok_or_else(|| {
+            KeyError::Untrusted(format!(
+                "cannot read /proc/self/status to check who owns the directory of signing-key \
+                 file {}; refusing to mint one there",
+                path.display()
+            ))
+        })?;
+        trusted_key_dir(path, ids)?;
         let seed = random_seed()?;
         let key = Self {
             signing: SigningKey::from_bytes(&seed),
@@ -109,25 +125,11 @@ impl HostKey {
         Self::load(path)
     }
 
-    /// Loads a key from a hex-seed file, refusing a group- or world-accessible one: the record's
-    /// "host-signed" claim rests on this seed being unreadable to other local users, and silently using a
-    /// lax-mode key would make every signature forgeable without a word said. First-run generation writes
-    /// `0600`, so this only fires on a file the operator supplied or widened.
+    /// Loads a key from a hex-seed file that [`open_trusted_key`] admitted.
     fn load(path: &Path) -> Result<Self, KeyError> {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(path)
-            .map_err(KeyError::Io)?
-            .permissions()
-            .mode()
-            & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(KeyError::Malformed(format!(
-                "signing-key file {} is mode {mode:03o}: group/world access makes host \
-                 signatures forgeable; `chmod 600` it",
-                path.display()
-            )));
-        }
-        let text = Zeroizing::new(std::fs::read_to_string(path).map_err(KeyError::Io)?);
+        let mut file = open_trusted_key(path)?;
+        let mut text = Zeroizing::new(String::new());
+        file.read_to_string(&mut text).map_err(KeyError::Io)?;
         let mut seed = Zeroizing::new([0u8; 32]);
         hex_decode(text.trim(), &mut *seed).map_err(|()| {
             KeyError::Malformed("signing-key file is not a 32-byte hex seed".into())
@@ -137,15 +139,13 @@ impl HostKey {
         })
     }
 
-    /// Persists the secret seed as hex at `0600`, creating parent dirs. Publishes **atomically** by
+    /// Persists the secret seed as hex at `0600` into a directory the caller has already made and
+    /// judged. Publishes **atomically** by
     /// linking a sibling temp file into place, so a concurrent generator either wins the link or sees the
     /// winner's file and a reader never observes a partial write. Returns `false` when another process
     /// published first, in which case the caller reloads that key. Only called on
     /// first-run generation, so it never widens an existing file's permissions.
     fn persist(&self, path: &Path) -> Result<bool, KeyError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(KeyError::Io)?;
-        }
         // The staging file is unlinked by `tmp`'s `Drop` on *every* exit from here on, the write
         // error, the hard-link outcome, and an unwinding panic in between, so no `<key>.tmp.<n>`
         // orphan is left in the key directory. The published key is the hard-linked `path`, a separate
@@ -237,6 +237,113 @@ impl HostKey {
     pub fn sign_detached(&self, msg: &[u8]) -> [u8; 64] {
         self.signing.sign(msg).to_bytes()
     }
+}
+
+/// Opens the signing key if this user's own, refusing a file another local user could have planted,
+/// read, or swapped.
+///
+/// The `metadata` call before `File::open` is load-bearing: without it a planted FIFO at the key path
+/// would block the open forever, which is a hang on the host path. The owner and mode are then taken
+/// from the **open descriptor**, so the file judged is the file read.
+///
+/// Two things it does differently from the user-config gate this mirrors
+/// (`open_trusted` in `crates/cli/src/trust.rs`), because the file is different:
+///
+/// - **`0o077`, not `0o022`.** That gate protects integrity, so it refuses only write bits and admits
+///   the `0o644` every editor writes. This one protects a *secret*, which leaks by being read.
+/// - **A non-regular file is refused, not skipped.** A config is optional, so a directory named
+///   `.bsx.toml` is nothing to read. A key at a path the operator configured is not optional.
+fn open_trusted_key(path: &Path) -> Result<File, KeyError> {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let untrusted = |m: String| Err(KeyError::Untrusted(m));
+    let p = path.display();
+
+    let link = std::fs::symlink_metadata(path).map_err(KeyError::Io)?;
+    // A symlink's own owner chooses which file gets read, so it needs the same trust as the target.
+    // Its permission bits are always `0o777` on Linux and carry nothing.
+    let link_uid = link.file_type().is_symlink().then(|| link.uid());
+
+    // Refusing without an identity would be worse than not checking: the check would depend on a
+    // read that can fail. `open_trusted` and `sweep_orphans` take the same line for the same reason.
+    let Some(ids) = HostIds::current() else {
+        return untrusted(format!(
+            "cannot read /proc/self/status to check who owns signing-key file {p}; refusing to \
+             sign with it"
+        ));
+    };
+
+    if let Some(uid) = link_uid
+        && !ids.trusts(uid)
+    {
+        return untrusted(format!(
+            "signing-key file {p} is a symlink owned by uid {uid}: the link's owner chooses which \
+             file this signs with; replace it with a link you own, or remove it"
+        ));
+    }
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => {
+            return untrusted(format!(
+                "signing-key file {p} is not a regular file: a FIFO there blocks this read and a \
+                 directory or device is not a key; remove it"
+            ));
+        }
+        Err(e) => return Err(KeyError::Io(e)),
+    }
+
+    let file = File::open(path).map_err(KeyError::Io)?;
+    let meta = file.metadata().map_err(KeyError::Io)?;
+    let uid = meta.uid();
+    if !ids.trusts(uid) {
+        return untrusted(format!(
+            "signing-key file {p} is owned by uid {uid}: a key another local user holds signs \
+             records this host then vouches for; `chown` it or point --key elsewhere"
+        ));
+    }
+    let mode = meta.permissions().mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return untrusted(format!(
+            "signing-key file {p} is mode {mode:03o}: group/world access makes host signatures \
+             forgeable; `chmod 600` it"
+        ));
+    }
+    trusted_key_dir(path, ids)?;
+    Ok(file)
+}
+
+/// Refuses the directory a key sits in when another local user can put a file there, whatever the
+/// key's own mode says. Read on the way in and on the way out: the load and the first-run mint.
+fn trusted_key_dir(path: &Path, ids: HostIds) -> Result<(), KeyError> {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let p = path.display();
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let meta = std::fs::metadata(dir).map_err(KeyError::Io)?;
+
+    let uid = meta.uid();
+    if !ids.trusts(uid) {
+        return Err(KeyError::Untrusted(format!(
+            "signing-key file {p} sits in {}, owned by uid {uid}: that uid can replace the key at \
+             any time; move it into a directory you own",
+            dir.display()
+        )));
+    }
+    // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel refuses to let one
+    // user unlink or rename another's file there. Without the sticky bit, ownership of the file
+    // proves nothing about what will be at that path a moment later.
+    let mode = meta.permissions().mode() & 0o7777;
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return Err(KeyError::Untrusted(format!(
+            "signing-key file {p} sits in {}, mode {mode:04o}: a group/world-writable directory \
+             without the sticky bit lets another local user replace the key; `chmod go-w` it, or \
+             move the key into a directory you own",
+            dir.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The chain hash of a record's canonical bytes, SHA-256 as hex. A chained record's `prev` is the previous
@@ -522,6 +629,10 @@ pub enum KeyError {
     Io(std::io::Error),
     /// The key file exists but isn't a 32-byte hex seed.
     Malformed(String),
+    /// The key file is there and readable, but another local user could have planted, read, or
+    /// swapped it. Carries the operator-facing sentence: what was found, and the one command
+    /// that fixes it.
+    Untrusted(String),
 }
 
 impl fmt::Display for KeyError {
@@ -529,6 +640,7 @@ impl fmt::Display for KeyError {
         match self {
             Self::Io(e) => write!(f, "signing key I/O: {e}"),
             Self::Malformed(m) => write!(f, "signing key malformed: {m}"),
+            Self::Untrusted(m) => write!(f, "signing key untrusted: {m}"),
         }
     }
 }
@@ -537,7 +649,7 @@ impl std::error::Error for KeyError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::Malformed(_) => None,
+            Self::Malformed(_) | Self::Untrusted(_) => None,
         }
     }
 }
@@ -1088,6 +1200,182 @@ mod tests {
             "secret key is not world/group readable"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The signing-key gate: what [`open_trusted_key`] admits and what it refuses.
+#[cfg(test)]
+mod key_gate {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use bsx_test_support::ScratchDir;
+
+    use super::*;
+
+    /// A well-formed key at `dir/record-signing.ed25519`, so a test that plants one fault has
+    /// exactly one fault.
+    fn good_key(dir: &Path) -> PathBuf {
+        let path = dir.join("record-signing.ed25519");
+        std::fs::write(&path, format!("{}\n", hex_encode(&[9u8; 32]))).expect("write key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        path
+    }
+
+    #[test]
+    fn an_ordinary_key_this_user_owns_loads() {
+        let dir = ScratchDir::created("key-ok");
+        let path = good_key(dir.path());
+        HostKey::open(&path).expect("our own 0600 key in our own directory loads");
+    }
+
+    #[test]
+    fn a_fifo_at_the_key_path_is_refused_rather_than_blocking_the_load() {
+        // The hang the gate exists to stop: `metadata` on a 0600 FIFO passes a mode check, and the
+        // read then waits forever for a writer. `is_file()` refuses it before any open, so this
+        // returns instead of pinning a host thread. `mkfifo(3)` needs libc, which this crate does
+        // not carry, so the node is made by the POSIX utility of the same name.
+        let dir = ScratchDir::created("key-fifo");
+        let path = dir.path().join("record-signing.ed25519");
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&path)
+            .status();
+        match made {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("skipping a_fifo_at_the_key_path...: no usable mkfifo(1)");
+                return;
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(HostKey::open(&probe).map(|k| k.key_id()));
+        });
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the load must return, not block on a FIFO with no writer");
+        let err = outcome.expect_err("a FIFO is not a key");
+        assert!(
+            matches!(&err, KeyError::Untrusted(m) if m.contains("not a regular file")),
+            "refused for what it is: {err}"
+        );
+    }
+
+    #[test]
+    fn a_non_regular_file_at_the_key_path_is_refused_not_read() {
+        // A config is optional, so `open_trusted` skips a directory named `.bsx.toml`. A key the
+        // operator configured is not optional, so each of these is an error.
+        let dir = ScratchDir::created("key-nonfile");
+        let as_dir = dir.path().join("adir");
+        std::fs::create_dir(&as_dir).expect("mkdir");
+        let as_socket = dir.path().join("asock");
+        let _listener = std::os::unix::net::UnixListener::bind(&as_socket).expect("bind");
+
+        for path in [as_dir, as_socket] {
+            let err = HostKey::open(&path).expect_err("not a regular file, so not a key");
+            assert!(
+                matches!(&err, KeyError::Untrusted(m) if m.contains("not a regular file")),
+                "{}: {err}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_or_world_readable_key_is_refused_naming_the_mode() {
+        let dir = ScratchDir::created("key-mode");
+        let path = good_key(dir.path());
+        for mode in [0o640, 0o604, 0o644, 0o660, 0o666] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+            let err = HostKey::open(&path).expect_err("a readable-by-others key is refused");
+            assert!(
+                matches!(&err, KeyError::Untrusted(m) if m.contains(&format!("{mode:03o}")) && m.contains("chmod 600")),
+                "mode {mode:03o} names itself and the fix: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symlinked_key_is_honored_when_the_link_is_ours() {
+        let dir = ScratchDir::created("key-symlink");
+        let target = good_key(dir.path());
+        let link = dir.path().join("link.ed25519");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let via_link = HostKey::open(&link).expect("a link we own reads the key it points at");
+        assert_eq!(
+            via_link.key_id(),
+            HostKey::open(&target).expect("direct").key_id()
+        );
+    }
+
+    #[test]
+    fn a_world_writable_key_directory_is_refused() {
+        // The precondition both halves of this hazard need: whoever can write the directory can
+        // swap the key, whatever the file's own mode says.
+        let dir = ScratchDir::created("key-dir");
+        let path = good_key(dir.path());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod");
+        let err = HostKey::open(&path).expect_err("a shared directory can swap the key");
+        assert!(
+            matches!(&err, KeyError::Untrusted(m) if m.contains("0777") && m.contains("sticky")),
+            "names the directory's mode and why the sticky bit would answer it: {err}"
+        );
+        // Sticky is the carve-out `/tmp` relies on: the kernel refuses a cross-user unlink there.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777))
+            .expect("chmod");
+        HostKey::open(&path).expect("a sticky shared directory is not a swap route");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+
+    #[test]
+    fn a_key_is_not_minted_into_a_directory_another_local_user_can_write() {
+        // First-run generation is where most keys come from, so judging the directory only on the
+        // way back in would put a fresh secret somewhere it can be swapped and say nothing until the
+        // next run.
+        let dir = ScratchDir::created("key-mint-dir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod");
+        let path = dir.path().join("record-signing.ed25519");
+
+        let err =
+            HostKey::load_or_generate(&path).expect_err("a shared directory is not key state");
+        assert!(
+            matches!(&err, KeyError::Untrusted(m) if m.contains("0777")),
+            "names the directory's mode: {err}"
+        );
+        assert!(
+            !path.exists(),
+            "and nothing was written: a refusal that still minted the key would be no refusal"
+        );
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        HostKey::load_or_generate(&path).expect("a directory we own mints normally");
+    }
+
+    #[test]
+    #[ignore = "chowns a file to another uid; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn a_key_owned_by_another_uid_is_refused() {
+        // The one fact an unprivileged process cannot fabricate, and the consequence the mode check
+        // alone misses: root reads a 0600 key another local user still holds, and every record this
+        // host signs with it is forgeable by that user under the `key_id` the host advertises.
+        if HostIds::current().map(HostIds::effective) != Some(0) {
+            eprintln!("skipping a_key_owned_by_another_uid_is_refused: needs real root");
+            return;
+        }
+        let dir = ScratchDir::created("key-foreign");
+        let path = good_key(dir.path());
+        std::os::unix::fs::chown(&path, Some(65534), Some(65534)).expect("chown to nobody");
+
+        let err = HostKey::open(&path).expect_err("another uid's key must be refused");
+        assert!(
+            matches!(&err, KeyError::Untrusted(m) if m.contains("65534") && m.contains("owned by uid")),
+            "the refusal names the foreign owner: {err}"
+        );
     }
 }
 

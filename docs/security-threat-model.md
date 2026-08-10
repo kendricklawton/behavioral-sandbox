@@ -151,7 +151,11 @@ record at all, which is `--record` or an operator's `records_dir`.
   lying host is the hoster's key custody and host hardening, outside this engine.
 - **Custody is the hoster's** (engine, not platform): the engine generates a host key on first use and
   signs; tenant keys, a KMS, key distribution, and revocation are the hoster's. A record's `key_id`
-  names the signing key, so a rotated key doesn't invalidate records already signed.
+  names the signing key, so a rotated key doesn't invalidate records already signed. What the engine
+  does check is the key *file*: another local user's key, one others can read, one in a directory
+  others can write, and a non-regular file at the path are each a refusal before the boot, on the
+  same terms as the config file that names it. See
+  [Setting `signing_key`](./cli-config.md#setting-signing_key).
 - **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
   a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
   hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `bsx
