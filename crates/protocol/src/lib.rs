@@ -833,6 +833,27 @@ fn write_message<T: Serialize>(
     w.flush().map_err(ProtocolError::Io)
 }
 
+/// Read until EOF **the way the daemon does**: answer an error and read on, rather than stopping at
+/// the first one. `session.rs` treats a malformed or over-cap line as per-request and continues, so a
+/// harness that stopped would leave everything reachable only *after* a recovered error outside what
+/// it explores, the [`discard_to_newline`] resync most of all.
+///
+/// It terminates because every error path consumes at least through its line and a spent reader
+/// answers `Ok(None)`: a `TooLarge` consumes or drains to the newline, and a `Malformed`/`Schema`
+/// follows a line `read_line_capped` already took.
+#[cfg(any(test, feature = "fuzzing"))]
+fn drain_like_the_daemon<R: BufRead, T>(
+    reader: &mut R,
+    read: fn(&mut R) -> Result<Option<T>, ProtocolError>,
+) {
+    loop {
+        match read(reader) {
+            Ok(Some(_)) | Err(_) => {}
+            Ok(None) => return,
+        }
+    }
+}
+
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
 /// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`bsx serve`)
@@ -850,14 +871,12 @@ pub mod fuzz {
     /// highest-value target: `bsx serve` decodes exactly this off its socket. Drains to EOF so a
     /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
     pub fn read_requests(data: &[u8]) {
-        let mut cur = Cursor::new(data);
-        while let Ok(Some(_)) = read_request(&mut cur) {}
+        crate::drain_like_the_daemon(&mut Cursor::new(data), read_request);
     }
 
     /// Read a stream of `Response`s from `data` (a client decoding a hostile/garbled daemon).
     pub fn read_responses(data: &[u8]) {
-        let mut cur = Cursor::new(data);
-        while let Ok(Some(_)) = read_response(&mut cur) {}
+        crate::drain_like_the_daemon(&mut Cursor::new(data), read_response);
     }
 }
 
@@ -1420,6 +1439,21 @@ mod tests {
             read_request(&mut flood.as_slice()),
             Err(ProtocolError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn the_fuzz_drain_reads_past_a_refusal_like_the_daemon_does() {
+        // A refused line followed by a good one. A drain that stopped at the first error would leave
+        // the second unread, which is what put the resync path (and anything else reachable only
+        // past a refusal) outside what the fuzz harnesses explore.
+        let wire: &[u8] = b"{not json}\n{\"schema\":1,\"op\":\"close\"}\n";
+        let mut cur = std::io::Cursor::new(wire);
+        drain_like_the_daemon(&mut cur, read_request);
+        assert_eq!(
+            usize::try_from(cur.position()).expect("a test-sized stream"),
+            wire.len(),
+            "the drain stopped at the refusal instead of reading on, as the daemon does"
+        );
     }
 
     #[test]

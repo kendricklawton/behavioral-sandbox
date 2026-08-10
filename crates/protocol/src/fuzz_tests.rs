@@ -197,11 +197,11 @@ fn reader_never_panics_on_arbitrary_bytes() {
                 *b = b'\n';
             }
         }
-        let mut cur = Cursor::new(&data);
-        // Bounded drain: read until EOF or the first error, never looping unboundedly on garbage.
-        while let Ok(Some(_)) = read_request(&mut cur) {}
-        let mut cur = Cursor::new(&data);
-        while let Ok(Some(_)) = read_response(&mut cur) {}
+        // Drained the way the daemon reads, so a recovered error is followed by the *next* message
+        // rather than ending the run: stopping at the first error would leave the resync path, and
+        // anything else only reachable past a refusal, unexplored.
+        crate::drain_like_the_daemon(&mut Cursor::new(&data[..]), read_request);
+        crate::drain_like_the_daemon(&mut Cursor::new(&data[..]), read_response);
     }
 }
 
