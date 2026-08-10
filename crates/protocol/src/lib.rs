@@ -1423,6 +1423,65 @@ mod tests {
     }
 
     #[test]
+    fn the_drain_finds_the_newline_across_buffer_refills() {
+        // `read_line_capped` has two over-cap exits, and only one of them reaches
+        // [`discard_to_newline`] with work to do. Over a `&[u8]` or a `Cursor`, `fill_buf` hands back
+        // the whole remainder, so the newline is always already in view and the inline branch takes
+        // it: every test that reads that way exercises the wrong half.
+        //
+        // The daemon reads through a `BufReader`, whose buffer is finite, so an over-cap line fills
+        // it many times with no newline in sight. That is this: a cap and a buffer small enough that
+        // the drain must span several refills before it finds the terminator.
+        let stream: &[u8] = b"0123456789abcdefghij\nNEXT\n";
+        let mut reader = std::io::BufReader::with_capacity(4, stream);
+
+        let mut out = Vec::new();
+        let err = read_line_capped(&mut reader, 8, &mut out)
+            .expect_err("a 20-byte line is over an 8-byte cap");
+        assert!(
+            matches!(err, ProtocolError::TooLarge { limit: 8 }),
+            "{err:?}"
+        );
+        assert!(
+            out.len() <= 8,
+            "buffered {} bytes past the cap it was told to stop at",
+            out.len()
+        );
+
+        // The drain is the point: the reader must be left exactly on the next line, so a session
+        // that treats `TooLarge` as per-request reads a whole message and not the tail of the one
+        // it just refused.
+        let mut next = Vec::new();
+        let eof =
+            read_line_capped(&mut reader, 8, &mut next).expect("the next line is under the cap");
+        assert_eq!(next, b"NEXT", "resumed mid-line instead of at the next one");
+        assert!(!eof);
+    }
+
+    #[test]
+    fn an_overlong_line_through_a_buffered_reader_resyncs_like_the_daemons() {
+        // The same property at the real cap and through the reader shape the daemon uses, so the
+        // production path is covered end to end and not only the small-cap unit above.
+        // Well past the cap, not one byte past it: a line that ends just over the bound puts its
+        // newline in view before the accumulation trips, so the inline branch takes it and the drain
+        // is skipped. The overrun has to outlast the reader's buffer for the drain to be the exit.
+        let mut wire = vec![b'x'; MAX_REQUEST_BYTES + 4096];
+        wire.push(b'\n');
+        wire.extend_from_slice(b"{\"schema\":1,\"op\":\"close\"}\n");
+        let mut reader = std::io::BufReader::with_capacity(64, wire.as_slice());
+
+        assert!(matches!(
+            read_request(&mut reader),
+            Err(ProtocolError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            read_request(&mut reader),
+            Ok(Some(Request::Close))
+        ));
+        assert!(matches!(read_request(&mut reader), Ok(None)));
+    }
+
+    #[test]
     fn an_overlong_line_resyncs_so_the_next_message_parses() {
         // An over-cap line is drained through its newline, so a session that treats `TooLarge` as
         // per-request never resumes mid-line: exactly one `TooLarge` is reported and the very next
