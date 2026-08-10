@@ -53,6 +53,22 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      # The inputs libFuzzer keeps, carried night to night: 15 minutes from cold re-derives what
+      # last night already found, and accumulation is where coverage-guided fuzzing reaches past the
+      # shallow decode paths the in-gate property tests already cover.
+      #
+      # Keyed and scoped **per target**, so eleven concurrent jobs never write one entry (each holds
+      # only its own corpus, and none can clobber another's). The name comes from `matrix.target`,
+      # which `fuzz_targets_are_single_sourced` already holds to `FUZZ_TARGETS`, so this adds no
+      # second copy of the list. The key is unique per run because a cache entry is immutable; a
+      # stable key would restore and then decline to save.
+      - name: Restore the fuzzing corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
       - name: Fuzz for 15 minutes
         run: cargo xtask fuzz ${{ matrix.target }} --seconds 900
 
