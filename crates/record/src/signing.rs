@@ -438,13 +438,30 @@ impl TrustedKey {
 
 /// The engine's per-host data directory: `$XDG_DATA_HOME/bsx`, falling back to `$HOME/.local/share/bsx`
 /// then `/var/lib/bsx`. Where an installed deployment keeps host **state** and runtime artifacts, and
-/// what `install.sh` writes into.
+/// what `install.sh` writes into. A relative value in **either** variable is skipped rather than
+/// joined, so the host key never lands at a path that moves with the cwd.
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
+    data_dir_in(
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// The pure core of [`data_dir`], taking the two variables rather than reading them, so each
+/// precedence case is unit-testable without mutating the process environment (`set_var` is `unsafe`
+/// in edition 2024 and races the parallel test runner). `Sources::discover_with` splits for the same
+/// reason.
+fn data_dir_in(xdg: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    // A relative value names a different directory depending on where the process started, so it
+    // identifies no host's state. `default_key_path` builds on this, and a relative key path is one
+    // the untrusted repo directory a run starts in can supply.
+    let base = xdg
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+        .or_else(|| {
+            home.filter(|h| h.is_absolute())
+                .map(|h| h.join(".local").join("share"))
+        })
         .unwrap_or_else(|| PathBuf::from("/var/lib"));
     base.join("bsx")
 }
@@ -1067,6 +1084,45 @@ mod tests {
             ),
             "a malformed link is a malformed envelope, not an unchained one"
         );
+    }
+
+    #[test]
+    fn the_data_dir_skips_a_relative_value_in_either_variable() {
+        // A relative `$HOME` yielded `relative/home/.local/share/bsx`, so a `--record` run minted and
+        // read its host signing key at a path that moves with the cwd, which on this project's own
+        // workflow is an untrusted repo directory. `$XDG_DATA_HOME` was already filtered; this is the
+        // sibling branch. `Sources::discover_with` applies the same rule to `~/.bsx.toml`.
+        let p = |s: &str| Some(PathBuf::from(s));
+        for (xdg, home, want, why) in [
+            (p("/x/data"), p("/home/you"), "/x/data/bsx", "XDG wins"),
+            (
+                None,
+                p("/home/you"),
+                "/home/you/.local/share/bsx",
+                "then HOME",
+            ),
+            (None, None, "/var/lib/bsx", "then the system dir"),
+            (
+                p("relative/data"),
+                p("/home/you"),
+                "/home/you/.local/share/bsx",
+                "a relative XDG falls through to HOME",
+            ),
+            (
+                p("relative/data"),
+                p("relative/home"),
+                "/var/lib/bsx",
+                "and a relative HOME falls through to the system dir, not to a cwd-relative path",
+            ),
+            (
+                None,
+                p("relative/home"),
+                "/var/lib/bsx",
+                "a relative HOME alone is skipped too",
+            ),
+        ] {
+            assert_eq!(data_dir_in(xdg, home), PathBuf::from(want), "{why}");
+        }
     }
 
     #[test]
