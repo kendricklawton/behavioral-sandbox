@@ -28,7 +28,9 @@ bsx run --unjailed --net --watch --trace --record run.json --record-summary run.
   endpoint), what egress was *denied*, its resource envelope, and any coverage gap, with the forensic
   detail (per-flow counters, per-syscall `comm` and hit counts) dropped. A *view* of the record, not
   new observation: compact, deterministic, and byte-stable, so an agent gets a small, stable summary to
-  feed into its next turn.
+  feed into its next turn. Its host-syscall sample is capped at 16 entries and dealt round-robin
+  across `execve`, `openat` and `connect`, so a run that opened many files still shows the connects it
+  made; `truncated` says when the list is partial.
 
 Check a `--record` file with [`bsx verify`](./cli-commands.md#bsx-verify).
 
