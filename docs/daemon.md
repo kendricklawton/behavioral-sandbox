@@ -60,6 +60,16 @@ its `--max-sessions` slot, so a wedged or forgotten connection does not hold cap
 covers the wait for the first `open` too; a client that keeps the connection moving keeps resetting it.
 `0` disables it.
 
+**A running command is bounded by `--max-wall-secs SECONDS` (default 3600), not by the idle
+timeout.** A session in the middle of an `exec` sends nothing and reads nothing, so the idle deadline
+deliberately does not arm: a long quiet command is a working session, not a wedged one. What ends
+that exec is the wall budget, which the client names in its `open` and this flag bounds. The bound
+matters because the wall is also the *host's* give-up deadline on a guest that stops reporting its
+command's end, so an `open` free to ask for any wall could hold a slot, a microVM, and its committed
+memory for as long as it liked. The default is the ceiling the in-guest agent already clamps a
+command to, so it refuses only an ask a cooperating guest would never have run out; an `open` past it
+is refused rather than quietly clamped, and `0` restores the unbounded wall.
+
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
 exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
 the same path a hard kill takes; the unlink just spares the next start the stale-socket check.
