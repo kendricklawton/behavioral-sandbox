@@ -287,6 +287,7 @@ name = "bsx-record"
 version = "0.0.3"
 dependencies = [
  "bsx-probes-common",
+ "bsx-test-support",
  "criterion",
  "ed25519-dalek",
  "serde_json",

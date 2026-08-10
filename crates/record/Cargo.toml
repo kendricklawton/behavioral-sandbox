@@ -32,6 +32,9 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Scratch dirs for the key-file gate's tests, so a planted FIFO, a wrong mode, or a world-writable
+# key directory is built and torn down the same way every other crate's tests do it.
+bsx-test-support = { path = "../test-support" }
 
 [[bench]]
 name = "record_benches"
