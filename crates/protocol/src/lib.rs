@@ -1478,6 +1478,67 @@ mod tests {
         }
     }
 
+    /// The wire's numbers and tag vocabularies as one machine-readable file, so a client vendors
+    /// them instead of transcribing them out of prose. Behavior stays in the two corpora beside it;
+    /// this carries only what a decoder needs to size a buffer and match a tag.
+    const CONTRACT: &str = include_str!("../tests/fixtures/contract.json");
+
+    /// Every value in `contract.json` against the code it describes. A field no assertion here
+    /// reads is a field the file could state falsely, so each one is checked, and the tag lists come
+    /// from serde and from the generated `NAMED` rather than from a second hand-written list.
+    #[test]
+    fn the_published_contract_matches_the_code_it_describes() {
+        let c: serde_json::Value = serde_json::from_str(CONTRACT).expect("contract.json is JSON");
+
+        assert_eq!(c["wire_schema"], serde_json::json!(WIRE_SCHEMA));
+
+        let f = &c["framing"];
+        assert_eq!(f["terminator"], serde_json::json!("\n"));
+        assert_eq!(f["encoding"], serde_json::json!("utf-8"));
+        assert_eq!(f["max_request_bytes"], serde_json::json!(MAX_REQUEST_BYTES));
+        assert_eq!(
+            f["max_response_bytes"],
+            serde_json::json!(MAX_RESPONSE_BYTES)
+        );
+
+        // Derived rather than declared: build a line whose content is exactly the cap and ask the
+        // writer. One that counted the terminator would refuse a line its own peer accepts, so the
+        // flag reports what this crate does instead of what the file says it does.
+        let mut probe = Vec::new();
+        write_request(
+            &mut probe,
+            &Request::Put(PutParams {
+                path: "p".into(),
+                content: String::new(),
+            }),
+        )
+        .expect("the empty-content probe encodes");
+        let at_cap = Request::Put(PutParams {
+            path: "p".into(),
+            content: "x".repeat(MAX_REQUEST_BYTES - (probe.len() - 1)),
+        });
+        let mut wire = Vec::new();
+        let counts_terminator = write_request(&mut wire, &at_cap).is_err();
+        assert_eq!(
+            f["cap_counts_terminator"],
+            serde_json::json!(counts_terminator)
+        );
+
+        assert_eq!(
+            c["requests"],
+            serde_json::json!(wire_tags::<Request>(r#"{"op":"__no_such_variant__"}"#))
+        );
+        assert_eq!(
+            c["responses"],
+            serde_json::json!(wire_tags::<Response>(r#"{"reply":"__no_such_variant__"}"#))
+        );
+        let kinds: Vec<&str> = FaultKind::NAMED
+            .iter()
+            .filter_map(FaultKind::wire_str)
+            .collect();
+        assert_eq!(c["fault_kinds"], serde_json::json!(kinds));
+    }
+
     /// The response constructors are positional, and three of them take arguments a compiler
     /// cannot tell apart (`result`'s two streams, `got`'s two strings, `error`'s message). Pin
     /// what lands where, so a swapped pair inside a constructor is a red test, not a record whose
