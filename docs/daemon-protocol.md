@@ -75,6 +75,14 @@ way.
 "unclassified", and assuming the host rather than the caller is the conservative read. An absent
 `kind` (an omitted field) reads the same way.
 
+**One rejected `open` knob can come back two ways, both `protocol`.** A value the field's type cannot
+hold is refused while the line is being decoded and carries the decoder's own wording (`vcpus: 300`
+does not fit the byte `vcpus` is carried in); a value the type holds but this host will not serve is
+refused afterwards, by the daemon, and names the rule it broke (`vcpus: 7`, since a count must be 1
+or even). Both are `protocol` and both name the field, so a client that reports `message` and fixes
+the request needs no special case. Both are also **fatal**, because `open` is the first message and a
+session that never opened has nothing to continue; reconnect to retry. Do not parse either text.
+
 ## Compatibility rules (what a client must do)
 
 The engine's own client is written in Rust with serde, but nothing here depends on that: a client in
