@@ -201,6 +201,9 @@ impl HostKey {
     /// Signs already-canonical record bytes, optionally chained to `prev`. With `prev` the signed message
     /// is `prev + "\n" + canonical` and the envelope carries a `prev` field; without it neither appears, so
     /// unchained envelopes stay byte-identical.
+    ///
+    /// `prev` must be a [`record_hash`] of the previous record. Anything else produces an envelope
+    /// [`verify`] refuses, since the 64-hex shape is what frames the two halves of the signed message.
     #[must_use]
     pub fn sign_canonical_chained(&self, canonical: &str, prev: Option<&str>) -> String {
         let signature: Signature = match prev {
@@ -353,8 +356,15 @@ pub fn record_hash(canonical: &str) -> String {
     hex_encode(&Sha256::digest(canonical.as_bytes()))
 }
 
-/// The signed message for a chained record: `prev + "\n" + canonical`. `prev` is 64 hex chars and
-/// `canonical` is compact JSON with no leading newline, so the single `\n` frames them unambiguously.
+/// Whether `s` has the shape [`record_hash`] produces: exactly 64 hex characters.
+fn is_chain_hash(s: &str) -> bool {
+    hex_decode(s, &mut [0u8; 32]).is_ok()
+}
+
+/// The signed message for a chained record: `prev + "\n" + canonical`. The single `\n` frames the two
+/// unambiguously because `prev` is 64 hex characters, which [`is_chain_hash`] holds at verify time, and
+/// because `canonical` carries no raw newline, which [`crate::RunRecord::to_json`] holds by escaping
+/// every captured byte.
 fn link_message(prev: &str, canonical: &str) -> String {
     let mut m = String::with_capacity(prev.len() + 1 + canonical.len());
     m.push_str(prev);
@@ -496,11 +506,22 @@ fn verify_entry(
     let record = field("record")?;
     let key_id = field("key_id")?;
     let sig_hex = field("signature")?;
-    // `prev` is optional: present only on a chained record.
-    let prev = v
-        .get("prev")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+    // `prev` is optional (present only on a chained record) but never free-form: it is the previous
+    // record's [`record_hash`], and its fixed 64-hex shape is what makes the single `\n` in
+    // `link_message` an unambiguous frame. Without this check a signature over
+    // `prev = "A\nB", canonical = "C"` also verifies against an envelope carrying `prev = "A"` and
+    // `record = "B\nC"`, since both build the same message, and `verify` would hand back the second
+    // split as the authentic bytes. A present-but-not-a-string `prev` is malformed here rather than
+    // read as absent, so a broken field is never a silently unchained record.
+    let prev = match v.get("prev") {
+        None => None,
+        Some(serde_json::Value::String(p)) if is_chain_hash(p) => Some(p.clone()),
+        Some(_) => {
+            return Err(VerifyError::Malformed(
+                "`prev` must be the previous record's 64-hex chain hash".into(),
+            ));
+        }
+    };
 
     let mut sig_bytes = [0u8; 64];
     hex_decode(&sig_hex, &mut sig_bytes)
@@ -976,9 +997,9 @@ mod tests {
 
     #[test]
     fn a_hostile_prev_cannot_deform_the_envelope() {
-        // `sign_canonical_chained` is public and takes an arbitrary `&str`, so the "64 hex chars,
-        // no metacharacters" invariant is the caller's habit, not something the signature enforces.
-        // An unescaped `"` would emit bytes that are not the JSON they look like.
+        // `sign_canonical_chained` is public and takes an arbitrary `&str`, so a `prev` carrying JSON
+        // metacharacters reaches the writer. Escaping is what keeps the emitted bytes the JSON they
+        // look like: an unescaped `"` would smuggle a second `record` key past a reader.
         let key = test_key();
         let hostile = r#"x","record":"forged"#;
         let envelope = key.sign_canonical_chained(r#"{"schema":1}"#, Some(hostile));
@@ -989,10 +1010,62 @@ mod tests {
             v["record"], r#"{"schema":1}"#,
             "and the record field is the real one, not a smuggled second key"
         );
-        // It still verifies, so escaping did not change what was signed.
-        assert_eq!(
-            verify(&envelope, &[key.verifying_key()]).expect("verifies"),
-            r#"{"schema":1}"#
+        // The other half, which escaping alone never gave: a `prev` that is not a chain hash cannot
+        // be a link, so the envelope is refused rather than read under a frame it does not fit.
+        assert!(
+            matches!(
+                verify(&envelope, &[key.verifying_key()]),
+                Err(VerifyError::Malformed(_))
+            ),
+            "a non-hash prev is malformed, not merely escaped"
+        );
+    }
+
+    #[test]
+    fn a_re_framed_prev_cannot_relabel_where_the_record_starts() {
+        // `link_message` joins with a single `\n`, so two different splits of the same bytes carry
+        // the same signature: signing `prev = "A\nB"` over `canonical = "C"` produces a signature
+        // that also checks against `prev = "A"` with `record = "B\nC"`. Measured against the unfixed
+        // verifier, which returned `"B\nC"` as the authentic canonical bytes. The 64-hex shape is
+        // what makes the frame single-valued, and it is refused before the signature is even read.
+        let key = test_key();
+        let real = key.sign_canonical_chained("C", Some("A\nB"));
+        let v: serde_json::Value = serde_json::from_str(&real).expect("valid JSON");
+        let (sig, kid) = (
+            v["signature"].as_str().expect("signature"),
+            v["key_id"].as_str().expect("key_id"),
+        );
+        let re_framed = format!(
+            r#"{{"schema":2,"key_id":"{kid}","signature":"{sig}","prev":"A","record":"B\nC"}}"#
+        );
+        assert!(
+            matches!(
+                verify(&re_framed, &[key.verifying_key()]),
+                Err(VerifyError::Malformed(_))
+            ),
+            "the second split must not be handed back as authentic bytes"
+        );
+    }
+
+    #[test]
+    fn a_prev_that_is_present_but_not_a_string_is_malformed_rather_than_absent() {
+        // `and_then(as_str)` yielded `None` for a numeric `prev`, so a broken field read as
+        // "unchained" and the entry verified as a standalone record. The signature caught it only
+        // because the message then lacked the link; a reader still learned nothing about the fault.
+        let key = test_key();
+        let unchained = key.sign_canonical("C");
+        let v: serde_json::Value = serde_json::from_str(&unchained).expect("valid JSON");
+        let numeric = format!(
+            r#"{{"schema":2,"key_id":"{}","signature":"{}","prev":5,"record":"C"}}"#,
+            v["key_id"].as_str().expect("key_id"),
+            v["signature"].as_str().expect("signature"),
+        );
+        assert!(
+            matches!(
+                verify(&numeric, &[key.verifying_key()]),
+                Err(VerifyError::Malformed(_))
+            ),
+            "a malformed link is a malformed envelope, not an unchained one"
         );
     }
 
