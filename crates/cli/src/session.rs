@@ -1233,6 +1233,32 @@ mod tests {
     }
 
     #[test]
+    fn the_widest_cap_the_wire_can_carry_meets_the_operator_ceiling() {
+        // `output_cap` is a `u64` on the wire, so the widest ask reaches the policy layer as
+        // `usize::MAX` on a 64-bit host: the ceiling has to refuse at that end, not merely at
+        // values a client might plausibly type.
+        let policy = Policy {
+            max_output_cap: Some(Limits::default().output_cap),
+            ..Policy::default()
+        };
+        let refusal = open_limits(&open_req(|p| p.output_cap = Some(u64::MAX)), &policy)
+            .expect_err("a cap past the operator ceiling is refused, not clamped");
+        assert!(
+            matches!(&refusal, OpenRefusal::Policy(m) if m.contains("--max-output-cap")),
+            "a ceiling is a policy refusal naming the flag that set it: {refusal:?}"
+        );
+
+        // Without the ceiling the same ask resolves, which is what makes the flag the only thing
+        // standing between that number and `charge`'s `captured + add > max` never being true.
+        let (limits, _) = open_limits(
+            &open_req(|p| p.output_cap = Some(u64::MAX)),
+            &Policy::default(),
+        )
+        .expect("no ceiling, no refusal");
+        assert_eq!(limits.output_cap, usize::MAX);
+    }
+
+    #[test]
     fn the_snapshot_ceiling_refuses_at_the_bound_and_zero_is_unlimited() {
         // A bundle is guest RAM plus a copy of the root disk and nothing on the wire reclaims one,
         // so this ceiling is what stands between a `snapshot` loop and a full scratch filesystem.

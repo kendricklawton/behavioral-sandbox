@@ -78,6 +78,17 @@ memory for as long as it liked. The default is the ceiling the in-guest agent al
 command to, so it refuses only an ask a cooperating guest would never have run out; an `open` past it
 is refused rather than quietly clamped, and `0` restores the unbounded wall.
 
+**Captured output is bounded by `--max-output-cap BYTES` (default 16 MiB, the engine's own
+`output_cap`).** The cap an `open` names is a bound on *this process's* memory, not the guest's: the
+host holds one exec's whole stdout, stderr, and artifacts in its heap before it can reply, charging
+each frame against the cap and refusing the frame that would pass it. So an `open` free to name any
+cap is a charge that never refuses, and one guest running `yes` grows the daemon until the host is
+out of memory, with the reply-size limit no help (a reply is measured after it has been built).
+Neither `--max-committed-mem-mib` (guest RAM) nor the wall covers this: a guest streams gigabytes
+long before an hour is up. The default is what a run gets when nobody asks, so it refuses only an ask
+above the shipped default; an `open` past it is refused rather than quietly clamped, and `0` restores
+the unbounded cap.
+
 **Snapshot disk is bounded by `--max-snapshots N` (default 16).** A `snapshot` bundle is roughly the
 session's guest RAM plus a copy of its root disk, and it **outlives the session**: the reply is a
 host path, and no wire verb consumes one, so nothing reclaims a bundle but you. That makes disk the
