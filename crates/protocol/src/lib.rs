@@ -1303,6 +1303,181 @@ mod tests {
         }
     }
 
+    /// The negative corpus: the lines a decoder must refuse, tolerate, or skip, each carrying the
+    /// outcome this crate produces for it. The framing edges are where a hand-written decoder
+    /// actually breaks, so they ship as an artifact beside the valid shapes rather than as prose a
+    /// client re-reads and re-interprets.
+    const WIRE_INVALID: &str = include_str!("../tests/fixtures/wire-invalid.jsonl");
+
+    /// The outcomes a negative-corpus entry can name. A stream ends cleanly rather than erroring,
+    /// but that follows from what comes *after* a line, so it is a property of `skip` at end of
+    /// input rather than a sixth value a single line could carry.
+    const EXPECTS: &[&str] = &["ok", "schema", "malformed", "too_large", "skip"];
+
+    /// One parsed negative-corpus entry, its `fill` already expanded.
+    struct Invalid {
+        name: String,
+        dir: String,
+        line: String,
+        expect: String,
+        reencode: Option<String>,
+    }
+
+    /// Builds the `put_content_pad` fill: a `put` padded so its line content is exactly `line_len`
+    /// bytes. Encoded through the larger bound because the over-cap entry is a line the request
+    /// writer is *supposed* to refuse, and this only needs its bytes.
+    fn put_content_pad(line_len: usize) -> String {
+        let mut probe = Vec::new();
+        write_request(
+            &mut probe,
+            &Request::Put(PutParams {
+                path: "p".into(),
+                content: String::new(),
+            }),
+        )
+        .expect("the empty-content probe encodes");
+        let overhead = probe.len() - 1; // everything but the newline
+        let padded = Request::Put(PutParams {
+            path: "p".into(),
+            content: "x".repeat(line_len - overhead),
+        });
+        let mut wire = Vec::new();
+        write_message(&mut wire, &padded, MAX_RESPONSE_BYTES).expect("the padded line encodes");
+        wire.truncate(wire.len() - 1); // the corpus stores content, not the terminator
+        String::from_utf8(wire).expect("the wire is UTF-8")
+    }
+
+    /// Parses [`WIRE_INVALID`], expanding any `fill` into its bytes.
+    fn invalid_corpus() -> Vec<Invalid> {
+        let mut out = Vec::new();
+        for (i, raw) in WIRE_INVALID.lines().enumerate() {
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let v: serde_json::Value =
+                serde_json::from_str(raw).expect("every corpus line is a JSON object");
+            let line = match v.get("fill") {
+                Some(f) => {
+                    let shape = f["shape"].as_str().expect("`shape`");
+                    assert_eq!(
+                        shape,
+                        "put_content_pad",
+                        "corpus line {}: no builder for fill shape `{shape}`",
+                        i + 1
+                    );
+                    let len = f["line_len"].as_u64().expect("`line_len`");
+                    put_content_pad(usize::try_from(len).expect("a length this host can hold"))
+                }
+                None => v["line"].as_str().expect("`line`").to_string(),
+            };
+            let e = Invalid {
+                name: v["name"].as_str().expect("`name`").to_string(),
+                dir: v["dir"].as_str().expect("`dir`").to_string(),
+                line,
+                expect: v["expect"].as_str().expect("`expect`").to_string(),
+                reencode: v
+                    .get("reencode")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            };
+            assert!(
+                EXPECTS.contains(&e.expect.as_str()),
+                "corpus line {}: `expect` is `{}`, not one of {EXPECTS:?}",
+                i + 1,
+                e.expect
+            );
+            out.push(e);
+        }
+        assert!(!out.is_empty(), "the negative corpus is empty");
+        out
+    }
+
+    /// Reads one line through the reader for its direction, re-encoding what decoded so both
+    /// directions share one set of assertions.
+    fn read_and_reencode(dir: &str, wire: &[u8]) -> Result<Option<String>, ProtocolError> {
+        fn reencode<T: serde::Serialize>(msg: &T) -> String {
+            let mut w = Vec::new();
+            write_message(&mut w, msg, MAX_RESPONSE_BYTES).expect("what decoded re-encodes");
+            String::from_utf8(w).expect("the wire is UTF-8")
+        }
+        if dir == "request" {
+            Ok(read_request(&mut &wire[..])?.map(|m| reencode(&m)))
+        } else {
+            Ok(read_response(&mut &wire[..])?.map(|m| reencode(&m)))
+        }
+    }
+
+    /// What a decoder must do with each line the negative corpus names. A client vendoring the file
+    /// runs the same table, so "my codec handles the edges" means one thing in every language
+    /// rather than one per implementation.
+    #[test]
+    fn the_negative_corpus_pins_what_a_decoder_must_refuse_tolerate_or_skip() {
+        for e in invalid_corpus() {
+            let Invalid {
+                name,
+                dir,
+                line,
+                expect,
+                reencode,
+            } = &e;
+            let mut wire = line.clone().into_bytes();
+            wire.push(b'\n');
+            let got = read_and_reencode(dir, &wire);
+            match expect.as_str() {
+                "ok" => {
+                    // An entry that names no `reencode` must round-trip to its own bytes; one that
+                    // does is a line the decode changes, which is the interesting case (a dropped
+                    // unknown field, an absent optional filled in).
+                    let want = reencode.as_deref().unwrap_or(line);
+                    assert!(got.is_ok(), "`{dir}/{name}` should decode, got {got:?}");
+                    let decoded = got
+                        .expect("asserted ok just above")
+                        .expect("a message, not EOF");
+                    assert_eq!(
+                        decoded.trim_end_matches('\n'),
+                        want,
+                        "`{dir}/{name}` re-encoded to different bytes"
+                    );
+                }
+                "schema" => assert!(
+                    matches!(got, Err(ProtocolError::Schema(_))),
+                    "`{dir}/{name}` should be a schema fault, got {got:?}"
+                ),
+                "malformed" => assert!(
+                    matches!(got, Err(ProtocolError::Malformed(_))),
+                    "`{dir}/{name}` should be malformed, got {got:?}"
+                ),
+                "too_large" => assert!(
+                    matches!(got, Err(ProtocolError::TooLarge { .. })),
+                    "`{dir}/{name}` should be over the bound, got {got:?}"
+                ),
+                // A skipped line is not a message, so the proof is that the *next* one still
+                // arrives: an implementation that errored instead would never reach it.
+                "skip" => {
+                    let next = if dir == "request" {
+                        r#"{"schema":1,"op":"close"}"#
+                    } else {
+                        r#"{"schema":1,"reply":"closed"}"#
+                    };
+                    let mut stream = wire.clone();
+                    stream.extend_from_slice(next.as_bytes());
+                    stream.push(b'\n');
+                    let past = read_and_reencode(dir, &stream);
+                    assert!(
+                        past.is_ok(),
+                        "`{dir}/{name}` should be skipped, got {past:?}"
+                    );
+                    let decoded = past
+                        .expect("asserted ok just above")
+                        .expect("the message after a skipped line still arrives");
+                    assert_eq!(decoded.trim_end_matches('\n'), next);
+                }
+                // `EXPECTS` was checked while parsing, so nothing else reaches here.
+                _ => {}
+            }
+        }
+    }
+
     /// The response constructors are positional, and three of them take arguments a compiler
     /// cannot tell apart (`result`'s two streams, `got`'s two strings, `error`'s message). Pin
     /// what lands where, so a swapped pair inside a constructor is a red test, not a record whose
