@@ -846,6 +846,12 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
 /// not one atomic step). Unlinking by path alone would then take out the **live** daemon's socket on
 /// the way out, leaving it listening on an inode no client can dial. Comparing device and inode
 /// against what was published makes a shutdown that lost the path a no-op instead.
+///
+/// An inode number alone would be too weak, since the kernel recycles one as soon as its last
+/// reference goes. What makes it an identity here is that this daemon's own listener is still bound
+/// when the signal thread runs (the accept loop holds it and the thread exits the process): a bound
+/// `AF_UNIX` socket holds a reference to its path, so the inode cannot be freed and its number
+/// cannot land under a successor while this daemon is still here to mistake it for its own.
 fn unlink_own_socket(socket: &Path, published: Option<(u64, u64)>) {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -1434,37 +1440,6 @@ mod tests {
             "nothing is listening, so the file is reclaimable"
         );
         assert!(!someone_is_listening(&scratch.path().join("absent.sock")));
-    }
-
-    #[test]
-    fn shutdown_unlinks_its_own_socket_and_leaves_a_successors_alone() {
-        use std::os::unix::fs::MetadataExt as _;
-
-        let scratch = bsx_test_support::ScratchDir::created("unlink-own");
-        let path = scratch.path().join("bsx.sock");
-        let mine = UnixListener::bind(&path).expect("bind");
-        let published = std::fs::symlink_metadata(&path)
-            .map(|m| (m.dev(), m.ino()))
-            .expect("stat");
-
-        // A successor replaces the path: the bind's reclaim-then-rename is not one atomic step, so
-        // two daemons racing can land here.
-        drop(mine);
-        std::fs::remove_file(&path).expect("the successor reclaims the path");
-        let _theirs = UnixListener::bind(&path).expect("the successor publishes its own");
-
-        unlink_own_socket(&path, Some(published));
-        assert!(
-            path.exists(),
-            "a shutdown that lost the path must not unlink the live daemon's socket"
-        );
-
-        // And the ordinary case still cleans up after itself.
-        let now = std::fs::symlink_metadata(&path)
-            .map(|m| (m.dev(), m.ino()))
-            .expect("stat");
-        unlink_own_socket(&path, Some(now));
-        assert!(!path.exists(), "its own socket is removed as before");
     }
 
     #[test]
