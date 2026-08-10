@@ -161,7 +161,7 @@ struct CidrV4(Ipv4Cidr);
 impl TryFrom<String> for CidrV4 {
     type Error = String;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        parse_v4_cidr(&s).map(CidrV4)
+        parse_v4_cidr(&s, "max_egress_v4").map(CidrV4)
     }
 }
 
@@ -173,7 +173,7 @@ struct CidrV6(Ipv6Cidr);
 impl TryFrom<String> for CidrV6 {
     type Error = String;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        parse_v6_cidr(&s).map(CidrV6)
+        parse_v6_cidr(&s, "max_egress_v6").map(CidrV6)
     }
 }
 
@@ -456,41 +456,45 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
     })
 }
 
-fn parse_v4_cidr(s: &str) -> Result<Ipv4Cidr, String> {
+/// Parse one IPv4 egress-ceiling entry, `IP` or `IP/PREFIX`. `context` is what the operator wrote it
+/// in (a config key, or `--max-egress`), so the same parser serves both without either message
+/// naming the other's spelling.
+pub(crate) fn parse_v4_cidr(s: &str, context: &str) -> Result<Ipv4Cidr, String> {
     match s.split_once('/') {
         Some((ip, prefix)) => {
             let addr: Ipv4Addr = ip
                 .parse()
-                .map_err(|_| format!("invalid IPv4 address {ip:?} in max_egress_v4 entry {s:?}"))?;
-            let prefix: u8 = prefix.parse().map_err(|_| {
-                format!("invalid CIDR prefix {prefix:?} in max_egress_v4 entry {s:?}")
-            })?;
-            Ipv4Cidr::new(addr, prefix).map_err(|e| format!("max_egress_v4 entry {s:?}: {e}"))
+                .map_err(|_| format!("invalid IPv4 address {ip:?} in {context} entry {s:?}"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in {context} entry {s:?}"))?;
+            Ipv4Cidr::new(addr, prefix).map_err(|e| format!("{context} entry {s:?}: {e}"))
         }
         None => {
             let addr: Ipv4Addr = s
                 .parse()
-                .map_err(|_| format!("invalid IPv4 address in max_egress_v4 entry {s:?}"))?;
+                .map_err(|_| format!("invalid IPv4 address in {context} entry {s:?}"))?;
             Ok(Ipv4Cidr::host(addr))
         }
     }
 }
 
-fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
+/// The v6 twin of [`parse_v4_cidr`].
+pub(crate) fn parse_v6_cidr(s: &str, context: &str) -> Result<Ipv6Cidr, String> {
     match s.split_once('/') {
         Some((ip, prefix)) => {
             let addr: Ipv6Addr = ip
                 .parse()
-                .map_err(|_| format!("invalid IPv6 address {ip:?} in max_egress_v6 entry {s:?}"))?;
-            let prefix: u8 = prefix.parse().map_err(|_| {
-                format!("invalid CIDR prefix {prefix:?} in max_egress_v6 entry {s:?}")
-            })?;
-            Ipv6Cidr::new(addr, prefix).map_err(|e| format!("max_egress_v6 entry {s:?}: {e}"))
+                .map_err(|_| format!("invalid IPv6 address {ip:?} in {context} entry {s:?}"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in {context} entry {s:?}"))?;
+            Ipv6Cidr::new(addr, prefix).map_err(|e| format!("{context} entry {s:?}: {e}"))
         }
         None => {
             let addr: Ipv6Addr = s
                 .parse()
-                .map_err(|_| format!("invalid IPv6 address in max_egress_v6 entry {s:?}"))?;
+                .map_err(|_| format!("invalid IPv6 address in {context} entry {s:?}"))?;
             Ok(Ipv6Cidr::host(addr))
         }
     }

@@ -455,6 +455,7 @@ your own file already said.
 
 **The real boundary is [`bsx serve`](./daemon.md)**, whose clients control neither the daemon's config
 nor its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
-`--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, plus the daemon-wide `--max-sessions` and
-committed-resource ceilings) and reads no `.bsx.toml` at all, neither layer: a daemon must not read a
+`--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, `--max-egress`, plus the daemon-wide
+`--max-sessions`, `--max-snapshots`, and committed-resource ceilings) and reads no `.bsx.toml` at
+all, neither layer: a daemon must not read a
 security control out of whatever directory it happened to be started in.
