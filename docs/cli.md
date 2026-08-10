@@ -54,7 +54,7 @@ out of scope.
 | Structured run result | `--json` |
 | Host readiness | [`bsx doctor`](./cli-commands.md#bsx-doctor) |
 | Crashed-run residue (`sweep_orphans`) | no flag: run automatically before every boot subcommand, reclaiming this euid's dead-pid scratch dirs and netns |
-| Config layering | [flags > env (`BSX_*`) > `.bsx.toml` > defaults](./cli-config.md) |
+| Config layering | [flags > env (`BSX_*`) > project `.bsx.toml` > `~/.bsx.toml` > defaults](./cli-config.md) |
 
 ## Deliberately not in the CLI
 

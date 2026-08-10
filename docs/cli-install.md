@@ -161,9 +161,9 @@ findmnt -no OPTIONS -T /tmp | tr , '\n' | grep -E 'nodev|noexec'   # prints the 
 If it prints `nodev` or `noexec`, the engine already falls back to `/var/tmp` on its own: the
 default scratch dir is chosen by probing `/tmp`'s mount flags, not assumed. You only need to set one
 yourself if `/var/tmp` is *also* mounted with those flags, or if you have pinned `scratch_dir` or
-`BSX_SCRATCH_DIR` at a blocked path. To set one, put it in a `.bsx.toml`. Discovery walks up from
-the working directory, so `~/.bsx.toml` covers everything you run from under your home directory,
-and a nearer file shadows it.
+`BSX_SCRATCH_DIR` at a blocked path. To set one, put it in `~/.bsx.toml`, which is read whatever
+directory you run from. `scratch_dir` names a path this host writes into, so it is one of the keys a
+project's own `.bsx.toml` may not set and cannot shadow.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
 kernel caps at ~108 bytes (an over-long one surfaces as a boot error, not a doctor row), so a
 short dir like `~/.bsx` beats a long one:

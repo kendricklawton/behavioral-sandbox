@@ -1,8 +1,23 @@
 # Configuration of `bsx`
 
-Configuration layers **flags > environment (`BSX_*`) > file (`.bsx.toml`) > defaults**. The file
-layer is the nearest `.bsx.toml` walking up from the current directory (the `.gitignore` convention),
-so a project pins its engine config beside its code.
+Configuration layers **flags > environment (`BSX_*`) > project file > user file > defaults**.
+
+There are **two files, and they are not read with the same authority**:
+
+- The **user file** is `~/.bsx.toml`, read whatever directory you run from, and it may set every key
+  on this page. `install.sh` writes one for you.
+- The **project file** is the nearest `.bsx.toml` walking up from the current directory (the
+  `.gitignore` convention), so a project pins its **limits** beside its code. It may set the house
+  defaults, the ceilings, and the postures, and nothing else.
+
+A file found above the working directory can arrive with the code it configures: clone a repository
+and its `.bsx.toml` comes with it. So the keys that name a binary this host executes, an image it
+boots, a key it signs or verifies with, a directory it writes into, or the identity a VMM drops to
+are read from the user file, the environment, or a flag. Each key below says which. A project file
+that names one is [refused](#a-project-file-that-reaches-past-its-keys), not quietly ignored.
+
+Every `## Setting` section names its **file** line accordingly: `~/.bsx.toml` for a user-only key,
+`any .bsx.toml` for one either file may set.
 
 The file uses the [toml] format, and an **unknown key is a typed error, never a silent no-op**. Its
 keys come in two kinds: the artifact and scratch keys mirror the environment names, minus the `BSX_`
@@ -12,14 +27,24 @@ precedence above, because a ceiling its bounded party can override is not a ceil
 All settings are **optional**. If a setting is not specified, the **default** value is used. *Thus, if
 you don't know what value to use, don't specify it.* The defaults might be tuned in the future.
 
-Example config:
+Example user config:
 
 ```toml
-# .bsx.toml: pinned beside a project's code
+# ~/.bsx.toml: this host's own paths
 kernel = "/srv/bsx/vmlinux"
 rootfs = "/srv/bsx/rootfs-guest.ext4"
 marker = "GUEST-READY"
 log = "info"
+```
+
+Example project config:
+
+```toml
+# .bsx.toml: pinned beside a project's code
+vcpus = 2
+mem_mib = 512
+max_wall_secs = 60
+require_record = true
 ```
 
 **What is deliberately not a knob.** The read-only base plus per-run tmpfs overlay, bulk read-only
@@ -36,6 +61,7 @@ is in [Architecture and design](./architecture.md).
 ## Setting `firecracker`
 
 - **env**: `BSX_FIRECRACKER`
+- **file**: `~/.bsx.toml` only
 - **type**: string (path or command name)
 - **default**: `firecracker` (resolved on `PATH`)
 
@@ -49,6 +75,7 @@ and whether the binary's sha256 matches the pin.
 ## Setting `kernel`
 
 - **env**: `BSX_KERNEL`
+- **file**: `~/.bsx.toml` only
 - **type**: string (path)
 - **default**: `artifacts/vmlinux`
 
@@ -60,6 +87,7 @@ own. A missing kernel is a hard failure, not a degradation: there is nothing to 
 ## Setting `rootfs`
 
 - **env**: `BSX_ROOTFS`
+- **file**: `~/.bsx.toml` only
 - **type**: string (path)
 - **default**: `artifacts/rootfs-guest.ext4`
 
@@ -73,6 +101,7 @@ explicitly collected.
 ## Setting `marker`
 
 - **env**: `BSX_MARKER`
+- **file**: any `.bsx.toml`
 - **type**: string
 - **default**: `GUEST-READY`
 
@@ -85,6 +114,7 @@ prompt.
 ## Setting `scratch_dir`
 
 - **env**: `BSX_SCRATCH_DIR`
+- **file**: `~/.bsx.toml` only
 - **type**: string (path)
 - **default**: `/tmp`, or `/var/tmp` when `/tmp` is unusable (see below)
 
@@ -106,6 +136,7 @@ which the kernel caps at roughly 108 bytes.
 ## Setting `log`
 
 - **env**: `BSX_LOG`
+- **file**: any `.bsx.toml`
 - **type**: string (`tracing` filter syntax)
 - **default**: `warn`
 
@@ -120,6 +151,7 @@ bare unknown word is not that case, since the filter grammar reads it as a targe
 ## Setting `require_limits`
 
 - **env**: `BSX_REQUIRE_LIMITS`
+- **file**: any `.bsx.toml`
 - **type**: boolean
 - **default**: `false`
 
@@ -135,6 +167,7 @@ The `--require-limits` flag sets it per run.
 ## Setting `jail_uid` and `jail_gid`
 
 - **env**: `BSX_JAIL_UID`, `BSX_JAIL_GID`
+- **file**: `~/.bsx.toml` only
 - **type**: integer (a non-zero uid/gid)
 - **default**: `10000` for both
 
@@ -157,6 +190,7 @@ nothing. The `--jail-uid` / `--jail-gid` flags set it per run on `bsx run`, `bsx
 ## Setting `gateway` and `resolver`
 
 - **env**: `BSX_GATEWAY`, `BSX_RESOLVER`
+- **file**: `~/.bsx.toml` only
 - **type**: IPv4 address
 - **default**: unset (the guest gets no default route and no nameserver)
 
@@ -186,6 +220,7 @@ warning naming the key, so a typo reads as a misconfiguration rather than as a b
 ## Setting `signing_key`
 
 - **env**: `BSX_SIGNING_KEY`
+- **file**: `~/.bsx.toml` only
 - **type**: string (path)
 - **default**: a path under the data directory, generated on first use
 
@@ -199,6 +234,7 @@ See [`bsx verify`](./cli-commands.md#bsx-verify).
 ## Setting `trusted_keys`
 
 - **env**: `BSX_TRUSTED_KEYS`
+- **file**: `~/.bsx.toml` only
 - **type**: array of 64-hex public keys in the file (`trusted_keys = ["aa..", "bb.."]`);
   comma-separated in the environment variable
 - **default**: empty
@@ -252,6 +288,7 @@ allow_net = false
 
 - **keys**: `vcpus`, `mem_mib`, `wall_secs`, `output_cap`
 - **kind**: default
+- **file**: any `.bsx.toml`
 - **type**: integer
 
 The house profile used when a caller does not ask. The engine's own defaults are 1 vCPU, 256 MiB, a
@@ -261,6 +298,7 @@ The house profile used when a caller does not ask. The engine's own defaults are
 
 - **keys**: `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap`
 - **kind**: ceiling
+- **file**: any `.bsx.toml`
 - **type**: integer
 
 Bounds what a caller may ask for. Ceilings and defaults compose differently, and the difference is
@@ -276,6 +314,7 @@ whether a caller actually asked:
 
 - **keys**: `max_egress_v4`, `max_egress_v6`
 - **kind**: ceiling
+- **file**: any `.bsx.toml`
 - **type**: array of CIDR strings (`max_egress_v4 = ["10.0.0.0/8"]`)
 
 Bounds what `--allow` may name: every requested rule must fall inside one of the listed CIDRs, and a
@@ -286,6 +325,7 @@ rather than a silently absent bound. Empty (the default) bounds nothing.
 ## Setting `require_jail`
 
 - **kind**: posture
+- **file**: any `.bsx.toml`
 - **type**: boolean
 - **default**: `false`
 
@@ -296,6 +336,7 @@ Withdraws the `--unjailed` opt-out on this host, so every run gets the jailer.
 ## Setting `allow_net`
 
 - **kind**: posture
+- **file**: any `.bsx.toml`
 - **type**: boolean
 - **default**: `true`
 
@@ -307,6 +348,7 @@ stronger statement than the default posture: no guest networking at all.
 ## Setting `require_record`
 
 - **kind**: posture
+- **file**: any `.bsx.toml`
 - **type**: boolean
 - **default**: `false`
 
@@ -321,6 +363,7 @@ not the record, so a summary-only run still refuses
 ## Setting `records_dir`
 
 - **kind**: default
+- **file**: `~/.bsx.toml` only
 - **type**: string (path)
 
 Every `run` writes its signed record there, as `run-<secs>-<pid>.json`, unless `--record` names a
@@ -330,13 +373,59 @@ path.
 
 ---
 
+## A project file that reaches past its keys
+
+Setting a user-only key in a project file is a refusal, before any boot, naming the key and where it
+may live:
+
+```console
+$ cd /srv/work && bsx run -- true
+bsx: /srv/work/.bsx.toml: `kernel` is read from /home/you/.bsx.toml or BSX_KERNEL, not from a file
+found above the working directory, because such a file can arrive with the code it configures.
+Remove `kernel` from this file, or set it in /home/you/.bsx.toml.
+```
+
+Refused rather than ignored, for the same reason a misspelled key is: this file's contract is that
+what you wrote either takes effect or says why not. Dropping a correctly spelled, documented key
+while a typo fails loudly would be the inconsistency. Nothing is lost to an attacker either way,
+since whoever can plant that file can already stop the run with one malformed byte.
+
+`a_project_file_naming_a_user_only_key_is_refused_before_any_boot` pins the refusal, and
+`the_user_file_supplies_artifact_paths_when_a_project_file_shadows_it` pins the half that makes it
+usable: a project file does not take your `~/.bsx.toml` down with it.
+
+## When two files set the same knob
+
+The project file is nearer, but nearer does not mean freer. It wins outright only for the keys that
+carry no posture (`marker`, `log`, and the house defaults, which a caller could pass on the command
+line anyway). For the rest, the two compose so that the result is never weaker than either file
+alone:
+
+| Key | Result |
+|---|---|
+| `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap` | the smaller of the two |
+| `require_jail`, `require_record`, `require_limits` | on if either says on |
+| `allow_net` | `false` if either says `false` |
+| `max_egress_v4`, `max_egress_v6` | the user file's list binds; a project list applies only where the user set none |
+
+The egress rule is deliberately not an intersection. Filtering a project list against a narrower user
+list can yield the empty list, and an empty list means *no restriction*, so a merge meant to tighten
+would have removed the ceiling entirely (`a_project_egress_ceiling_does_not_replace_the_user_ceiling`).
+
 ## Where this is enforcement, and where it is a guardrail
 
-For the CLI this is a **guardrail**: a local caller owns this file, and
-[Security](./security.md#what-is-not-a-security-bug) already treats them as trusted.
+Three tiers, not two.
 
-The real boundary is [`bsx serve`](./daemon.md), whose clients control neither the daemon's config nor
-its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
+**Your own `~/.bsx.toml` is a guardrail.** You wrote it, so the ceilings in it bound you at your own
+request, and [Security](./security.md#what-is-not-a-security-bug) treats a caller harming themselves
+as misuse rather than a vulnerability.
+
+**A project `.bsx.toml` is not necessarily yours**, which is why the keys that reach host execution
+and host trust are not read from one, and why the keys that are read from one can only tighten what
+your own file already said.
+
+**The real boundary is [`bsx serve`](./daemon.md)**, whose clients control neither the daemon's config
+nor its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
 `--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, plus the daemon-wide `--max-sessions` and
-committed-resource ceilings) rather than from a discovered file: a daemon must not read a
+committed-resource ceilings) and reads no `.bsx.toml` at all, neither layer: a daemon must not read a
 security control out of whatever directory it happened to be started in.

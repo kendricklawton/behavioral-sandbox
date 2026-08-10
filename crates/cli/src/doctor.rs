@@ -120,11 +120,16 @@ fn json_escape(s: &str) -> String {
 /// when the engine can boot *something* (every hard prerequisite met), a failure code when a hard
 /// requirement is missing, so `bsx doctor && bsx run …` gates correctly.
 #[must_use]
-pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
+pub fn report(
+    config: &BootConfig,
+    args: &DoctorArgs,
+    sources: &crate::config::Sources,
+) -> ExitCode {
     let mut out = std::io::stdout();
 
     let mut checks = doctor::checks(config);
     checks.push(ebpf_check());
+    checks.push(config_check(sources));
 
     // The JSON form is the whole stdout result, so it returns before any human framing is written.
     if args.json {
@@ -243,6 +248,30 @@ fn ebpf_check() -> Check {
                 "--trace/--watch degrade to a coverage gap and --allow enforcement refuses: {e}"
             )),
         },
+    }
+}
+
+/// Which `.bsx.toml` layers this run read. Always `Ok`: a project file reaching for a user-only key
+/// is refused before dispatch, so this row cannot observe that case, and a host that uses no config
+/// file at all is a normal host rather than a degraded one. The row exists to explain where the
+/// artifact paths in the rows above came from, and it travels in `--json` for a host you do not own.
+fn config_check(sources: &crate::config::Sources) -> Check {
+    let user = match sources.user_path() {
+        Some(p) if p.is_file() => format!("user {}", p.display()),
+        Some(p) => format!("no user file at {}", p.display()),
+        None => "$HOME does not resolve, so there is no user file".to_string(),
+    };
+    let project = match sources.project_path() {
+        Some(p) => format!(
+            "project {} (house defaults, ceilings, and postures)",
+            p.display()
+        ),
+        None => "no project file above the working directory".to_string(),
+    };
+    Check {
+        label: "config (user file, project file)".to_string(),
+        status: CheckStatus::Ok,
+        note: Some(format!("{user}, {project}")),
     }
 }
 

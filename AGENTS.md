@@ -155,8 +155,11 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them.
   Git keeps them attached to the diff there.
 - `tracing` logs to stderr. A run writes its structured result and audit log to stdout, so
-  `bsx run … 2>/dev/null` stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then file
-  (`.bsx.toml`, the nearest one above the cwd), then defaults.
+  `bsx run … 2>/dev/null` stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then the
+  nearest `.bsx.toml` above the cwd, then `~/.bsx.toml`, then defaults. The project file carries the
+  house defaults, the ceilings, and the postures. The keys that name a host binary, a guest image, a
+  key, a write root, or a jail id are read from the user file, because a file above the cwd can
+  arrive with the code it configures.
 - **An em-dash is the exception, not the default.** Repo docs, code comments, and commit messages
   use a colon, a comma, or parentheses first. Use an em-dash only where those marks are ambiguous or
   too weak: to set off material that carries its own commas, or to make a break that is sharper than

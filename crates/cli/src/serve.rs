@@ -315,7 +315,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // serve records that claim to be verifiable but aren't signed. The daemon has no `.bsx.toml`
     // layer (env + flags only), so the path resolves from `BSX_SIGNING_KEY` or the default.
     let signing_key = match bsx_probes_loader::HostKey::load_or_generate(
-        &crate::config::signing_key_path(None),
+        &crate::config::signing_key_path(&crate::config::Sources::default()),
     ) {
         Ok(k) => k,
         Err(e) => {

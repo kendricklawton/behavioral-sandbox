@@ -78,8 +78,9 @@ fn main() -> Result<(), VmmError> {
 ```
 
 Leaving `ids` unset keeps the single fixed pair, which `--jail-uid` / `BSX_JAIL_UID` /
-`.bsx.toml`'s `jail_uid` select for operators who separate tenants by running a daemon each rather
-than by spanning one.
+`~/.bsx.toml`'s `jail_uid` select for operators who separate tenants by running a daemon each rather
+than by spanning one. The id is read from the user's own file rather than one found above the working
+directory, on the same reasoning that keeps it off the wire: it is the operator's to choose.
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 

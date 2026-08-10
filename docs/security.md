@@ -88,7 +88,9 @@ The mirror list, so reports stay signal:
   policy bind the *guest*. An embedder pointing the engine at a bad rootfs, exhausting their own
   host with a thousand sandboxes, or writing `RunResult` bytes somewhere unwise is misuse, not a
   vulnerability (the admission cap and typed errors are there to make misuse hard, not to defend
-  against the owner).
+  against the owner). A `.bsx.toml` inside a tree you cloned is **not** the caller, which is why the
+  keys that reach host execution and host trust are read from `~/.bsx.toml` rather than from a file
+  found above the working directory ([Configuration](./cli-config.md)).
 - **A hostile guest controlling the in-guest agent.** Assumed, by design; only effects that cross
   the boundary (escape, policy bypass, record forgery, host panic/hang/leak, secret exposure)
   count.

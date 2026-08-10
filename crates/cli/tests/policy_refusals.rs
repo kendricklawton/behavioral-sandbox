@@ -10,8 +10,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// A scratch cwd holding the test's `.bsx.toml`, removed on drop. Its own `.bsx.toml` is the
-/// nearest one, so discovery never reaches a stray file higher up the temp tree.
+/// A scratch cwd holding the test's project `.bsx.toml`, plus an empty `$HOME` for the spawned
+/// process, removed on drop. Its own `.bsx.toml` is the nearest one, and the pinned `HOME` has none,
+/// so neither layer of discovery reaches a stray file (including the developer's real
+/// `~/.bsx.toml`, which would otherwise supply artifact paths to every one of these runs).
 struct PolicyDir(PathBuf);
 
 impl PolicyDir {
@@ -19,9 +21,15 @@ impl PolicyDir {
         let dir = std::env::temp_dir().join(format!("bsx-policy-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+        std::fs::create_dir_all(dir.join("home")).unwrap_or_else(|e| panic!("create home: {e}"));
         std::fs::write(dir.join(".bsx.toml"), toml)
             .unwrap_or_else(|e| panic!("write .bsx.toml: {e}"));
         Self(dir)
+    }
+
+    /// The empty `$HOME` handed to the spawned `bsx`.
+    fn home(&self) -> PathBuf {
+        self.0.join("home")
     }
 }
 
@@ -41,6 +49,7 @@ fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
         .arg("--")
         .arg("true")
         .current_dir(&dir.0)
+        .env("HOME", dir.home())
         .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
         .env("BSX_SIGNING_KEY", dir.0.join("signing.key"))
         .output()
@@ -136,14 +145,33 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
 fn records_dir_satisfies_require_record_on_its_own() {
     // The book's sentence, pinned: "Satisfied on its own by records_dir." An operator who records
     // every run by default owes their callers no flag.
-    let dir = PolicyDir::with_toml(
-        "recdir",
-        "require_record = true\nrecords_dir = \"records\"\n",
-    );
+    //
+    // `records_dir` names a directory this host writes into, so it is read from the user file. The
+    // posture that needs it, `require_record`, can come from either.
+    let dir = PolicyDir::with_toml("recdir", "require_record = true\n");
+    std::fs::write(dir.home().join(".bsx.toml"), "records_dir = \"records\"\n")
+        .expect("write the user file");
     let (code, stderr) = run_in(&dir, &[]);
     assert_eq!(code, Some(2), "admitted, then fails on the missing VMM");
     assert!(
         !stderr.contains("operator policy"),
         "records_dir alone must satisfy require_record: {stderr}"
+    );
+}
+
+#[test]
+fn a_project_file_naming_a_user_only_key_is_refused_before_any_boot() {
+    // A `.bsx.toml` can arrive with the code it configures, so the keys that name a host binary are
+    // not read from one found above the working directory.
+    let dir = PolicyDir::with_toml("useronly", "firecracker = \"/tmp/planted-firecracker\"\n");
+    let (code, stderr) = run_in(&dir, &[]);
+    assert_eq!(code, Some(2), "refused, and before any boot");
+    assert!(
+        stderr.contains("`firecracker`") && stderr.contains(".bsx.toml"),
+        "names the key and the file: {stderr}"
+    );
+    assert!(
+        !stderr.contains("planted-firecracker"),
+        "and never reaches the planted path: {stderr}"
     );
 }

@@ -109,7 +109,10 @@ impl Drop for Daemon {
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
-    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+    // A `$HOME` with no `.bsx.toml`: the user file is read whatever the cwd is, so without this the
+    // developer's own config would supply artifact paths and ceilings to a golden-output test.
+    cmd.env("HOME", root.join("target"))
+        .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
         .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .env("BSX_LOG", "warn");

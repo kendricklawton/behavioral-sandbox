@@ -33,9 +33,9 @@ pub struct VerifyArgs {
 }
 
 /// Verify the record file, printing the outcome and returning a non-zero exit on any failure.
-pub fn run(args: VerifyArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
+pub fn run(args: VerifyArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
     let content = read_bounded(&args.record)?;
-    let trusted = trusted_keys(&args, file)?;
+    let trusted = trusted_keys(&args, sources)?;
 
     // One non-empty line is a single envelope; several are a session chain in file order. The
     // per-envelope size bound stays enforced inside the record crate either way
@@ -98,15 +98,12 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 /// Trusting a set is what lets a record signed *before* a key rotation still verify:
 /// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
 /// sources dedup cleanly.
-fn trusted_keys(
-    args: &VerifyArgs,
-    file: Option<&config::BsxToml>,
-) -> Result<Vec<TrustedKey>, CliError> {
+fn trusted_keys(args: &VerifyArgs, sources: &config::Sources) -> Result<Vec<TrustedKey>, CliError> {
     let mut hexes: Vec<String> = args.keys.clone();
-    hexes.extend(config::trusted_key_hexes(file));
+    hexes.extend(config::trusted_key_hexes(sources));
     // The host's own current key (its public half), if the file is present. A present-but-unreadable
     // key doesn't block an explicit `--key`/configured trust, so warn and skip rather than fail.
-    let key_path = config::signing_key_path(file);
+    let key_path = config::signing_key_path(sources);
     if key_path.exists() {
         match HostKey::open(&key_path) {
             Ok(hk) => hexes.push(hk.key_id()),

@@ -106,5 +106,6 @@ holds the wire types, `bsx-client` is a dependency-light reference client, and `
 
 The security-relevant difference from the CLI: a daemon's clients control neither its config file nor
 its environment, so it takes its resource ceilings as **explicit flags** rather than from a discovered
-`.bsx.toml`. A daemon must not read a security control out of whatever directory it happened to be
-started in.
+`.bsx.toml`, and reads neither config layer. A daemon must not read a security control out of whatever
+directory it happened to be started in. The CLI reads two layers for the same reason in miniature: a
+`.bsx.toml` above the cwd sets limits, and the keys reaching host execution come from `~/.bsx.toml`.

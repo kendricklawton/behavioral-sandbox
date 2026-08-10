@@ -231,8 +231,8 @@ main() {
         ok "installed $DATA/$f"
     done
 
-    # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
-    # finds ~/.bsx.toml for anything under $HOME). Never overwrites: your config is yours.
+    # A starter config, written only if none exists. This is the *user* file, read whatever directory
+    # you run from, and the only one that may name artifact paths. Never overwrites: yours is yours.
     if [ -z "${BSX_NO_TOML:-}" ] && [ ! -e "$HOME/.bsx.toml" ]; then
         # The jailed default (real root) builds a chroot under the scratch dir (a mknod'd /dev/kvm, an
         # exec'd firecracker copy); on a host whose default base (/tmp) is `nodev` (every systemd
@@ -247,7 +247,7 @@ main() {
             mkdir -p "$SCRATCH"
         fi
         {
-            say '# Written by install.sh; the engine reads the nearest .bsx.toml walking up from the cwd.'
+            say '# Written by install.sh; the engine reads this file whatever directory you run from.'
             printf 'kernel = "%s"\n' "$DATA/vmlinux"
             printf 'rootfs = "%s"\n' "$DATA/rootfs-guest.ext4"
             if [ -n "$SCRATCH" ]; then

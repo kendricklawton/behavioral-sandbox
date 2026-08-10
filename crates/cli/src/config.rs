@@ -1,19 +1,25 @@
-//! The `.bsx.toml` **file layer** of the config precedence `flags > env (BSX_*) > file > defaults`.
+//! The `.bsx.toml` **file layer** of the config precedence
+//! `flags > env (BSX_*) > project file > user file > defaults`.
 //!
 //! The env layer lives in [`bsx_engine::BootConfig::from_env`] and the flags layer is the CLI's own
-//! arguments, so this module inserts a file between env and defaults.
+//! arguments, so this module inserts two files between env and defaults.
 //!
+//! - **Two files, two trust levels.** The **user file** is `$HOME/.bsx.toml` and carries every key.
+//!   The **project file** is the nearest `.bsx.toml` walking up from the cwd, like `.gitignore`, and
+//!   carries only the keys that cannot weaken this host's posture. A file found above the working
+//!   directory can arrive with the code it configures, so the keys that name a host binary, a guest
+//!   image, a key path, a write root, or a jail id are read from the user file, the environment, or a
+//!   flag. [`project_from`] is the enforcer: it destructures every field of [`UserConfig`] with no
+//!   rest pattern, so a new key does not compile until it is classified.
 //! - **Two vocabularies.** The *artifact and scratch* keys mirror their `BSX_*` env names (minus the
 //!   prefix, lowercased), so a value is spelled the same wherever it comes from. The **operator-policy**
 //!   keys deliberately do not: they are the host's posture, and routing them through the precedence
-//!   above would let the caller they bound edit them (see [`BsxToml`]).
-//! - **Discovery** is the nearest `.bsx.toml` walking up from the cwd, like `.gitignore`, so a project
-//!   pins its engine config beside its code.
-//! - **Typos are a typed error**, never a silent no-op: the file is parsed with `deny_unknown_fields`,
-//!   so a misspelled key fails loudly rather than being ignored.
+//!   above would let the caller they bound edit them (see [`UserConfig`]).
+//! - **A misplaced or mistyped key is a typed error**, never a silent no-op: the file is parsed with
+//!   `deny_unknown_fields`, and a project file naming a user-only key is refused rather than dropped.
 //! - **The layering** composes a lookup for
 //!   [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with), returning the real env var if
-//!   set and the file's value otherwise, so the engine's env-key logic and defaults are not duplicated.
+//!   set and a file's value otherwise, so the engine's env-key logic and defaults are not duplicated.
 //!   The `log` key has no `BootConfig` field, so the CLI reads it from here directly.
 
 use std::ffi::OsString;
@@ -21,21 +27,23 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
-use bsx_engine::VmmError;
 use bsx_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
 use crate::policy::Policy;
 
-/// The file name discovered up from the cwd.
+/// The file name, both under `$HOME` and when discovered up from the cwd.
 const FILE_NAME: &str = ".bsx.toml";
 
 /// A parsed `.bsx.toml`. Every field is optional (an absent key falls through to the env/default
 /// layer); every key mirrors an `BSX_*` env name. Unknown keys are rejected so a typo can't
 /// silently no-op.
+///
+/// Named for where it may be read from in full: `$HOME/.bsx.toml`. A file found above the working
+/// directory is parsed into this type too, then narrowed by [`project_from`].
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BsxToml {
+pub struct UserConfig {
     /// Mirrors `BSX_FIRECRACKER`.
     firecracker: Option<PathBuf>,
     /// Mirrors `BSX_KERNEL`.
@@ -64,10 +72,12 @@ pub struct BsxToml {
     /// No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
 
-    // Operator policy. These do **not** mirror `BSX_*` env keys: they are the
-    // host's posture, not a per-invocation knob, and the ceilings exist precisely to bound what a
-    // caller may ask for, so routing them through the flags > env > file precedence would let the
-    // caller they bound edit them. See `crate::policy` for where this binds and where it is only a
+    // Operator policy. The ceilings and postures here do **not** mirror `BSX_*` env keys: they are
+    // the host's posture, not a per-invocation knob, and they exist precisely to bound what a caller
+    // may ask for, so routing them through the flags > env > file precedence would let the caller
+    // they bound edit them. The two jail ids are the exception, and carry `BSX_JAIL_UID` /
+    // `BSX_JAIL_GID`: an operator sets them per host, so they layer like the artifact keys and are
+    // read from the user file alone. See `crate::policy` for where this binds and where it is only a
     // guardrail.
     /// House default vCPUs when a caller does not ask.
     vcpus: Option<NonZeroU8>,
@@ -130,32 +140,34 @@ impl TryFrom<String> for CidrV6 {
     }
 }
 
-impl BsxToml {
-    /// Discover and parse the nearest `.bsx.toml` walking up from `start`, or `None` if none
-    /// exists between `start` and the filesystem root.
-    /// # Errors
-    /// [`VmmError::Vmm`] if a file is found but can't be read or has an unknown/mistyped key or bad
-    /// TOML, a config the operator wrote but got wrong must fail loudly, not be skipped.
-    pub fn discover(start: &Path) -> Result<Option<Self>, VmmError> {
+impl UserConfig {
+    /// The nearest `.bsx.toml` walking up from `start`, or `None` if none exists between `start`
+    /// and the filesystem root.
+    fn nearest(start: &Path) -> Option<PathBuf> {
         let mut dir = Some(start);
         while let Some(d) = dir {
             let candidate = d.join(FILE_NAME);
             if candidate.is_file() {
-                return Self::parse_file(&candidate).map(Some);
+                return Some(candidate);
             }
             dir = d.parent();
         }
-        Ok(None)
+        None
     }
 
     /// Read + parse one `.bsx.toml`, naming the file in any error.
-    fn parse_file(path: &Path) -> Result<Self, VmmError> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| VmmError::Vmm(format!("read {}: {e}", path.display())))?;
-        Self::parse(&text).map_err(|e| VmmError::Vmm(format!("{}: {e}", path.display())))
+    fn parse_file(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        Self::parse(&text).map_err(|message| ConfigError::Parse {
+            path: path.to_path_buf(),
+            message,
+        })
     }
 
-    /// Parse TOML text into an [`BsxToml`], surfacing an unknown-key/type error as a plain string
+    /// Parse TOML text into a [`UserConfig`], surfacing an unknown-key/type error as a plain string
     /// (the pure core the file reader and the unit tests share).
     fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| e.message().to_string())
@@ -220,23 +232,6 @@ impl BsxToml {
     /// of these keys, yields the default policy, which changes nothing.
     #[must_use]
     pub fn policy(&self) -> Policy {
-        // Already validated at deserialize time (`CidrV4`/`CidrV6`), so this projection cannot
-        // drop an entry.
-        let max_egress_v4 = self
-            .max_egress_v4
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|c| c.0)
-            .collect();
-        let max_egress_v6 = self
-            .max_egress_v6
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|c| c.0)
-            .collect();
-
         Policy {
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
@@ -250,10 +245,163 @@ impl BsxToml {
             allow_net: self.allow_net,
             require_record: self.require_record.unwrap_or(false),
             records_dir: self.records_dir.clone(),
-            max_egress_v4,
-            max_egress_v6,
+            max_egress_v4: cidrs_v4(self.max_egress_v4.as_deref()),
+            max_egress_v6: cidrs_v6(self.max_egress_v6.as_deref()),
         }
     }
+}
+
+/// Already validated at deserialize time (`CidrV4`), so this projection cannot drop an entry.
+fn cidrs_v4(list: Option<&[CidrV4]>) -> Vec<Ipv4Cidr> {
+    list.unwrap_or(&[]).iter().map(|c| c.0).collect()
+}
+
+/// The v6 twin of [`cidrs_v4`].
+fn cidrs_v6(list: Option<&[CidrV6]>) -> Vec<Ipv6Cidr> {
+    list.unwrap_or(&[]).iter().map(|c| c.0).collect()
+}
+
+/// What a `.bsx.toml` found above the working directory may set: house defaults a caller could pass
+/// on the command line anyway, and ceilings and postures that only ever refuse more than they
+/// permit. It carries no path, key, or identity field, so no lookup over it can return one.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProjectConfig {
+    marker: Option<String>,
+    log: Option<String>,
+    require_limits: bool,
+    policy: Policy,
+}
+
+impl ProjectConfig {
+    /// The file's `marker`, if set.
+    #[must_use]
+    pub fn marker(&self) -> Option<&str> {
+        self.marker.as_deref()
+    }
+
+    /// The file's `log` filter, if set.
+    #[must_use]
+    pub fn log(&self) -> Option<&str> {
+        self.log.as_deref()
+    }
+
+    /// Whether the file asks for `require_limits`. There is no "asks it off": see [`project_from`].
+    #[must_use]
+    pub fn require_limits(&self) -> bool {
+        self.require_limits
+    }
+
+    /// The operator policy this file declares.
+    #[must_use]
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+}
+
+/// The `BSX_*` variable a user-only key mirrors, or `None` for the keys that have none.
+fn env_mirror(key: &str) -> Option<&'static str> {
+    match key {
+        "firecracker" => Some("BSX_FIRECRACKER"),
+        "kernel" => Some("BSX_KERNEL"),
+        "rootfs" => Some("BSX_ROOTFS"),
+        "scratch_dir" => Some("BSX_SCRATCH_DIR"),
+        "signing_key" => Some("BSX_SIGNING_KEY"),
+        "trusted_keys" => Some("BSX_TRUSTED_KEYS"),
+        "gateway" => Some("BSX_GATEWAY"),
+        "resolver" => Some("BSX_RESOLVER"),
+        "jail_uid" => Some("BSX_JAIL_UID"),
+        "jail_gid" => Some("BSX_JAIL_GID"),
+        _ => None,
+    }
+}
+
+/// Narrow a parsed file to what a project-local one may carry, or name every user-only key it set.
+///
+/// **This function is the enforcer for the two trust levels.** It destructures every field of
+/// [`UserConfig`] with no rest pattern, so a new key does not compile here until someone classifies
+/// it, and a binding that is neither returned nor refused trips the workspace's denied
+/// `unused_variables`.
+///
+/// # Errors
+/// The names of the user-only keys the file set, in declaration order.
+pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>> {
+    let UserConfig {
+        // User-only. Each names a binary this host executes, an image it boots, a key it signs or
+        // verifies with, a directory it writes into, or the identity a VMM drops to.
+        firecracker,
+        kernel,
+        rootfs,
+        scratch_dir,
+        signing_key,
+        trusted_keys,
+        records_dir,
+        gateway,
+        resolver,
+        jail_uid,
+        jail_gid,
+        // Project-honored.
+        marker,
+        log,
+        require_limits,
+        vcpus,
+        mem_mib,
+        wall_secs,
+        output_cap,
+        max_vcpus,
+        max_mem_mib,
+        max_wall_secs,
+        max_output_cap,
+        require_jail,
+        allow_net,
+        require_record,
+        max_egress_v4,
+        max_egress_v6,
+    } = cfg;
+
+    let refused: Vec<&'static str> = [
+        ("firecracker", firecracker.is_some()),
+        ("kernel", kernel.is_some()),
+        ("rootfs", rootfs.is_some()),
+        ("scratch_dir", scratch_dir.is_some()),
+        ("signing_key", signing_key.is_some()),
+        ("trusted_keys", trusted_keys.is_some()),
+        ("records_dir", records_dir.is_some()),
+        ("gateway", gateway.is_some()),
+        ("resolver", resolver.is_some()),
+        ("jail_uid", jail_uid.is_some()),
+        ("jail_gid", jail_gid.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .collect();
+    if !refused.is_empty() {
+        return Err(refused);
+    }
+
+    Ok(ProjectConfig {
+        marker,
+        log,
+        // Only the strengthening direction travels, so a project `false` contributes nothing and
+        // cannot displace a user file's `true` in the composed lookup.
+        require_limits: require_limits.unwrap_or(false),
+        policy: Policy {
+            vcpus,
+            mem_mib,
+            wall_secs,
+            output_cap,
+            max_vcpus,
+            max_mem_mib,
+            max_wall_secs,
+            max_output_cap,
+            require_jail: require_jail.unwrap_or(false),
+            allow_net,
+            require_record: require_record.unwrap_or(false),
+            // `records_dir` is user-only and was refused above.
+            records_dir: None,
+            max_egress_v4: cidrs_v4(max_egress_v4.as_deref()),
+            max_egress_v6: cidrs_v6(max_egress_v6.as_deref()),
+        },
+    })
 }
 
 fn parse_v4_cidr(s: &str) -> Result<Ipv4Cidr, String> {
@@ -296,26 +444,220 @@ fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
     }
 }
 
-/// The operator policy for this process: the nearest `.bsx.toml`'s, or the permissive default when
-/// there is no file. `run` and `shell` both source policy through here, so the two CLI paths agree.
+/// A `.bsx.toml` the CLI could not use. Every variant names the file, so a message can send the
+/// reader to the line they wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// The file exists but could not be read.
+    Read { path: PathBuf, message: String },
+    /// The file is not valid TOML, or names a key that does not exist.
+    Parse { path: PathBuf, message: String },
+    /// A project-local file set keys that are read from the user file, the environment, or a flag.
+    UserOnlyKeys {
+        path: PathBuf,
+        user_path: Option<PathBuf>,
+        keys: Vec<&'static str>,
+    },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Read { path, message } => write!(f, "read {}: {message}", path.display()),
+            ConfigError::Parse { path, message } => write!(f, "{}: {message}", path.display()),
+            ConfigError::UserOnlyKeys {
+                path,
+                user_path,
+                keys,
+            } => {
+                let names: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+                let names = names.join(", ");
+                let (verb, pronoun) = if keys.len() == 1 {
+                    ("is", "it")
+                } else {
+                    ("are", "them")
+                };
+                // Name the `BSX_*` route only when every refused key has one: `records_dir` has no
+                // mirror, so a blanket "the matching variable" would send the reader to nothing.
+                let envs = keys
+                    .iter()
+                    .map(|k| env_mirror(k))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| v.join(" / "));
+                let (source, fix) = match (user_path, &envs) {
+                    (Some(p), Some(e)) => (
+                        format!("{} or {e}", p.display()),
+                        format!("set {pronoun} in {}", p.display()),
+                    ),
+                    (Some(p), None) => (
+                        p.display().to_string(),
+                        format!("set {pronoun} in {}", p.display()),
+                    ),
+                    (None, Some(e)) => (
+                        format!("{e}, since $HOME does not resolve here"),
+                        format!("set {e}"),
+                    ),
+                    (None, None) => (
+                        "$HOME/.bsx.toml, which does not resolve here".to_string(),
+                        "set $HOME so the user config resolves".to_string(),
+                    ),
+                };
+                write!(
+                    f,
+                    "{}: {names} {verb} read from {source}, not from a file found above the working \
+                     directory, because such a file can arrive with the code it configures. Remove \
+                     {pronoun} from this file, or {fix}.",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// The two config files this process reads: the user's own, and the project-local one.
+///
+/// Threading one of these instead of a bare parsed file is what keeps the trust levels apart at the
+/// call sites: the accessors that reach a host binary, a key, or a jail id read [`Self::user`]
+/// alone, and no lookup can reach a path through the project layer because [`ProjectConfig`] has no
+/// path field to reach.
+#[derive(Debug, Default, Clone)]
+pub struct Sources {
+    user: Option<UserConfig>,
+    user_path: Option<PathBuf>,
+    project: Option<ProjectConfig>,
+    project_path: Option<PathBuf>,
+}
+
+impl Sources {
+    /// Read `$HOME/.bsx.toml` and the nearest `.bsx.toml` above `cwd`.
+    ///
+    /// # Errors
+    /// [`ConfigError`] if either file cannot be read or parsed, or if the project-local one sets a
+    /// user-only key. A config the operator wrote but got wrong must fail loudly, not be skipped.
+    pub fn discover(cwd: &Path) -> Result<Self, ConfigError> {
+        Self::discover_with(cwd, std::env::var_os("HOME").map(PathBuf::from))
+    }
+
+    /// The pure core of [`discover`](Self::discover), taking `$HOME` rather than reading it, so
+    /// every precedence case is unit-testable without mutating the process environment (`set_var`
+    /// is `unsafe` in edition 2024 and races the parallel test runner).
+    ///
+    /// # Errors
+    /// As [`discover`](Self::discover).
+    pub(crate) fn discover_with(cwd: &Path, home: Option<PathBuf>) -> Result<Self, ConfigError> {
+        // A relative `$HOME` names a different directory depending on where the process started, so
+        // it does not identify the user's own file. Same filter `bsx_record`'s data dir applies.
+        let user_path = home.filter(|h| h.is_absolute()).map(|h| h.join(FILE_NAME));
+        let user = match user_path.as_deref() {
+            Some(p) if p.is_file() => Some(UserConfig::parse_file(p)?),
+            _ => None,
+        };
+
+        // Walking up from a cwd under `$HOME` lands on the user's own file. Classifying it as a
+        // project file would refuse the user their own keys, so identity is resolved first.
+        let project_path = UserConfig::nearest(cwd).filter(|n| !same_file(n, user_path.as_deref()));
+        let project = match project_path.as_deref() {
+            Some(p) => {
+                let parsed = UserConfig::parse_file(p)?;
+                Some(
+                    project_from(parsed).map_err(|keys| ConfigError::UserOnlyKeys {
+                        path: p.to_path_buf(),
+                        user_path: user_path.clone(),
+                        keys,
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            user,
+            user_path,
+            project,
+            project_path,
+        })
+    }
+
+    /// The composed `env > project > user` lookup
+    /// [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with) consumes.
+    pub fn boot_lookup(&self) -> impl Fn(&str) -> Option<OsString> + '_ {
+        move |key| {
+            std::env::var_os(key)
+                .or_else(|| self.project_env(key))
+                .or_else(|| self.user.as_ref().and_then(|u| u.env_value(key)))
+        }
+    }
+
+    /// The project layer's contribution to the composed lookup. Two arms, and a third that returned
+    /// a path could not be written: [`ProjectConfig`] holds no such field.
+    fn project_env(&self, key: &str) -> Option<OsString> {
+        let p = self.project.as_ref()?;
+        match key {
+            "BSX_MARKER" => p.marker().map(OsString::from),
+            "BSX_REQUIRE_LIMITS" => p.require_limits().then(|| OsString::from("true")),
+            _ => None,
+        }
+    }
+
+    /// Where the user file was looked for, whether or not one is there.
+    #[must_use]
+    pub fn user_path(&self) -> Option<&Path> {
+        self.user_path.as_deref()
+    }
+
+    /// The project-local file that was read, if one was.
+    #[must_use]
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
+    }
+}
+
+/// Whether `path` and `other` name the same file, resolving links so a `$HOME` that is itself a
+/// symlink still recognises its own config.
+fn same_file(path: &Path, other: Option<&Path>) -> bool {
+    let Some(other) = other else { return false };
+    match (path.canonicalize(), other.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => path == other,
+    }
+}
+
+/// The operator policy for this process: the user file's, tightened by the project file's.
+/// `run` and `shell` both source policy through here, so the two CLI paths agree.
 ///
 /// The daemon deliberately does **not**: `serve` builds its [`Policy`] from its own flags, because a
 /// daemon must not read a security control out of whatever directory it happened to be started in.
 /// That divergence is the design, not drift, so this function is the CLI's single source and not the
 /// process's.
 #[must_use]
-pub fn policy_of(file: Option<&BsxToml>) -> Policy {
-    file.map(BsxToml::policy).unwrap_or_default()
+pub fn policy_of(sources: &Sources) -> Policy {
+    let user = sources
+        .user
+        .as_ref()
+        .map(UserConfig::policy)
+        .unwrap_or_default();
+    match sources.project.as_ref() {
+        Some(p) => user.tightened_by(p.policy()),
+        None => user,
+    }
 }
 
 /// Resolve the host record-signing key path with `env (BSX_SIGNING_KEY) > file > default`
 /// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
 /// The default is [`bsx_probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
-pub fn signing_key_path(file: Option<&BsxToml>) -> PathBuf {
+pub fn signing_key_path(sources: &Sources) -> PathBuf {
     std::env::var_os("BSX_SIGNING_KEY")
         .map(PathBuf::from)
-        .or_else(|| file.and_then(BsxToml::signing_key).map(Path::to_path_buf))
+        .or_else(|| {
+            sources
+                .user
+                .as_ref()
+                .and_then(UserConfig::signing_key)
+                .map(Path::to_path_buf)
+        })
         .unwrap_or_else(bsx_probes_loader::default_key_path)
 }
 
@@ -324,7 +666,7 @@ pub fn signing_key_path(file: Option<&BsxToml>) -> PathBuf {
 /// override: every configured key stays trusted so a record signed before a key rotation still
 /// verifies. Parsing/validation is the caller's (`TrustedKey::from_hex`).
 #[must_use]
-pub fn trusted_key_hexes(file: Option<&BsxToml>) -> Vec<String> {
+pub fn trusted_key_hexes(sources: &Sources) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(v) = std::env::var_os("BSX_TRUSTED_KEYS") {
         out.extend(
@@ -335,7 +677,9 @@ pub fn trusted_key_hexes(file: Option<&BsxToml>) -> Vec<String> {
                 .map(str::to_string),
         );
     }
-    if let Some(f) = file {
+    // The user file only: this set is additive, so a file that could add to it could make a record
+    // it signed verify against this host.
+    if let Some(f) = sources.user.as_ref() {
         out.extend(f.trusted_keys().iter().cloned());
     }
     out
@@ -345,20 +689,35 @@ pub fn trusted_key_hexes(file: Option<&BsxToml>) -> Vec<String> {
 /// The `BootConfig` layers can't carry `log` (it has no field), so this mirrors that precedence for
 /// the one config value that drives `tracing` instead of the engine.
 #[must_use]
-pub fn resolve_log(flag: Option<&str>, file: Option<&BsxToml>) -> Option<String> {
+pub fn resolve_log(flag: Option<&str>, sources: &Sources) -> Option<String> {
     flag.map(str::to_string)
         .or_else(|| std::env::var("BSX_LOG").ok())
-        .or_else(|| file.and_then(BsxToml::log).map(str::to_string))
+        .or_else(|| {
+            sources
+                .project
+                .as_ref()
+                .and_then(ProjectConfig::log)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            sources
+                .user
+                .as_ref()
+                .and_then(UserConfig::log)
+                .map(str::to_string)
+        })
 }
 
 #[cfg(test)]
 mod tests {
+    use bsx_test_support::ScratchDir;
+
     use super::*;
 
     #[test]
     fn unknown_key_is_a_typed_error_not_a_silent_no_op() {
         // A typo (`kernal`) must fail loudly, per the deny-unknown-fields contract.
-        let err = BsxToml::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
+        let err = UserConfig::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
         assert!(
             err.contains("kernal") || err.contains("unknown"),
             "names the bad key: {err}"
@@ -367,7 +726,7 @@ mod tests {
 
     #[test]
     fn known_keys_parse_into_env_values() {
-        let toml = BsxToml::parse(
+        let toml = UserConfig::parse(
             "kernel = \"/k/vmlinux\"\nrootfs = \"/r/root.ext4\"\nmarker = \"UP\"\nlog = \"debug\"\n",
         )
         .expect("valid toml parses");
@@ -394,7 +753,7 @@ mod tests {
         // renders decimal text and `from_env_with` parses it back, so the file never gets a second
         // validation path that could accept an id the env layer refuses.
         let set =
-            BsxToml::parse("jail_uid = 20001\njail_gid = 20002\n").expect("valid toml parses");
+            UserConfig::parse("jail_uid = 20001\njail_gid = 20002\n").expect("valid toml parses");
         assert_eq!(set.env_value("BSX_JAIL_UID"), Some(OsString::from("20001")));
         assert_eq!(set.env_value("BSX_JAIL_GID"), Some(OsString::from("20002")));
         let jail = bsx_engine::BootConfig::from_env_with(|k| set.env_value(k))
@@ -404,7 +763,7 @@ mod tests {
 
         // Unset leaves the jail alone: the CLI's own `unwrap_or_default()` supplies the pinned ids,
         // and an unjailed boot drops the whole `Jail` regardless.
-        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        let bare = UserConfig::parse("marker = \"UP\"\n").expect("valid toml parses");
         assert!(bare.env_value("BSX_JAIL_UID").is_none());
         assert!(
             bsx_engine::BootConfig::from_env_with(|k| bare.env_value(k))
@@ -417,14 +776,14 @@ mod tests {
     fn require_limits_bool_renders_the_env_token_from_env_parses() {
         // The file bool slots under the env in one composed lookup: `env_value` renders the canonical
         // token, and `BootConfig::from_env_with` parses it back onto the posture (env > file > default).
-        let on = BsxToml::parse("require_limits = true\n").expect("valid toml parses");
+        let on = UserConfig::parse("require_limits = true\n").expect("valid toml parses");
         assert_eq!(
             on.env_value("BSX_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
         assert!(bsx_engine::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
-        let off = BsxToml::parse("require_limits = false\n").expect("valid toml parses");
+        let off = UserConfig::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
             off.env_value("BSX_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
@@ -432,21 +791,21 @@ mod tests {
         assert!(!bsx_engine::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
-        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        let bare = UserConfig::parse("marker = \"UP\"\n").expect("valid toml parses");
         assert_eq!(bare.env_value("BSX_REQUIRE_LIMITS"), None);
     }
 
     #[test]
     fn signing_key_parses_from_the_file_layer() {
         let toml =
-            BsxToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
+            UserConfig::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
         assert_eq!(
             toml.signing_key(),
             Some(Path::new("/keys/host.ed25519")),
             "the file layer carries the record-signing key path"
         );
         assert_eq!(
-            BsxToml::default().signing_key(),
+            UserConfig::default().signing_key(),
             None,
             "unset falls through"
         );
@@ -454,10 +813,11 @@ mod tests {
 
     #[test]
     fn trusted_keys_parse_as_a_list_from_the_file_layer() {
-        let toml = BsxToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
+        let toml =
+            UserConfig::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
         assert_eq!(toml.trusted_keys(), ["aa".to_string(), "bb".to_string()]);
         assert!(
-            BsxToml::default().trusted_keys().is_empty(),
+            UserConfig::default().trusted_keys().is_empty(),
             "unset is an empty set, not an error"
         );
     }
@@ -466,8 +826,8 @@ mod tests {
     fn env_beats_file_beats_default_via_the_composed_lookup() {
         // The layering `BootConfig::from_env_with` sees: env wins over file, file over default. Model
         // that composition here without a real process env or a real BootConfig.
-        let file =
-            BsxToml::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n").expect("valid");
+        let file = UserConfig::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n")
+            .expect("valid");
         // A fake environment that only sets the kernel.
         let env = |key: &str| -> Option<OsString> {
             match key {
@@ -489,25 +849,25 @@ mod tests {
     fn malformed_egress_ceiling_is_a_typed_error_not_a_dropped_entry() {
         // A dropped ceiling entry *widens* the ceiling (empty means unrestricted in
         // `Policy::check_egress`), so a typo must refuse the whole file, loudly, at parse time.
-        let err = BsxToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
+        let err = UserConfig::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
             .expect_err("a malformed CIDR entry must fail the parse");
         assert!(
             err.contains("10.0.0.0-8") && err.contains("max_egress_v4"),
             "error names the entry and the key: {err}"
         );
 
-        let err = BsxToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
+        let err = UserConfig::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
             .expect_err("an out-of-range prefix must fail the parse");
         assert!(err.contains("10.0.0.0/33"), "error names the entry: {err}");
 
-        let err = BsxToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
+        let err = UserConfig::parse("max_egress_v6 = [\"fd00::/129\"]\n")
             .expect_err("an out-of-range v6 prefix must fail the parse");
         assert!(err.contains("fd00::/129"), "error names the entry: {err}");
     }
 
     #[test]
     fn egress_ceilings_parse_into_the_policy_unabridged() {
-        let toml = BsxToml::parse(
+        let toml = UserConfig::parse(
             "max_egress_v4 = [\"10.0.0.0/8\", \"192.0.2.7\"]\nmax_egress_v6 = [\"fd00::/8\"]\n",
         )
         .expect("valid ceilings parse");
@@ -525,33 +885,169 @@ mod tests {
             vec![bsx_probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
         );
         // Absent keys stay "no restriction": the permissive default, explicitly chosen.
-        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid");
+        let bare = UserConfig::parse("marker = \"UP\"\n").expect("valid");
         assert!(bare.policy().max_egress_v4.is_empty());
         assert!(bare.policy().max_egress_v6.is_empty());
     }
 
-    #[test]
-    fn discover_walks_up_from_the_cwd_and_finds_the_nearest() {
-        // A three-level temp tree with a file at the top; discovery from the leaf finds it.
-        let base = std::env::temp_dir().join(format!("bsx-cfg-{}", std::process::id()));
-        let leaf = base.join("a/b");
+    /// A three-level tree under a reclaimed scratch dir, with `.bsx.toml` bodies written at the
+    /// levels `at` names. Returns the scratch dir (kept alive by the caller) and the leaf.
+    fn tree(tag: &str, at: &[(&str, &str)]) -> (ScratchDir, PathBuf) {
+        let dir = ScratchDir::created(tag);
+        let leaf = dir.path().join("a/b");
         std::fs::create_dir_all(&leaf).expect("mkdirs");
-        std::fs::write(base.join(".bsx.toml"), "marker = \"FROMFILE\"\n").expect("write");
-        // A nearer file shadows the farther one.
-        std::fs::write(base.join("a/.bsx.toml"), "marker = \"NEARER\"\n").expect("write nearer");
-        let found = BsxToml::discover(&leaf)
-            .expect("discover ok")
-            .expect("a file exists");
-        assert_eq!(found.log(), None);
-        assert_eq!(
-            found.env_value("BSX_MARKER"),
-            Some(OsString::from("NEARER"))
+        for (rel, body) in at {
+            let p = dir.path().join(rel).join(FILE_NAME);
+            std::fs::write(&p, body).expect("write a .bsx.toml into the tree");
+        }
+        (dir, leaf)
+    }
+
+    #[test]
+    fn nearest_project_file_shadows_a_farther_one() {
+        let (dir, leaf) = tree(
+            "cfg-nearest",
+            &[
+                ("", "marker = \"FARTHER\"\n"),
+                ("a", "marker = \"NEARER\"\n"),
+            ],
         );
-        // None above the tree.
-        let empty = std::env::temp_dir().join(format!("bsx-cfg-empty-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).expect("mkdir empty");
-        assert_eq!(BsxToml::discover(&empty).expect("ok"), None);
-        let _ = std::fs::remove_dir_all(&base);
-        let _ = std::fs::remove_dir_all(&empty);
+        let sources = Sources::discover_with(&leaf, None).expect("discover ok");
+        assert_eq!(
+            sources.project.as_ref().and_then(ProjectConfig::marker),
+            Some("NEARER"),
+            "the nearer file shadows the farther one"
+        );
+        assert_eq!(
+            sources.project_path(),
+            Some(dir.path().join("a").join(FILE_NAME).as_path())
+        );
+
+        // None above a tree that has no file at all.
+        let empty = ScratchDir::created("cfg-empty");
+        let bare = Sources::discover_with(empty.path(), None).expect("ok");
+        assert!(bare.project_path().is_none() && bare.user_path().is_none());
+    }
+
+    #[test]
+    fn the_user_file_supplies_artifact_paths_when_a_project_file_shadows_it() {
+        // The regression this split exists for: a project file that sets one knob used to shadow
+        // the user's whole file, taking the artifact paths with it.
+        let home = ScratchDir::created("cfg-home");
+        std::fs::write(
+            home.path().join(FILE_NAME),
+            "kernel = \"/user/vmlinux\"\nvcpus = 8\n",
+        )
+        .expect("write user file");
+        let (_dir, leaf) = tree("cfg-shadow", &[("a", "vcpus = 2\n")]);
+
+        let sources =
+            Sources::discover_with(&leaf, Some(home.path().to_path_buf())).expect("discover ok");
+        let lookup = sources.boot_lookup();
+        assert_eq!(
+            lookup("BSX_KERNEL"),
+            Some(OsString::from("/user/vmlinux")),
+            "the user file still supplies the kernel path"
+        );
+        assert_eq!(
+            policy_of(&sources).vcpus.map(NonZeroU8::get),
+            Some(2),
+            "and the nearer file still wins for a house default"
+        );
+    }
+
+    #[test]
+    fn a_project_file_that_sets_a_user_only_key_is_refused_naming_the_key_and_where_it_may_live() {
+        let home = ScratchDir::created("cfg-refuse-home");
+        std::fs::write(home.path().join(FILE_NAME), "vcpus = 1\n").expect("write user file");
+        let (_dir, leaf) = tree("cfg-refuse", &[("a", "kernel = \"/evil/vmlinux\"\n")]);
+
+        let err = Sources::discover_with(&leaf, Some(home.path().to_path_buf()))
+            .expect_err("a project file may not name `kernel`");
+        let msg = err.to_string();
+        assert!(msg.contains("`kernel`"), "names the key: {msg}");
+        assert!(msg.contains("BSX_KERNEL"), "names the env route: {msg}");
+        assert!(
+            msg.contains(&home.path().join(FILE_NAME).display().to_string()),
+            "names where it may live: {msg}"
+        );
+    }
+
+    #[test]
+    fn project_config_drops_every_user_only_key() {
+        let all = "firecracker = \"/f\"\nkernel = \"/k\"\nrootfs = \"/r\"\n\
+                   scratch_dir = \"/s\"\nsigning_key = \"/sk\"\ntrusted_keys = [\"aa\"]\n\
+                   records_dir = \"/rd\"\ngateway = \"10.0.0.1\"\nresolver = \"10.0.0.2\"\n\
+                   jail_uid = 20001\njail_gid = 20002\nvcpus = 2\n";
+        let keys = project_from(UserConfig::parse(all).expect("valid toml"))
+            .expect_err("every user-only key must be refused");
+        assert_eq!(
+            keys,
+            vec![
+                "firecracker",
+                "kernel",
+                "rootfs",
+                "scratch_dir",
+                "signing_key",
+                "trusted_keys",
+                "records_dir",
+                "gateway",
+                "resolver",
+                "jail_uid",
+                "jail_gid",
+            ],
+            "all eleven are named, in declaration order"
+        );
+    }
+
+    #[test]
+    fn a_project_file_at_the_user_path_is_read_once_as_the_user_file() {
+        // Working inside `$HOME` is the ordinary case: the walk up lands on the user's own file,
+        // which must keep its full authority rather than be narrowed as a project file.
+        let home = ScratchDir::created("cfg-identity");
+        std::fs::write(home.path().join(FILE_NAME), "kernel = \"/user/vmlinux\"\n")
+            .expect("write user file");
+        let sources = Sources::discover_with(home.path(), Some(home.path().to_path_buf()))
+            .expect("the user's own file is not a project file");
+        assert!(
+            sources.project_path().is_none(),
+            "not classified as a project file"
+        );
+        assert_eq!(
+            sources.boot_lookup()("BSX_KERNEL"),
+            Some(OsString::from("/user/vmlinux"))
+        );
+    }
+
+    #[test]
+    fn no_home_means_no_user_config_and_a_project_file_still_supplies_the_house_defaults() {
+        let (_dir, leaf) = tree("cfg-nohome", &[("a", "vcpus = 3\n")]);
+        let sources = Sources::discover_with(&leaf, None).expect("discover ok");
+        assert!(sources.user_path().is_none());
+        assert_eq!(policy_of(&sources).vcpus.map(NonZeroU8::get), Some(3));
+    }
+
+    #[test]
+    fn a_project_require_limits_can_tighten_the_posture_and_cannot_relax_it() {
+        let home = ScratchDir::created("cfg-rl-home");
+        std::fs::write(home.path().join(FILE_NAME), "require_limits = true\n").expect("write");
+
+        // A project file saying `false` contributes nothing, so the user's `true` still stands.
+        let (_off, leaf_off) = tree("cfg-rl-off", &[("a", "require_limits = false\n")]);
+        let relaxed = Sources::discover_with(&leaf_off, Some(home.path().to_path_buf()))
+            .expect("discover ok");
+        assert_eq!(
+            relaxed.boot_lookup()("BSX_REQUIRE_LIMITS"),
+            Some(OsString::from("true")),
+            "a project file cannot relax the user's posture"
+        );
+
+        // And it can strengthen one the user never set.
+        let (_on, leaf_on) = tree("cfg-rl-on", &[("a", "require_limits = true\n")]);
+        let tightened = Sources::discover_with(&leaf_on, None).expect("discover ok");
+        assert_eq!(
+            tightened.boot_lookup()("BSX_REQUIRE_LIMITS"),
+            Some(OsString::from("true"))
+        );
     }
 }

@@ -237,8 +237,8 @@ impl BootConfig {
     /// `lookup`, keyed by the `BSX_*` env name. Two uses: precedence is unit-testable without
     /// mutating the process environment (which races under the parallel runner and is `unsafe` from
     /// edition 2024); and a caller can **layer another source under the environment** by returning
-    /// the real env var if set, else its own value, e.g. the CLI's `.bsx.toml` file layer resolves
-    /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
+    /// the real env var if set, else its own value, e.g. the CLI's two `.bsx.toml` layers resolve
+    /// `env > project file > user file > defaults` by chaining `or_else` over each source.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
         if let Some(v) = lookup("BSX_FIRECRACKER") {
