@@ -10,12 +10,17 @@
 //! `AUDIT_SCHEMA_VERSION` bumped with a deliberate migration story, then a regenerated fixture
 //! (`regenerate_fixture` below).
 
+// The fixture readers below sit outside the `#[test]` bodies where the no-panic lints are relaxed,
+// and a fixture this suite cannot read is a failed test either way.
+#![allow(clippy::expect_used)]
+
 use std::time::Duration;
 
 use bsx_record::{
-    AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats, RecordSubject, ResourceSummary,
-    RunRecord, SyscallEvent, SyscallFootprint, Timing, TrustedKey, record_hash, verify,
-    verify_chain,
+    AUDIT_SCHEMA_VERSION, AxisGap, FlowCounts, FlowKey, HostKey, MAX_ENVELOPE_BYTES, NetSection,
+    NetStats, RecordSubject, ResourceSummary, RunRecord, SIGNED_RECORD_SCHEMA_VERSION,
+    SUMMARY_SCHEMA_VERSION, SyscallEvent, SyscallFootprint, Timing, TrustedKey, record_hash,
+    verify, verify_chain,
 };
 
 /// The frozen envelope. Regenerate only on a deliberate schema bump (`regenerate_fixture`).
@@ -25,11 +30,28 @@ const ENVELOPE: &str = include_str!("fixtures/run-record.envelope.json");
 /// about the single-record fixture covers that framing, so a change to it would reach
 /// backwards through every session record on disk with the single-record pin still green.
 const CHAIN: &str = include_str!("fixtures/run-record.chain.jsonl");
+/// The fixture set's metadata: the record-side schema numbers, and the key id and canonical hash
+/// the envelopes above verify under. Beside the fixtures rather than in this file, so a verifier in
+/// another language reads the whole set without reading Rust.
+const META: &str = include_str!("fixtures/meta.json");
+
+/// One string out of [`META`], by its key under `fixture`. Optional rather than panicking, since a
+/// helper here sits outside the `#[test]` bodies where the no-panic lints are relaxed.
+fn meta_fixture_str(key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(META).ok()?;
+    Some(v["fixture"][key].as_str()?.to_string())
+}
+
 /// The public half of the throwaway fixture key ([`fixture_key`]); not a secret, the seed is in
 /// this file. What matters is that `verify` accepts the frozen envelope under it.
-const PUBKEY_HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+fn pubkey_hex() -> String {
+    meta_fixture_str("key_id").expect("meta.json names `fixture.key_id`")
+}
+
 /// `record_hash` of the frozen canonical record bytes, the value a session chain would carry.
-const CANONICAL_HASH: &str = "1bb0652cb600621048687ca966b5fdfb0f6779a179228fe09bc075cca9d1bd48";
+fn canonical_hash() -> String {
+    meta_fixture_str("canonical_hash").expect("meta.json names `fixture.canonical_hash`")
+}
 
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -144,7 +166,7 @@ fn fixture_record_two() -> RunRecord {
 
 #[test]
 fn a_frozen_chain_still_verifies() {
-    let trusted = TrustedKey::from_hex(PUBKEY_HEX).expect("fixture pubkey");
+    let trusted = TrustedKey::from_hex(&pubkey_hex()).expect("fixture pubkey");
     let entries: Vec<&str> = CHAIN
         .lines()
         .map(str::trim)
@@ -159,26 +181,26 @@ fn a_frozen_chain_still_verifies() {
     assert_eq!(records[1], fixture_record_two().to_json());
     assert_eq!(
         record_hash(&records[0]),
-        CANONICAL_HASH,
+        canonical_hash(),
         "the anchor is the same record the single-envelope fixture carries"
     );
 }
 
 #[test]
 fn a_frozen_envelope_still_verifies() {
-    let trusted = TrustedKey::from_hex(PUBKEY_HEX).expect("fixture pubkey");
+    let trusted = TrustedKey::from_hex(&pubkey_hex()).expect("fixture pubkey");
     let canonical = verify(ENVELOPE.trim_end(), &[trusted])
         .expect("the frozen envelope must verify under the fixture key");
     assert_eq!(
         record_hash(&canonical),
-        CANONICAL_HASH,
+        canonical_hash(),
         "the canonical bytes inside the frozen envelope changed"
     );
 }
 
 #[test]
 fn todays_canonicalization_reproduces_the_frozen_bytes() {
-    let trusted = TrustedKey::from_hex(PUBKEY_HEX).expect("fixture pubkey");
+    let trusted = TrustedKey::from_hex(&pubkey_hex()).expect("fixture pubkey");
     let canonical = verify(ENVELOPE.trim_end(), &[trusted]).expect("frozen envelope");
     assert_eq!(
         fixture_record().to_json(),
@@ -188,8 +210,43 @@ fn todays_canonicalization_reproduces_the_frozen_bytes() {
     );
 }
 
+/// Every number `meta.json` publishes, against the code it describes. The file is what an off-host
+/// verifier in another language sizes its buffers and gates its schemas by, so a value it states
+/// that this crate does not hold would be wrong everywhere except here.
+#[test]
+fn the_published_fixture_metadata_matches_the_code_it_describes() {
+    let m: serde_json::Value = serde_json::from_str(META).expect("meta.json is JSON");
+    assert_eq!(
+        m["signed_record_schema_version"],
+        serde_json::json!(SIGNED_RECORD_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        m["audit_schema_version"],
+        serde_json::json!(AUDIT_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        m["summary_schema_version"],
+        serde_json::json!(SUMMARY_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        m["max_envelope_bytes"],
+        serde_json::json!(MAX_ENVELOPE_BYTES)
+    );
+    // The two file names are the rest of the set an outside verifier needs to find.
+    assert_eq!(
+        m["fixture"]["envelope"],
+        serde_json::json!("run-record.envelope.json")
+    );
+    assert_eq!(
+        m["fixture"]["chain"],
+        serde_json::json!("run-record.chain.jsonl")
+    );
+    // `key_id` and `canonical_hash` are already load-bearing: every verify test above reads them
+    // from here, so a wrong value fails those rather than needing its own assertion.
+}
+
 /// Regenerates the fixture after a *deliberate* schema bump, printing a fresh envelope and the two
-/// constants above to paste in:
+/// `meta.json` values to paste in:
 ///
 /// ```console
 /// BSX_REGENERATE_FIXTURE=1 cargo test -p bsx-record --test durability regenerate -- --nocapture
@@ -216,8 +273,8 @@ fn regenerate_fixture() {
         "{}",
         key.sign_canonical_chained(&r2, Some(&record_hash(&r1)))
     );
-    println!("--- PUBKEY_HEX ---");
+    println!("--- fixtures/meta.json: fixture.key_id ---");
     println!("{}", key.key_id());
-    println!("--- CANONICAL_HASH ---");
+    println!("--- fixtures/meta.json: fixture.canonical_hash ---");
     println!("{}", record_hash(&canonical));
 }
