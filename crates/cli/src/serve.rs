@@ -82,6 +82,16 @@ const DEFAULT_MAX_WALL_SECS: u64 = 3600;
 /// smallest ceiling that does not refuse a workload where every session snapshots once.
 const DEFAULT_MAX_SNAPSHOTS: usize = 16;
 
+/// The default `--max-output-cap`. Finite because the cap a client asks for bounds a **host-side**
+/// buffer: the collect loop charges each frame against it before buffering, and at `usize::MAX`
+/// that charge never refuses, so one guest streaming stdout grows the daemon's own heap until the
+/// host is out of memory. The engine's own [`Limits::output_cap`] default is the anchor, since it is
+/// what a run gets when nobody asks, so a ceiling there refuses only asks above the shipped default;
+/// a hoster who wants more sets the flag.
+fn default_max_output_cap() -> usize {
+    Limits::default().output_cap
+}
+
 /// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
 /// is the shared global flag on the `bsx` CLI, so it is not repeated here.
 #[derive(clap::Args)]
@@ -156,9 +166,13 @@ pub struct ServeArgs {
     /// the in-guest agent's own command ceiling; `0` = unlimited.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_MAX_WALL_SECS)]
     max_wall_secs: u64,
-    /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for.
-    #[arg(long, value_name = "BYTES")]
-    max_output_cap: Option<usize>,
+    /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for. Past it the
+    /// `open` is **refused**. What it bounds is the *daemon's* memory, not the guest's: the host
+    /// buffers one exec's whole stdout, stderr, and artifacts before it can reply, so this, and not
+    /// `--max-committed-mem-mib` (guest RAM), is what stops a session that streams output from
+    /// growing this process. Defaults to the engine's own `output_cap` default; `0` = unlimited.
+    #[arg(long, value_name = "BYTES", default_value_t = default_max_output_cap())]
+    max_output_cap: usize,
     /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions *and*
     /// pre-warmed pool clones (their RAM is real before any session exists), the resource
     /// counterpart to `--max-sessions`: a session whose `open` would push committed
@@ -218,7 +232,8 @@ fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
 /// flags, not from a discovered `.bsx.toml`: a daemon must not read a security control out of
 /// whatever directory it happened to be started in. Jail and networking are already daemon-wide and
 /// client-immutable (`--unjailed`), so only the ceilings need to travel to the session boundary.
-/// `--max-wall-secs 0` is the unlimited opt-out, spelled like `--idle-timeout 0`.
+/// On the ceilings that carry a finite default, `0` is the unlimited opt-out, spelled like
+/// `--idle-timeout 0`.
 fn operator_policy(args: &ServeArgs) -> Policy {
     // Wildcard-free, so a third address family cannot be dropped on the floor by this split.
     let mut max_egress_v4 = Vec::new();
@@ -233,7 +248,7 @@ fn operator_policy(args: &ServeArgs) -> Policy {
         max_vcpus: args.max_vcpus,
         max_mem_mib: args.max_mem_mib,
         max_wall_secs: (args.max_wall_secs > 0).then_some(args.max_wall_secs),
-        max_output_cap: args.max_output_cap,
+        max_output_cap: (args.max_output_cap > 0).then_some(args.max_output_cap),
         max_egress_v4,
         max_egress_v6,
         ..Policy::default()
@@ -1212,6 +1227,42 @@ mod tests {
         assert!(
             unlimited.resolve(&greedy).is_ok(),
             "`0` must mean unlimited, as it does for --idle-timeout and --max-sessions"
+        );
+    }
+
+    #[test]
+    fn the_default_output_ceiling_bounds_the_daemons_own_heap() {
+        use crate::policy::Requested;
+
+        // The ask becomes the bound the exec collect loop charges every frame against, and that
+        // buffer is this process's heap rather than the guest's RAM, so an unbounded ask is a
+        // charge that never refuses while a streaming guest keeps sending.
+        let policy = operator_policy(&serve_args(&[]));
+        assert_eq!(policy.max_output_cap, Some(Limits::default().output_cap));
+
+        let greedy = Requested {
+            output_cap: Some(usize::MAX),
+            ..Requested::default()
+        };
+        let err = policy
+            .resolve(&greedy)
+            .expect_err("a cap past the ceiling must be refused, not clamped");
+        let message = err.daemon_message();
+        assert!(
+            message.contains("--max-output-cap"),
+            "the refusal must name the flag that set the ceiling: {message}"
+        );
+
+        // A default is not a decision taken from the hoster: the opt-out restores the unbounded
+        // cap for a fleet whose sessions are meant to capture whatever they produce.
+        let unlimited = operator_policy(&serve_args(&["--max-output-cap", "0"]));
+        assert_eq!(unlimited.max_output_cap, None);
+        assert_eq!(
+            unlimited
+                .resolve(&greedy)
+                .expect("`0` must mean unlimited, as it does for --max-wall-secs")
+                .output_cap,
+            usize::MAX
         );
     }
 
