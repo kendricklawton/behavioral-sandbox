@@ -1,0 +1,19 @@
+{"name":"schema_two","dir":"request","line":"{\"schema\":2,\"op\":\"close\"}","expect":"schema","note":"a known op at a foreign schema: the version fails, not the body"}
+{"name":"schema_ninetynine_unknown_op","dir":"request","line":"{\"schema\":99,\"op\":\"teleport\"}","expect":"schema","note":"the schema gate runs before the body is trusted, so an unknown op at a foreign schema is still a schema fault"}
+{"name":"schema_absent","dir":"request","line":"{\"op\":\"close\"}","expect":"malformed"}
+{"name":"schema_not_an_integer","dir":"request","line":"{\"schema\":\"1\",\"op\":\"close\"}","expect":"malformed"}
+{"name":"not_json","dir":"request","line":"not json at all","expect":"malformed"}
+{"name":"unknown_op","dir":"request","line":"{\"schema\":1,\"op\":\"teleport\"}","expect":"malformed","note":"unlike an unknown field, an unknown verb is a hard error"}
+{"name":"exec_missing_argv","dir":"request","line":"{\"schema\":1,\"op\":\"exec\"}","expect":"malformed"}
+{"name":"open_vcpus_not_a_number","dir":"request","line":"{\"schema\":1,\"op\":\"open\",\"vcpus\":\"x\"}","expect":"malformed"}
+{"name":"deep_nesting","dir":"request","line":"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[","expect":"malformed","note":"past the JSON parser's recursion limit; a typed error, not a stack overflow"}
+{"name":"unknown_field_ignored","dir":"request","line":"{\"schema\":1,\"op\":\"exec\",\"argv\":[\"echo\"],\"nice\":10}","expect":"ok","reencode":"{\"schema\":1,\"op\":\"exec\",\"argv\":[\"echo\"],\"stdin\":null,\"env\":null}","note":"an unknown field decodes and is dropped, which is what lets the wire grow additively"}
+{"name":"blank","dir":"request","line":"","expect":"skip"}
+{"name":"whitespace_only","dir":"request","line":"   ","expect":"skip"}
+{"name":"put_at_cap","dir":"request","expect":"ok","fill":{"shape":"put_content_pad","line_len":4194304},"note":"a line of exactly MAX_REQUEST_BYTES decodes; a writer must also accept it"}
+{"name":"put_over_cap","dir":"request","expect":"too_large","fill":{"shape":"put_content_pad","line_len":4194305},"note":"one byte past the cap; the reader resyncs to the next line boundary"}
+{"name":"unknown_reply","dir":"response","line":"{\"schema\":1,\"reply\":\"streamed\",\"chunk\":\"partial output\"}","expect":"malformed","note":"a reply this client cannot interpret must surface, never be skipped"}
+{"name":"unknown_fault_kind","dir":"response","line":"{\"schema\":1,\"reply\":\"error\",\"message\":\"x\",\"fatal\":true,\"kind\":\"quantum\"}","expect":"ok","reencode":"{\"schema\":1,\"reply\":\"error\",\"message\":\"x\",\"fatal\":true,\"kind\":\"quantum\"}","note":"an unrecognized kind degrades to the unknown-carrying form and round-trips; it is not an error"}
+{"name":"error_without_kind","dir":"response","line":"{\"schema\":1,\"reply\":\"error\",\"message\":\"x\",\"fatal\":false}","expect":"ok","reencode":"{\"schema\":1,\"reply\":\"error\",\"message\":\"x\",\"fatal\":false,\"kind\":\"\"}","note":"a peer predating the field; the absent kind decodes as the unknown form carrying an empty string"}
+{"name":"got_without_lossy","dir":"response","line":"{\"schema\":1,\"reply\":\"got\",\"path\":\"p\",\"content\":\"c\",\"present\":true}","expect":"ok","reencode":"{\"schema\":1,\"reply\":\"got\",\"path\":\"p\",\"content\":\"c\",\"present\":true,\"lossy\":false}"}
+{"name":"unknown_field_ignored","dir":"response","line":"{\"schema\":1,\"reply\":\"opened\",\"boot_ms\":7,\"pooled\":true,\"cpu_model\":\"future\"}","expect":"ok","reencode":"{\"schema\":1,\"reply\":\"opened\",\"boot_ms\":7,\"pooled\":true}"}
