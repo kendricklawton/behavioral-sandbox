@@ -342,7 +342,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     Ok(dir) => Response::snapshotted(dir),
                     Err(e) => {
                         server.metrics.request_failed(true);
-                        nonfatal(format!("snapshot: {e}"), wire_kind(e.kind()))
+                        nonfatal(e.message(), e.kind())
                     }
                 };
                 if !send(&mut writer, &resp) {
@@ -571,9 +571,61 @@ fn cold_boot(
     Vm::boot(config)
 }
 
+/// Why a `snapshot` produced no bundle. Split by fault: a disk ceiling is the operator's posture and
+/// a client can retry against it once a bundle is removed, an engine refusal (a jailed session) never
+/// will be, and an unreadable bundle directory is the daemon's own problem.
+enum SnapshotRefusal {
+    /// The daemon already holds `--max-snapshots` bundles.
+    AtCeiling { held: usize },
+    /// The bundle directory could not be read, so the headroom is unknown.
+    Unverifiable(std::io::Error),
+    /// `Vm::snapshot` refused or failed.
+    Engine(VmmError),
+}
+
+impl SnapshotRefusal {
+    /// The wire message, prefixed like every other `snapshot` failure.
+    fn message(&self) -> String {
+        match self {
+            Self::AtCeiling { held } => format!(
+                "snapshot: this host already holds {held} snapshot bundle(s) (operator policy: \
+                 `--max-snapshots` on bsx serve); a bundle outlives its session, so remove one you \
+                 have consumed to make room"
+            ),
+            Self::Unverifiable(e) => {
+                format!("snapshot: cannot read the bundle directory to check headroom: {e}")
+            }
+            Self::Engine(e) => format!("snapshot: {e}"),
+        }
+    }
+
+    fn kind(&self) -> FaultKind {
+        match self {
+            Self::AtCeiling { .. } => FaultKind::Refused,
+            Self::Unverifiable(_) => FaultKind::Infra,
+            Self::Engine(e) => wire_kind(e.kind()),
+        }
+    }
+}
+
+/// Whether another bundle fits under the ceiling. `0` is the unlimited opt-out, so it never refuses.
+fn snapshot_fits(held: usize, max: usize) -> bool {
+    max == 0 || held < max
+}
+
 /// Snapshot the session's VM into a fresh daemon-side bundle directory, returning its host path. A
 /// jailed session is a typed refusal inside `snapshot` (its disk is in the chroot).
-fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
+///
+/// The ceiling is checked **before** the VM is paused: a bundle is guest RAM plus a copy of the root
+/// disk and nothing on the wire reclaims one, so an unbounded `snapshot` loop is what fills the
+/// scratch filesystem.
+fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, SnapshotRefusal> {
+    let held = server
+        .snapshot_bundles()
+        .map_err(SnapshotRefusal::Unverifiable)?;
+    if !snapshot_fits(held, server.max_snapshots) {
+        return Err(SnapshotRefusal::AtCeiling { held });
+    }
     let dir = server.next_snapshot_dir();
     // Don't pre-create the bundle dir: `Vm::snapshot` refuses a restored/jailed/device-bearing VM
     // *before* writing anything, and creates the dir itself only on its success path. Pre-creating it
@@ -581,7 +633,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
     // snapshot is always a refusal), so a client looping `snapshot` would leak dirs unbounded.
     // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
     // directory (the bundle stays on the daemon host, keeping bulk bytes off this line).
-    let _snapshot = vm.snapshot(&dir)?;
+    let _snapshot = vm.snapshot(&dir).map_err(SnapshotRefusal::Engine)?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
@@ -1162,6 +1214,46 @@ mod tests {
         assert_eq!(base.mem_mib, d.mem_mib);
         assert_eq!(base.wall, d.wall);
         assert_eq!(base.output_cap, d.output_cap);
+    }
+
+    #[test]
+    fn the_snapshot_ceiling_refuses_at_the_bound_and_zero_is_unlimited() {
+        // A bundle is guest RAM plus a copy of the root disk and nothing on the wire reclaims one,
+        // so this ceiling is what stands between a `snapshot` loop and a full scratch filesystem.
+        assert!(snapshot_fits(0, 4), "an empty daemon has room");
+        assert!(snapshot_fits(3, 4), "one below the ceiling still fits");
+        assert!(
+            !snapshot_fits(4, 4),
+            "at the ceiling is refused, not the one past it"
+        );
+        assert!(!snapshot_fits(9, 4), "and so is anything beyond it");
+        assert!(
+            snapshot_fits(usize::MAX, 0),
+            "`0` is the unlimited opt-out, as it is for --max-sessions and --idle-timeout"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_refusal_names_its_fault_and_the_flag_that_set_it() {
+        let at_ceiling = SnapshotRefusal::AtCeiling { held: 16 };
+        assert_eq!(
+            at_ceiling.kind(),
+            FaultKind::Refused,
+            "an operator posture the client can retry against, not a broken daemon"
+        );
+        let msg = at_ceiling.message();
+        assert!(msg.contains("--max-snapshots"), "{msg}");
+        assert!(
+            msg.contains("16"),
+            "the message says how many are held: {msg}"
+        );
+
+        // The daemon's own failure to read its bundle directory is infra, and it refuses rather
+        // than assuming headroom it could not verify.
+        assert_eq!(
+            SnapshotRefusal::Unverifiable(std::io::Error::other("boom")).kind(),
+            FaultKind::Infra
+        );
     }
 
     #[test]
