@@ -20,8 +20,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use crate::Syscall;
 use crate::json::{clamped_ns, field, field_opt_u64, json_str, proto_name, syscall_name};
-use crate::record::{AxisGap, NetSection, RunRecord};
+use crate::record::{AxisGap, NetSection, NotableSyscall, RunRecord};
 
 /// The version of the record-summary JSON schema. Versioned independently of the full record's
 /// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION) and the CLI run-result schema, since this is a
@@ -255,7 +256,8 @@ fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
 
 /// The host-syscall summary: the by-kind counts, a bounded `notable` sample as `"kind detail"` strings
 /// with the forensic `comm`/`hits` dropped, and one `truncated` flag that is true if *either* the
-/// record's own cap overflowed *or* this projection's tighter cap dropped entries.
+/// record's own cap overflowed *or* this projection's tighter cap dropped entries. Which entries the
+/// cap keeps is [`notable_sample`]'s.
 fn syscalls_summary(out: &mut String, record: &RunRecord) {
     let s = &record.host_syscalls;
     out.push('{');
@@ -263,7 +265,11 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
     field(out, "openat", s.by_kind.openat, false);
     field(out, "connect", s.by_kind.connect, false);
     out.push_str(",\"notable\":[");
-    for (i, n) in s.notable.iter().take(SUMMARY_NOTABLE_CAP).enumerate() {
+    for (i, &idx) in notable_sample(&s.notable, SUMMARY_NOTABLE_CAP)
+        .iter()
+        .enumerate()
+    {
+        let n = &s.notable[idx];
         if i > 0 {
             out.push(',');
         }
@@ -285,6 +291,47 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
     let truncated = s.notable_truncated || s.notable.len() > SUMMARY_NOTABLE_CAP;
     let _ = write!(out, ",\"truncated\":{truncated}");
     out.push('}');
+}
+
+/// Which entries of the record's `notable` this projection keeps, as indices into it, ascending.
+///
+/// A round-robin across kinds rather than a prefix. The record sorts `notable` by [`Syscall`]
+/// discriminant first, so the kinds sit in contiguous runs and `connect` is always last; taking the
+/// first `cap` of that drops whole kinds from the tail, and the kind that sorts last is the one that
+/// names an outbound destination. Each kind present takes its turn, so no kind is structurally last.
+///
+/// Deterministic: the runs come out in the record's own order, and the result is re-sorted into it,
+/// so the summary lists what it kept in the same order the full record does.
+fn notable_sample(notable: &[NotableSyscall], cap: usize) -> Vec<usize> {
+    if notable.len() <= cap {
+        return (0..notable.len()).collect();
+    }
+    let mut runs: Vec<(Syscall, Vec<usize>)> = Vec::new();
+    for (i, n) in notable.iter().enumerate() {
+        match runs.last_mut() {
+            Some((kind, run)) if *kind == n.kind => run.push(i),
+            _ => runs.push((n.kind, vec![i])),
+        }
+    }
+
+    let mut keep = Vec::with_capacity(cap);
+    for round in 0.. {
+        let mut dealt = false;
+        for (_, run) in &runs {
+            let Some(&i) = run.get(round) else { continue };
+            keep.push(i);
+            dealt = true;
+            if keep.len() == cap {
+                break;
+            }
+        }
+        // Every run is exhausted, which the length check above already rules out, or the cap is met.
+        if !dealt || keep.len() == cap {
+            break;
+        }
+    }
+    keep.sort_unstable();
+    keep
 }
 
 /// One coverage gap as `"axis: reason"`, the flat, model-legible form of an [`AxisGap`].
@@ -335,6 +382,101 @@ mod tests {
         assert!(
             json.contains("[truncated]"),
             "a cut path must be marked where a person reads it: {json}"
+        );
+    }
+
+    /// The record's `notable` is a `[u8; 8]` sockaddr for a connect; this is the one the summary
+    /// renders as `8.8.8.8:53`.
+    const CONNECT_8888_53: [u8; 8] = [2, 0, 0, 53, 8, 8, 8, 8];
+
+    #[test]
+    fn a_lone_connect_survives_a_notable_list_full_of_opens() {
+        // The record sorts `notable` by syscall discriminant, and connect sorts last, so a prefix of
+        // 16 drops the one entry naming an outbound destination while keeping 16 interchangeable
+        // paths. The summary exists to carry that destination.
+        let mut events: Vec<SyscallEvent> = (0..20u32)
+            .map(|i| ev(1, 0x42, format!("/tmp/file-{i:03}").as_bytes(), "sh"))
+            .collect();
+        events.push(ev(2, 0x42, &CONNECT_8888_53, "sh"));
+
+        let mut record = sample(vec![]);
+        record.host_syscalls = SyscallFootprint::from_events(0x42, &events);
+        let json = record.to_summary_json();
+
+        assert!(
+            json.contains("connect 8.8.8.8:53"),
+            "the destination must be in the sample, not only in the counts: {json}"
+        );
+        assert!(
+            json.contains("\"truncated\":true}"),
+            "and the reader is still told the list is partial: {json}"
+        );
+        assert_eq!(
+            json.matches("openat /tmp/file-").count(),
+            SUMMARY_NOTABLE_CAP - 1,
+            "connect takes one slot, not a share proportional to nothing: {json}"
+        );
+    }
+
+    #[test]
+    fn every_kind_present_keeps_a_share_of_the_notable_sample() {
+        // Round-robin, so the cap is spent across the kinds rather than down the sort order. With
+        // all three oversubscribed the 16 slots split 6/5/5: the first kind gets the odd one because
+        // the deal starts there, which is deterministic rather than fair-by-accident.
+        let mut events: Vec<SyscallEvent> = Vec::new();
+        for i in 0..10u32 {
+            events.push(ev(0, 0x42, format!("/bin/prog-{i:03}").as_bytes(), "sh"));
+            events.push(ev(1, 0x42, format!("/tmp/file-{i:03}").as_bytes(), "sh"));
+            let mut addr = CONNECT_8888_53;
+            addr[3] = i as u8; // a distinct destination port per event
+            events.push(ev(2, 0x42, &addr, "sh"));
+        }
+        let mut record = sample(vec![]);
+        record.host_syscalls = SyscallFootprint::from_events(0x42, &events);
+        let json = record.to_summary_json();
+
+        let (execve, openat, connect) = (
+            json.matches("execve /bin/prog-").count(),
+            json.matches("openat /tmp/file-").count(),
+            json.matches("connect 8.8.8.8:").count(),
+        );
+        assert_eq!(
+            (execve, openat, connect),
+            (6, 5, 5),
+            "16 slots dealt across three kinds: {json}"
+        );
+    }
+
+    #[test]
+    fn the_notable_sample_stays_in_the_records_own_order() {
+        // Which entries survive changes; the order they are listed in does not. A reader comparing
+        // the summary against the full record should not have to reconcile two orders.
+        let mut events: Vec<SyscallEvent> = (0..20u32)
+            .map(|i| ev(1, 0x42, format!("/tmp/file-{i:03}").as_bytes(), "sh"))
+            .collect();
+        events.push(ev(0, 0x42, b"/bin/sh", "sh"));
+        events.push(ev(2, 0x42, &CONNECT_8888_53, "sh"));
+
+        let mut record = sample(vec![]);
+        record.host_syscalls = SyscallFootprint::from_events(0x42, &events);
+        let json = record.to_summary_json();
+
+        // Every entry's kind, in the order rendered, not just each kind's first appearance: the
+        // round-robin deals them interleaved, so only the whole sequence tells the two apart.
+        let v: serde_json::Value = serde_json::from_str(&json).expect("summary parses");
+        let kinds: Vec<String> = v["host_syscalls"]["notable"]
+            .as_array()
+            .expect("notable is an array")
+            .iter()
+            .filter_map(|e| e.as_str())
+            .filter_map(|line| line.split(' ').next().map(str::to_string))
+            .collect();
+        assert_eq!(kinds.len(), SUMMARY_NOTABLE_CAP, "a full sample: {json}");
+
+        let rank = |k: &str| ["execve", "openat", "connect"].iter().position(|x| *x == k);
+        assert!(
+            kinds.windows(2).all(|w| rank(&w[0]) <= rank(&w[1])),
+            "kinds run in discriminant order, as they do in the record: {kinds:?}"
         );
     }
 
