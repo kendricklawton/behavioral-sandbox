@@ -432,9 +432,14 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // overcommit the host by the pool's footprint). A --prewarm the ceiling can't even hold is a
     // misconfiguration: refused here, loudly, not silently overcommitted.
     let clone = pool_clone_limits();
-    let pool_ready = pool
-        .as_ref()
-        .map_or(0, |p| p.lock().map_or(0, |guard| guard.ready()));
+    // A poisoned lock still guards a real pool: its clones exist and their RAM is committed, so
+    // reading `0` through the poison would leave that memory uncharged against the ceilings for the
+    // daemon's whole life. Take the guard through the poison, the same way `jail.rs` does.
+    let pool_ready = pool.as_ref().map_or(0, |p| {
+        p.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ready()
+    });
     let pool_mem = pool_ready as u64 * u64::from(clone.mem_mib.get());
     let pool_vcpus = pool_ready as u64 * u64::from(clone.vcpus.get());
     if (args.max_committed_mem_mib != 0 && pool_mem > args.max_committed_mem_mib)
@@ -819,11 +824,45 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
     }
 }
 
-/// Install the SIGTERM/SIGINT handler: log, unlink the socket, remove this daemon's own bundle dirs
-/// (`cleanup_dirs`, guest-memory-sized), then exit 0 (a clean stop for a supervisor). Best-effort, a
-/// host where the handler can't be installed keeps the crash-only behavior (the sentinel still reaps
-/// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
+/// Remove `socket` only while it is still the same inode this daemon published there.
+///
+/// The unlink is by path, and a path is not an identity: between this daemon's start and its stop,
+/// another can publish its own socket at that path (the bind's stale-socket reclaim and rename are
+/// not one atomic step). Unlinking by path alone would then take out the **live** daemon's socket on
+/// the way out, leaving it listening on an inode no client can dial. Comparing device and inode
+/// against what was published makes a shutdown that lost the path a no-op instead.
+fn unlink_own_socket(socket: &Path, published: Option<(u64, u64)>) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Some(published) = published else {
+        return; // never published one; there is nothing here that is ours to remove
+    };
+    let Ok(now) = std::fs::symlink_metadata(socket) else {
+        return; // already gone
+    };
+    if (now.dev(), now.ino()) == published {
+        let _ = std::fs::remove_file(socket);
+    } else {
+        tracing::warn!(
+            socket = %socket.display(),
+            "another daemon owns this socket path now; leaving it in place"
+        );
+    }
+}
+
+/// Install the SIGTERM/SIGINT handler: log, unlink this daemon's own socket, remove its own bundle
+/// dirs (`cleanup_dirs`, guest-memory-sized), then exit 0 (a clean stop for a supervisor).
+/// Best-effort, a host where the handler can't be installed keeps the crash-only behavior (the
+/// sentinel still reaps VMs; the next start clears the stale socket and the startup sweep reclaims
+/// the leaked bundle dirs).
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    // Taken before the wait, so it identifies the socket this daemon published rather than whatever
+    // holds the path at shutdown.
+    let published = std::fs::symlink_metadata(&socket)
+        .ok()
+        .map(|m| (m.dev(), m.ino()));
     let spawned = std::thread::Builder::new()
         .name("bsx-signals".into())
         .spawn(move || {
@@ -842,7 +881,7 @@ fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
                 // In-flight sessions end crash-consistently (their VMs reaped by the sentinel);
                 // the unlink is what a plain process kill would leave behind, and the bundle dirs
                 // are guest-memory-sized files a plain kill would leak.
-                let _ = std::fs::remove_file(&socket);
+                unlink_own_socket(&socket, published);
                 for dir in &cleanup_dirs {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -951,6 +990,35 @@ fn build_pool_from(
     Pool::new(snapshot, pool_config, target)
 }
 
+/// Whether a daemon is listening at `socket`, without waiting on one that is.
+///
+/// The connect is **non-blocking** on purpose. A blocking `connect` to an `AF_UNIX` socket waits
+/// when the listener's backlog is full, so a live-but-wedged daemon that has stopped accepting would
+/// hang a new daemon's startup rather than being reported. Non-blocking, that case is `EAGAIN`, which
+/// is still a listener and so still a refusal; a dead daemon's leftover socket is `ECONNREFUSED` at
+/// once either way.
+fn someone_is_listening(socket: &Path) -> bool {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr};
+
+    let Ok(addr) = UnixAddr::new(socket) else {
+        return false; // too long for `sun_path`; nothing could be listening there
+    };
+    let Ok(fd) = nix::sys::socket::socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK,
+        None,
+    ) else {
+        return false;
+    };
+    match nix::sys::socket::connect(std::os::fd::AsRawFd::as_raw_fd(&fd), &addr) {
+        Ok(()) => true,
+        // The backlog is full: a daemon is there and behind, which is the case this exists to catch.
+        Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINPROGRESS) => true,
+        Err(_) => false,
+    }
+}
+
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
 /// **live** daemon. If the path exists, a successful connect means another `bsx` is already
 /// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
@@ -973,7 +1041,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
                 socket.display()
             ));
         }
-        if UnixStream::connect(socket).is_ok() {
+        if someone_is_listening(socket) {
             return Err(format!(
                 "another bsx daemon is already listening on {}",
                 socket.display()
@@ -1243,6 +1311,109 @@ mod tests {
         let args = serve_args(&[]);
         assert_eq!(args.max_snapshots, DEFAULT_MAX_SNAPSHOTS);
         assert_eq!(serve_args(&["--max-snapshots", "0"]).max_snapshots, 0);
+    }
+
+    #[test]
+    fn the_liveness_probe_answers_promptly_with_a_full_backlog() {
+        // A listener that never accepts fills its backlog, and a *blocking* connect then waits on it
+        // indefinitely, so a wedged-but-alive daemon would hang a new daemon's startup rather than
+        // being reported as live. Bounded here by the clock: the answer must be "yes, live", promptly.
+        //
+        // The listener is built by hand with a backlog of **1**: `UnixListener::bind` uses 128, and
+        // queueing past that many connections to reproduce the hang is not worth the fds.
+        use std::os::fd::AsRawFd as _;
+        let scratch = bsx_test_support::ScratchDir::created("bind-wedged");
+        let path = scratch.path().join("wedged.sock");
+        let addr = nix::sys::socket::UnixAddr::new(&path).expect("addr");
+        let listener = nix::sys::socket::socket(
+            nix::sys::socket::AddressFamily::Unix,
+            nix::sys::socket::SockType::Stream,
+            nix::sys::socket::SockFlag::empty(),
+            None,
+        )
+        .expect("socket");
+        nix::sys::socket::bind(listener.as_raw_fd(), &addr).expect("bind");
+        nix::sys::socket::listen(
+            &listener,
+            nix::sys::socket::Backlog::new(1).expect("backlog"),
+        )
+        .expect("listen");
+
+        // Fill the one-deep queue and then some, with *non-blocking* connects: a blocking one past
+        // the backlog would hang the test setup itself, which is the very hazard under test.
+        let _fill: Vec<_> = (0..4)
+            .filter_map(|_| {
+                let fd = nix::sys::socket::socket(
+                    nix::sys::socket::AddressFamily::Unix,
+                    nix::sys::socket::SockType::Stream,
+                    nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+                    None,
+                )
+                .ok()?;
+                let _ = nix::sys::socket::connect(fd.as_raw_fd(), &addr);
+                Some(fd)
+            })
+            .collect();
+
+        // Through `bind`, not the probe alone: the defect was reachable only via the caller, and a
+        // test of the helper by itself would pass with the blocking connect restored at the call site.
+        let started = Instant::now();
+        let refused = bind(&path).expect_err("a live daemon must not be clobbered");
+        let elapsed = started.elapsed();
+
+        assert!(
+            refused.contains("already listening"),
+            "a listener that is behind is still a listener: {refused}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the probe must not wait on the backlog: {elapsed:?}"
+        );
+        assert!(path.exists(), "and the live daemon's socket is left alone");
+    }
+
+    #[test]
+    fn the_liveness_probe_says_no_for_a_dead_daemons_leftover_socket() {
+        let scratch = bsx_test_support::ScratchDir::created("bind-stale");
+        let path = scratch.path().join("stale.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        drop(listener); // the daemon died; the socket file outlives it
+        assert!(
+            !someone_is_listening(&path),
+            "nothing is listening, so the file is reclaimable"
+        );
+        assert!(!someone_is_listening(&scratch.path().join("absent.sock")));
+    }
+
+    #[test]
+    fn shutdown_unlinks_its_own_socket_and_leaves_a_successors_alone() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let scratch = bsx_test_support::ScratchDir::created("unlink-own");
+        let path = scratch.path().join("bsx.sock");
+        let mine = UnixListener::bind(&path).expect("bind");
+        let published = std::fs::symlink_metadata(&path)
+            .map(|m| (m.dev(), m.ino()))
+            .expect("stat");
+
+        // A successor replaces the path: the bind's reclaim-then-rename is not one atomic step, so
+        // two daemons racing can land here.
+        drop(mine);
+        std::fs::remove_file(&path).expect("the successor reclaims the path");
+        let _theirs = UnixListener::bind(&path).expect("the successor publishes its own");
+
+        unlink_own_socket(&path, Some(published));
+        assert!(
+            path.exists(),
+            "a shutdown that lost the path must not unlink the live daemon's socket"
+        );
+
+        // And the ordinary case still cleans up after itself.
+        let now = std::fs::symlink_metadata(&path)
+            .map(|m| (m.dev(), m.ino()))
+            .expect("stat");
+        unlink_own_socket(&path, Some(now));
+        assert!(!path.exists(), "its own socket is removed as before");
     }
 
     #[test]
