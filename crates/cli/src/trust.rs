@@ -181,6 +181,9 @@ fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: &Ids) -> Str
 }
 
 /// This process's effective uid, or `None` if `/proc/self/status` cannot be read.
+// The `fuzzing` library target compiles this module for `open_trusted` alone, without `serve`, which
+// is the caller that makes this live in the binary.
+#[cfg_attr(feature = "fuzzing", allow(dead_code))]
 pub(crate) fn own_euid() -> Option<u32> {
     Ids::current().map(|i| i.effective)
 }
