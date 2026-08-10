@@ -231,6 +231,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     stdin.as_deref().unwrap_or(""),
                     env.as_deref().unwrap_or(&[]),
                     &writer,
+                    &reader,
                 );
                 if interrupted {
                     // The sandbox is gone, so the exec's own error is noise. Acknowledge only a real
@@ -957,12 +958,19 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// holds only because `exec` is bounded on both sides, by the session's wall budget and, once the kill
 /// lands, by the dead guest. A scoped thread wrapping an unbounded call would be a host hang, which is why
 /// the `peek` rather than a second blocking read does the watching.
+///
+/// The `reader` is watched alongside the socket, and taken whole rather than as a "has it buffered"
+/// flag so no caller can answer that question wrongly. The peek sees only the *kernel* receive queue,
+/// and a client that wrote its `cancel` in the same call as its `exec` has already had that line
+/// pulled into the `BufReader`, leaving the queue empty and the peek blind to it. Nothing reads the
+/// reader again until this returns, so what it holds cannot change here.
 fn exec_watching_for_cancel(
     vm: &RunningVm,
     argv: &[String],
     stdin: &str,
     env: &[(String, String)],
     socket: &UnixStream,
+    reader: &BufReader<DeadlineStream>,
 ) -> (Result<bsx_engine::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
@@ -971,7 +979,7 @@ fn exec_watching_for_cancel(
         let worker = scope.spawn(|| vm.exec_with_files(argv, stdin.as_bytes(), &[], env, &[]));
         let mut interrupted = false;
         while !worker.is_finished() {
-            if client_spoke(socket) {
+            if client_spoke(socket, !reader.buffer().is_empty()) {
                 interrupted = true;
                 // Best-effort: a kill that cannot land leaves the exec to its own wall budget,
                 // which is the pre-cancel behavior, never a hang.
@@ -999,9 +1007,17 @@ fn exec_watching_for_cancel(
 ///
 /// `peek` is deliberate: it does **not** consume, so the pending line is still there for the reply
 /// path to parse, and the session's framing cannot desync on a partially-arrived message.
-fn client_spoke(socket: &UnixStream) -> bool {
+///
+/// `buffered` short-circuits it, because the peek only ever sees what is still in the kernel. Bytes
+/// the session's `BufReader` has already pulled into userspace are just as much the client speaking,
+/// and a `cancel` that arrived coalesced with its `exec` is exactly that case: the queue is empty, so
+/// the peek alone would return `false` for the whole run and the kill would never land.
+fn client_spoke(socket: &UnixStream, buffered: bool) -> bool {
     use std::os::fd::AsRawFd as _;
 
+    if buffered {
+        return true;
+    }
     let restore = socket.read_timeout().ok().flatten();
     let _ = socket.set_read_timeout(Some(CANCEL_POLL));
     let spoke = match nix::sys::socket::recv(
@@ -1526,6 +1542,50 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(800),
             "the deadline must bound the whole message (~200ms), not reset per byte: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancel_coalesced_with_its_exec_is_still_noticed() {
+        use std::io::Write as _;
+
+        // A pipelining client writes `exec` and `cancel` in one `write_all`, which is legal. Reading
+        // the exec pulls *both* lines into the `BufReader`, so the cancel is sitting in userspace
+        // and the kernel receive queue is empty.
+        let (client, server_end) = UnixStream::pair().expect("socketpair");
+        let peer = server_end
+            .try_clone()
+            .expect("the second handle `serve` peeks on");
+        let mut reader = BufReader::new(DeadlineStream::new(server_end, None));
+
+        let mut both = Vec::new();
+        write_request(
+            &mut both,
+            &Request::Exec(ExecParams::new(vec!["sleep".into(), "infinity".into()])),
+        )
+        .expect("encode the exec");
+        write_request(&mut both, &Request::Cancel).expect("encode the cancel");
+        (&client)
+            .write_all(&both)
+            .expect("one write, both messages");
+
+        assert!(
+            matches!(read_request(&mut reader), Ok(Some(Request::Exec(_)))),
+            "the exec arrives first"
+        );
+        assert!(
+            !reader.buffer().is_empty(),
+            "the cancel is buffered in userspace, which is what sets this case up"
+        );
+        // The defect, asserted rather than described: with only the peek to go on, the watcher sees
+        // an idle socket for the whole exec and the kill never lands.
+        assert!(
+            !client_spoke(&peer, false),
+            "precondition: the peek cannot see a line the reader already took"
+        );
+        assert!(
+            client_spoke(&peer, !reader.buffer().is_empty()),
+            "asking the reader too is what makes a pipelined cancel land"
         );
     }
 
