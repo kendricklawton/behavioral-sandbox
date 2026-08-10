@@ -138,7 +138,14 @@ struct Term {
     /// `None` on a host that refused the registration (the view still runs; only the signal case is
     /// unguarded). Closed and joined on `Drop` so a normal exit leaves signal disposition untouched.
     signal_guard: Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
+    /// The hook installed before this guard's, so `Drop` puts *it* back rather than resetting to the
+    /// default. Shared with the hook closure, which is why it is an `Arc`: the closure has to call it
+    /// on a panic while the view is up, and `Drop` has to reinstall it afterwards.
+    prev_hook: std::sync::Arc<PanicHook>,
 }
+
+/// The boxed panic hook `std::panic::take_hook` hands back.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
 /// Spawn the view's signal-restore listener: on SIGTERM/SIGINT/SIGHUP, restore the terminal (from
 /// normal thread context, so crossterm is safe to call, the `Signals` iterator does not deliver in
@@ -178,6 +185,15 @@ fn install_view_signal_restore()
     Some((handle, thread))
 }
 
+/// Reinstall the hook that was in place before the view's, dropping the view's own. `take_hook`
+/// alone would install the **default** hook instead, which is only the same thing while nothing else
+/// in the process has installed one; this does not depend on that staying true.
+fn restore_hook(prev: &std::sync::Arc<PanicHook>) {
+    let _ = std::panic::take_hook();
+    let prev = std::sync::Arc::clone(prev);
+    std::panic::set_hook(Box::new(move |info| prev(info)));
+}
+
 impl Term {
     fn new() -> Result<Self, VmmError> {
         enable_raw_mode().map_err(|e| VmmError::Vmm(format!("enter raw mode: {e}")))?;
@@ -187,21 +203,23 @@ impl Term {
         }
         // Chain a terminal-restoring step ahead of the existing panic hook: without it a panic while the
         // view is up prints into the alternate screen, which this guard's `Drop` then tears down on unwind,
-        // so the process dies with the terminal restored and the failure *invisible*. `Drop` resets to the
-        // default hook, which is the original, since the CLI installs none before here.
-        let prev = std::panic::take_hook();
+        // so the process dies with the terminal restored and the failure *invisible*.
+        let prev: std::sync::Arc<PanicHook> = std::sync::Arc::new(std::panic::take_hook());
+        let chained = std::sync::Arc::clone(&prev);
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
             let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
-            prev(info);
+            chained(info);
         }));
         match Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stderr())) {
             Ok(terminal) => Ok(Self {
                 terminal,
                 signal_guard: install_view_signal_restore(),
+                prev_hook: prev,
             }),
             Err(e) => {
-                let _ = std::panic::take_hook(); // drop our hook (Terminal init failed, no view)
+                // No view, so put back what was there rather than leaving ours installed.
+                restore_hook(&prev);
                 let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
                 let _ = disable_raw_mode();
                 Err(VmmError::Vmm(format!("initialize terminal: {e}")))
@@ -219,9 +237,9 @@ impl Drop for Term {
             handle.close();
             let _ = thread.join();
         }
-        // Reset the panic hook to the default (drops ours), then restore the terminal. Idempotent
+        // Put back the hook that was installed before ours, then restore the terminal. Idempotent
         // with the hook itself if a panic already ran it.
-        let _ = std::panic::take_hook();
+        restore_hook(&self.prev_hook);
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
