@@ -70,10 +70,10 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 /// packaged install.
 ///
 /// Without it a self-hosted binary only works from inside the source tree, since the artifact defaults
-/// resolve relative to the working directory. Config discovery walks up from the cwd, so this file covers
-/// any cwd **under `$HOME`** rather than everywhere; from outside `$HOME` pass the paths by env or flag.
-/// Never overwrites an existing file, and `BSX_NO_TOML=1` skips it, the same escape hatch `install.sh`
-/// offers.
+/// resolve relative to the working directory. This is the **user** file, read whatever the cwd is, and
+/// the only one that may name artifact paths: a `.bsx.toml` above the working directory carries limits
+/// and cannot shadow these. Never overwrites an existing file, and `BSX_NO_TOML=1` skips it, the same
+/// escape hatch `install.sh` offers.
 ///
 /// On a host whose default scratch base is mounted `nodev` or `noexec`, the jailer's chroot there can't
 /// open its `/dev/kvm` or exec its firecracker copy, so the jailed default fails
@@ -93,9 +93,9 @@ fn write_starter_config() -> Result<()> {
         return Ok(());
     }
     let mut body = format!(
-        "# Written by `cargo xtask self-host`; the engine reads the nearest .bsx.toml walking up\n\
-         # from the cwd, so this covers any working directory under $HOME. Absolute paths, so the\n\
-         # installed binary no longer depends on being run from the source tree.\n\
+        "# Written by `cargo xtask self-host`; the engine reads this file whatever the working\n\
+         # directory is. Absolute paths, so the installed binary no longer depends on being run\n\
+         # from the source tree.\n\
          kernel = \"{}\"\n\
          rootfs = \"{}\"\n",
         kernel_path().display(),

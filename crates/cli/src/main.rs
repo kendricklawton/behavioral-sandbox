@@ -99,6 +99,12 @@ impl From<VmmError> for CliError {
     }
 }
 
+impl From<config::ConfigError> for CliError {
+    fn from(e: config::ConfigError) -> Self {
+        Self::Cli(e.to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "bsx",
@@ -343,23 +349,23 @@ fn main() -> ExitCode {
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
-    // The `.bsx.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
-    // failure here, before any boot (config typos must not silently no-op).
+    // The `.bsx.toml` layers are discovered once: the user's own file, and the nearest one above
+    // the cwd. A mistyped key, or a project-local file reaching for a user-only one, is a loud
+    // failure here, before any boot (a config the operator got wrong must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let file = match config::BsxToml::discover(&cwd) {
-        Ok(f) => f,
+    let sources = match config::Sources::discover(&cwd) {
+        Ok(s) => s,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "bsx: {e}");
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
-    // Log filter resolves flags > env > file > default.
-    if let Err(e) = init_tracing(config::resolve_log(cli.log.as_deref(), file.as_ref()).as_deref())
-    {
+    // Log filter resolves flags > env > project file > user file > default.
+    if let Err(e) = init_tracing(config::resolve_log(cli.log.as_deref(), &sources).as_deref()) {
         let _ = writeln!(std::io::stderr(), "bsx: {e}");
         return ExitCode::from(EXIT_OPERATIONAL);
     }
-    match run(cli.cmd, file.as_ref()) {
+    match run(cli.cmd, &sources) {
         Ok(code) => code,
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
@@ -378,18 +384,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cmd: Cmd, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
+fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => {
-            sweep_vm_residue(file);
-            run_command(*args, file)
+            sweep_vm_residue(sources);
+            run_command(*args, sources)
         }
         Cmd::Shell(args) => {
-            sweep_vm_residue(file);
-            shell(args, file)
+            sweep_vm_residue(sources);
+            shell(args, sources)
         }
-        Cmd::Doctor(args) => Ok(doctor::report(&base_config(file), &args)),
-        Cmd::Verify(args) => verify::run(args, file),
+        Cmd::Doctor(args) => Ok(doctor::report(&base_config(sources), &args, sources)),
+        Cmd::Verify(args) => verify::run(args, sources),
         // `serve` is dispatched in `main` before this point (it skips the project-file/tracing
         // setup `run` runs under), so this arm is never reached; a typed error rather than a
         // panic keeps the no-panic discipline even for the impossible case.
@@ -405,8 +411,8 @@ fn run(cmd: Cmd, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
 /// boot subcommand as the boot-time GC the engine owes its host. Best-effort and
 /// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
 /// concurrent run's live sandbox.
-fn sweep_vm_residue(file: Option<&config::BsxToml>) {
-    match sweep_orphans(&base_config(file).scratch_dir) {
+fn sweep_vm_residue(sources: &config::Sources) {
+    match sweep_orphans(&base_config(sources).scratch_dir) {
         Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
             dirs = r.dirs_reclaimed,
             netns = r.netns_reclaimed,
@@ -417,14 +423,12 @@ fn sweep_vm_residue(file: Option<&config::BsxToml>) {
     }
 }
 
-/// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
-/// its flags. Composes a single lookup that prefers the real environment, then the `.bsx.toml`
-/// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
-/// stay one vocabulary keyed by the `BSX_*` names.
-fn base_config(file: Option<&config::BsxToml>) -> BootConfig {
-    BootConfig::from_env_with(|key| {
-        std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
-    })
+/// The env+file-layered base config, `env > project file > user file > defaults`, over which each
+/// subcommand applies its flags. Composes a single lookup that prefers the real environment, then
+/// each `.bsx.toml` layer, then (inside [`BootConfig::from_env_with`]) the pinned default, so the
+/// lower layers stay one vocabulary keyed by the `BSX_*` names.
+fn base_config(sources: &config::Sources) -> BootConfig {
+    BootConfig::from_env_with(sources.boot_lookup())
 }
 
 /// Apply the `--jail-uid`/`--jail-gid` flag layer over the env/file ids `base_config` already
@@ -444,7 +448,7 @@ fn apply_jail_ids(config: &mut BootConfig, uid: Option<u32>, gid: Option<u32>) {
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
 /// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
-fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
+fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
     // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
     // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
     // ties these log lines to the audit record and the host's own process table.
@@ -453,7 +457,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
     // Resolve the caller's knobs against the operator's policy. For the CLI this is a
     // guardrail rather than a boundary (a local caller owns the config file, and `docs/security.md`
     // trusts them), but it keeps a host's defaults and ceilings consistent across both entry points.
-    let host_policy = config::policy_of(file);
+    let host_policy = config::policy_of(sources);
     let limits = host_policy
         .resolve(&Requested {
             vcpus: args.vcpus,
@@ -521,7 +525,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
     // Last of the pre-flight checks, because it is the only one that *creates* something, which a run a
     // cheaper check rejects should not do. Loading is idempotent.
     if record_path.is_some() {
-        let key_path = config::signing_key_path(file);
+        let key_path = config::signing_key_path(sources);
         bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
             CliError::Cli(format!(
                 "signing key {} is unusable, so this run could not be recorded: {e}",
@@ -529,7 +533,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
             ))
         })?;
     }
-    let mut config = base_config(file).with_limits(limits);
+    let mut config = base_config(sources).with_limits(limits);
     config.enable_network = args.net;
     // Flags win over the `BSX_GATEWAY`/`BSX_RESOLVER` + file layers `base_config` already resolved,
     // so a run can override the host's uplink without editing its config.
@@ -719,7 +723,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
                 }
                 "records_dir"
             };
-            let key_path = config::signing_key_path(file);
+            let key_path = config::signing_key_path(sources);
             let key = bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
@@ -742,9 +746,9 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
-fn shell(args: ShellArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
-    let limits = shell_policy(&args, &config::policy_of(file))?;
-    let mut config = base_config(file).with_limits(limits);
+fn shell(args: ShellArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
+    let limits = shell_policy(&args, &config::policy_of(sources))?;
+    let mut config = base_config(sources).with_limits(limits);
     if args.require_limits {
         config.require_limits = true;
     }

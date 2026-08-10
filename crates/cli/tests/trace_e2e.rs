@@ -64,6 +64,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     let signing_key = scratch.path().join("signing.key");
     let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(&root)
+        .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", "GUEST-READY")
         // Keep the generated host signing key inside the scratch dir, not the real default path.
@@ -140,6 +141,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // byte, trusting the same host key that signed it (resolved from BSX_SIGNING_KEY).
     let verify_ok = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(&root)
+        .env("HOME", root.join("target"))
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&record_path)
@@ -167,6 +169,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     .expect("write tampered record");
     let verify_bad = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(&root)
+        .env("HOME", root.join("target"))
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&tampered_path)
@@ -245,6 +248,7 @@ print('p14-9b-egress')
 ";
     let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(&root)
+        .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", "GUEST-READY")
         .args([
@@ -355,6 +359,7 @@ print('p14-9f-complete')
 ";
     let mut child = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(scratch.path()) // --get writes result.txt here
+        .env("HOME", scratch.path()) // a $HOME with no user config
         .envs(env.iter().cloned())
         .args([
             "run",
@@ -448,6 +453,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // record.
     let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .current_dir(&root)
+        .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", "GUEST-READY")
         .args([

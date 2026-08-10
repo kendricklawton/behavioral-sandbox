@@ -10,8 +10,9 @@ use std::process::Command;
 
 use bsx_probes_loader::{HostKey, record_hash};
 
-/// A scratch dir for the chain file, removed on drop; also the spawn cwd, so a `.bsx.toml`
-/// higher up the tree can't leak configuration into the run.
+/// A scratch dir for the chain file, removed on drop; also the spawn cwd and the spawned process's
+/// `$HOME`, so neither a `.bsx.toml` higher up the tree nor the developer's own user config can leak
+/// configuration (a `trusted_keys` entry above all) into the run.
 struct ChainDir(PathBuf);
 
 impl ChainDir {
@@ -50,6 +51,7 @@ fn verify_in(dir: &ChainDir, file: &Path, key_hex: &str) -> (Option<i32>, String
         .arg(file)
         .args(["--key", key_hex])
         .current_dir(&dir.0)
+        .env("HOME", &dir.0)
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx verify: {e}"));
     (

@@ -152,6 +152,68 @@ pub struct Policy {
     pub max_egress_v6: Vec<Ipv6Cidr>,
 }
 
+impl Policy {
+    /// Fold a project-local file's policy onto this one (the user's), tightening only.
+    ///
+    /// The two files are not peers. "Absent is weakest" makes every key here safe against a host
+    /// with no config at all, but not against one whose user file already set a posture: a plain
+    /// nearest-wins merge would let a project `require_jail = false` displace a user `true`. So the
+    /// house defaults take the nearer value (a caller could pass those on the command line anyway,
+    /// and [`Policy::resolve`] clamps a default to whatever ceiling survives), while ceilings take
+    /// the smaller and postures take the stronger.
+    #[must_use]
+    pub fn tightened_by(mut self, project: &Policy) -> Policy {
+        if project.vcpus.is_some() {
+            self.vcpus = project.vcpus;
+        }
+        if project.mem_mib.is_some() {
+            self.mem_mib = project.mem_mib;
+        }
+        if project.wall_secs.is_some() {
+            self.wall_secs = project.wall_secs;
+        }
+        if project.output_cap.is_some() {
+            self.output_cap = project.output_cap;
+        }
+
+        self.max_vcpus = tighter(self.max_vcpus, project.max_vcpus);
+        self.max_mem_mib = tighter(self.max_mem_mib, project.max_mem_mib);
+        self.max_wall_secs = tighter(self.max_wall_secs, project.max_wall_secs);
+        self.max_output_cap = tighter(self.max_output_cap, project.max_output_cap);
+
+        self.require_jail |= project.require_jail;
+        self.require_record |= project.require_record;
+        self.allow_net = match (self.allow_net, project.allow_net) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (_, set @ Some(true)) => set,
+            (user, None) => user,
+        };
+
+        // A user ceiling binds as written; the project's applies only where the user set none.
+        // Do **not** intersect the two by containment: an empty list means "no restriction" in
+        // [`Policy::check_egress`], so filtering a wider project list against a narrower user one
+        // yields the empty list and widens the ceiling it was meant to tighten.
+        if self.max_egress_v4.is_empty() {
+            self.max_egress_v4 = project.max_egress_v4.clone();
+        }
+        if self.max_egress_v6.is_empty() {
+            self.max_egress_v6 = project.max_egress_v6.clone();
+        }
+
+        self
+    }
+}
+
+/// The tighter of two optional bounds. `Option::min` orders `None` below `Some`, so it would pick
+/// "unbounded" over a real ceiling.
+fn tighter<T: Ord>(user: Option<T>, project: Option<T>) -> Option<T> {
+    match (user, project) {
+        (Some(u), Some(p)) => Some(u.min(p)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
 /// A run refused because it asked past the operator's policy. Carries the knob, what was asked, and
 /// the bound, so the message can name the fix rather than just saying no.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -705,5 +767,81 @@ mod tests {
             // Both carry the same substance: the knob, the ask, and the bound.
             assert!(daemon.contains(knob) && daemon.contains('9') && daemon.contains('2'));
         }
+    }
+
+    #[test]
+    fn a_project_ceiling_tightens_the_user_ceiling_and_never_widens_it() {
+        let user = Policy {
+            max_vcpus: NonZeroU8::new(4),
+            max_mem_mib: NonZeroU32::new(1024),
+            require_jail: true,
+            ..Policy::default()
+        };
+
+        // A lower project ceiling binds ...
+        let tighter_project = Policy {
+            max_vcpus: NonZeroU8::new(2),
+            ..Policy::default()
+        };
+        let folded = user.clone().tightened_by(&tighter_project);
+        assert_eq!(
+            folded.max_vcpus,
+            NonZeroU8::new(2),
+            "the smaller ceiling wins"
+        );
+        assert_eq!(
+            folded.max_mem_mib,
+            NonZeroU32::new(1024),
+            "an unset one leaves the user's"
+        );
+
+        // ... and a higher one does not.
+        let looser_project = Policy {
+            max_vcpus: NonZeroU8::new(64),
+            require_jail: false,
+            ..Policy::default()
+        };
+        let folded = user.clone().tightened_by(&looser_project);
+        assert_eq!(
+            folded.max_vcpus,
+            NonZeroU8::new(4),
+            "a project file cannot raise the user's ceiling"
+        );
+        assert!(folded.require_jail, "nor withdraw a posture the user set");
+
+        // A ceiling the user never set is still adopted: absent is weakest, so this only bounds.
+        let adopted = Policy::default().tightened_by(&looser_project);
+        assert_eq!(adopted.max_vcpus, NonZeroU8::new(64));
+    }
+
+    #[test]
+    fn a_project_egress_ceiling_does_not_replace_the_user_ceiling() {
+        let ten_16 = Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 16).unwrap();
+        let ten_8 = Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap();
+        let user = Policy {
+            max_egress_v4: vec![ten_16],
+            ..Policy::default()
+        };
+        let project = Policy {
+            max_egress_v4: vec![ten_8],
+            ..Policy::default()
+        };
+
+        let folded = user.tightened_by(&project);
+        assert_eq!(
+            folded.max_egress_v4,
+            vec![ten_16],
+            "the user's narrower ceiling still binds"
+        );
+        // The trap this guards: intersecting the two by containment yields the empty list, and an
+        // empty list means "no restriction", so the merge would have widened the ceiling.
+        assert!(
+            !folded.max_egress_v4.is_empty(),
+            "never widens to unrestricted"
+        );
+
+        // Where the user set none, the project's applies.
+        let adopted = Policy::default().tightened_by(&project);
+        assert_eq!(adopted.max_egress_v4, vec![ten_8]);
     }
 }
