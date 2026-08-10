@@ -9,8 +9,9 @@
 //!   graceful degradation; any other schema change requires a [`PROTOCOL_VERSION`] bump.
 //! - **Framing:** Length-prefixed frames: `tag(u8) · len(u32-le) · payload`. `len` is validated against
 //!   [`MAX_PAYLOAD`] before allocation to prevent memory exhaustion attacks.
-//! - **Type-State API:** [`ClientConnection`] (host) and [`ServerConnection`] (guest) enforce strict
-//!   role-based state transitions post-handshake.
+//! - **Role-split API:** [`ClientConnection`] (host) and [`ServerConnection`] (guest) each expose
+//!   only their own side of the wire, so sending a frame in the wrong direction is a missing method,
+//!   not a runtime error.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
