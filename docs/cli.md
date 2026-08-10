@@ -62,7 +62,7 @@ Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, n
 "The CLI" here means the one-shot commands (`run`, `shell`, `doctor`, `verify`): a process that
 boots one VM, does its work, and exits. The daemon is the **same `bsx` binary** started as
 `bsx serve`, so a daemon-scoped feature is one subcommand away, not a separate install; what
-differs is the operational shape, a long-lived process with its own flags, policy, and wire API.
+differs is the operational shape — a long-lived process with its own flags, policy, and wire API.
 
 - **Snapshots and the pre-warmed pool.** A pre-warmed pool is a long-lived-process concern, so it
   lives in the [`bsx serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
