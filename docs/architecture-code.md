@@ -71,7 +71,7 @@ Some types to have in the back of your head before reading further.
   this struct. If you are adding a boot-time capability, it almost certainly starts here.
 
 * **`RunningVm`** (`vm.rs`) is the booted microVM: the `firecracker` child, its API socket, the scratch
-  dir, the captured console, and, importantly, **everything that must be reclaimed**. Its fields are a
+  dir, the captured console, and — importantly — **everything that must be reclaimed**. Its fields are a
   good map of what a VM owns: the active rootfs backing file, the vsock socket, the output device and
   where it extracts to, the per-VM tap (which lives *outside* the workdir, so teardown must delete it
   explicitly), the chroot (whose cgroup is likewise outside), and the lifetime machinery below.

@@ -197,7 +197,7 @@ exits 0 having extracted nothing) all leave with the child process.
 The bounds move from watching a subprocess to being written into the walk itself: bytes charged per
 chunk as they are written, a total entry count, a depth limit, and a wall clock. Depth and entries
 exist because a crafted image can point a directory entry at an ancestor and `ext4-view` exposes no
-inode number to deduplicate on. Every bound is a typed error, never a silent truncation, on the same
+inode number to deduplicate on. Every bound is a typed error — never a silent truncation — on the same
 reasoning that never let an `rdump` which extracted nothing pass as success.
 
 **Memory safety is not correctness, and the trade is named rather than hidden.** A logic bug in the

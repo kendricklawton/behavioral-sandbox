@@ -157,8 +157,11 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
 - `tracing` logs to stderr. A run writes its structured result and audit log to stdout, so
   `bsx run … 2>/dev/null` stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then file
   (`.bsx.toml`, the nearest one above the cwd), then defaults.
-- **No em-dashes in prose.** Repo docs, code comments, and commit messages use colons, commas, or
-  parentheses instead. A true separator in a code block or in shown output stays. User-facing output
+- **An em-dash is the exception, not the default.** Repo docs, code comments, and commit messages
+  use a colon, a comma, or parentheses first. Use an em-dash only where those marks are ambiguous or
+  too weak: to set off material that carries its own commas, or to make a break that is sharper than
+  a colon makes. Use one em-dash or one em-dash pair in a sentence, because a second one reads as the
+  close of the first. A true separator in a code block or in shown output stays. User-facing output
   *strings* are a separate case.
 - **A human owns the pull requests. The operator decides the commits and the pushes.** A **coding
   agent** never opens, approves, or merges a pull request. This includes `gh pr create`,

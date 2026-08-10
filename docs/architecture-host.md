@@ -35,7 +35,7 @@ LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
       untrusted code
 ```
 
-The eBPF programs sit on the **host** side of that boundary: they attach to host-kernel hooks and
+The eBPF programs sit on the **host** side of that boundary — they attach to host-kernel hooks and
 observe the VMM's host footprint, the guest's tap, and its cgroup, never the guest's own syscalls
 (a microVM services those in its own kernel).
 
