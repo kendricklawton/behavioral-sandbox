@@ -294,6 +294,10 @@ allow_net = false
 The house profile used when a caller does not ask. The engine's own defaults are 1 vCPU, 256 MiB, a
 30-second wall budget, and a 16 MiB output cap.
 
+`vcpus` takes the same rule as `--vcpus`: **1 or an even number up to 32**, which is what Firecracker
+accepts. A file naming anything else is a parse error saying so, rather than a value carried to boot
+and refused there.
+
 ## Setting the ceilings
 
 - **keys**: `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap`
@@ -309,6 +313,9 @@ whether a caller actually asked:
 - **A default above a ceiling is clamped.** Nobody asked for it, so there is nothing to contradict.
   This is what lets you set only `max_wall_secs = 10` without refusing every bare run, since the
   engine's own default is 30 seconds.
+
+That clamp is why `max_vcpus` takes the 1-or-even rule too, not just `vcpus`: `vcpus = 8` under
+`max_vcpus = 7` would resolve to 7, and the boot would then be refused for a count you never wrote.
 
 ## Setting the egress ceilings
 
