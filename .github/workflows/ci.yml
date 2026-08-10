@@ -56,7 +56,7 @@ jobs:
 
       # Prebuilt binary, so the gate's `cargo deny check` layer has its tool.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.85.8
+        uses: taiki-e/install-action@v2.85.10
         with:
           tool: cargo-deny
 
