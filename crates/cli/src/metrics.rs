@@ -269,7 +269,7 @@ impl Metrics {
     /// fresh per-scrape snapshot of live capacity (warm-pool stock, committed resources, and the
     /// aggregate ceilings): `pool_ready` is `None` when the daemon runs without a pool (the family is
     /// then absent, not zero, so "no pool" and "empty pool" stay distinguishable to an alert), and the
-    /// committed/capacity gauges. let a fleet dispatcher route on real headroom.
+    /// committed/capacity gauges let a fleet dispatcher route on real headroom.
     pub fn render(&self, cap: &CapacitySample) -> String {
         let mut out = String::with_capacity(2048);
 

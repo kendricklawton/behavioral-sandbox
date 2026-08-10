@@ -332,8 +332,8 @@ mod tests {
         assert_eq!(json_escape(r#"a "quoted" path"#), r#"a \"quoted\" path"#);
         assert_eq!(json_escape("back\\slash"), "back\\\\slash");
         assert_eq!(json_escape("two\nlines"), "two\\nlines");
-        // An ANSI escape in a note (a guest-influenced string can reach one) becomes , not a
-        // raw control byte in someone else's parser.
+        // An ANSI escape in a note (a guest-influenced string can reach one) becomes the text
+        // `\u001b`, not a raw control byte in someone else's parser.
         assert_eq!(json_escape("\x1b[31mred"), "\\u001b[31mred");
     }
 
