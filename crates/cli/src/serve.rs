@@ -183,6 +183,35 @@ pub struct ServeArgs {
     /// refusal. Default 16, one per default session slot; `0` = unlimited.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_SNAPSHOTS)]
     max_snapshots: usize,
+    /// Ceiling on the egress destinations a session's `open` may name (repeatable; `IP` or
+    /// `IP/PREFIX`, either address family). An `open` whose `allow` rules reach outside every entry
+    /// is **refused**, naming the CIDR it asked for. Unset is no CIDR ceiling, not an open tap: the
+    /// tap denies by default, so a client still reaches only what it asked for and the operator only
+    /// loses the say over *what* it may ask for.
+    #[arg(long, value_name = "CIDR", value_parser = parse_max_egress)]
+    max_egress: Vec<MaxEgress>,
+}
+
+/// One `--max-egress` entry. A single flag rather than a `-v4`/`-v6` pair, because an operator
+/// setting a ceiling thinks in destinations; which of [`Policy`]'s two lists it lands in follows from
+/// the address it names.
+#[derive(Debug, Clone, Copy)]
+enum MaxEgress {
+    V4(bsx_probes_loader::Ipv4Cidr),
+    V6(bsx_probes_loader::Ipv6Cidr),
+}
+
+/// Parse one `--max-egress` entry, sharing the config file's CIDR parsers so the two spellings of
+/// this ceiling cannot drift. The family comes from the address rather than from trying one parser
+/// and falling back to the other, so a typo'd IPv4 address is reported as a bad IPv4 address instead
+/// of as a bad IPv6 one.
+fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
+    let addr = s.split_once('/').map_or(s, |(a, _)| a);
+    if addr.contains(':') {
+        crate::config::parse_v6_cidr(s, "--max-egress").map(MaxEgress::V6)
+    } else {
+        crate::config::parse_v4_cidr(s, "--max-egress").map(MaxEgress::V4)
+    }
 }
 
 /// The per-`open` ceilings, built from the daemon's own flags. The daemon takes policy from its
@@ -191,11 +220,22 @@ pub struct ServeArgs {
 /// client-immutable (`--unjailed`), so only the ceilings need to travel to the session boundary.
 /// `--max-wall-secs 0` is the unlimited opt-out, spelled like `--idle-timeout 0`.
 fn operator_policy(args: &ServeArgs) -> Policy {
+    // Wildcard-free, so a third address family cannot be dropped on the floor by this split.
+    let mut max_egress_v4 = Vec::new();
+    let mut max_egress_v6 = Vec::new();
+    for entry in &args.max_egress {
+        match entry {
+            MaxEgress::V4(c) => max_egress_v4.push(*c),
+            MaxEgress::V6(c) => max_egress_v6.push(*c),
+        }
+    }
     Policy {
         max_vcpus: args.max_vcpus,
         max_mem_mib: args.max_mem_mib,
         max_wall_secs: (args.max_wall_secs > 0).then_some(args.max_wall_secs),
         max_output_cap: args.max_output_cap,
+        max_egress_v4,
+        max_egress_v6,
         ..Policy::default()
     }
 }
@@ -1132,6 +1172,70 @@ mod tests {
             1,
             "removing a consumed bundle must give the budget back"
         );
+    }
+
+    #[test]
+    fn the_egress_ceiling_reaches_the_policy_a_session_is_resolved_against() {
+        use bsx_probes_loader::EgressPolicy;
+
+        // The defect was not a missing check: `session::open_network` has always called
+        // `check_egress`. The daemon just never put anything in the lists it checks, so the ceiling
+        // was dead. What this pins is that the flag reaches the enforcing copy.
+        let policy = operator_policy(&serve_args(&["--max-egress", "10.0.0.0/8"]));
+        assert_eq!(
+            policy.max_egress_v4.len(),
+            1,
+            "the v4 entry lands in the v4 list"
+        );
+        assert!(policy.max_egress_v6.is_empty(), "and not in the v6 one");
+
+        let inside = EgressPolicy::default().allow(
+            crate::config::parse_v4_cidr("10.1.2.0/24", "test").expect("valid"),
+            None,
+            None,
+        );
+        assert!(
+            policy.check_egress(&inside).is_ok(),
+            "a request inside the ceiling is served"
+        );
+
+        let outside = EgressPolicy::default().allow(
+            crate::config::parse_v4_cidr("9.9.9.9", "test").expect("valid"),
+            None,
+            None,
+        );
+        let msg = policy
+            .check_egress(&outside)
+            .expect_err("a request outside the ceiling is refused")
+            .daemon_message();
+        assert!(msg.contains("9.9.9.9"), "the refusal names the ask: {msg}");
+
+        // Unset stays unset: no CIDR ceiling, which is not the same as an open tap.
+        let none = operator_policy(&serve_args(&[]));
+        assert!(none.max_egress_v4.is_empty() && none.max_egress_v6.is_empty());
+        assert!(none.check_egress(&outside).is_ok());
+    }
+
+    #[test]
+    fn a_max_egress_entry_is_read_in_the_family_its_address_names() {
+        let both = operator_policy(&serve_args(&[
+            "--max-egress",
+            "10.0.0.0/8",
+            "--max-egress",
+            "fd00::/8",
+        ]));
+        assert_eq!(both.max_egress_v4.len(), 1);
+        assert_eq!(both.max_egress_v6.len(), 1);
+
+        // A typo'd v4 address must report as a bad v4 address, not as a bad v6 one, which is what a
+        // try-v4-then-v6 parser would have said.
+        let msg = parse_max_egress("10.0.0.999/8").expect_err("not an address");
+        assert!(
+            msg.contains("IPv4") && msg.contains("--max-egress"),
+            "{msg}"
+        );
+        let msg6 = parse_max_egress("fd00::zz/8").expect_err("not an address");
+        assert!(msg6.contains("IPv6"), "{msg6}");
     }
 
     #[test]

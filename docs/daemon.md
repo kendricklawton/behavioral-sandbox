@@ -80,6 +80,14 @@ consumed frees budget without restarting the daemon. `0` is unlimited. Only an `
 reaches this at all: snapshotting a jailed session is a typed refusal, since its disk lives in the
 chroot.
 
+**Egress destinations are bounded by `--max-egress CIDR` (repeatable, unset by default).** A session
+that asks for a NIC builds its egress policy from the `allow` rules in its `open`; this bounds which
+destinations those rules may name, and an `open` reaching outside every entry is refused naming the
+CIDR it asked for. Takes `IP` or `IP/PREFIX` in either address family, and the family follows from
+the address. Unset is no CIDR ceiling rather than an open tap: the tap denies by default, so a client
+still reaches only what it explicitly asked for, and what the operator gives up is the say over
+*what* it may ask for.
+
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
 exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
 the same path a hard kill takes; the unlink just spares the next start the stale-socket check.
