@@ -8,7 +8,7 @@
 //!   builder, so the same observations always render the same bytes. A golden test pins them.
 //! - **No floats.** Durations are integer nanoseconds clamped to `u64` (a ~584-year ceiling; parse with
 //!   64-bit integers, not doubles) and byte counts are integers, so there is no locale or precision
-//!   wobble. Addresses render as dotted quads and protocols and syscalls as their names, so the record
+//!   wobble. Addresses render as dotted quads, protocols, and syscalls as their names, so the record
 //!   reads without a decoder ring.
 //! - **The machine surface.** Pretty-printing for people is the live view's job.
 
