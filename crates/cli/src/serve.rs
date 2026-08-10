@@ -68,6 +68,14 @@ pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
         || e.kind() == std::io::ErrorKind::OutOfMemory
 }
 
+/// The default `--max-wall-secs`. Finite because the wall a client asks for becomes the *host's*
+/// own give-up deadline on the exec (`VmmError::ExecUnresponsive`), so an unbounded ask lets a guest
+/// that never reports its command's end hold a session slot, its VM, and its committed memory for as
+/// long as the client named. One hour is the ceiling the in-guest agent already clamps a command to
+/// (`crates/guest-agent/src/lib.rs`), so this refuses only what a cooperating guest would never have
+/// run to completion anyway; a hoster who wants a tighter or looser bound sets the flag.
+const DEFAULT_MAX_WALL_SECS: u64 = 3600;
+
 /// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
 /// is the shared global flag on the `bsx` CLI, so it is not repeated here.
 #[derive(clap::Args)]
@@ -134,9 +142,13 @@ pub struct ServeArgs {
     /// Ceiling on the guest memory (MiB) a session's `open` may ask for.
     #[arg(long, value_name = "MIB")]
     max_mem_mib: Option<NonZeroU32>,
-    /// Ceiling on the wall-clock budget (seconds) a session's `open` may ask for.
-    #[arg(long, value_name = "SECONDS")]
-    max_wall_secs: Option<u64>,
+    /// Ceiling on the wall-clock budget (seconds) a session's `open` may ask for. Past it the `open`
+    /// is **refused**. This is also what bounds one exec's hold on a slot: `--idle-timeout` does not
+    /// arm while a command runs (a long quiet command is a working session, not a wedged one), so
+    /// the wall is the only thing that ends an exec whose guest stops reporting. Default 3600 (1 h),
+    /// the in-guest agent's own command ceiling; `0` = unlimited.
+    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_MAX_WALL_SECS)]
+    max_wall_secs: u64,
     /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for.
     #[arg(long, value_name = "BYTES")]
     max_output_cap: Option<usize>,
@@ -155,6 +167,21 @@ pub struct ServeArgs {
     /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
     #[arg(long, value_name = "N", default_value_t = 0)]
     max_committed_vcpus: u64,
+}
+
+/// The per-`open` ceilings, built from the daemon's own flags. The daemon takes policy from its
+/// flags, not from a discovered `.bsx.toml`: a daemon must not read a security control out of
+/// whatever directory it happened to be started in. Jail and networking are already daemon-wide and
+/// client-immutable (`--unjailed`), so only the ceilings need to travel to the session boundary.
+/// `--max-wall-secs 0` is the unlimited opt-out, spelled like `--idle-timeout 0`.
+fn operator_policy(args: &ServeArgs) -> Policy {
+    Policy {
+        max_vcpus: args.max_vcpus,
+        max_mem_mib: args.max_mem_mib,
+        max_wall_secs: (args.max_wall_secs > 0).then_some(args.max_wall_secs),
+        max_output_cap: args.max_output_cap,
+        ..Policy::default()
+    }
 }
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
@@ -348,17 +375,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         );
         return ExitCode::from(EXIT_OPERATIONAL);
     }
-    // The daemon takes policy from its flags, not from a discovered `.bsx.toml`: a daemon must not
-    // read a security control out of whatever directory it happened to be started in. Jail and
-    // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
-    // ceilings need to travel to the session boundary.
-    let policy = Policy {
-        max_vcpus: args.max_vcpus,
-        max_mem_mib: args.max_mem_mib,
-        max_wall_secs: args.max_wall_secs,
-        max_output_cap: args.max_output_cap,
-        ..Policy::default()
-    };
+    let policy = operator_policy(&args);
     let server = Arc::new(Server {
         base,
         isolation,
@@ -1006,6 +1023,52 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// Parse a `bsx serve` command line into its args, so a test sees the same defaults clap applies
+    /// to the real invocation rather than a hand-built struct that could drift from them.
+    fn serve_args(extra: &[&str]) -> ServeArgs {
+        #[derive(clap::Parser)]
+        struct Harness {
+            #[command(flatten)]
+            args: ServeArgs,
+        }
+        let mut argv = vec!["bsx", "--socket", "/tmp/bsx-test.sock"];
+        argv.extend_from_slice(extra);
+        <Harness as clap::Parser>::parse_from(argv).args
+    }
+
+    #[test]
+    fn the_default_wall_ceiling_bounds_what_one_exec_can_hold() {
+        use crate::policy::Requested;
+
+        // The ask becomes the host's own give-up deadline on a guest that stops reporting, and
+        // `--idle-timeout` does not arm while a command runs, so without a ceiling one `open` plus
+        // one stalled exec holds a session slot and its VM for as long as the client asked for.
+        let policy = operator_policy(&serve_args(&[]));
+        assert_eq!(policy.max_wall_secs, Some(DEFAULT_MAX_WALL_SECS));
+
+        let greedy = Requested {
+            wall_secs: Some(u64::MAX),
+            ..Requested::default()
+        };
+        let err = policy
+            .resolve(&greedy)
+            .expect_err("a wall past the ceiling must be refused, not clamped");
+        let message = err.daemon_message();
+        assert!(
+            message.contains("--max-wall-secs"),
+            "the refusal must name the flag that set the ceiling: {message}"
+        );
+
+        // A default is not a decision taken from the hoster: the opt-out still restores the
+        // unbounded wall, for a fleet whose sessions are meant to run long.
+        let unlimited = operator_policy(&serve_args(&["--max-wall-secs", "0"]));
+        assert_eq!(unlimited.max_wall_secs, None);
+        assert!(
+            unlimited.resolve(&greedy).is_ok(),
+            "`0` must mean unlimited, as it does for --idle-timeout and --max-sessions"
+        );
+    }
 
     #[test]
     fn a_mistyped_socket_path_is_refused_not_deleted() {
