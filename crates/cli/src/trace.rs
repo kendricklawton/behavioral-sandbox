@@ -4,7 +4,11 @@
 //! being deterministic for the same record, parse the JSON, read this.
 //!
 //! Pure `record -> String`, so it is unit-tested host-safe against a golden.
+//!
+//! - **Terminal injection:** the notable-syscall lines carry `detail` and `comm`, decoded from bytes
+//!   the probe captured, so they reach a terminal through [`printable`] rather than raw.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -116,8 +120,8 @@ pub fn render(record: &RunRecord) -> String {
             out,
             "    {:<8} {} ({}) x{}",
             syscall_name(n.kind),
-            n.detail,
-            n.comm,
+            printable(&n.detail),
+            printable(&n.comm),
             n.hits
         );
     }
@@ -145,6 +149,25 @@ pub fn render(record: &RunRecord) -> String {
         let _ = writeln!(out, "  gap        {line}");
     }
     out
+}
+
+/// A probe-captured string made safe to write to a terminal: control characters are escaped, so an
+/// `openat` path or a `comm` carrying ESC or CSI cannot forge lines in the audit trail. Borrowed
+/// when there is nothing to escape, which is every ordinary path, since the live view renders this
+/// once per poll. Needs no length cap: `DETAIL_CAP` and `COMM_CAP` bound these bytes at capture.
+pub(crate) fn printable(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// A duration for humans: adaptive unit, one place so the trail and the live view agree.
@@ -324,6 +347,58 @@ audit trail (host-observed, from outside the guest)
         let text = render(&record);
         assert!(text.contains("no NIC"), "{text}");
         assert!(text.contains("--net"), "{text}");
+    }
+
+    #[test]
+    fn printable_escapes_control_bytes_and_borrows_a_clean_path() {
+        assert!(
+            matches!(printable("/etc/hosts"), Cow::Borrowed(_)),
+            "an ordinary path must not allocate; the live view renders these once per poll"
+        );
+        assert_eq!(printable("a\x1b[2Jb"), "a\\u{1b}[2Jb");
+        assert_eq!(printable("a\x7fb"), "a\\u{7f}b", "DEL");
+        // CSI in its 8-bit form: `char::is_control` covers C1, which a C0-only check would miss.
+        assert_eq!(printable("a\u{9b}b"), "a\\u{9b}b");
+    }
+
+    #[test]
+    fn a_hostile_path_cannot_forge_a_trail_line() {
+        // The trail is an audit surface, so a captured path must not be able to write lines of its
+        // own into it. The record keeps the bytes the probe saw; this renderer is what escapes them.
+        let record = RunRecord::from_parts(
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
+            None,
+            ResourceSummary::default(),
+            SyscallFootprint::from_events(
+                0x42,
+                &[ev(1, 0x42, b"/tmp/\x1b]0;pwned\x07evil", "sh\x1b[2J")],
+            ),
+            Timing::new(Duration::ZERO, Duration::ZERO),
+            vec![],
+        );
+        let text = render(&record);
+        assert!(
+            !text.contains('\x1b'),
+            "no ESC reaches the terminal: {text:?}"
+        );
+        assert!(
+            !text.contains('\x07'),
+            "no BEL reaches the terminal: {text:?}"
+        );
+        assert_eq!(
+            text.lines().count(),
+            render(&{
+                let mut clean = record.clone();
+                clean.host_syscalls =
+                    SyscallFootprint::from_events(0x42, &[ev(1, 0x42, b"/tmp/evil", "sh")]);
+                clean
+            })
+            .lines()
+            .count(),
+            "the hostile detail must not add a line"
+        );
+        // Escaped, not swallowed: dropping the string would satisfy the assertions above too.
+        assert!(text.contains("pwned"), "the text is kept, escaped: {text}");
     }
 
     #[test]

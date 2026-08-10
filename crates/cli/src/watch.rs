@@ -26,7 +26,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::audit::RunProbes;
-use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
+use crate::trace::{human_bytes, human_duration, printable, proto_name, syscall_name};
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
@@ -108,7 +108,12 @@ impl Timeline {
                 if !self.seen_notable.contains(&id) {
                     self.push(
                         at,
-                        format!("{} {} ({})", syscall_name(n.kind), n.detail, n.comm),
+                        format!(
+                            "{} {} ({})",
+                            syscall_name(n.kind),
+                            printable(&n.detail),
+                            printable(&n.comm)
+                        ),
                     );
                     self.seen_notable.insert(id);
                 }
@@ -468,7 +473,7 @@ fn draw_syscalls(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
                 lines.push(Line::from(format!(
                     "  {:<8} {} x{}",
                     syscall_name(n.kind),
-                    n.detail,
+                    printable(&n.detail),
                     n.hits
                 )));
             }
@@ -575,6 +580,38 @@ mod tests {
         tl.observe(Duration::from_millis(50), &snap);
         assert_eq!(tl.events.len(), 1, "a distinct syscall lands once");
         assert!(tl.events[0].1.contains("openat"));
+    }
+
+    #[test]
+    fn a_hostile_path_cannot_forge_a_timeline_entry() {
+        // The live view happens to be shielded by ratatui dropping zero-width graphemes, but that is
+        // a third-party rendering detail. The entry is built escaped, so the property is this
+        // crate's, and the same helper covers the trail (`trace::printable`).
+        use bsx_probes_loader::{Syscall, SyscallEvent};
+        let detail = b"/tmp/\x1b]0;pwned\x07evil";
+        let mut d = [0u8; DETAIL_CAP];
+        d[..detail.len()].copy_from_slice(detail);
+        let mut comm = [0u8; bsx_probes_loader::COMM_CAP];
+        comm[..5].copy_from_slice(b"sh\x1b[2");
+        let mut tl = Timeline::new();
+        let mut snap = LiveSnapshot::default();
+        snap.host_syscalls = Some(SyscallFootprint::from_events(
+            1,
+            &[SyscallEvent {
+                cgroup_id: 1,
+                pid: 1,
+                tid: 1,
+                syscall: Syscall::Openat as u32,
+                detail_len: detail.len() as u32,
+                comm,
+                detail: d,
+            }],
+        ));
+        tl.observe(Duration::ZERO, &snap);
+        let entry = &tl.events[0].1;
+        assert!(!entry.contains('\x1b'), "no ESC in the entry: {entry:?}");
+        assert!(!entry.contains('\x07'), "no BEL in the entry: {entry:?}");
+        assert!(entry.contains("pwned"), "escaped, not dropped: {entry}");
     }
 
     #[test]
