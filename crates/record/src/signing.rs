@@ -791,6 +791,8 @@ impl std::error::Error for ChainError {
 
 #[cfg(test)]
 mod tests {
+    use bsx_test_support::ScratchDir;
+
     use super::*;
 
     /// A fixed seed, so signatures are deterministic in tests.
@@ -1250,9 +1252,9 @@ mod tests {
 
     #[test]
     fn concurrent_first_run_generation_converges_on_one_key() {
-        let dir = std::env::temp_dir().join(format!("bsx-key-race-{}", std::process::id()));
+        let dir = ScratchDir::created("key-race");
+        let dir = dir.path();
         let path = dir.join("record-signing.ed25519");
-        let _ = std::fs::remove_dir_all(&dir);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -1276,13 +1278,12 @@ mod tests {
         );
         let mode = std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&path).expect("stat"));
         assert_eq!(mode & 0o777, 0o600);
-        let litter: Vec<_> = std::fs::read_dir(&dir)
+        let litter: Vec<_> = std::fs::read_dir(dir)
             .expect("dir")
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(litter.is_empty(), "no temp litter: {litter:?}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1291,9 +1292,8 @@ mod tests {
         // The leak `StagingFile` closes: a panic between creating the staging temp and publishing
         // it must not strand a `<key>.tmp.<n>` orphan. Catch an unwind out of a scope holding a
         // live guard and assert the file is gone.
-        let dir = std::env::temp_dir().join(format!("bsx-key-unwind-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let tmp = dir.join("record-signing.ed25519.tmp.0");
+        let dir = ScratchDir::created("key-unwind");
+        let tmp = dir.path().join("record-signing.ed25519.tmp.0");
         std::fs::write(&tmp, b"seed").expect("write staging");
         assert!(tmp.exists());
         let tmp_for_panic = tmp.clone();
@@ -1306,14 +1306,12 @@ mod tests {
             !tmp.exists(),
             "the staging file must be unlinked as the guard drops on unwind"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn load_or_generate_persists_then_reloads_the_same_key() {
-        let dir = std::env::temp_dir().join(format!("bsx-key-{}", std::process::id()));
-        let path = dir.join("record-signing.ed25519");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = ScratchDir::created("key-reload");
+        let path = dir.path().join("record-signing.ed25519");
         let first = HostKey::load_or_generate(&path).expect("generates");
         let second = HostKey::load_or_generate(&path).expect("reloads");
         assert_eq!(
@@ -1328,7 +1326,6 @@ mod tests {
             0o600,
             "secret key is not world/group readable"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

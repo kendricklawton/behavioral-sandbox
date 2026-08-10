@@ -139,6 +139,8 @@ fn parse_io_bytes(text: &str) -> (u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    use bsx_test_support::ScratchDir;
+
     use super::*;
 
     #[test]
@@ -179,14 +181,8 @@ mod tests {
     fn cgroup_stats_read_of_a_synthetic_dir_collects_present_files_and_tolerates_absent() {
         // A temp dir stands in for a cgroup dir: `read` collects the files that exist and
         // leaves the rest None (best-effort), never failing. No eBPF, no real cgroup, host-safe.
-        let dir = std::env::temp_dir().join(format!(
-            "bsx-cgstats-{}-{}",
-            std::process::id(),
-            // vary by a fixed nonce; no clock/rng on the host path here, and one dir per test run is fine
-            "t"
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create synthetic cgroup dir");
+        let scratch = ScratchDir::created("cgstats");
+        let dir = scratch.path();
         std::fs::write(dir.join("cpu.stat"), "usage_usec 777\nuser_usec 700\n").expect("cpu.stat");
         std::fs::write(dir.join("memory.current"), "4096\n").expect("memory.current");
         std::fs::write(
@@ -196,7 +192,7 @@ mod tests {
         .expect("io.stat");
         // memory.peak deliberately absent (older-kernel case).
 
-        let stats = CgroupStats::read(&dir);
+        let stats = CgroupStats::read(dir);
         assert_eq!(stats.cpu_usage_usec, Some(777));
         assert_eq!(stats.memory_current, Some(4096));
         assert_eq!(
@@ -205,8 +201,6 @@ mod tests {
         );
         assert_eq!(stats.io_rbytes, Some(10));
         assert_eq!(stats.io_wbytes, Some(20));
-
-        let _ = std::fs::remove_dir_all(&dir);
 
         // A wholly nonexistent dir yields the all-None default, still no error.
         assert_eq!(CgroupStats::read(&dir.join("gone")), CgroupStats::default());
