@@ -6,12 +6,12 @@
 # from fuzz/artifacts/.
 name: fuzz-smoke
 
-# Scoped to what a target can actually reach, because this job is a *regression* check: a seeded
-# 60s run over unchanged code re-explores the space it explored last time, and duration plus corpus
-# accumulation (the nightly job) is where coverage-guided fuzzing finds anything new. The five
-# crates below are the ones the ten targets drive; `Cargo.lock` is here because a dependency bump
-# can change decode behavior under an unchanged decoder. The gap this accepts: a change elsewhere
-# that alters how a fuzzed decoder is *called* goes unsmoked until the nightly run.
+# Scoped to what a target can actually reach, because this job is a *regression* check. The corpus
+# carries between runs (see the cache step below), so each run extends the last one's search instead
+# of re-deriving it from the seeds, which is what makes a 60s budget worth spending per change. The
+# crates below are the ones the targets drive; `Cargo.lock` is here because a dependency bump can
+# change decode behavior under an unchanged decoder. The gap this accepts: a change elsewhere that
+# alters how a fuzzed decoder is *called* goes unsmoked until the nightly run.
 on:
   pull_request:
     paths: &fuzz_inputs
@@ -60,6 +60,23 @@ jobs:
       # crash found here may not reproduce on a dev box running a different fuzzer.
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+
+      # The inputs libFuzzer keeps, carried across runs. `fuzz/corpus/` is gitignored working data,
+      # so without this every run restarts from `fuzz/seeds/` and re-walks the same ground: a
+      # coverage-guided fuzzer earns its budget by accumulating, and 60s from cold buys little.
+      # One entry for all targets, because this job fuzzes them in one job; the nightly matrix keys
+      # per target instead, since a job there holds only its own.
+      #
+      # The key is unique per run because a cache entry is immutable: a stable key would restore and
+      # then decline to save, so the corpus would never grow past its first write. `restore-keys`
+      # takes the newest entry sharing the prefix, which makes a cold cache a seed-only run rather
+      # than a failure.
+      - name: Restore the fuzzing corpus
+        uses: actions/cache@v6
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-smoke-${{ github.run_id }}
+          restore-keys: fuzz-corpus-smoke-
 
       # Every target, 60s each (plus the build, well inside the 20m timeout). Seeds are folded in
       # by `fuzz-smoke`, so the short budget reaches the decode logic, not the message shape.
