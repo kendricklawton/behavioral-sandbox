@@ -16,6 +16,7 @@ mod policy;
 mod serve;
 mod session;
 mod trace;
+mod trust;
 mod verify;
 mod watch;
 

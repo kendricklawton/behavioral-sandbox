@@ -373,6 +373,28 @@ path.
 
 ---
 
+## Which `~/.bsx.toml` is read
+
+The user file names the binary this host executes, the images it boots, and the key it signs records
+with, so on a shared host it is read only when its author could have been you. It is refused when:
+
+- **it is owned by another local user** (or is a symlink another user owns, since the link chooses
+  which file gets read). Your own uid, `root`, and, under `sudo`, the invoking user all count as you.
+- **it is group- or world-writable** (`chmod go-w` it). Read bits are fine: `0o644`, what an editor
+  writes under the usual umask, is admitted. This file's contents are paths and ceilings, already
+  visible in `ps`, so what matters is who can change it, not who can see it.
+- **its directory is owned by another user, or is group/world-writable without the sticky bit.** A
+  directory someone else can write lets them replace the file whatever its own mode says. `/tmp` and
+  friends at `0o1777` are fine, because the sticky bit stops one user unlinking another's file.
+
+Under `sudo` the invoking user is read from `SUDO_UID`, and only when the real and effective uid are
+both `0`, which is the state `sudo` produces. `su -` clears the environment and `doas` sets a name
+rather than a uid, so a root shell obtained either way does not adopt your uid and reads your config
+as another user's. Pass the paths with `BSX_*` there, or run under `sudo -E`.
+
+The project file gets no such check. It carries only knobs and postures, so gating it would refuse
+every `0o664` file a developer on `umask 002` writes, for nothing.
+
 ## A project file that reaches past its keys
 
 Setting a user-only key in a project file is a refusal, before any boot, naming the key and where it

@@ -167,6 +167,21 @@ impl UserConfig {
         })
     }
 
+    /// Read + parse an already-opened `.bsx.toml`, so the file parsed is the one that was judged.
+    fn parse_open(mut file: std::fs::File, path: &Path) -> Result<Self, ConfigError> {
+        use std::io::Read as _;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|e| ConfigError::Read {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        Self::parse(&text).map_err(|message| ConfigError::Parse {
+            path: path.to_path_buf(),
+            message,
+        })
+    }
+
     /// Parse TOML text into a [`UserConfig`], surfacing an unknown-key/type error as a plain string
     /// (the pure core the file reader and the unit tests share).
     fn parse(text: &str) -> Result<Self, String> {
@@ -452,6 +467,8 @@ pub enum ConfigError {
     Read { path: PathBuf, message: String },
     /// The file is not valid TOML, or names a key that does not exist.
     Parse { path: PathBuf, message: String },
+    /// The user file is there, but another local user could have authored or replaced it.
+    Untrusted(String),
     /// A project-local file set keys that are read from the user file, the environment, or a flag.
     UserOnlyKeys {
         path: PathBuf,
@@ -465,6 +482,8 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::Read { path, message } => write!(f, "read {}: {message}", path.display()),
             ConfigError::Parse { path, message } => write!(f, "{}: {message}", path.display()),
+            // Already names the file and the fix; re-prefixing would print the path twice.
+            ConfigError::Untrusted(message) => write!(f, "{message}"),
             ConfigError::UserOnlyKeys {
                 path,
                 user_path,
@@ -550,9 +569,16 @@ impl Sources {
         // A relative `$HOME` names a different directory depending on where the process started, so
         // it does not identify the user's own file. Same filter `bsx_record`'s data dir applies.
         let user_path = home.filter(|h| h.is_absolute()).map(|h| h.join(FILE_NAME));
+        // The user file is the one that still carries the keys reaching host execution and host
+        // trust, so it is opened through the ownership and mode gate rather than by path. The
+        // project file is not: it can set only knobs and postures, and gating it would refuse every
+        // `0o664` file a developer on `umask 002` creates, for nothing.
         let user = match user_path.as_deref() {
-            Some(p) if p.is_file() => Some(UserConfig::parse_file(p)?),
-            _ => None,
+            Some(p) => match crate::trust::open_trusted(p).map_err(ConfigError::Untrusted)? {
+                Some(file) => Some(UserConfig::parse_open(file, p)?),
+                None => None,
+            },
+            None => None,
         };
 
         // Walking up from a cwd under `$HOME` lands on the user's own file. Classifying it as a

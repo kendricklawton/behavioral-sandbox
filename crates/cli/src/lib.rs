@@ -11,3 +11,7 @@
 pub mod config;
 #[cfg(feature = "fuzzing")]
 pub mod policy;
+// Private: `config`'s user-file read goes through it, but it is filesystem IO rather than a parser,
+// so it is not part of what the harness drives.
+#[cfg(feature = "fuzzing")]
+mod trust;

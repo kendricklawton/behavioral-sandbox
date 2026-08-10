@@ -656,14 +656,6 @@ fn snapshots_dir(scratch: &Path) -> PathBuf {
     scratch.join(format!("bsx-snapshots-{}", std::process::id()))
 }
 
-/// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
-/// (from a prior crashed daemon of the same user), never another user's on a shared scratch base.
-fn own_euid() -> Option<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
-    uid.split_whitespace().nth(1)?.parse().ok()
-}
-
 /// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead** prior
 /// daemons, whose guest-memory-sized files are pure leak once their owner is gone. Best-effort per entry,
 /// skipping this pid and any live one. A dead daemon's pid is genuinely absent from `/proc`, since it is
@@ -692,7 +684,7 @@ fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
 
 fn sweep_stale_agent_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
-    let Some(me) = own_euid() else {
+    let Some(me) = crate::trust::own_euid() else {
         return; // without our euid we can't prove ownership; skip rather than risk a wrong delete
     };
     let Ok(entries) = std::fs::read_dir(scratch) else {
