@@ -222,13 +222,23 @@ fn pid_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
-/// This process's **effective** uid, from `/proc/self/status` (`Uid:` is real/effective/saved/fs;
-/// effective is the second field), no `unsafe`, no libc, the same read the test helpers use.
-/// The euid is what names the files this process creates, so it's the identity `create_workdir`'s
-/// dirs carry and the one the candidate filter must match. Also the ownership the restore-disk
-/// staging verifies before adopting a pre-existing dir (`stage_restore_disk`).
+/// This process's **effective** uid, from `/proc/self/status`, no `unsafe`, no libc. The crate's one
+/// euid read: the identity `create_workdir`'s dirs carry and the candidate filter must match, the
+/// ownership `stage_restore_disk` verifies before adopting a pre-existing dir, and the real-root
+/// answer `doctor`'s jailer rows report.
 pub(crate) fn own_euid() -> Option<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    euid_in(&std::fs::read_to_string("/proc/self/status").ok()?)
+}
+
+/// The effective uid in a `/proc/<pid>/status` body. `strip_prefix` consumes the `Uid:` token, so
+/// the remaining whitespace fields are `[real, effective, saved, fs]` and the effective one is index
+/// 1; a `starts_with` split would leave `Uid:` as field 0 and shift it to 2.
+///
+/// Split from the read so the index is pinned against a **setuid-shaped** line, which a live `/proc`
+/// read cannot do: an ordinary process's four uid fields are all equal, so it cannot tell the two
+/// indices apart. `bsx-record`'s `uids` carries the same reasoning for the copy engine cannot reach
+/// (engine does not depend on `bsx-record`).
+fn euid_in(status: &str) -> Option<u32> {
     let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
     uid.split_whitespace().nth(1)?.parse().ok()
 }
@@ -441,5 +451,23 @@ mod tests {
         let dir = ScratchDir::created("bsx-sweep-uid");
         let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();
         assert_eq!(own_euid(), Some(dir_uid));
+    }
+
+    #[test]
+    fn the_uid_line_parse_reads_the_effective_field() {
+        // **Four distinct values on purpose.** The test above cross-checks this parse against the
+        // kernel's own answer, but an ordinary process's four uid fields are all equal, so it cannot
+        // tell one index from another. A setuid-shaped `1000 0 0 0` is no better: fields 1 and 2 are
+        // both `0`, so it passes on an off-by-one too. Only a line where every field differs can see
+        // the index.
+        let status = "Name:\tbsx\nUid:\t1000\t1001\t1002\t1003\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(
+            euid_in(status),
+            Some(1001),
+            "field 1 after the label is the effective uid (real 1000, saved 1002, fs 1003)"
+        );
+        assert_eq!(euid_in("Name:\tbsx\n"), None, "no Uid: line");
+        assert_eq!(euid_in("Uid:\t1000\n"), None, "no effective field");
+        assert_eq!(euid_in("Uid:\t1000\tnotanumber\n"), None);
     }
 }
