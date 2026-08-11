@@ -26,7 +26,7 @@ use crate::console::Console;
 use crate::drives::{OutputDevice, collect_output_image};
 use crate::exec::{
     EXEC_KILL_SLACK, ExecBounds, PROBE_TIMEOUT, VSOCK_TIMEOUT, connect_agent_at,
-    connect_agent_once, run_exec,
+    connect_agent_bounded, connect_agent_once, run_exec,
 };
 use crate::firecracker::{Action, ApiClient};
 use crate::jail::{Chroot, Jail, remove_cgroup};
@@ -867,12 +867,14 @@ impl RunningVm {
         // The host's total patience: the command's own budget (the `Limits::exec_wall` knob this VM
         // booted with) plus the agent's kill+report margin. Derived from the *actual* budget so a
         // raised budget can't leave the socket idle timeout cutting off a long quiet command. Used
-        // both as the socket's per-read idle timeout and, inside `run_exec`, as the wall-clock
-        // deadline on the loop, so the agent's `TimedOut` (at `budget`) reaches us first, and a
-        // silent guest can't park us.
+        // as one **absolute** deadline on the connection's reads and writes and, inside `run_exec`,
+        // as the wall-clock deadline on the loop, so the agent's `TimedOut` (at `budget`) reaches us
+        // first and neither a silent nor a dribbling guest can park us. The connection is the bounded
+        // constructor for that reason: a per-syscall timeout is re-armed by every byte, so it bounds
+        // one `read`, not one frame.
         let budget = self.exec_wall;
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
-        let mut conn = connect_agent_at(uds, VSOCK_PORT, wall)?;
+        let mut conn = connect_agent_bounded(uds, VSOCK_PORT, wall)?;
         let argv_ref: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
         let files_in_ref: Vec<(&str, &[u8])> = files_in
             .iter()
