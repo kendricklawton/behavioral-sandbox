@@ -378,7 +378,7 @@ impl Spawned {
         // tap it enforces on stays host-side, in the clone's own netns.
 
         tracing::info!(
-            restore_ms = latency.as_millis() as u64,
+            restore_ms = crate::ms(latency),
             "microVM restored from snapshot"
         );
         Ok(latency)

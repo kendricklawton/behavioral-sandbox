@@ -314,7 +314,7 @@ pub(crate) fn run_exec<S: Read + Write>(
                     stdout_bytes = stdout.len(),
                     stderr_bytes = stderr.len(),
                     artifacts = files.len(),
-                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    elapsed_ms = crate::ms(started.elapsed()),
                     "guest command finished"
                 );
                 return Ok(RunResult {
@@ -333,7 +333,7 @@ pub(crate) fn run_exec<S: Read + Write>(
             // it on the error (or a `timed_out` RunResult) is a future enhancement.
             Response::TimedOut { elapsed_ms } => {
                 tracing::warn!(
-                    limit_ms = bounds.timeout.as_millis() as u64,
+                    limit_ms = crate::ms(bounds.timeout),
                     elapsed_ms,
                     "guest command timed out"
                 );

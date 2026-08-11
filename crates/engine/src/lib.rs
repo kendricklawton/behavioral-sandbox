@@ -46,6 +46,12 @@ pub use pool::Pool;
 pub use sweep::{SweepReport, sweep_orphans};
 pub use vm::{BootConfig, DEFAULT_GUEST_CID, RunningVm, Snapshot, VSOCK_PORT, Vm};
 
+/// A [`Duration`] as whole milliseconds, saturating rather than wrapping, for the latency fields the
+/// engine logs.
+pub(crate) fn ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ErrorKind, VmmError};
