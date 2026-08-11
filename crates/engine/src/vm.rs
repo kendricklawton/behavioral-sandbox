@@ -1051,7 +1051,14 @@ pub(crate) fn teardown(
         chroot.unmount_all();
     }
     // Delete the netns and reclaim the scratch dir, gated so a lingering netns keeps its dir.
-    reclaim_scratch(workdir, tap);
+    // A jailed chroot is chowned to its leased pair, so a tree that survives this keeps that pair out
+    // of the span: reusing it would put two on-host chroots under one uid, which is the separation
+    // the span exists to buy.
+    if reclaim_scratch(workdir, tap) == Reclaimed::No
+        && let Some(chroot) = chroot
+    {
+        chroot.withhold_lease();
+    }
 }
 
 /// Delete the VM's netns (cascading its tap away), then reclaim the scratch dir **only once the netns
@@ -1060,7 +1067,7 @@ pub(crate) fn teardown(
 /// the pid is recycled. Keeping the dir when the netns lingers keeps the pair together and sweepable.
 /// One home for the invariant, shared by [`teardown`] and [`Spawned::abort`](crate::spawn) so the two
 /// teardown paths reclaim identically (a failed boot must not leak a dir-less netns either).
-pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) {
+pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) -> Reclaimed {
     let netns_gone = match tap {
         Some(tap) => {
             tap.delete();
@@ -1068,14 +1075,34 @@ pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) {
         }
         None => true,
     };
-    if netns_gone {
-        let _ = std::fs::remove_dir_all(workdir);
-    } else {
+    if !netns_gone {
         tracing::warn!(
             workdir = %workdir.display(),
             "netns outlived teardown; keeping the scratch dir so the orphan sweep can reclaim both"
         );
+        return Reclaimed::No;
     }
+    match std::fs::remove_dir_all(workdir) {
+        Ok(()) => Reclaimed::Yes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Reclaimed::Yes,
+        Err(e) => {
+            tracing::warn!(
+                workdir = %workdir.display(), error = %e,
+                "scratch dir survived teardown; leaving it for the orphan sweep"
+            );
+            Reclaimed::No
+        }
+    }
+}
+
+/// Whether the scratch dir is gone. Returned rather than logged-and-forgotten because a **jailed**
+/// VM's chroot is chowned to its leased uid/gid, so a surviving tree is what keeps that pair from
+/// being safe to hand to the next sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a scratch dir that survived decides whether its jail pair may be reused"]
+pub(crate) enum Reclaimed {
+    Yes,
+    No,
 }
 
 /// Reclaim the scratch dir after a **tap-creation** failure, where the half-built netns was already
@@ -1111,7 +1138,11 @@ mod tests {
         let base = ScratchDir::created("bsx-reclaim");
         let workdir = base.path().join("bsx-1-0");
         std::fs::create_dir(&workdir).expect("create workdir");
-        reclaim_scratch(&workdir, None);
+        assert_eq!(
+            reclaim_scratch(&workdir, None),
+            Reclaimed::Yes,
+            "a removed dir reports itself reclaimed, which is what frees its jail pair"
+        );
         assert!(
             !workdir.exists(),
             "no netns to gate on, so the dir is reclaimed"

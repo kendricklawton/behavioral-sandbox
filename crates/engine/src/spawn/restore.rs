@@ -72,7 +72,8 @@ impl Spawned {
                 // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
                 // the dir is kept if the netns delete fails: a failed boot must not strand a
                 // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
-                reclaim_scratch(&workdir, tap.as_ref());
+                // Unjailed, so no chroot is chowned to a leased pair and there is none to withhold.
+                let _ = reclaim_scratch(&workdir, tap.as_ref());
                 return Err(e);
             }
         };

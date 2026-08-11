@@ -108,6 +108,7 @@ impl Jail {
                 uid: self.uid,
                 gid: self.gid,
                 span: None,
+                withheld: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -191,6 +192,7 @@ impl JailIds {
             uid: id,
             gid: id,
             span: Some((self.clone(), slot)),
+            withheld: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -211,9 +213,11 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// The uid/gid one jailed sandbox runs under, held for as long as its chroot exists.
 ///
-/// Returned to its span on drop. [`Chroot`] owns it, and `RunningVm`'s `Drop` runs `teardown`
-/// before its fields drop, so the pair is only reusable once the VMM is gone and the scratch dir
-/// (whose chroot is chowned to that pair) has been reclaimed.
+/// Returned to its span on drop **unless the tree those ids own outlived teardown**, in which case
+/// [`withhold`](Self::withhold) keeps the slot out of the pool: a chroot still chowned to the pair is
+/// exactly what makes handing it to the next sandbox a collision. [`Chroot`] owns the lease and
+/// `RunningVm`'s `Drop` runs `teardown` before its fields drop, so the reclaim outcome is known by
+/// the time this drops.
 #[derive(Debug)]
 pub(crate) struct JailLease {
     uid: u32,
@@ -221,6 +225,9 @@ pub(crate) struct JailLease {
     /// The span to give the slot back to, and which slot. `None` for the fixed
     /// [`Jail::uid`]/[`Jail::gid`] pair, which is shared and so was never taken from anything.
     span: Option<(JailIds, usize)>,
+    /// Set when teardown could not reclaim the chowned tree. Atomic rather than a `bool` because
+    /// teardown holds only `&Chroot`, and the VM this hangs off crosses threads.
+    withheld: std::sync::atomic::AtomicBool,
 }
 
 impl JailLease {
@@ -230,10 +237,35 @@ impl JailLease {
     pub(crate) fn gid(&self) -> u32 {
         self.gid
     }
+
+    /// Keep this pair out of the span for the driver's lifetime, because the chroot chowned to it is
+    /// still on the host. A withheld slot is a permanent in-process loss: the orphan sweep may
+    /// reclaim the tree seconds later, but nothing tells this pool, so exhausting a span this way is
+    /// a typed refusal naming the span rather than a silent uid collision.
+    pub(crate) fn withhold(&self) {
+        self.withheld
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Chroot {
+    /// Keep this chroot's leased pair out of its span, for a teardown that could not remove the tree
+    /// the pair owns. Takes `&self` because `teardown` holds only a shared reference by then.
+    pub(crate) fn withhold_lease(&self) {
+        self._lease.withhold();
+    }
 }
 
 impl Drop for JailLease {
     fn drop(&mut self) {
+        if self.withheld.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                uid = self.uid,
+                gid = self.gid,
+                "jail id withheld: its chroot outlived teardown, so the pair stays out of the span"
+            );
+            return;
+        }
         if let Some((ids, slot)) = &self.span {
             ids.release(*slot);
         }
@@ -262,7 +294,8 @@ pub(crate) struct Chroot {
     pub(crate) uid: u32,
     pub(crate) gid: u32,
     /// The leased pair, held so it cannot be handed to another sandbox while this chroot exists.
-    /// Dropped after `teardown` has reclaimed the tree those ids own (see [`JailLease`]).
+    /// Dropped after `teardown` has reclaimed the tree those ids own, and withheld from the span
+    /// entirely when it has not (see [`JailLease`]).
     _lease: JailLease,
     /// The cgroup dir the jailer created for this VMM (`/sys/fs/cgroup/<...>`), learned from
     /// `/proc/<pid>/cgroup` once the VMM is up. Removed (best-effort) on teardown; `None` until read.
@@ -873,6 +906,32 @@ mod tests {
         let one = jail.lease().expect("the fixed pair");
         let two = jail.lease().expect("the fixed pair again");
         assert_eq!((one.uid(), two.uid()), (DEFAULT_JAIL_UID, DEFAULT_JAIL_UID));
+    }
+
+    #[test]
+    fn a_withheld_pair_never_returns_to_its_span() {
+        // The reuse contract `JailLease` documents: a chroot chowned to a pair outlives a failed
+        // teardown, so handing that pair to the next sandbox would put two on-host trees under one
+        // uid. Withholding costs a slot; reusing costs the separation the span is for.
+        let ids = JailIds::span(30_000, 2).expect("a valid span");
+        let leaked = ids.lease().expect("a free pair");
+        let kept = ids.lease().expect("the second pair");
+        let (leaked_uid, kept_uid) = (leaked.uid(), kept.uid());
+
+        leaked.withhold();
+        drop(leaked);
+        assert!(
+            ids.lease().is_err(),
+            "the withheld pair must not come back, even with the span otherwise exhausted"
+        );
+
+        // The ordinary path is untouched: a pair released after a clean teardown is reusable.
+        drop(kept);
+        let reused = ids
+            .lease()
+            .expect("the cleanly released pair is free again");
+        assert_eq!(reused.uid(), kept_uid);
+        assert_ne!(reused.uid(), leaked_uid, "and it is not the withheld one");
     }
 
     #[test]
