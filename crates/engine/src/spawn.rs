@@ -250,7 +250,8 @@ impl Spawned {
                 // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
                 // the dir is kept if the netns delete fails: a failed boot must not strand a
                 // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
-                reclaim_scratch(&workdir, tap.as_ref());
+                // Unjailed, so no chroot is chowned to a leased pair and there is none to withhold.
+                let _ = reclaim_scratch(&workdir, tap.as_ref());
                 return Err(e);
             }
         };
@@ -372,7 +373,11 @@ impl Spawned {
                 // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
                 // the dir is kept if the netns delete fails: a failed boot must not strand a
                 // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
-                reclaim_scratch(&workdir, tap.as_ref());
+                // The jailer may have chowned the chroot to `lease` before failing, so a dir that
+                // survives keeps that pair out of the span, as teardown does.
+                if reclaim_scratch(&workdir, tap.as_ref()) == crate::vm::Reclaimed::No {
+                    lease.withhold();
+                }
                 return Err(e);
             }
         };
@@ -788,7 +793,12 @@ impl Spawned {
         // Delete the tap/netns and reclaim the scratch dir through the *same* gated path as
         // `teardown`: a transient `ip netns del` failure keeps the dir so the orphan sweep can
         // reclaim the pair, instead of leaking a dir-less netns a failed boot could otherwise strand.
-        reclaim_scratch(&self.workdir, self.tap.as_ref());
+        // A surviving jailed chroot withholds its pair here too, for teardown's reason.
+        if reclaim_scratch(&self.workdir, self.tap.as_ref()) == crate::vm::Reclaimed::No
+            && let Some(chroot) = self.chroot.as_ref()
+        {
+            chroot.withhold_lease();
+        }
 
         let mut detail = String::new();
         if let Some(tail) = last_lines(&fc_log, 3) {
