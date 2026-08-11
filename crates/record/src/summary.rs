@@ -57,8 +57,8 @@ impl RunRecord {
         );
         out.push('}');
 
-        // network, reached against denied, plus the guest-view
-        // byte rollup. `null` when the sandbox had no NIC, the distinction the full record draws.
+        // network: reached against denied, plus the guest-view byte rollup. `null` when the sandbox had
+        // no NIC, the distinction the full record draws.
         out.push_str(",\"network\":");
         match &self.network {
             Some(net) => net_summary(&mut out, net),
@@ -69,8 +69,7 @@ impl RunRecord {
         out.push_str(",\"host_syscalls\":");
         syscalls_summary(&mut out, self);
 
-        // resources: eBPF CPU, peak memory, IO bytes. The transient and cross-check fields
-        // are dropped.
+        // resources: eBPF CPU, peak memory, IO bytes; the transient and cross-check fields are dropped.
         out.push_str(",\"resources\":{");
         field(
             &mut out,
@@ -117,23 +116,19 @@ impl RunRecord {
 /// collapsed to their destination triple, minus any that were denied, sorted), `denied` (blocked
 /// destinations, already dst-aggregated and sorted by the builder), and the guest-view byte rollup.
 fn net_summary(out: &mut String, net: &NetSection) {
-    // The tap counts a flow *before* the egress verdict runs (`tap_ingress`: `count()` then
-    // `egress_verdict()`), so a fully-denied endpoint still appears among the flow destinations even
-    // though every packet was dropped. Subtract the denied triples: `reached` must mean the guest
-    // actually got bytes out, not merely attempted, or a supervising agent reads a
-    // blocked exfil endpoint as reached. Those endpoints still appear in `denied` below.
-    //
-    // Subtracting the whole triple is right only while a denied endpoint cannot *also* have gotten
-    // bytes out, which holds because the policy is armed before the tap goes live rather than
-    // because of anything here. A policy that could change mid-session would make a triple both
-    // reached and denied, and this would then report the reach as zero.
+    // The tap counts a flow *before* the egress verdict runs, so a fully-denied endpoint still appears
+    // among the flow destinations. Subtract the denied triples so `reached` means the guest actually got
+    // bytes out, not merely attempted, or a supervising agent reads a blocked exfil endpoint as reached
+    // (those endpoints still appear in `denied` below). Subtracting the whole triple is right only while
+    // a denied endpoint cannot also have gotten bytes out, which holds because the policy is armed before
+    // the tap goes live; a mid-session policy change would make a triple both, reported here as zero reach.
     let denied: BTreeSet<(u32, u16, u8)> = net
         .denials
         .iter()
         .map(|d| (d.dst_addr, d.dst_port, d.proto))
         .collect();
-    // Collapse flows to distinct destinations, an agent cares *which endpoint* it reached, not the
-    // ephemeral source port. A BTreeSet dedups and yields them in total (dst, port, proto) order.
+    // Collapse flows to distinct destinations (an agent cares which endpoint it reached, not the source
+    // port); the BTreeSet dedups and yields them in total (dst, port, proto) order.
     let dests: BTreeSet<(u32, u16, u8)> = net
         .flows
         .iter()
@@ -188,15 +183,14 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // Guest-view bytes: the record's tap-view `ingress` is what the guest sent, `egress` what it received.
     field(out, "sent_bytes", net.totals.ingress_bytes, false);
     field(out, "recv_bytes", net.totals.egress_bytes, false);
-    // An agent reading `reached`/`denied` between turns must know when the lists are not
-    // exhaustive (the kernel's flow/denial tables saturated); the counts ride the full record.
+    // A `true` here says the kernel's flow/denial tables saturated, so `reached`/`denied` are not
+    // exhaustive; the counts ride the full record.
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
-    // What the sandbox *may* reach, beside what it did. `reached` and `denied` are both backward-looking,
-    // so an agent planning its next turn cannot tell "this endpoint failed, retrying is pointless"
-    // from "I never tried it". `allowed` + `routed` answer that before it spends a turn finding out.
-    // All three are `null` when the posture could not be read, which is not the same claim as an
-    // empty allow-list.
+    // What the sandbox *may* reach, beside what it did: `reached`/`denied` are backward-looking, so
+    // `allowed` + `routed` let an agent tell "this endpoint failed, retrying is pointless" from "I never
+    // tried it". All three are `null` when the posture could not be read, not the same claim as an empty
+    // allow-list.
     match &net.posture {
         Some(p) => {
             out.push_str(",\"allowed\":[");
@@ -278,10 +272,9 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
         syscall_name(&mut line, n.kind);
         line.push(' ');
         line.push_str(&n.detail);
-        // The summary has no field to carry the flag, so it goes in the text: a reader skimming
-        // paths must not take a prefix for the whole path. The marker cannot be forged away by a
-        // guest naming a file after it (that only over-states doubt), and the JSON record carries
-        // the machine-readable `truncated` beside it.
+        // No field to carry the flag, so it goes in the text: a reader skimming paths must not take a
+        // prefix for the whole path. A guest naming a file `[truncated]` only over-states doubt, and the
+        // JSON record carries the machine-readable flag beside it.
         if n.truncated {
             line.push_str(" [truncated]");
         }
@@ -295,13 +288,10 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
 
 /// Which entries of the record's `notable` this projection keeps, as indices into it, ascending.
 ///
-/// A round-robin across kinds rather than a prefix. The record sorts `notable` by [`Syscall`]
-/// discriminant first, so the kinds sit in contiguous runs and `connect` is always last; taking the
-/// first `cap` of that drops whole kinds from the tail, and the kind that sorts last is the one that
-/// names an outbound destination. Each kind present takes its turn, so no kind is structurally last.
-///
-/// Deterministic: the runs come out in the record's own order, and the result is re-sorted into it,
-/// so the summary lists what it kept in the same order the full record does.
+/// A round-robin across kinds rather than a prefix: the record sorts `notable` by [`Syscall`]
+/// discriminant, so a first-`cap` prefix would drop whole kinds from the tail, and the last-sorting kind
+/// is `connect`, the one naming an outbound destination. Each kind present takes its turn instead.
+/// Deterministic: the runs come out in the record's order and the result is re-sorted into it.
 fn notable_sample(notable: &[NotableSyscall], cap: usize) -> Vec<usize> {
     if notable.len() <= cap {
         return (0..notable.len()).collect();
