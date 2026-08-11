@@ -1215,16 +1215,18 @@ mod tests {
     /// same `Bidi_Control` set.
     ///
     /// `char::is_control` is category `Cc` only, so the bidi controls pass it and a guest `Error`
-    /// string or a captured `openat` path can reorder the trail line it lands in. `bsx-channel` guards
-    /// the wire half and `bsx-cli`'s trail guards the probe half; `crates/cli` has no dependency edge
-    /// to `crates/channel`, and adding one for a text helper would put a utility on that crate's
-    /// pinned surface, so a shared function is not available and the twins are pinned instead.
+    /// string, a captured `openat` path, or a boot-failure console tail can reorder the line it lands
+    /// in. Three surfaces render guest-authored text to the operator's terminal and each carries its
+    /// own copy: `crates/cli` has no dependency edge to `crates/channel`, and while `crates/engine`
+    /// does, the predicate is private there and making it public would put a text utility on that
+    /// crate's pinned surface. A shared function is not available, so the set is pinned instead.
     #[test]
     fn the_terminal_escapers_agree_on_the_bidi_controls() {
         let repo = workspace_root();
         let sites = [
             ("crates/channel/src/lib.rs", "is_bidi_control"),
             ("crates/cli/src/trace.rs", "is_bidi_control"),
+            ("crates/engine/src/console.rs", "is_bidi_control"),
         ];
         // The Unicode `Bidi_Control` property, as the two predicates spell it.
         let required = [
