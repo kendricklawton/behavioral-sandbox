@@ -141,10 +141,12 @@ pub struct ServeArgs {
     /// Drop a session after this many seconds with **no progress** on the connection, whether the
     /// client stopped sending requests or stopped reading replies, so a wedged or forgotten
     /// connection can't pin a microVM and a `--max-sessions` slot forever (the idle half of the same
-    /// capacity guarantee the ceiling gives). Arms both the read and the write deadline (a client
-    /// that never drains a large reply is dropped just like one that goes silent). Applies to the
-    /// wait for the first `open` too. A client streaming requests keeps resetting it; `0` disables
-    /// the timeout. Default 300 (5 min).
+    /// capacity guarantee the ceiling gives). Both directions get one **absolute deadline per
+    /// message**, not a bare socket timeout, so a client that drips a request in or drains a reply
+    /// out just fast enough to keep each syscall progressing is dropped like one that goes silent.
+    /// The write side is what bounds a large reply: 33 MiB (the wire's ceiling) inside the default
+    /// is ~113 KiB/s, below any real client. Applies to the wait for the first `open` too. A client
+    /// streaming requests keeps resetting it; `0` disables the timeout. Default 300 (5 min).
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
     /// Ceiling on the vCPUs a session's `open` may ask for. Past it the `open` is **refused**, never

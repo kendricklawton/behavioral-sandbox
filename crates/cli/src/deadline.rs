@@ -1,22 +1,39 @@
-//! A read half bounded by one **absolute deadline** instead of a bare socket timeout.
+//! Both directions of a socket bounded by one **absolute deadline** instead of a bare socket timeout.
 //!
-//! - **The threat is the slow drip, not the silent peer.** `SO_RCVTIMEO` is re-armed by the OS on
-//!   every byte, so a per-read timeout alone lets a peer sending one byte just inside the interval
-//!   stretch a single message indefinitely while holding the thread that reads it. Shrinking the
-//!   socket timeout to the time left before one absolute deadline makes the sum of all reads honor
-//!   one wall clock. `bsx-engine` holds its own copies of this discipline and cannot share this type
-//!   across the crate boundary, so `every_deadline_bounded_socket_refuses_a_spent_budget` pins each
-//!   copy to the same invariant.
+//! - **The threat is the slow peer, not the silent one.** `SO_RCVTIMEO` and `SO_SNDTIMEO` are both
+//!   re-armed by the OS per syscall, so a bare socket timeout bounds one `read`/`write`, not one
+//!   message. A peer that keeps each syscall progressing stretches a single message while holding the
+//!   thread carrying it. Shrinking the sockopt to the time left before one absolute deadline makes
+//!   the sum of all the syscalls honor one wall clock.
+//! - **The two directions differ in how much a peer can spend.** A slow *sender* pays nothing, so the
+//!   read side is where the cheap attack is. A slow *receiver* has to keep draining fast enough to
+//!   keep the writer progressing, so the write side bounds a client that is expensive to be, and the
+//!   overrun without this is bounded by the reply size rather than unbounded.
+//! - `bsx-engine` holds its own copies of this discipline and cannot share this type across the crate
+//!   boundary, so `every_deadline_bounded_socket_refuses_a_spent_budget` pins each copy to the same
+//!   invariant.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// The one sockopt [`DeadlineStream`] arms, as a trait because std puts the method on
+/// The read sockopt [`DeadlineStream`] arms, as a trait because std puts the method on
 /// `UnixStream` and `TcpStream` without a shared one.
 pub(crate) trait SetReadTimeout {
     fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()>;
+}
+
+/// The write sockopt, the twin of [`SetReadTimeout`] and a separate trait for the same reason: a
+/// caller that only ever reads should not have to name a write timeout it never arms.
+pub(crate) trait SetWriteTimeout {
+    fn set_write_timeout(&self, dur: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl SetWriteTimeout for UnixStream {
+    fn set_write_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
+        UnixStream::set_write_timeout(self, dur)
+    }
 }
 
 impl SetReadTimeout for UnixStream {
@@ -39,9 +56,9 @@ impl SetReadTimeout for &TcpStream {
     }
 }
 
-/// A stream whose reads are bounded by one absolute deadline per message: the whole message must
-/// complete within one `budget` of its first-awaited byte. A `None` budget reads plain (the
-/// daemon's idle-timeout opt-out).
+/// A stream whose reads and writes are bounded by one absolute deadline per message: the whole
+/// message must complete within one `budget` of [`rearm`](Self::rearm). A `None` budget passes
+/// through plain (the daemon's idle-timeout opt-out).
 pub(crate) struct DeadlineStream<S> {
     stream: S,
     /// The per-message budget; [`rearm`](Self::rearm) restarts the clock for the next message.
@@ -68,20 +85,64 @@ impl<S> DeadlineStream<S> {
     pub(crate) fn rearm(&mut self) {
         self.deadline = self.budget.map(|b| Instant::now() + b);
     }
+
+    /// The wrapped stream, for a caller that needs the socket itself (the daemon peeks it for a
+    /// pipelined `cancel` while an exec runs).
+    pub(crate) fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// The time left on the in-flight message, or `None` when the deadline is disabled.
+    ///
+    /// `Some(ZERO)` is the spent budget and must be refused rather than armed: a zero `SO_RCVTIMEO`
+    /// or `SO_SNDTIMEO` is what the kernel reads as "block forever", the hang this wrapper exists to
+    /// stop.
+    fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
 }
 
 impl<S: Read + SetReadTimeout> Read for DeadlineStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(deadline) = self.deadline {
+        if let Some(remaining) = self.remaining() {
             // Shrink the socket timeout to the time left, so the sum of all reads honors one wall
-            // clock. A spent budget is the timeout itself, checked ahead of arming it: a zero
-            // `set_read_timeout` means "block forever", the very hang this wrapper exists to stop.
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            // clock. The refusal precedes the arming, since a zero timeout means "block forever".
             if remaining.is_zero() {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
             }
             self.stream.set_read_timeout(Some(remaining))?;
         }
         self.stream.read(buf)
+    }
+}
+
+/// The most one bounded `write` hands the kernel at a time.
+///
+/// **The deadline is only checked between syscalls, so the syscalls have to be small.** A unix
+/// socket's `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent, re-applying
+/// `SO_SNDTIMEO` to each internal wait, so handing it a 16 MiB reply is one `write` call that can
+/// block for minutes while a slow peer drains it, and no per-call check ever runs. Chunking bounds
+/// the overshoot to one chunk, which the armed sockopt bounds in turn.
+const WRITE_CHUNK: usize = 64 * 1024;
+
+impl<S: Write + SetWriteTimeout> Write for DeadlineStream<S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(remaining) = self.remaining() {
+            // The same shrink as the read half, against the receiving end of the same shape: a peer
+            // draining just fast enough to keep each `write` returning re-arms `SO_SNDTIMEO` every
+            // time, so only an absolute deadline bounds the whole reply.
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
+            }
+            self.stream.set_write_timeout(Some(remaining))?;
+            let chunk = &buf[..buf.len().min(WRITE_CHUNK)];
+            return self.stream.write(chunk);
+        }
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
     }
 }

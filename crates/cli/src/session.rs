@@ -51,27 +51,26 @@ const NOOP_ARGV: &str = "true";
 /// connection can't take the daemon down.
 pub fn serve(stream: UnixStream, server: &Server) {
     // A second handle for writing, so the read side can sit in a `BufReader` while we still reply.
-    let mut writer = match stream.try_clone() {
+    let writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!(error = %e, "cannot split the connection; dropping it");
             return;
         }
     };
-    // The idle timeout bounds **both** directions, each with the shape its threat needs. The read half
-    // needs an *absolute per-message deadline*, not a bare `set_read_timeout`: `SO_RCVTIMEO` is re-armed
-    // on every byte, so a client dripping one byte per interval would reset a per-read timeout forever and
-    // pin a session thread plus a `--max-sessions` slot. The write half stays a plain socket timeout,
-    // since an `exec` reply can be megabytes against a small socket buffer and a client that never reads
-    // would park the thread in `write_all`. Best-effort on the sockopts.
+    // The idle timeout bounds **both** directions with the same shape, one absolute deadline per
+    // message, because both sockopts have the same defect: `SO_RCVTIMEO` and `SO_SNDTIMEO` are
+    // re-armed by the OS per syscall, so either one bounds a single `read`/`write` rather than a whole
+    // message. A client that keeps each syscall progressing (dripping a request in, or draining a
+    // reply out) resets a bare socket timeout indefinitely and pins a session thread plus a
+    // `--max-sessions` slot and its committed envelope. Arming the sockopt to the *time left* is what
+    // makes the sum of the syscalls honor one wall clock.
     let mut reader = BufReader::new(DeadlineStream::new(
         stream,
         server.idle_timeout,
         IDLE_DEADLINE_MSG,
     ));
-    if let Some(idle) = server.idle_timeout {
-        let _ = writer.set_write_timeout(Some(idle));
-    }
+    let mut writer = DeadlineStream::new(writer, server.idle_timeout, IDLE_REPLY_MSG);
 
     // The first message must be `open` (carrying the session's resource envelope). Anything else,
     // EOF, a stray verb, a malformed/wrong-schema line, ends the connection before any VM is booted.
@@ -93,7 +92,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         Ok(parsed) => parsed,
         Err(refusal) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &refusal.into_fatal());
+            let _ = reply(&mut writer, &refusal.into_fatal());
             return;
         }
     };
@@ -101,7 +100,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         Ok(resolved) => resolved,
         Err(refusal) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &refusal.into_fatal());
+            let _ = reply(&mut writer, &refusal.into_fatal());
             return;
         }
     };
@@ -122,7 +121,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 vcpus = limits.vcpus.get(),
                 "refusing an open: at an aggregate resource ceiling"
             );
-            let _ = write_response(&mut writer, &Response::at_capacity(AT_CAPACITY_RETRY_MS));
+            let _ = reply(&mut writer, &Response::at_capacity(AT_CAPACITY_RETRY_MS));
             return;
         }
     };
@@ -233,7 +232,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     &argv,
                     stdin.as_deref().unwrap_or(""),
                     env.as_deref().unwrap_or(&[]),
-                    &writer,
+                    writer.get_ref(),
                     &reader,
                 );
                 if interrupted {
@@ -246,7 +245,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     server.metrics.request_failed(false);
                     reader.get_mut().rearm();
                     if matches!(read_request(&mut reader), Ok(Some(Request::Cancel))) {
-                        let _ = write_response(&mut writer, &Response::Cancelled);
+                        let _ = reply(&mut writer, &Response::Cancelled);
                     }
                     break;
                 }
@@ -459,7 +458,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
 /// should stop, the connection broke, or the fault is session-ending (an **infra/transport** fault
 /// means the VM is gone; a **guest** fault the session survives).
 fn serve_run(
-    w: &mut UnixStream,
+    w: &mut DeadlineStream<UnixStream>,
     metrics: &Metrics,
     result: Result<bsx_engine::RunResult, VmmError>,
     wall: Duration,
@@ -885,8 +884,8 @@ fn record_to_value(json: &str) -> serde_json::Value {
 
 /// Send a response, returning `false` (so the caller stops) if the write failed, a broken pipe is a
 /// gone client, not a daemon fault.
-fn send(w: &mut UnixStream, resp: &Response) -> bool {
-    match write_response(w, resp) {
+fn send(w: &mut DeadlineStream<UnixStream>, resp: &Response) -> bool {
+    match reply(w, resp) {
         Ok(()) => true,
         // Not a gone client: the daemon's own reply outgrew what one line carries, which a run can
         // reach under an `output_cap` larger than the wire's (output dense in C0 controls escapes
@@ -1062,6 +1061,20 @@ fn wire_kind(kind: ErrorKind) -> FaultKind {
 
 /// What a blown per-message idle deadline reads as, on the shared [`DeadlineStream`].
 const IDLE_DEADLINE_MSG: &str = "session message exceeded the idle deadline";
+
+/// What a reply the client would not drain inside one idle budget reports, the write-side twin of
+/// [`IDLE_DEADLINE_MSG`].
+const IDLE_REPLY_MSG: &str = "session reply exceeded the idle deadline";
+
+/// Writes one reply, starting its idle budget first.
+///
+/// Every reply goes through here rather than `write_response` directly, so the deadline bounds one
+/// reply's drain the way [`DeadlineStream::rearm`] on the read half bounds one request's arrival. A
+/// reply that shares the previous one's spent budget would refuse a client that did nothing wrong.
+fn reply(w: &mut DeadlineStream<UnixStream>, resp: &Response) -> Result<(), ProtocolError> {
+    w.rearm();
+    write_response(w, resp)
+}
 
 /// A [`Duration`] as whole milliseconds, saturating (a run never realistically overflows `u64` ms).
 pub(crate) fn ms(d: Duration) -> u64 {
@@ -1635,6 +1648,54 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "the write must give up at its timeout, not hang"
         );
+    }
+
+    /// A client that drains *slowly* is cut off at the reply's absolute deadline.
+    ///
+    /// The case the test above does not reach. A peer that never reads is caught by a bare
+    /// `SO_SNDTIMEO` on its own, but the OS re-arms that sockopt per `write` syscall, so a peer
+    /// draining just fast enough to keep each one returning holds `write_all` for as long as it keeps
+    /// paying, and with it a session thread, a `--max-sessions` slot and its committed envelope.
+    ///
+    /// Measured on this dev box 2026-08-11: a peer reading 1 B per 150 ms does **not** sustain it (the
+    /// write dies in ~410 ms, the same as never reading, because a 1-byte read frees no whole `skb`);
+    /// somewhere between ~107 and ~213 KiB/s it does. The drip below sits well above that, so the
+    /// only thing that can end the write in time is the deadline.
+    #[test]
+    fn a_slow_draining_client_is_cut_off_at_the_absolute_reply_deadline() {
+        use std::io::{Read as _, Write};
+        const BUDGET: Duration = Duration::from_millis(300);
+        let (writer, mut reader) = UnixStream::pair().expect("socketpair");
+        let peer = std::thread::spawn(move || {
+            // ~640 KiB/s: above the rate that keeps each `write` progressing, and slow enough that
+            // draining 16 MiB would take ~25 s, far past the assertion below.
+            let mut buf = vec![0u8; 32 * 1024];
+            for _ in 0..400 {
+                std::thread::sleep(Duration::from_millis(50));
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let mut bounded = DeadlineStream::new(writer, Some(BUDGET), IDLE_REPLY_MSG);
+        let started = Instant::now();
+        let err = bounded
+            .write_all(&vec![0u8; 16 * 1024 * 1024])
+            .expect_err("a slow-draining peer must hit the reply deadline");
+        let held = started.elapsed();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "want the wrapper's own refusal, got {err:?}"
+        );
+        assert!(
+            held < Duration::from_secs(5),
+            "the reply must end at its absolute deadline; held {held:?}"
+        );
+        drop(bounded);
+        let _ = peer.join();
     }
 
     #[test]
