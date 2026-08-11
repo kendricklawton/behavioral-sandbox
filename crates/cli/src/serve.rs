@@ -336,9 +336,10 @@ impl Server {
 }
 
 /// Run the daemon (`bsx serve`): the `--log` filter comes from the CLI's shared global flag, the
-/// rest of the knobs from [`ServeArgs`]. Its own tracing init (info default, optional JSON) and its
-/// own config (flags + environment, no `.bsx.toml`), so the CLI dispatches this **before** its
-/// project-file/tracing setup ([`crate::main`]).
+/// rest of the knobs from [`ServeArgs`]. Its own [`log_filter`] resolution (info default, optional
+/// JSON) and its own config (flags + environment, no `.bsx.toml`), so the CLI dispatches this
+/// **before** its project-file/tracing setup ([`crate::main`]). The subscriber it installs is
+/// [`crate::init_tracing`], shared with the CLI so one mistyped filter gets one answer.
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
         || std::env::var("BSX_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
