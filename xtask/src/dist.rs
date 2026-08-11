@@ -1400,7 +1400,14 @@ mod tests {
                 imp: "impl<S: Read + SetReadTimeout> Read for",
                 method: "read",
                 sockopt: "set_read_timeout",
-                budget: None,
+                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
+            },
+            Site {
+                file: "crates/cli/src/deadline.rs",
+                imp: "impl<S: Write + SetWriteTimeout> Write for",
+                method: "write",
+                sockopt: "set_write_timeout",
+                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
             },
             Site {
                 file: "crates/engine/src/deadline.rs",

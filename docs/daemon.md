@@ -62,8 +62,9 @@ it, but it is host memory that neither `--max-committed-mem-mib` (guest RAM) nor
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
 bound: a session whose connection makes no *progress* for this long is dropped, whether the client
-stopped sending requests or stopped draining replies (the flag arms both the read and the write
-deadline), freeing its microVM and
+stopped sending requests or stopped draining replies. Both directions carry one absolute deadline per
+message rather than a plain socket timeout, which the OS re-arms per syscall, so a client that dribbles
+a request in or drags a reply out is bounded the same way a silent one is. That frees its microVM and
 its `--max-sessions` slot, so a wedged or forgotten connection does not hold capacity indefinitely. It
 covers the wait for the first `open` too; a client that keeps the connection moving keeps resetting it.
 `0` disables it.
