@@ -201,7 +201,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
             "real root (euid 0: the jailer mknod's device nodes)",
-            geteuid() == Some(0),
+            crate::sweep::own_euid() == Some(0),
             true,
             "jailed chroot boot requires root (sudo); `--unjailed` mode runs unconfined using hardware KVM isolation",
         ),
@@ -333,7 +333,7 @@ pub fn can_boot(checks: &[Check]) -> bool {
 /// that actually works here instead of one that fails.
 #[must_use]
 pub fn jailed_run_available() -> bool {
-    geteuid() == Some(0) && command_on_path("jailer")
+    crate::sweep::own_euid() == Some(0) && command_on_path("jailer")
 }
 
 /// `/dev/kvm` opens read-write (root, or the `kvm` group).
@@ -353,14 +353,6 @@ fn command_on_path(bin: &str) -> bool {
     }
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
-}
-
-/// The effective uid from `/proc/self/status` (`Uid:` line, fields real/effective/…), or `None` if
-/// it can't be read, std-only, no `libc`.
-fn geteuid() -> Option<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
-    line.split_whitespace().nth(2).and_then(|s| s.parse().ok())
 }
 
 /// The supported Firecracker range as an operator-facing string (`v1.14..=v1.16`), rendered from
