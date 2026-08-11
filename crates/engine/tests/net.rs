@@ -48,7 +48,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     }
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = true;
-    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
     // The driver exposes the netns + tap name as the eBPF-binding handle: the eBPF loader
     // enters the netns and resolves the tap there. The tap is a real `fc`-prefixed interface *inside*
@@ -121,7 +121,7 @@ fn a_gateway_gives_the_guest_a_default_route_and_a_resolver() {
     // The resolver is deliberately *not* on-link, since a resolver's whole point is to be reachable
     // through the gateway rather than beside it.
     cfg.egress = Some(GuestEgress::via(HOST_END).with_resolver(RESOLVER));
-    let vm = Vm::boot(cfg).expect("a microVM with a gateway should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("a microVM with a gateway should boot to readiness");
 
     // The default route exists and points at the configured gateway. `ip=`'s third field is what
     // installs it, so this failing means the boot parameter never carried it.
@@ -167,7 +167,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
     }
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = true;
-    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
     let guest_ip = vm.ipv4().expect("ipv4 when networked").guest.to_string();
 
@@ -261,7 +261,7 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
     }
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = true;
-    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip6 = vm.ipv6().expect("ipv6 when networked").host.to_string();
     let guest_ip6 = vm.ipv6().expect("ipv6 when networked").guest.to_string();
 
@@ -366,15 +366,15 @@ fn two_networked_vms_run_in_isolated_netns() {
     }
     let mut cfg_a = guest_rootfs_config();
     cfg_a.enable_network = true;
-    let vm_a = Vm::boot(cfg_a).expect("VM A with a NIC should boot to readiness");
+    let mut vm_a = Vm::boot(cfg_a).expect("VM A with a NIC should boot to readiness");
     let mut cfg_b = guest_rootfs_config();
     cfg_b.enable_network = true;
-    let vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
+    let mut vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
 
     // Distinct network namespaces are the isolation boundary. The two guests even share an address
     // (the fixed /30), which is only safe *because* they are in separate stacks.
-    let ns_a = vm_a.netns().expect("A netns when networked");
-    let ns_b = vm_b.netns().expect("B netns when networked");
+    let ns_a = vm_a.netns().expect("A netns when networked").to_string();
+    let ns_b = vm_b.netns().expect("B netns when networked").to_string();
     assert_ne!(
         ns_a, ns_b,
         "the two VMs must run in distinct network namespaces"
@@ -390,7 +390,7 @@ fn two_networked_vms_run_in_isolated_netns() {
     // same, so this checks presence-in-the-right-stack, which the addresses below make unambiguous.)
     // Deny-by-default holds per VM: neither guest can reach an off-/30 address, and the other VM lives
     // entirely in a separate netns, so it is off every route either guest has.
-    for (vm, other) in [(&vm_a, ns_b), (&vm_b, ns_a)] {
+    for (vm, other) in [(&mut vm_a, ns_b), (&mut vm_b, ns_a)] {
         let off = vm
             .exec(
                 &[
@@ -438,7 +438,7 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     }
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = true;
-    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let netns = vm.netns().expect("netns when networked").to_string();
     let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
     let port = 45_000u16; // fixed; the netns is private, so no host-side port contention

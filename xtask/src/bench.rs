@@ -171,7 +171,7 @@ fn prewarm_python_snapshot(
     let bundle =
         ScratchDir(std::env::temp_dir().join(format!("bsx-bench-{tag}-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&bundle.0);
-    let source =
+    let mut source =
         Vm::boot(warm_bench_config(kernel, rootfs, true)).context("boot the prewarmed source")?;
     let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
     let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
@@ -187,7 +187,7 @@ fn prewarm_python_snapshot(
 
 /// Exec the timed Python one-liner on `vm` and verify the answer actually came back: a sample
 /// counts only if it produced the result (a bench that times failures would be lying).
-fn timed_python(vm: &RunningVm) -> Result<()> {
+fn timed_python(vm: &mut RunningVm) -> Result<()> {
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = vm.exec(&argv, &[]).context("exec python")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -248,10 +248,10 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     let progress = Progress::new("cold boot", runs);
     for i in 0..runs {
         let t0 = Instant::now();
-        let vm = Vm::boot(warm_bench_config(&kernel, &rootfs, false))
+        let mut vm = Vm::boot(warm_bench_config(&kernel, &rootfs, false))
             .with_context(|| format!("cold boot {i}"))?;
         cold_start.push(t0.elapsed().as_millis() as u64);
-        timed_python(&vm).with_context(|| format!("cold exec {i}"))?;
+        timed_python(&mut vm).with_context(|| format!("cold exec {i}"))?;
         let ms = t0.elapsed().as_millis() as u64;
         cold_result.push(ms);
         vm.shutdown().ok();
@@ -267,9 +267,10 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     let progress = Progress::new("snapshot restore", runs);
     for i in 0..runs {
         let t0 = Instant::now();
-        let vm = Vm::restore(&snapshot, &restore_cfg).with_context(|| format!("restore {i}"))?;
+        let mut vm =
+            Vm::restore(&snapshot, &restore_cfg).with_context(|| format!("restore {i}"))?;
         restore_start.push(t0.elapsed().as_millis() as u64);
-        timed_python(&vm).with_context(|| format!("restore exec {i}"))?;
+        timed_python(&mut vm).with_context(|| format!("restore exec {i}"))?;
         let ms = t0.elapsed().as_millis() as u64;
         restore_result.push(ms);
         vm.shutdown().ok();
@@ -287,9 +288,9 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     let progress = Progress::new("pool take", runs);
     for i in 0..runs {
         let t0 = Instant::now();
-        let vm = pool.take().with_context(|| format!("pool take {i}"))?;
+        let mut vm = pool.take().with_context(|| format!("pool take {i}"))?;
         take_start.push(t0.elapsed().as_millis() as u64);
-        timed_python(&vm).with_context(|| format!("pool exec {i}"))?;
+        timed_python(&mut vm).with_context(|| format!("pool exec {i}"))?;
         let ms = t0.elapsed().as_millis() as u64;
         take_result.push(ms);
         vm.shutdown().ok();

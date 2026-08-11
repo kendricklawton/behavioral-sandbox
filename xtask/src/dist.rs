@@ -1182,6 +1182,46 @@ mod tests {
         );
     }
 
+    /// Every public `exec` on the engine takes `&mut self`, the one thing keeping two of them off a
+    /// single sandbox.
+    ///
+    /// The guest agent serves every connection from one working directory, so two execs in flight
+    /// against one VM read and write each other's injected files: a `RunResult::files` can come back
+    /// carrying bytes that run never produced, which makes it a wrong **audit** record and not just a
+    /// wrong result. `Sandbox` is `Sync` and each exec dials its own vsock connection, so nothing
+    /// else stands in the way.
+    ///
+    /// A revert would not pass silently (`-D warnings` catches the `mut` bindings it strands), but it
+    /// would land as fifty `unused_mut`s across the test suite, which reads as tidy-up. This says
+    /// what the receiver is for, where it is declared.
+    #[test]
+    fn every_public_exec_on_the_engine_takes_a_unique_borrow() {
+        let repo = workspace_root();
+        for (file, ty) in [
+            ("crates/engine/src/lib.rs", "Sandbox"),
+            ("crates/engine/src/vm.rs", "RunningVm"),
+        ] {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            for name in ["exec", "exec_with_files"] {
+                // The `(` is what keeps `exec` from matching `exec_with_files` first.
+                let needle = format!("pub fn {name}(");
+                assert!(src.contains(&needle), "{file} must declare `{needle}`");
+                let at = src.find(&needle).expect("asserted present just above");
+                let receiver: String = src[at + needle.len()..]
+                    .chars()
+                    .take_while(|c| *c != ',')
+                    .collect();
+                assert!(
+                    receiver.trim().starts_with("&mut self"),
+                    "{ty}::{name} must take `&mut self`, got `{}`: a shared receiver lets an \
+                     embedder run two execs against one working directory",
+                    receiver.trim()
+                );
+            }
+        }
+    }
+
     /// `unescape_octal` exists twice, byte-identical, and **cannot be shared**: the parser it
     /// belongs to (`mountinfo::mounts`) is `pub(crate)`, and `confinement.rs` compiles as a foreign
     /// crate, so reaching it would put a `/proc` parser on `bsx-engine`'s pinned public API for a

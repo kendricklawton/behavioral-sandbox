@@ -26,7 +26,7 @@ fn execs_a_command_in_the_microvm() {
     // actually binds vsock in a real guest, so `exec` round-trips end to end, not against a faked
     // socket. Boot returns once the agent's readiness marker reaches the console, so the connect
     // can't race the bind.
-    let vm = Vm::boot(guest_rootfs_config())
+    let mut vm = Vm::boot(guest_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
         .exec(&["echo".into(), "hi".into()], b"")
@@ -53,7 +53,7 @@ fn jailed_exec_runs_a_command() {
         eprintln!("skipping jailed_exec_runs_a_command: needs real root (euid 0, initial userns)");
         return;
     }
-    let vm = Vm::boot(jailed_agent_config())
+    let mut vm = Vm::boot(jailed_agent_config())
         .expect("jailed agent microVM should boot and announce readiness");
     // The VMM really is jailed (not a plain boot that happens to exec): it runs as the dropped uid.
     let pid = vm.vmm_pid();
@@ -106,7 +106,7 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
     let mut cfg = jailed_overlay_config();
     cfg.input_dir = Some(input.path().to_path_buf());
     cfg.output_dir = Some(output.path().to_path_buf());
-    let vm = Vm::boot(cfg).expect("jailed microVM with bulk I/O should boot to readiness");
+    let mut vm = Vm::boot(cfg).expect("jailed microVM with bulk I/O should boot to readiness");
 
     // Still actually confined with the devices attached: the VMM runs as the dropped uid.
     let pid = vm.vmm_pid();
@@ -174,7 +174,7 @@ fn execs_python_in_the_microvm() {
     // The reference language runtime: `build-rootfs` installs python3 from the pinned Alpine
     // branch, and a real interpreter (dynamic musl binary + its stdlib, not a shell builtin) runs
     // in the guest and computes, proving the image carries a working userland, not just busybox.
-    let vm = Vm::boot(guest_rootfs_config())
+    let mut vm = Vm::boot(guest_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
         .exec(&["python3".into(), "-c".into(), "print(2+2)".into()], b"")
@@ -197,7 +197,7 @@ fn python_script_writes_a_file_and_we_capture_it() {
     // inject → run → capture loop with an actual language runtime (using the stdlib, `json`), not a
     // shell builtin. This is the per-file channel path; the bulk block-device paths are
     // covered by the input/output-disk tests below.
-    let vm = Vm::boot(guest_rootfs_config())
+    let mut vm = Vm::boot(guest_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
     // A real script: import a stdlib module, compute, and write a file in the working dir.
@@ -239,7 +239,7 @@ fn runs_node_a_second_interpreter() {
     // Runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
     // through the same exec path as Python, the rootfs isn't Python-specific. Inject a small `.js`,
     // run the real `node` on it, and capture the file it writes (the per-file channel path).
-    let vm = Vm::boot(guest_rootfs_config())
+    let mut vm = Vm::boot(guest_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
     // A real Node script: use the runtime's own APIs (JSON + fs) to write a file.
@@ -304,7 +304,7 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
     let mut cfg = guest_rootfs_config();
     cfg.input_dir = Some(indir.path().to_path_buf());
     cfg.output_dir = Some(outdir.path().to_path_buf());
-    let vm = Vm::boot(cfg).expect("microVM with input + output devices should boot");
+    let mut vm = Vm::boot(cfg).expect("microVM with input + output devices should boot");
     let out = vm
         .exec(
             &["/input/writefile".into(), "/output/answer.txt".into()],
@@ -349,7 +349,7 @@ fn injects_a_large_file_via_block_device() {
 
     let mut cfg = guest_rootfs_config();
     cfg.input_dir = Some(dir.clone());
-    let vm = Vm::boot(cfg).expect("microVM with an input block device should boot");
+    let mut vm = Vm::boot(cfg).expect("microVM with an input block device should boot");
     let out = vm
         .exec(
             &[
@@ -404,7 +404,7 @@ fn collects_outputs_via_block_device() {
 
     let mut cfg = guest_rootfs_config();
     cfg.output_dir = Some(dir.path().to_path_buf());
-    let vm = Vm::boot(cfg).expect("microVM with an output block device should boot");
+    let mut vm = Vm::boot(cfg).expect("microVM with an output block device should boot");
     let out = vm
         .exec(
             &[
@@ -483,7 +483,7 @@ fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
     // the whole tree via `cgroup.kill`, so the exec returns immediately with the parent's exit code
     // and the daemon is actually gone. `cgroup.kill` catches the `setsid` process a `killpg` would
     // miss, which is the whole point of using the cgroup rather than the process group.
-    let vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
+    let mut vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
 
     // fork -> setsid -> exec `sleep 30` (so its comm is `sleep` and it holds the inherited stdout);
     // the parent exits 0 straight away.

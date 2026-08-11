@@ -44,7 +44,7 @@ fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox()
     // Boot a sandbox (unjailed on purpose: the proof is the cgroup accounting, not the jailer, and
     // the unjailed path doesn't need the jail-uid device ACL). Its VMM runs in a per-VM lifetime cgroup
     //; that is the cgroup the meter attributes to.
-    let vm = Vm::boot(agent_config()).expect("an agent microVM should boot");
+    let mut vm = Vm::boot(agent_config()).expect("an agent microVM should boot");
     let vmm_pid = vm.vmm_pid();
     let cgroup = cgroup_id_of_pid(vmm_pid).expect("resolve the VMM's cgroup id");
 

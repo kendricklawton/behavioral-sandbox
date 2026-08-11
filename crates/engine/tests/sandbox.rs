@@ -43,7 +43,7 @@ fn sandbox_opens_jailed_by_default() {
         cfg.jail.is_none(),
         "precondition: the config asks for no jail"
     );
-    let sandbox = Sandbox::open(cfg).expect("the sandbox should open jailed");
+    let mut sandbox = Sandbox::open(cfg).expect("the sandbox should open jailed");
     assert_eq!(
         vmm_uid(sandbox.vmm_pid()).as_deref(),
         Some(DEFAULT_JAIL_UID.to_string().as_str()),
@@ -67,7 +67,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
     let out_dir = TmpDir::new("sandbox-outputs");
     let mut cfg = guest_rootfs_config();
     cfg.output_dir = Some(out_dir.path().to_path_buf());
-    let sandbox = Sandbox::open_unjailed(cfg).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(cfg).expect("open");
 
     let result = sandbox
         .exec_with_files(
@@ -115,7 +115,7 @@ fn kill_handle_stays_inert_during_output_readback() {
     let out_dir = TmpDir::new("readback-killhandle");
     let mut cfg = guest_rootfs_config();
     cfg.output_dir = Some(out_dir.path().to_path_buf());
-    let sandbox = Sandbox::open_unjailed(cfg).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(cfg).expect("open");
     sandbox
         .exec(
             &["sh".into(), "-c".into(), "printf ok > /output/f.txt".into()],
@@ -153,7 +153,7 @@ fn session_state_persists_across_execs() {
     // file exec 1 writes are both visible to exec 2, and the guest filesystem beyond the workdir
     // (here /root, on the boot's tmpfs overlay) accumulates too. State's lifetime is the VM's:
     // teardown discards the overlay, so nothing outlives the session.
-    let sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
 
     let first = sandbox
         .exec_with_files(
@@ -205,7 +205,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
     // One `wall` covers boot and exec at the public API; this test wants a tight *exec*
     // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the public API.
     cfg.boot_timeout = Duration::from_secs(30);
-    let sandbox = Sandbox::open_unjailed(cfg).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(cfg).expect("open");
 
     let ok = sandbox
         .exec(&["echo".into(), "within budget".into()], b"")
@@ -246,7 +246,7 @@ fn many_sandboxes_run_concurrently_without_interference() {
     let workers: Vec<_> = (0..3)
         .map(|i| {
             std::thread::spawn(move || {
-                let sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
+                let mut sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
                 let out = sandbox
                     .exec(
                         &[
@@ -281,8 +281,8 @@ fn two_concurrent_stateful_sessions_stay_isolated() {
     // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
     // reads back exactly its own accumulated state, and a file that exists only in B is absent
     // in A.
-    let a = Sandbox::open_unjailed(guest_rootfs_config()).expect("open session A");
-    let b = Sandbox::open_unjailed(guest_rootfs_config()).expect("open session B");
+    let mut a = Sandbox::open_unjailed(guest_rootfs_config()).expect("open session A");
+    let mut b = Sandbox::open_unjailed(guest_rootfs_config()).expect("open session B");
 
     let sh = |cmd: &str| vec!["sh".into(), "-c".into(), cmd.to_string()];
     assert_eq!(
@@ -341,7 +341,7 @@ fn snapshot_yields_a_restorable_bundle() {
     // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are the jailed-restore path's
     // proof in tests/snapshot.rs; snapshotting a *jailed* sandbox stays a typed refusal.)
     let bundle = TmpDir::new("sandbox-bundle");
-    let sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
     let prewarmed = ["python3", "-c", "import json"].map(String::from);
     assert_eq!(
         sandbox.exec(&prewarmed, b"").expect("warm-up").exit_code,
@@ -353,7 +353,8 @@ fn snapshot_yields_a_restorable_bundle() {
         .expect("snapshot the sandbox");
     sandbox.shutdown().expect("close the source");
 
-    let clone = Vm::restore(&snapshot, &guest_rootfs_config()).expect("restore from the bundle");
+    let mut clone =
+        Vm::restore(&snapshot, &guest_rootfs_config()).expect("restore from the bundle");
     let out = clone
         .exec(&["python3".into(), "-c".into(), "print(6 * 7)".into()], b"")
         .expect("exec in the restored clone");
@@ -371,7 +372,7 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
     // RunResult is the one surface allowed to carry it.
     const SENTINEL: &str = "S3KR1T-vm-canary-41ab88";
 
-    let sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
+    let mut sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
 
     // Capture the host-side tracing this thread emits during the execs.
     use std::sync::{Arc, Mutex, PoisonError};

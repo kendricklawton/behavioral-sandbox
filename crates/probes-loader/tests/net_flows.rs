@@ -28,7 +28,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
 
     // Boot a networked sandbox. Unjailed on purpose: the proof is about the tap counters, not the
     // jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let netns = vm
         .netns()
         .expect("a networked VM exposes its netns")

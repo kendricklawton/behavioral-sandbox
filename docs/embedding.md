@@ -30,7 +30,8 @@ governs.
 Sandbox::open(config)            confined by default: KVM + the jailer
     .exec(argv, stdin)           synchronous; a RunResult or a typed VmmError
     .exec_with_files(argv, stdin, files, env, artifacts)
-    …repeated execs = one stateful session (the VM is the session)
+    …repeated execs = one stateful session (the VM is the session; `&mut self`
+       keeps them a sequence, since they share one working directory)
     .snapshot(dir)               a portable pre-warmed bundle (unjailed sources only)
     .collect_outputs()           the bulk /output tree, back on the host
     .shutdown()                  releases the VM, scratch dir, tap, cgroup (Drop and the sentinel too)

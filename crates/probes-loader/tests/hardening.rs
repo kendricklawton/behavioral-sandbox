@@ -56,7 +56,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     let tracer = SharedTracer::load().expect("load the shared syscall tracer");
     let meter = SharedMeter::load().expect("load the shared CPU meter");
 
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 
@@ -219,7 +219,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     let tracer = SharedTracer::load().expect("load the shared syscall tracer");
     let meter = SharedMeter::load().expect("load the shared CPU meter");
 
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 
@@ -333,7 +333,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         );
         return;
     };
-    let vm = Vm::boot(cfg).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(cfg).expect("a networked agent microVM should boot");
     let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 

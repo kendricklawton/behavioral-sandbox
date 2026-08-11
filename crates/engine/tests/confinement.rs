@@ -721,7 +721,7 @@ fn kill_handle_unblocks_a_wedged_exec() {
     // out-of-band path: cloneable, Send, and it kills through the cgroup file, so firing it from
     // another thread makes the VMM die, the vsock peer close, and the blocked exec return a typed
     // error long before its 30 s command (or budget) would have.
-    let vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
+    let mut vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
     let handle = vm.kill_handle();
 
     let killer = std::thread::spawn(move || {
@@ -770,7 +770,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
         );
         return;
     };
-    let vm = Vm::boot(cfg).expect("agent microVM should boot");
+    let mut vm = Vm::boot(cfg).expect("agent microVM should boot");
     cg.enter(vm.vmm_pid());
 
     // Touch pages, don't just reserve them: `bytearray` zero-fills, so every chunk is real guest
@@ -899,7 +899,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         );
         return;
     };
-    let vm = Vm::boot(cfg).expect("agent microVM should boot");
+    let mut vm = Vm::boot(cfg).expect("agent microVM should boot");
     cg.enter(vm.vmm_pid());
 
     let threads_before = process_threads(vm.vmm_pid());
@@ -1061,9 +1061,9 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     };
 
     // Two co-resident runs, each in its own capped cgroup, the per-run isolation a hoster relies on.
-    let victim = Vm::boot(cfg.clone()).expect("victim microVM should boot");
+    let mut victim = Vm::boot(cfg.clone()).expect("victim microVM should boot");
     victim_cg.enter(victim.vmm_pid());
-    let attacker = Vm::boot(cfg).expect("attacker microVM should boot");
+    let mut attacker = Vm::boot(cfg).expect("attacker microVM should boot");
     attacker_cg.enter(attacker.vmm_pid());
     assert_ne!(
         victim.vmm_pid(),

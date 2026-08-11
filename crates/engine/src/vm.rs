@@ -833,7 +833,7 @@ impl RunningVm {
     /// command, [`VmmError::ExecTimeout`] if it outran its budget, [`VmmError::OutputCap`] if it
     /// flooded output. A command that merely exits non-zero (even by signal) is a normal
     /// [`RunResult`], not an error.
-    pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
+    pub fn exec(&mut self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
         self.exec_with_files(argv, stdin, &[], &[], &[])
     }
 
@@ -847,6 +847,13 @@ impl RunningVm {
     /// **Env scope.** The variables are set on the **spawned command only** (the agent applies them via
     /// `Command::env`, never its own process), so one run's environment cannot bleed into a later run.
     ///
+    /// **One exec at a time**, which is what the `&mut self` receiver is for. The agent serves every
+    /// connection from one working directory, so two execs in flight against one VM see each other's
+    /// injected files and artifacts: each reads whatever the other last wrote under the same name, and
+    /// a [`RunResult::files`] can come back carrying bytes that run never produced. Execs *in sequence*
+    /// sharing that directory are the stateful session (see [`exec`](Self::exec)); concurrent ones are
+    /// the defect, and the borrow checker is the thing keeping them apart.
+    ///
     /// **Secret hygiene**, held by `injected_secrets_reach_no_observable_surface`: injected file
     /// contents and env *values* reach no engine log line, [`VmmError`] rendering, or serial console,
     /// and the driver's wire copies are zero-wiped after send. An error path may name a file *path* or
@@ -856,7 +863,7 @@ impl RunningVm {
     /// # Errors
     /// As [`exec`](Self::exec).
     pub fn exec_with_files(
-        &self,
+        &mut self,
         argv: &[String],
         stdin: &[u8],
         files_in: &[(String, Vec<u8>)],

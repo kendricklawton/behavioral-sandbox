@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 3. Boot: hardware isolation (KVM) under the jailer, the confined default.
     //    `open_unjailed` is the greppable dev opt-out for a host without root.
-    let sandbox = Sandbox::open(config)?;
+    let mut sandbox = Sandbox::open(config)?;
     println!(
         "# sandbox up: vmm pid {}, booted in {} ms",
         sandbox.vmm_pid(),

@@ -26,7 +26,7 @@ use common::{TmpDir, have_jailer_privileges, jailed_overlay_config};
 /// steady bucket can't refill between them) and return the host-observed rate in MiB/s. A rewrite
 /// (`conv=notrunc`) keeps the file at `count_mib` MiB, so it never outgrows the 256 MiB image; the
 /// `-o sync` mount forces every write through virtio, so the rate is the limiter's, not a cache's.
-fn write_rate(vm: &RunningVm, label: &str, iters: u32, count_mib: u32) -> f64 {
+fn write_rate(vm: &mut RunningVm, label: &str, iters: u32, count_mib: u32) -> f64 {
     let script = format!(
         "for i in $(seq {iters}); do \
            dd if=/dev/zero of=/output/thrash bs=1M count={count_mib} conv=notrunc 2>/dev/null \
@@ -68,7 +68,7 @@ fn default_guest_io_throttles_sustained_writes_and_leaves_boot_unthrottled() {
     // Sustained rewrites past the 1 GiB burst take seconds at the 256 MiB/s cap; give each exec room
     // so the throttle, not the per-exec wall, bounds the run.
     cfg.exec_wall = Duration::from_secs(180);
-    let vm =
+    let mut vm =
         Vm::boot(cfg).expect("jailed microVM with a writable /output should boot to readiness");
 
     // Boot latency unchanged: a cold boot's rootfs reads (tens of MiB) sit far inside the 1 GiB
@@ -84,7 +84,7 @@ fn default_guest_io_throttles_sustained_writes_and_leaves_boot_unthrottled() {
 
     // Baseline: a short burst-covered stream (600 MiB < the 1 GiB burst) measures this host's raw,
     // unthrottled /output speed in the same VM, so it calibrates the throttle assertion below.
-    let baseline = write_rate(&vm, "baseline", 3, 200);
+    let baseline = write_rate(&mut vm, "baseline", 3, 200);
 
     // A disk that can't clear ~500 MiB/s can't distinguish the 256 MiB/s cap from raw throughput, so
     // the proof simply can't be made on it. Skip honestly (never a flaky failure) rather than assert
@@ -99,11 +99,11 @@ fn default_guest_io_throttles_sustained_writes_and_leaves_boot_unthrottled() {
 
     // Drain the rest of the one-time burst: cumulative 600 + 800 = 1400 MiB clears the 1 GiB burst,
     // so the measured stream that follows is pure steady state.
-    let _ = write_rate(&vm, "exhaust-burst", 4, 200);
+    let _ = write_rate(&mut vm, "exhaust-burst", 4, 200);
 
     // The proof: a long continuous rewrite once the burst is gone must pin to the 256 MiB/s steady
     // cap, well under both this host's raw disk (baseline) and a generous ceiling around the cap.
-    let throttled = write_rate(&vm, "throttled", 16, 200);
+    let throttled = write_rate(&mut vm, "throttled", 16, 200);
 
     assert!(
         throttled < 330.0,
