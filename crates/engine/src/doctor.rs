@@ -17,8 +17,6 @@
 //! mutually-distrusting tenants share the hardware. Advisory by design, so a single-tenant dev box
 //! tripping them is fine. This module is `unsafe`-free std-only detection; nothing here boots a VM.
 
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::BootConfig;
@@ -642,25 +640,15 @@ pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
 /// always covered by `/`, so this only happens on malformed input).
 fn mount_flags_in(mountinfo: &str, target: &Path) -> Option<MountFlags> {
     let mut best: Option<(usize, MountFlags)> = None;
-    for line in mountinfo.lines() {
-        // mountinfo fields: id parent major:minor root MOUNT_POINT OPTIONS <optional...> - fstype ...
-        // Mount point (index 4) and the per-mount VFS options (index 5) sit before the variable
-        // optional fields, so their positions are fixed.
-        let mut fields = line.split(' ');
-        let Some(mount_point) = fields.nth(4).map(unescape_octal) else {
-            continue;
-        };
-        let Some(options) = fields.next() else {
-            continue;
-        };
-        if target.starts_with(&mount_point) {
-            let len = mount_point.as_os_str().len();
+    for mount in crate::mountinfo::mounts(mountinfo) {
+        if target.starts_with(&mount.point) {
+            let len = mount.point.as_os_str().len();
             if best.is_none_or(|(best_len, _)| len > best_len) {
                 best = Some((
                     len,
                     MountFlags {
-                        nodev: options.split(',').any(|opt| opt == "nodev"),
-                        noexec: options.split(',').any(|opt| opt == "noexec"),
+                        nodev: mount.options.split(',').any(|opt| opt == "nodev"),
+                        noexec: mount.options.split(',').any(|opt| opt == "noexec"),
                     },
                 ));
             }
@@ -678,30 +666,6 @@ fn nearest_existing(dir: &Path) -> Option<PathBuf> {
         }
         cur = cur.parent()?;
     }
-}
-
-/// Decode a mountinfo path's octal escapes (`\040` space, `\011` tab, `\012` newline, `\134`
-/// backslash) so a mount point with a space still prefix-matches correctly.
-fn unescape_octal(s: &str) -> PathBuf {
-    if !s.contains('\\') {
-        return PathBuf::from(s);
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8)
-        {
-            out.push(byte);
-            i += 4;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    PathBuf::from(OsString::from_vec(out))
 }
 
 #[cfg(test)]

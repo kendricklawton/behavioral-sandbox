@@ -614,20 +614,12 @@ fn scratch_is_shared_mount(path: &Path) -> bool {
 /// the optional tags (where `shared:N` lives) run from field 6 up to a standalone `-`.
 fn mount_is_shared(mountinfo: &str, target: &Path) -> bool {
     let mut best: Option<(usize, bool)> = None;
-    for line in mountinfo.lines() {
-        let fields: Vec<&str> = line.split(' ').collect();
-        if fields.len() < 7 {
+    for mount in crate::mountinfo::mounts(mountinfo) {
+        if !target.starts_with(&mount.point) {
             continue;
         }
-        let mount_point = Path::new(fields[4]);
-        if !target.starts_with(mount_point) {
-            continue;
-        }
-        let shared = fields[6..]
-            .iter()
-            .take_while(|f| **f != "-")
-            .any(|f| f.starts_with("shared:"));
-        let depth = mount_point.components().count();
+        let shared = mount.shared;
+        let depth = mount.point.components().count();
         // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the topmost,
         // the **last** mountinfo line, governs what a later mount there inherits. Keeping the
         // first-seen line would read a point listed `shared:` first then private-later as shared, take
@@ -1127,6 +1119,25 @@ mod tests {
             mount_is_shared(private_then_shared, Path::new("/scratch/x")),
             "the topmost (shared) overmount governs"
         );
+    }
+
+    #[test]
+    fn an_escaped_mount_point_is_matched_like_any_other() {
+        // `scratch_dir` is operator-supplied and a path with a space is legal, so the kernel writes
+        // its mount point octal-escaped. Comparing the raw field finds no covering mount, and this
+        // returns `false`: the boot silently takes the per-VM copy fallback instead of the
+        // page-cache-shared bind, and blames the mount's propagation for it.
+        let escaped = "\
+21 1 0:20 / / rw,relatime - ext4 /dev/root rw
+30 21 0:24 / /my\\040scratch rw,relatime shared:128 - tmpfs tmpfs rw
+";
+        assert!(
+            mount_is_shared(escaped, Path::new("/my scratch/bsx-1")),
+            "the shared mount holding the target is found through its escaped point"
+        );
+        // The root is present and *not* shared here, so a false positive from the wrong line would
+        // show as a failure of the assertion above rather than passing by accident.
+        assert!(!mount_is_shared(escaped, Path::new("/elsewhere")));
     }
 
     #[test]

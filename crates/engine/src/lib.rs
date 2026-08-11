@@ -18,6 +18,7 @@ mod exec;
 mod firecracker;
 mod jail;
 mod lifetime;
+mod mountinfo;
 mod net;
 mod paths;
 mod pool;
