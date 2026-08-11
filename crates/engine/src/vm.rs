@@ -1111,8 +1111,8 @@ pub(crate) enum Reclaimed {
 /// best-effort deleted by [`Tap::create`](crate::net::Tap::create) but that delete may itself have
 /// failed. The netns is named after the scratch dir (its basename), so if one lingers we keep the dir
 /// (like [`reclaim_scratch`]) so the dir-keyed orphan sweep can reclaim the pair, never stranding a
-/// dir-less netns. Shared by the three `Tap::create` call sites in [`spawn`](crate::spawn), which have
-/// no [`Tap`] to hand [`reclaim_scratch`].
+/// dir-less netns. Called from [`spawn::create_tap_or_reclaim`](crate::spawn), the one place that
+/// creates a tap and so has no [`Tap`] yet to hand [`reclaim_scratch`].
 pub(crate) fn reclaim_scratch_after_tap_failure(workdir: &Path) {
     let netns = workdir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !netns.is_empty() && crate::net::netns_exists(netns) {

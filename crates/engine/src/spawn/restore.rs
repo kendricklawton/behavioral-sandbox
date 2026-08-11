@@ -16,11 +16,8 @@ use crate::jail::{
     stage_ro_base_into_chroot,
 };
 use crate::lifetime::VmLifetime;
-use crate::net::Tap;
 use crate::paths::path_str;
-use crate::vm::{
-    BootConfig, Snapshot, VSOCK_UDS, reclaim_scratch, reclaim_scratch_after_tap_failure,
-};
+use crate::vm::{BootConfig, Snapshot, VSOCK_UDS, reclaim_scratch};
 
 impl Spawned {
     /// Spawn a bare `firecracker` for a snapshot restore: a fresh scratch dir + process + console,
@@ -48,15 +45,7 @@ impl Spawned {
         // driver's own privilege, so the tap needs no per-uid owner. Created before Firecracker so it
         // can join the netns; a failed create reclaims its own netns, and we still own the workdir.
         let tap = if snapshot.tap_name.is_some() {
-            match Tap::create(&workdir_name(&workdir), None) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    // Gate the dir removal on the netns actually being gone (a failed create's own
-                    // best-effort delete may have failed), so a dir-less netns is never stranded.
-                    reclaim_scratch_after_tap_failure(&workdir);
-                    return Err(e);
-                }
-            }
+            Some(super::create_tap_or_reclaim(&workdir, None)?)
         } else {
             None
         };
