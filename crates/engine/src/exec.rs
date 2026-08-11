@@ -66,10 +66,38 @@ pub(crate) fn connect_agent_at(
     port: u32,
     timeout: Duration,
 ) -> Result<ClientConnection<UnixStream>, VmmError> {
+    with_dial_retry(timeout, || connect_agent_once(uds, port, timeout))
+}
+
+/// [`connect_agent_at`] returning a connection whose reads and writes are bounded by **one absolute
+/// deadline**, `timeout` from the moment the channel handshake starts, rather than by a per-syscall
+/// timeout the peer re-arms with every byte.
+///
+/// This is the exec path's constructor, and the difference is the threat: the plain form's
+/// `SO_RCVTIMEO` is reset by each byte that arrives, so a guest dribbling one byte per interval holds
+/// the host inside a single `read_exact` for `frame_bytes × timeout`. The deadline is armed after the
+/// dial rather than before, so a retried dial does not spend the exec's budget.
+pub(crate) fn connect_agent_bounded(
+    uds: &Path,
+    port: u32,
+    timeout: Duration,
+) -> Result<ClientConnection<DeadlineStream>, VmmError> {
+    with_dial_retry(timeout, || {
+        let stream = vsock_connect(uds, port, timeout)?;
+        let bounded = DeadlineStream::new(stream, Instant::now() + timeout);
+        ClientConnection::connect(bounded).map_err(handshake_err)
+    })
+}
+
+/// The dial-retry loop both constructors share, so the window and its reasoning live once.
+fn with_dial_retry<T>(
+    timeout: Duration,
+    mut attempt: impl FnMut() -> Result<T, VmmError>,
+) -> Result<T, VmmError> {
     let retry_deadline = Instant::now() + timeout.min(DIAL_RETRY_CAP);
     let mut backoff = crate::spawn::PollBackoff::new();
     loop {
-        match connect_agent_once(uds, port, timeout) {
+        match attempt() {
             Ok(conn) => return Ok(conn),
             Err(e @ VmmError::GuestUnavailable(_)) if Instant::now() < retry_deadline => {
                 tracing::debug!(error = %e, "vsock dial failed transiently; retrying");
@@ -77,6 +105,64 @@ pub(crate) fn connect_agent_at(
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// A `Read`/`Write` adapter bounding **every** syscall by one absolute deadline, the exec channel's
+/// counterpart to the Firecracker API's `DeadlineReader`.
+///
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO` are re-armed by the kernel on each syscall, so a peer that never
+/// pauses a full timeout's worth is never cut off: the socket option bounds one syscall, and
+/// `read_exact` of an `N`-byte frame makes `N` of them. Shrinking the option to the *remaining*
+/// budget before each one makes the sum of them honour a single deadline, which is what turns a
+/// dribbling guest from a host hang into a typed `TimedOut`. Writes are bounded for the same reason
+/// in the other direction: a guest that reads slowly would otherwise park the host in `write_all`.
+pub(crate) struct DeadlineStream {
+    stream: UnixStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn new(stream: UnixStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    /// The budget left, or `None` when it is spent. `None` must not be armed as a timeout: the
+    /// kernel reads a zero `SO_RCVTIMEO`/`SO_SNDTIMEO` as "block forever", the hang this exists to
+    /// prevent.
+    fn remaining(&self) -> Option<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(remaining) = self.remaining() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "guest exec response exceeded its deadline",
+            ));
+        };
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let Some(remaining) = self.remaining() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "guest exec request exceeded its deadline",
+            ));
+        };
+        self.stream.set_write_timeout(Some(remaining))?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
     }
 }
 
@@ -89,17 +175,20 @@ pub(crate) fn connect_agent_once(
     timeout: Duration,
 ) -> Result<ClientConnection<UnixStream>, VmmError> {
     let stream = vsock_connect(uds, port, timeout)?;
-    ClientConnection::connect(stream).map_err(|e| {
-        let detail = format!("channel handshake over vsock: {e}");
-        // A peer close mid-handshake is the same transient "not serving right now" condition as a
-        // close during CONNECT, typed retryable; anything else (bad magic, a mismatched agent) is
-        // a permanent fault, and retrying it would only mislabel it as unavailability.
-        if channel_err_is_disconnect(&e) {
-            VmmError::GuestUnavailable(format!("{detail} (is the guest agent listening?)"))
-        } else {
-            VmmError::Vmm(detail)
-        }
-    })
+    ClientConnection::connect(stream).map_err(handshake_err)
+}
+
+/// Classify a channel-handshake failure. A peer close mid-handshake is the same transient "not
+/// serving right now" condition as a close during CONNECT, typed retryable; anything else (bad magic,
+/// a mismatched agent) is a permanent fault, and retrying it would only mislabel it as
+/// unavailability.
+fn handshake_err(e: bsx_channel::ChannelError) -> VmmError {
+    let detail = format!("channel handshake over vsock: {e}");
+    if channel_err_is_disconnect(&e) {
+        VmmError::GuestUnavailable(format!("{detail} (is the guest agent listening?)"))
+    } else {
+        VmmError::Vmm(detail)
+    }
 }
 
 /// Whether an io error kind is a peer disconnect (EPIPE / ECONNRESET / EOF), the shared predicate
@@ -239,13 +328,16 @@ pub(crate) fn run_exec<S: Read + Write>(
     }
     let mut captured = 0usize;
     loop {
-        // The host's own wall-clock deadline, checked *before* each blocking read. The socket's
-        // per-read idle timeout is reset by every frame, so a guest that dribbles tiny well-formed
-        // frames, never sending its terminal `Exit`/`TimedOut`, would otherwise keep this loop
-        // alive indefinitely under the output cap. `wall` outlasts the guest's own `TimedOut`, so a
-        // legitimate timeout still arrives as `ExecTimeout`; this only fires for a non-reporting
-        // guest. Worst case the loop is parked in `recv_response` when the deadline passes, so the
-        // real bound is `deadline + one idle period`, bounded, not a hang.
+        // The host's own wall-clock deadline, checked *before* each blocking read: a guest that
+        // dribbles tiny well-formed frames, never sending its terminal `Exit`/`TimedOut`, would
+        // otherwise keep this loop alive indefinitely under the output cap. `wall` outlasts the
+        // guest's own `TimedOut`, so a legitimate timeout still arrives as `ExecTimeout`; this only
+        // fires for a non-reporting guest.
+        //
+        // This check bounds the loop *between* frames only. Bounding the read *within* one frame is
+        // `DeadlineStream`'s job (the connection comes from `connect_agent_bounded`), because a
+        // per-syscall socket timeout is re-armed by every byte and so bounds one `read`, not one
+        // `read_exact` of a whole frame. With both, the worst case is the deadline plus one syscall.
         if Instant::now() >= deadline {
             return Err(VmmError::ExecUnresponsive { limit: bounds.wall });
         }
@@ -1009,6 +1101,101 @@ mod tests {
             handler(conn);
         });
         (dir, uds, handle)
+    }
+
+    /// [`fake_vsock_server`] handing back the **raw** stream after both handshakes, so a test can
+    /// write bytes the channel encoder would never produce: a frame header followed by a payload
+    /// dribbled a byte at a time.
+    fn fake_vsock_server_raw<F>(
+        tag: &str,
+        handler: F,
+    ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    {
+        use std::os::unix::net::UnixListener;
+        let dir = ScratchDir::created(tag);
+        let uds = dir.path().join(VSOCK_UDS);
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut b = [0u8; 1];
+            loop {
+                stream.read_exact(&mut b).expect("read CONNECT");
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            stream.write_all(b"OK 10000\n").expect("write ack");
+            // The channel handshake by hand (its encoders are private to `bsx-channel`): magic, then
+            // the version, then the peer's own six bytes.
+            let mut hello = [0u8; 6];
+            hello[..4].copy_from_slice(b"AGCH");
+            hello[4..].copy_from_slice(&bsx_channel::PROTOCOL_VERSION.to_le_bytes());
+            stream.write_all(&hello).expect("write handshake");
+            stream.flush().expect("flush handshake");
+            let mut peer = [0u8; 6];
+            stream.read_exact(&mut peer).expect("read handshake");
+            handler(stream);
+        });
+        (dir, uds, handle)
+    }
+
+    #[test]
+    fn a_guest_dribbling_one_frames_bytes_cannot_outlast_the_wall() {
+        // The in-frame twin of `exec_dribbling_guest_trips_the_host_wall_deadline`: that one dribbles
+        // whole frames, which the loop's between-frames deadline check catches. This one dribbles the
+        // bytes *inside* a single frame, where the loop never gets control, so only an absolute bound
+        // on the reads themselves can end it. A per-syscall `SO_RCVTIMEO` cannot: the kernel re-arms
+        // it on every byte that arrives, so the frame is bounded by `payload_len × timeout`.
+        const PAYLOAD: usize = 200;
+        const PER_BYTE: Duration = Duration::from_millis(20);
+        let (_dir, uds, server) = fake_vsock_server_raw("bsx-vsock-inframe", |mut s| {
+            // A well-formed `Stdout` header promising PAYLOAD bytes, then one byte at a time. Each
+            // arrival is far inside the socket timeout, so the idle timer never fires.
+            let mut header = [0u8; 5];
+            header[0] = 2; // Tag::Stdout
+            header[1..].copy_from_slice(&(PAYLOAD as u32).to_le_bytes());
+            if s.write_all(&header).is_err() {
+                return;
+            }
+            for _ in 0..PAYLOAD {
+                if s.write_all(b"x").is_err() || s.flush().is_err() {
+                    return;
+                }
+                std::thread::sleep(PER_BYTE);
+            }
+        });
+
+        // Dribbling the whole payload takes PAYLOAD * PER_BYTE = 4 s. The wall is 300 ms, and it is
+        // the socket timeout too, so an unbounded read would sit here for the full 4 s and *succeed*.
+        let wall = Duration::from_millis(300);
+        let mut conn = connect_agent_bounded(&uds, VSOCK_PORT, wall).expect("connect");
+        let started = std::time::Instant::now();
+        let err = run_exec(
+            &mut conn,
+            &["dribble-in-frame"],
+            b"",
+            &[],
+            &[],
+            &[],
+            ExecBounds {
+                timeout: Duration::from_millis(200),
+                wall,
+                max_output: MAX_EXEC_OUTPUT,
+            },
+        )
+        .expect_err("a frame that outruns the wall must not be waited out");
+        let held = started.elapsed();
+
+        let unbounded = PER_BYTE * PAYLOAD as u32; // ~4 s
+        assert!(
+            held < unbounded / 2,
+            "the read must end near the {wall:?} wall, not near the {unbounded:?} the dribble \
+             would take; held {held:?} ({err:?})"
+        );
+        drop(conn);
+        let _ = server.join();
     }
 
     #[test]
