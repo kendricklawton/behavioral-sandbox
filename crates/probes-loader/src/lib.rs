@@ -218,7 +218,7 @@ fn load_object() -> Result<Ebpf, ProbeError> {
 ///
 /// # Errors
 /// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
-/// cgroup-v1-only host), or the cgroup dir can't be stat'd.
+/// cgroup-v1-only host), names the root cgroup, or the cgroup dir can't be stat'd.
 pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
     cgroup_id_of_dir(&cgroup_dir_of_pid(pid)?)
 }
@@ -230,12 +230,28 @@ pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
 /// all three resource axes to that one sandbox's cgroup. Pure `std` fs, no `unsafe`.
 ///
 /// # Errors
-/// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read or has no unified (`0::`) line (a
-/// cgroup-v1-only host).
+/// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
+/// cgroup-v1-only host), or names the **root** cgroup, which is not a sandbox: registering it would
+/// fold every process in it into this sandbox's record.
 pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
     let proc_path = format!("/proc/{pid}/cgroup");
     let text = std::fs::read_to_string(&proc_path)
         .map_err(|e| ProbeError::Cgroup(format!("read {proc_path}: {e}")))?;
+    cgroup_dir_in(&text, &proc_path)
+}
+
+/// The cgroup dir a `/proc/<pid>/cgroup` body names, split from the read so both refusals are
+/// unit-testable without a live `/proc`.
+///
+/// The **root cgroup is refused.** A registered cgroup matches every process whose
+/// `bpf_get_current_cgroup_id` equals it, so registering the root folds the whole host's syscall
+/// paths and CPU time into one sandbox's signed record, and two sandboxes that both resolve to it
+/// collide in the shared bookkeeping. A process reads `0::/` when it is in the root cgroup, and so
+/// does every process in a container with the default private cgroup namespace. Refusing here makes
+/// the axis a recorded [`AxisGap`] instead. `read_cgroup_dir` in `crates/engine/src/jail.rs` refuses
+/// the same input for its own reason, and `the_cgroup_resolution_refuses_the_root_cgroup_everywhere`
+/// in `xtask` holds the two together.
+fn cgroup_dir_in(text: &str, proc_path: &str) -> Result<PathBuf, ProbeError> {
     // The cgroup v2 unified controller is the `0::<path>` line, rooted at the cgroup mount.
     let rel = text
         .lines()
@@ -246,6 +262,12 @@ pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
             ))
         })?
         .trim();
+    if rel.is_empty() || rel == "/" {
+        return Err(ProbeError::Cgroup(format!(
+            "{proc_path} names the root cgroup: the process is not in a cgroup of its own, so \
+             tracing it would attribute every process in the root to this sandbox"
+        )));
+    }
     Ok(Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/')))
 }
 
@@ -413,6 +435,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_root_cgroup_is_refused_rather_than_registered_as_a_sandbox() {
+        // Resolving `0::/` yields `/sys/fs/cgroup` itself, whose inode is a perfectly registerable
+        // target id, so the whole host would fold into one sandbox's record. Every shape the kernel
+        // writes for a process in the root cgroup, including the one every process reads inside a
+        // container with the default private cgroup namespace.
+        for body in ["0::/\n", "0::\n", "0::   \n", "1:name=systemd:/x\n0::/\n"] {
+            let err = cgroup_dir_in(body, "/proc/2/cgroup")
+                .expect_err(&format!("{body:?} names the root cgroup"));
+            assert!(
+                err.to_string().contains("root cgroup"),
+                "the refusal names its cause, got: {err}"
+            );
+        }
+
+        // A sandbox's own cgroup still resolves, or this test would pass on a resolver that refuses
+        // everything.
+        assert_eq!(
+            cgroup_dir_in("0::/user.slice/bsx-1.scope\n", "/proc/2/cgroup")
+                .expect("a non-root cgroup resolves"),
+            Path::new("/sys/fs/cgroup/user.slice/bsx-1.scope")
+        );
+
+        // The v1-only host stays its own refusal: the two failures are told apart by their message,
+        // and only one of them means "this host cannot do cgroup v2".
+        let v1 = cgroup_dir_in("1:name=systemd:/x\n", "/proc/2/cgroup")
+            .expect_err("no unified line on a v1-only host");
+        assert!(
+            v1.to_string().contains("no unified"),
+            "a v1-only host keeps its own reason, got: {v1}"
+        );
     }
 
     #[test]
