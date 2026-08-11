@@ -167,6 +167,10 @@ impl std::fmt::Debug for Request {
 }
 
 /// Guest-to-host response message stream.
+///
+/// The derived `Debug` renders payload bytes in full, up to [`MAX_PAYLOAD`] a frame, so a caller that
+/// logs one abbreviates it rather than handing `{:?}` a whole response. [`Request`] redacts instead,
+/// because its payloads are the host's secrets where these are the guest's own output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Response {
