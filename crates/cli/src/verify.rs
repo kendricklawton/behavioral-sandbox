@@ -69,13 +69,10 @@ pub fn run(args: VerifyArgs, sources: &config::Sources) -> Result<ExitCode, CliE
 }
 
 /// The most bytes this reads from a record **file**, as distinct from [`MAX_ENVELOPE_BYTES`], which
-/// bounds **one** envelope. A session chain is one envelope per line, so a file holding a long
-/// session legitimately exceeds the per-envelope bound while every envelope in it is inside it.
-///
-/// The whole file is read at once because [`verify_chain`] checks the sequence as a unit, so this is
-/// a memory bound on the verifying host rather than a claim about how long a chain may be. Sixteen
-/// envelopes' worth: envelopes run to kilobytes in practice ([`MAX_ENVELOPE_BYTES`] is itself
-/// headroom), so a real chain meets this long after it has stopped being one anybody reads.
+/// bounds **one** envelope: a session chain is one envelope per line, so a long session legitimately
+/// exceeds the per-envelope bound while every envelope in it stays inside it. A memory bound on the
+/// verifying host, not a claim about chain length, since [`verify_chain`] checks the sequence as a
+/// unit and so the whole file is read at once.
 const MAX_RECORD_FILE_BYTES: usize = 16 * MAX_ENVELOPE_BYTES;
 
 /// Conflating the two bounds is the defect this constant exists to keep fixed: a chain is one
@@ -83,9 +80,8 @@ const MAX_RECORD_FILE_BYTES: usize = 16 * MAX_ENVELOPE_BYTES;
 /// test, since nothing here is worth deferring to run time.
 const _: () = assert!(MAX_RECORD_FILE_BYTES > MAX_ENVELOPE_BYTES);
 
-/// Read the record file, bounded: the envelope is untrusted input (relayed by a host the verifier
-/// deliberately doesn't trust), so the read stops at [`MAX_RECORD_FILE_BYTES`] instead of swallowing
-/// an arbitrarily large file. The **per-envelope** bound stays where it belongs, inside `verify`.
+/// Read the record file, stopping at [`MAX_RECORD_FILE_BYTES`] rather than swallowing an arbitrarily
+/// large file. The **per-envelope** bound stays where it belongs, inside `verify`.
 fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
     read_bounded_to(path, MAX_RECORD_FILE_BYTES)
 }
@@ -116,10 +112,9 @@ fn read_bounded_to(path: &std::path::Path, limit: usize) -> Result<String, CliEr
 }
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys
-/// (`BSX_TRUSTED_KEYS` / `.bsx.toml`, for rotation), and the host's own current signing key.
-/// Trusting a set is what lets a record signed *before* a key rotation still verify:
-/// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
-/// sources dedup cleanly.
+/// (`BSX_TRUSTED_KEYS` / `.bsx.toml`), and the host's own current signing key. A set rather than one
+/// key is what lets a record signed *before* a rotation still verify. Everything reduces to `key_id`
+/// hex, so the sources dedup cleanly.
 fn trusted_keys(args: &VerifyArgs, sources: &config::Sources) -> Result<Vec<TrustedKey>, CliError> {
     let mut hexes: Vec<String> = args.keys.clone();
     hexes.extend(config::trusted_key_hexes(sources));

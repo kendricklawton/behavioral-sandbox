@@ -68,12 +68,10 @@ pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
         || e.kind() == std::io::ErrorKind::OutOfMemory
 }
 
-/// The default `--max-wall-secs`. Finite because the wall a client asks for becomes the *host's*
-/// own give-up deadline on the exec (`VmmError::ExecUnresponsive`), so an unbounded ask lets a guest
-/// that never reports its command's end hold a session slot, its VM, and its committed memory for as
-/// long as the client named. One hour is the ceiling the in-guest agent already clamps a command to
-/// (`crates/guest-agent/src/lib.rs`), so this refuses only what a cooperating guest would never have
-/// run to completion anyway; a hoster who wants a tighter or looser bound sets the flag.
+/// The default `--max-wall-secs`, finite because the wall a client asks for becomes the *host's* own
+/// give-up deadline, so an unbounded ask lets a guest that never reports its command's end hold a
+/// session slot, its VM, and its committed memory for as long as the client named. One hour matches
+/// the ceiling the in-guest agent already clamps a command to.
 const DEFAULT_MAX_WALL_SECS: u64 = 3600;
 
 /// The default `--max-snapshots`. Finite because a bundle **outlives its session** by design: the
@@ -82,12 +80,10 @@ const DEFAULT_MAX_WALL_SECS: u64 = 3600;
 /// smallest ceiling that does not refuse a workload where every session snapshots once.
 const DEFAULT_MAX_SNAPSHOTS: usize = 16;
 
-/// The default `--max-output-cap`. Finite because the cap a client asks for bounds a **host-side**
-/// buffer: the collect loop charges each frame against it before buffering, and at `usize::MAX`
-/// that charge never refuses, so one guest streaming stdout grows the daemon's own heap until the
-/// host is out of memory. The engine's own [`Limits::output_cap`] default is the anchor, since it is
-/// what a run gets when nobody asks, so a ceiling there refuses only asks above the shipped default;
-/// a hoster who wants more sets the flag.
+/// The default `--max-output-cap`, finite because the cap a client asks for bounds a **host-side**
+/// buffer: at `usize::MAX` the collect loop's per-frame charge never refuses, so one guest streaming
+/// stdout grows the daemon's heap until the host is out of memory. Anchored to the engine's own
+/// [`Limits::output_cap`] default, so it refuses only asks above the shipped default.
 fn default_max_output_cap() -> usize {
     Limits::default().output_cap
 }
@@ -228,12 +224,10 @@ fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
     }
 }
 
-/// The per-`open` ceilings, built from the daemon's own flags. The daemon takes policy from its
-/// flags, not from a discovered `.bsx.toml`: a daemon must not read a security control out of
-/// whatever directory it happened to be started in. Jail and networking are already daemon-wide and
-/// client-immutable (`--unjailed`), so only the ceilings need to travel to the session boundary.
-/// On the ceilings that carry a finite default, `0` is the unlimited opt-out, spelled like
-/// `--idle-timeout 0`.
+/// The per-`open` ceilings, built from the daemon's own flags rather than a discovered `.bsx.toml`,
+/// because a daemon must not read a security control out of whatever directory it was started in.
+/// Jail and networking are already daemon-wide and client-immutable, so only the ceilings travel to
+/// the session boundary. On a ceiling with a finite default, `0` is the unlimited opt-out.
 fn operator_policy(args: &ServeArgs) -> Policy {
     // Wildcard-free, so a third address family cannot be dropped on the floor by this split.
     let mut max_egress_v4 = Vec::new();

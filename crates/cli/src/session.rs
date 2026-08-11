@@ -106,11 +106,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    // Resource-aware admission: the count ticket (acquired at accept) bounds *how many*
-    // sessions; this reservation bounds *how much* they commit, so a memory-heterogeneous fleet can't
-    // overcommit the host into OOM while still under `--max-sessions`. Charged before boot from the
-    // resolved `Limits`, held for the session, released on teardown by `Drop`. A refusal is the
-    // distinct `at_capacity` reply a dispatcher fails over on, not a boot failure.
+    // The count ticket (acquired at accept) bounds *how many* sessions; this reservation bounds *how
+    // much* they commit, so a memory-heterogeneous fleet cannot overcommit the host into OOM while
+    // still under `--max-sessions`. Charged before boot, released on teardown by `Drop`.
     let _reservation = match ResourceReservation::try_acquire(
         server,
         u64::from(limits.mem_mib.get()),
@@ -500,15 +498,15 @@ fn serve_run(
     }
 }
 
-/// Boot the session's VM. A **bare** `open` (every knob defaulted) is served from the pre-warmed pool
-/// when the daemon has one, the fast path, since the pool's clones carry the default profile. Any
-/// custom resource knob (or no pool) is a cold boot with the requested envelope.
-/// The lock is taken **non-blocking** (`try_lock`) and held only to pop **ready stock** (an O(1)
-/// pop), never across a `Vm::restore`. Two ways it declines and cold-boots instead of blocking:
-/// an empty (or poisoned) pool, and a *contended* one, `end_session` holds this same lock across its
-/// `refill`'s inline restores, so a blocking `lock()` here would serialize every bare `open` behind
-/// that whole refill window. Falling through to a lock-free cold boot keeps opens independent of
-/// refills; the trade is a `pooled: false` on the transient dry/busy window instead of a stall.
+/// Boot the session's VM: a **bare** `open` (every knob defaulted) is served from the pre-warmed pool
+/// when the daemon has one, and any custom resource knob (or no pool) is a cold boot with the
+/// requested envelope.
+///
+/// The pool lock is **non-blocking** (`try_lock`) and held only for an O(1) pop of ready stock, never
+/// across a `Vm::restore`. It declines on an empty, poisoned, *or contended* pool, because
+/// `end_session` holds this same lock across its refill's inline restores, so a blocking `lock()`
+/// would serialize every bare `open` behind that window. The trade is a `pooled: false` on the
+/// transient dry/busy window instead of a stall.
 fn boot_session_vm(
     server: &Server,
     limits: Limits,
@@ -645,11 +643,10 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, SnapshotRefusa
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
 /// between sessions, the moment the [`Pool`](bsx_engine::Pool) doc reserves for restore cost).
-/// The refill is **best-effort and non-blocking**: `try_lock`, and skip if the pool is
-/// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
-/// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
-/// target), and any bare `open` that meanwhile finds the pool dry cold-boots, correct, just not
-/// pooled.
+///
+/// The refill is **best-effort and non-blocking** (`try_lock`, skip if contended), so a burst of closes
+/// cannot queue behind one another's restore. Stock recovers on the next uncontended close, and a bare
+/// `open` that meanwhile finds the pool dry cold-boots: correct, just not pooled.
 fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
     server.metrics.session_closed(vm.sentinel_degraded());
     drop(probes); // detach from the shared tracer/meter (its own `Drop`)
@@ -812,13 +809,12 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
 
 /// Fold an [`Request::Open`]'s optional knobs onto the [`Limits`] the operator's `policy` allows,
 /// validating each as a typed message (never a panic): a vCPU count the VMM accepts (1 or an even
-/// number up to 32), memory and wall nonzero.
-/// Also reports whether the `open` was **bare** (every knob defaulted), which decides pool
-/// eligibility. A non-`Open` first message is the caller's error too.
-/// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
-/// controls neither this process's environment nor its `.bsx.toml`, so bounding the request here
-/// is what makes an operator ceiling real. Asking past a ceiling is refused, never
-/// quietly clamped.
+/// number up to 32), memory and wall nonzero. Also reports whether the `open` was **bare** (every knob
+/// defaulted), which decides pool eligibility; a non-`Open` first message is the caller's error too.
+///
+/// The daemon's policy boundary: a client controls neither this process's environment nor its
+/// `.bsx.toml`, so bounding the request here is what makes an operator ceiling real. Asking past a
+/// ceiling is refused, never quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRefusal> {
     let Request::Open(OpenParams {
         vcpus,
@@ -959,16 +955,15 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// and `exec` returns a typed error instead of running out its wall budget with a client that is no
 /// longer listening.
 ///
-/// **Thread discipline.** The worker is scoped, so `thread::scope` cannot return until it finishes. That
-/// holds only because `exec` is bounded on both sides, by the session's wall budget and, once the kill
-/// lands, by the dead guest. A scoped thread wrapping an unbounded call would be a host hang, which is why
-/// the `peek` rather than a second blocking read does the watching.
+/// **Thread discipline.** The worker is scoped, so `thread::scope` cannot return until it finishes,
+/// which is safe only because `exec` is bounded on both sides: by the session's wall budget and, once
+/// the kill lands, by the dead guest. A scoped thread wrapping an unbounded call would be a host hang,
+/// which is why a `peek` rather than a second blocking read does the watching.
 ///
-/// The `reader` is watched alongside the socket, and taken whole rather than as a "has it buffered"
-/// flag so no caller can answer that question wrongly. The peek sees only the *kernel* receive queue,
-/// and a client that wrote its `cancel` in the same call as its `exec` has already had that line
-/// pulled into the `BufReader`, leaving the queue empty and the peek blind to it. Nothing reads the
-/// reader again until this returns, so what it holds cannot change here.
+/// The `reader` is taken whole rather than as a "has it buffered" flag, so no caller can answer that
+/// question wrongly: the peek sees only the *kernel* receive queue, and a client that wrote its
+/// `cancel` in the same call as its `exec` has already had that line pulled into the `BufReader`,
+/// leaving the peek blind to it. Nothing reads the reader again until this returns.
 fn exec_watching_for_cancel(
     vm: &RunningVm,
     argv: &[String],

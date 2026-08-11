@@ -134,8 +134,8 @@ pub struct Policy {
     /// Ceiling on the output cap, bytes.
     pub max_output_cap: Option<usize>,
 
-    /// Refuse an unjailed boot: the `--unjailed` opt-out. is withdrawn on this host.
-    /// Monotone, a caller can ask for the jail, never ask it away.
+    /// Refuse an unjailed boot, withdrawing the `--unjailed` opt-out on this host. Monotone: a caller
+    /// can ask for the jail, never ask it away.
     pub require_jail: bool,
     /// Whether a caller may attach a NIC at all. `false` refuses `--net` outright; it does not change
     /// the deny-by-default egress policy a NIC still gets.
@@ -153,14 +153,11 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Fold a project-local file's policy onto this one (the user's), tightening only.
-    ///
-    /// The two files are not peers. "Absent is weakest" makes every key here safe against a host
-    /// with no config at all, but not against one whose user file already set a posture: a plain
-    /// nearest-wins merge would let a project `require_jail = false` displace a user `true`. So the
-    /// house defaults take the nearer value (a caller could pass those on the command line anyway,
-    /// and [`Policy::resolve`] clamps a default to whatever ceiling survives), while ceilings take
-    /// the smaller and postures take the stronger.
+    /// Fold a project-local file's policy onto this one (the user's), tightening only: ceilings take
+    /// the smaller, postures the stronger, and only the house defaults take the nearer value (a caller
+    /// could pass those on the command line anyway, and [`Policy::resolve`] clamps a default to
+    /// whatever ceiling survives). The two files are not peers, so a plain nearest-wins merge would
+    /// let a project `require_jail = false` displace a user `true`.
     #[must_use]
     pub fn tightened_by(mut self, project: &Policy) -> Policy {
         if project.vcpus.is_some() {
@@ -276,10 +273,9 @@ impl fmt::Display for PolicyError {
 impl std::error::Error for PolicyError {}
 
 impl PolicyError {
-    /// The refusal phrased for a **daemon's** wire client: the same message, but the pointer names
-    /// the `bsx serve` flag that set the posture rather than `.bsx.toml`, which a daemon
-    /// deliberately never reads (its policy is its own flags; see `config::policy_of`). `Display`
-    /// stays the CLI flavor, where the file *is* where the posture lives.
+    /// The refusal phrased for a **daemon's** wire client: the same message, but pointing at the
+    /// `bsx serve` flag that set the posture rather than `.bsx.toml`, which a daemon never reads.
+    /// `Display` stays the CLI flavor, where the file *is* where the posture lives.
     #[must_use]
     pub fn daemon_message(&self) -> String {
         match self {
