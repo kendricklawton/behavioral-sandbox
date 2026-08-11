@@ -770,11 +770,7 @@ fn snapshots_dir(scratch: &Path) -> PathBuf {
     scratch.join(format!("bsx-snapshots-{}", std::process::id()))
 }
 
-/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead** prior
-/// daemons, whose guest-memory-sized files are pure leak once their owner is gone. Best-effort per entry,
-/// skipping this pid and any live one. A dead daemon's pid is genuinely absent from `/proc`, since it is
-/// not this process's unreaped child, so existence is a sound liveness check.
-/// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
+/// Reclaims the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
 /// ([`bsx_engine::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
@@ -796,6 +792,10 @@ fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
     }
 }
 
+/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead** prior
+/// daemons, whose guest-memory-sized files are pure leak once their owner is gone. Best-effort per
+/// entry, skipping this pid and any live one: a dead daemon is not this process's unreaped child, so
+/// absence from `/proc` is a sound liveness check.
 fn sweep_stale_agent_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Some(me) = crate::trust::own_euid() else {
