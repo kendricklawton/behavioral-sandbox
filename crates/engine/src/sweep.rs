@@ -168,24 +168,27 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
 /// Detach (lazy, best-effort) every mount whose mount point lies under `dir`, deepest first, so a
 /// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind, today that is
 /// the read-only base a jailed overlay boot bind-mounts into its chroot. Reads `/proc/self/mountinfo`
-/// (mount point is its 5th space-separated field); paths a self-hosted scratch dir carries have no
-/// spaces, so the octal-escape edge (`\040`) is not decoded. A no-op when `dir` holds no mounts.
+/// through [`crate::mountinfo`], so a mount point whose path contains a space matches like any
+/// other. A no-op when `dir` holds no mounts.
 fn detach_mounts_under(dir: &Path) {
     let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return;
     };
-    let mut points: Vec<PathBuf> = info
-        .lines()
-        .filter_map(|line| {
-            let mp = Path::new(line.split(' ').nth(4)?);
-            mp.starts_with(dir).then(|| mp.to_path_buf())
-        })
-        .collect();
-    // Deepest first: a child mount must be detached before its parent mount point.
-    points.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for mp in points {
+    for mp in mounts_under(&info, dir) {
         unmount_base(&mp);
     }
+}
+
+/// The mount points under `dir` in `mountinfo`, **deepest first**, since a child mount must be
+/// detached before its parent's mount point. Split from the unmounting so the selection and the
+/// order are unit-testable against a fixture rather than a live `/proc`.
+fn mounts_under(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
+    let mut points: Vec<PathBuf> = crate::mountinfo::mounts(mountinfo)
+        .filter(|m| m.point.starts_with(dir))
+        .map(|m| m.point)
+        .collect();
+    points.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    points
 }
 
 /// Whether a live process is staging a restore disk into `dir` right now: its
@@ -286,6 +289,32 @@ fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
 mod tests {
     use super::*;
     use bsx_test_support::ScratchDir;
+
+    #[test]
+    fn mounts_under_finds_an_escaped_point_and_orders_children_first() {
+        // `BSX_SCRATCH_DIR` is operator-supplied and a path with a space is legal, so the mount
+        // point the kernel writes is octal-escaped. Comparing the raw field misses it, the binds a
+        // crashed run left stay attached, and the following `remove_dir_all` fails `EBUSY`.
+        let mountinfo = "\
+21 1 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+40 21 0:30 / /my\\040scratch/bsx-1 rw,relatime - ext4 /dev/sdb rw
+41 40 0:31 / /my\\040scratch/bsx-1/root/rootfs.ext4 rw,relatime - ext4 /dev/sdc rw
+42 21 0:32 / /my\\040scratch/bsx-2 rw,relatime - ext4 /dev/sdd rw
+";
+        let found = mounts_under(mountinfo, Path::new("/my scratch/bsx-1"));
+        assert_eq!(
+            found,
+            vec![
+                PathBuf::from("/my scratch/bsx-1/root/rootfs.ext4"),
+                PathBuf::from("/my scratch/bsx-1"),
+            ],
+            "both mounts under the dir, the child before the parent it sits on"
+        );
+
+        // A sibling run's dir is not swept by this one, and `/` covers everything but is not under
+        // it, so neither may appear above.
+        assert!(mounts_under(mountinfo, Path::new("/my scratch/bsx-3")).is_empty());
+    }
 
     /// A pid that is certainly dead: spawn a short-lived child and reap it. Immediate recycling of
     /// a just-freed pid is very unlikely (the kernel allocates pids cyclically).
