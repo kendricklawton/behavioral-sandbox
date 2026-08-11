@@ -87,8 +87,22 @@ impl Console {
     }
 }
 
+/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
+/// [`char::is_control`] is category `Cc` only and returns `false` for every one of them. The twin of
+/// `bsx_channel`'s and `bsx-cli`'s predicates of the same name, one per surface that renders a
+/// guest-authored string to a terminal; `the_terminal_escapers_agree_on_the_bidi_controls` pins the
+/// set across all three.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 /// The last `n` non-empty lines of `text`, oldest first, joined with ` | `, `None` if there are
-/// none. Diagnostic tails for error enrichment.
+/// none: diagnostic tails for error enrichment, made safe to print.
+///
+/// Escaping happens **here** rather than at the call sites because every caller folds the result into
+/// a [`VmmError`](crate::VmmError) the CLI prints to a terminal, and the console half is bytes the
+/// guest chose: an unescaped tail lets it forge lines or reorder the operator's display around it.
 pub(crate) fn last_lines(text: &str, n: usize) -> Option<String> {
     let tail: Vec<&str> = text
         .lines()
@@ -100,7 +114,16 @@ pub(crate) fn last_lines(text: &str, n: usize) -> Option<String> {
     if tail.is_empty() {
         return None;
     }
-    Some(tail.into_iter().rev().collect::<Vec<_>>().join(" | "))
+    let joined = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    let mut out = String::with_capacity(joined.len() + 8);
+    for c in joined.chars() {
+        if c.is_control() || is_bidi_control(c) {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 /// Append a console chunk, dropping the oldest bytes in one bulk compaction once the buffer
@@ -173,5 +196,32 @@ mod tests {
             CONSOLE_CAP + 1,
             "no compaction until cap + slack"
         );
+    }
+
+    #[test]
+    fn a_console_tail_cannot_forge_or_reorder_the_line_it_lands_in() {
+        // `abort` folds this tail into a `VmmError` the CLI prints, and the console is bytes the guest
+        // chose, so the diagnostic must not carry a terminal's control or bidi vocabulary.
+        let forged =
+            last_lines("boot ok\nowned\x1b]0;pwned\x07 \x1b[2J", 2).expect("two non-empty lines");
+        assert!(
+            !forged.contains('\x1b'),
+            "ESC must be escaped, not printed: {forged:?}"
+        );
+        assert!(
+            forged.contains("\\u{1b}") && forged.contains("boot ok"),
+            "the text survives, escaped: {forged:?}"
+        );
+
+        // Bidi controls are category `Cf`, so an `is_control`-only guard passes them straight through.
+        let reordered = last_lines("start\u{202E}dne", 1).expect("one non-empty line");
+        assert!(
+            !reordered.contains('\u{202E}') && reordered.contains("\\u{202e}"),
+            "the RTL override is escaped: {reordered:?}"
+        );
+
+        // A carriage return can retype a line over itself on a terminal, so it is control too.
+        let retyped = last_lines("real line\rfake line", 1).expect("one non-empty line");
+        assert!(!retyped.contains('\r'), "CR must be escaped: {retyped:?}");
     }
 }
