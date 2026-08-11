@@ -43,9 +43,11 @@ mod workdir;
 #[cfg(test)]
 use fcversion::FC_CLOCK_REALTIME_SINCE;
 use fcversion::warn_on_unpinned_firecracker;
+pub(crate) use fcversion::{
+    FcProbe, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION, probe_fc_version,
+};
 #[cfg(test)]
-use fcversion::{FcProbe, VERSION_HEAD_CAP, probe_fc_version, probe_fc_version_within};
-pub(crate) use fcversion::{MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION, fc_version_of};
+use fcversion::{VERSION_HEAD_CAP, fc_version_of, probe_fc_version_within};
 #[cfg(test)]
 use restore::{StagedDisk, ensure_private_staging_dir, stage_restore_disk};
 #[cfg(test)]

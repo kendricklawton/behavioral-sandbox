@@ -57,12 +57,14 @@ pub(crate) enum FcProbe {
 /// is a probe per boot on the hot path, and a single-binary host is the shape every deployment has.
 static FC_VERSION: std::sync::OnceLock<FcProbe> = std::sync::OnceLock::new();
 
-/// Probe (once) and warn, loudly but never fatally, when the binary is outside the supported range.
-/// Run `firecracker --version` under a wall and classify the result. Bounded because this is the
+/// Runs `firecracker --version` under a wall and classifies the result. Bounded because this is the
 /// one probe that runs before any boot deadline is consulted: an `BSX_FIRECRACKER` pointed at a
 /// binary that hangs on `--version` would hang every boot forever with nothing to report. A wedged
 /// probe is [`FcProbe::Unavailable`], the silent case, since the spawn that follows produces the
 /// legible typed error.
+///
+/// `doctor`'s readiness row runs this same function, so the version it reports and the version the
+/// driver gates request fields on come from one probe.
 pub(crate) fn probe_fc_version(firecracker: &Path) -> FcProbe {
     probe_fc_version_within(firecracker, crate::proc::VERSION_PROBE_TIMEOUT)
 }
@@ -166,8 +168,8 @@ pub(crate) fn clock_realtime_arg() -> Option<bool> {
 }
 
 /// The `(major, minor)` out of `firecracker --version` output (first line `Firecracker v1.16.1`).
-/// Single-sourced here (the driver's own boot-time pin check) so `doctor`'s readiness probe reports
-/// the exact same version the driver validates against, the two surfaces can't drift.
+/// Its one non-test caller is [`probe_fc_version_within`], so every surface that names a version
+/// (the boot-time pin warning, `doctor`'s readiness row) reaches this parse through that probe.
 pub(crate) fn fc_version_of(text: &str) -> Option<(u64, u64)> {
     let rest = text.split("Firecracker v").nth(1)?;
     let mut parts = rest
