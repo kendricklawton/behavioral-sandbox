@@ -198,6 +198,30 @@ pub(crate) fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<St
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// The last `cap` bytes of `file`, or all of it when shorter: the tail counterpart of [`read_head`],
+/// for a diagnostic that wants the lines nearest the failure rather than the oldest ones.
+///
+/// The `take` is not redundant with the seek: the writer may still be appending, so the file can grow
+/// between the length read and the copy, and only the `take` bounds that. A window that starts
+/// mid-file also starts mid-line, and that fragment is dropped, because a partial line in an error
+/// message reads as a whole one.
+pub(crate) fn read_tail(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let len = file.metadata()?.len();
+    let from = len.saturating_sub(cap);
+    file.seek(SeekFrom::Start(from))?;
+    let mut buf = Vec::new();
+    file.take(cap).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if from == 0 {
+        return Ok(text);
+    }
+    match text.split_once('\n') {
+        Some((_, rest)) if !rest.is_empty() => Ok(rest.to_owned()),
+        _ => Ok(text),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +272,58 @@ mod tests {
         (&sink).write_all(b"Firecracker v1.16.1\n").expect("write");
         let head = read_head(back, 4096).expect("read back");
         assert_eq!(head, "Firecracker v1.16.1\n");
+    }
+
+    /// The stderr tail's bound, asserted where it lives. `abort` reads this file after a boot the
+    /// guest may have driven for its whole window, so the two properties are the cap and the *end*:
+    /// reading the head of a flooded log returns the oldest lines, which name nothing.
+    #[test]
+    fn read_tail_stops_at_the_cap_and_keeps_the_end() {
+        use std::io::Write as _;
+
+        let (sink, back) = scratch_pair("readtail").expect("a scratch pair");
+        let cap = 4096u64;
+        let filler = vec![b'x'; 64 * 1024];
+        for _ in 0..16 {
+            (&sink).write_all(&filler).expect("flood");
+        }
+        (&sink)
+            .write_all(b"\nvirtio: bad descriptor\nfirecracker: exiting\n")
+            .expect("tail");
+        let on_disk = sink.metadata().expect("stat").len();
+        assert!(
+            on_disk > cap * 100,
+            "the file must dwarf the cap: {on_disk}"
+        );
+
+        let tail = read_tail(back, cap).expect("read back");
+        assert!(
+            tail.len() as u64 <= cap,
+            "bounded by the cap, got {}",
+            tail.len()
+        );
+        assert!(
+            tail.ends_with("firecracker: exiting\n"),
+            "the window is the end of the file, not its start"
+        );
+        assert!(
+            tail.contains("virtio: bad descriptor"),
+            "the lines nearest the failure survive: {tail:?}"
+        );
+        assert!(
+            !tail.starts_with('x'),
+            "the fragment the seek landed inside is dropped, not printed as a line"
+        );
+    }
+
+    #[test]
+    fn read_tail_returns_a_short_file_whole() {
+        use std::io::Write as _;
+
+        let (sink, back) = scratch_pair("readtail-short").expect("a scratch pair");
+        (&sink).write_all(b"only line\n").expect("write");
+        // No truncation, so nothing is a fragment and the first line stays.
+        assert_eq!(read_tail(back, 4096).expect("read back"), "only line\n");
     }
 
     #[test]

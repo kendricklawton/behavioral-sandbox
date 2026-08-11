@@ -55,6 +55,11 @@ use workdir::SUN_PATH_MAX;
 pub(crate) use workdir::{VM_DIR_PREFIX, check_sun_path};
 use workdir::{WorkdirGuard, create_workdir, workdir_name};
 
+/// How much of Firecracker's stderr a boot failure reads back for its diagnostic tail. The file is
+/// written by the VMM for as long as the boot or restore runs, so its size is the guest's to
+/// influence; three lines need far less than this.
+const FC_STDERR_TAIL_CAP: u64 = 8 * 1024;
+
 /// A spawned-but-not-yet-ready VMM. Kept distinct from [`RunningVm`] so the boot sequence can fail
 /// and clean up without ever constructing a half-booted `RunningVm`. Its `Drop` is the panic
 /// safety net: if anything unwinds between `launch` and `abort`/`into_running` (a panicking
@@ -767,7 +772,12 @@ impl Spawned {
         }
         self.lifetime.teardown();
         self.console.join();
-        let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
+        // Bounded, and from the *tail*: the guest can drive Firecracker's stderr for the whole boot
+        // or restore window, so this file has no size the driver picked, and the lines that name the
+        // failure are the last ones. An unreadable file is no diagnostic, never a failure of its own.
+        let fc_log = std::fs::File::open(self.workdir.join(FC_STDERR))
+            .and_then(|f| crate::proc::read_tail(f, FC_STDERR_TAIL_CAP))
+            .unwrap_or_default();
         let console = self.console.snapshot();
         // A jailed VM may hold read-only bind mounts in its chroot (shared base, restore mem/disk);
         // unmount each (lazy) before reclaiming the scratch dir, or `remove_dir_all` `EBUSY`s on the
