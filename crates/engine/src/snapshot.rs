@@ -45,19 +45,17 @@ impl Vm {
     ///
     /// **Network.** A networked snapshot restores into a fresh per-VM netns where the baked-in guest
     /// address, MAC, and routes are already correct and collision-free, so any number of clones coexist
-    /// with no re-addressing. Entropy is reseeded via VMGenID, proven by test rather than assumed, so
-    /// clones don't share RNG state. The guest's clock is advanced across the snapshot's age at load, so
-    /// a clone does not wake believing no time passed; that advance is the host's measure of elapsed
-    /// time rather than a time sync.
+    /// with no re-addressing. Entropy is reseeded via VMGenID (proven by test), so clones do not share
+    /// RNG state, and the guest's clock is advanced across the snapshot's age at load: the host's
+    /// measure of elapsed time, not a time sync.
     ///
     /// **Jailed.** With [`jail`](BootConfig::jail) set the bundle is staged into the chroot, the memory
     /// file and a shared base disk bind-mounted read-only, a private disk copy handed to the jailed uid,
     /// and a networked clone's netns joined via `--netns`. Needs real root. The cgroup caps are
-    /// re-applied, so the restored VM is confined and not just isolated, and both derive from the
-    /// *snapshot's* true envelope rather than `config`'s declaration: `memory.max` from the memory
-    /// file's true size, `cpu.max` from [`Snapshot::vcpus`], and the constant `pids.max`. Restore issues
-    /// no `PUT /machine-config`, so a `config` under-declaring the guest cannot OOM or throttle a
-    /// legitimate clone.
+    /// re-applied from the *snapshot's* true envelope rather than `config`'s declaration (`memory.max`
+    /// from the memory file's size, `cpu.max` from [`Snapshot::vcpus`], a constant `pids.max`), and
+    /// restore issues no `PUT /machine-config`, so a `config` under-declaring the guest cannot OOM or
+    /// throttle a legitimate clone.
     ///
     /// Restore latency is [`RunningVm::boot_latency`] on the returned VM.
     ///
@@ -109,12 +107,12 @@ impl RunningVm {
     /// so a prewarmed snapshot restores exec-ready.
     ///
     /// Refused (a typed error, never an unrestorable bundle): a VM with an **output** or **input**
-    /// block device (per-clone images a restore can't yet recreate), a **jailed** VM (its disk lives
-    /// inside the chroot at a chroot-relative path, so a bundle would record an unrestorable backing,
-    /// snapshot an *unjailed* prewarmed source, then restore **jailed** clones from it, which is where
-    /// the untrusted code runs), and an **already-restored** VM (its `rootfs` is a placeholder; the
-    /// live disk is an anonymous inode with no host path to bundle). A NIC is supported: the bundle
-    /// records the tap name and restore recreates it in each clone's own netns (see [`Vm::restore`]).
+    /// block device (per-clone images a restore cannot yet recreate), a **jailed** VM (its disk lives
+    /// inside the chroot at a chroot-relative path, so a bundle would record an unrestorable backing),
+    /// and an **already-restored** VM (its `rootfs` is a placeholder; the live disk is an anonymous
+    /// inode with no host path to bundle). The clone story is to snapshot an *unjailed* prewarmed
+    /// source and restore **jailed** clones from it, which is where the untrusted code runs. A NIC is
+    /// supported: the bundle records the tap name and restore recreates it in each clone's own netns.
     ///
     /// # Errors
     /// [`VmmError::Vmm`] if the VM is unsupported for snapshotting, or on any API or file-copy failure.
@@ -125,7 +123,6 @@ impl RunningVm {
     pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
         // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
         // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
-        // Refuse it outright, the way the prewarmed-snapshot guard did.
         if self.restored {
             return Err(VmmError::Vmm(
                 "snapshot of an already-restored VM is not supported (its live disk has no host path)"

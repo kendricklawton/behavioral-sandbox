@@ -126,7 +126,7 @@ impl Spawned {
         // untrusted code runs) is confined too, not just isolated, the co-resident-safety property.
         // Both caps derive from the snapshot's true envelope, never `config`'s declaration:
         // `memory.max` from the memory file's true size (`restore_mem_mib`, never below what the
-        // clone actually uses, the OOM hazard that once kept restore uncapped), `cpu.max` from the
+        // clone actually uses, so the cap cannot OOM it), `cpu.max` from the
         // vCPU count recorded in the bundle (the clone's real parallelism; a `config` defaulting to
         // fewer vCPUs than the source must not silently throttle it), and `pids.max` is a constant.
         // A networked clone gets the fixed-name tap in a fresh netns; its baked-in guest identity is

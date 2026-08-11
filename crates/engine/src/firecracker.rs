@@ -426,11 +426,10 @@ pub(crate) struct SnapshotLoad<'a> {
     /// that a clone may sit minutes between snapshot and take, that skew is the common case rather
     /// than the exception. x86_64-only upstream, which is this engine's only target anyway.
     ///
-    /// **`None` omits the key**, which is load-bearing rather than tidy: the field only exists from
-    /// v1.16, Firecracker rejects unknown fields outright, and sending it unconditionally therefore
-    /// broke restore on every older release, including ones upstream still patches. Set from the
-    /// probed version (`spawn::clock_realtime_arg`), so an older-but-supported binary gets a body it
-    /// accepts and only loses the clock fix-up.
+    /// **`None` omits the key**, which is load-bearing rather than tidy: the field exists only from
+    /// v1.16 and Firecracker rejects unknown fields outright, so sending it unconditionally fails
+    /// restore on every older release. Set from the probed version (`spawn::clock_realtime_arg`), so an
+    /// older-but-supported binary gets a body it accepts and only loses the clock fix-up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock_realtime: Option<bool>,
 }

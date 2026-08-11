@@ -24,55 +24,43 @@ pub(crate) const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Default cap on the stdout+stderr+artifacts the host buffers for one `exec`, the
-/// [`Limits::output_cap`](crate::Limits::output_cap) default. Each frame is already
-/// `≤ MAX_PAYLOAD`, but a guest can send *unboundedly many* frames (`yes`), so the aggregate is
-/// capped too, a hostile guest never grows host memory without bound. (A command's *runtime* is a
-/// separate axis, bounded by the exec wall budget below.) The knob is per-sandbox: it rides
-/// `Limits` → `BootConfig` → `RunningVm` and every exec on that VM enforces it.
+/// [`Limits::output_cap`](crate::Limits::output_cap) default, so a guest sending unboundedly many
+/// `≤ MAX_PAYLOAD` frames cannot grow host memory without bound. Per-sandbox: it rides `Limits` →
+/// `BootConfig` → `RunningVm`.
 pub(crate) const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
 
 /// Per-frame overhead charged toward the output cap, so a flood of empty (or all-`path`, no-`data`)
 /// frames can't spin the collect loop or grow the artifact list without advancing the cap.
 const FRAME_FLOOR: usize = 64;
 
-/// Default wall-clock budget for one command, the [`Limits::wall`](crate::Limits::wall)
-/// default (folded into [`BootConfig::exec_wall`](crate::BootConfig::exec_wall)). Sent to the guest agent, which kills the command past it (and clamps any request to its
-/// own 1 h ceiling). The knob is per-sandbox (`Limits` → `BootConfig` → `RunningVm`), and both the
-/// socket idle timeout *and* the host give-up deadline are derived from the *configured* value,
-/// `budget + EXEC_KILL_SLACK`, see `RunningVm::exec_with_files`, never from this const, so a raised
-/// budget can't leave a long quiet command cut off by the transport.
+/// Default wall-clock budget for one command, the [`Limits::wall`](crate::Limits::wall) default, sent
+/// to the guest agent, which kills the command past it. The socket idle timeout and the host give-up
+/// deadline both derive from the *configured* value (`budget + EXEC_KILL_SLACK`), never from this
+/// const, so a raised budget cannot leave a long quiet command cut off by the transport.
 pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Slack past a command's own budget before the *host* gives up on the exec connection: the margin
-/// for the guest agent to notice its deadline, SIGKILL the command, and get its `TimedOut` frame
-/// back. The host's total patience is `budget + EXEC_KILL_SLACK`, used both as the exec socket's
-/// per-read idle timeout (so a legitimately long-but-quiet command isn't cut off by the transport)
-/// and as the wall-clock deadline on the collect loop (so a silent-or-hostile guest that never
-/// self-reports can't park `exec` forever: liveness is the transport's job, not the
-/// guest's). Ordered so the guest's cooperative `TimedOut` (fired at `budget`) always beats the host
-/// deadline for a legitimate timeout; the host fires only when the guest fails to report.
+/// Slack past a command's own budget before the *host* gives up: the margin for the guest agent to
+/// notice its deadline, SIGKILL the command, and get its `TimedOut` frame back. `budget +
+/// EXEC_KILL_SLACK` is both the socket's per-read idle timeout and the collect loop's wall deadline,
+/// so a silent-or-hostile guest cannot park `exec` forever. The ordering is what matters: the guest's
+/// cooperative `TimedOut` fires at `budget`, so the host deadline fires only when the guest does not.
 pub(crate) const EXEC_KILL_SLACK: Duration = Duration::from_secs(5);
 
-/// Cap on the **dial-retry window** in [`connect_agent_at`]. Peer closes during establishment are
-/// observed at millisecond scale (whatever their exact trigger; see the retry loop's comment), so
-/// a brief window absorbs them, while capping *below* the caller's full timeout keeps a genuinely
-/// dead agent from burning a 35s exec wall per request: today's fail-in-milliseconds becomes
-/// fail-in-≤2s, not fail-in-35s.
+/// Cap on the **dial-retry window** in [`connect_agent_at`], short enough that a genuinely dead agent
+/// fails in ≤2s rather than burning the caller's full exec wall, long enough to absorb the
+/// establishment-time peer closes, which are observed at millisecond scale.
 const DIAL_RETRY_CAP: Duration = Duration::from_secs(2);
 
 /// Dial Firecracker's vsock socket, speak the `CONNECT <port>` handshake, and complete the channel
 /// handshake, the whole host side of reaching the guest agent. Factored out of
 /// [`RunningVm::connect_agent`] so it can be tested against a fake vsock socket without a VM.
 ///
-/// A peer close during establishment (any face of it: EPIPE writing `CONNECT`, EOF before the
-/// ack, EOF in the channel handshake) is retried within `min(timeout, DIAL_RETRY_CAP)`: the
-/// condition is observed transient in practice, and its exact trigger is not pinned down (the
-/// guest kernel queues pending vsock dials, so it is *not* simply the agent being between
-/// accepts), so this is deliberate symptom-level hardening: one request-scale race must not kill
-/// a whole session. Exhaustion returns the last [`VmmError::GuestUnavailable`]. Per-attempt
-/// connect/ack deadlines and the successful stream's read/write timeouts all stay the caller's
-/// full `timeout` (the exec loop's per-read idle timer rides on them), so the worst case is
-/// ~`timeout + DIAL_RETRY_CAP` when the final attempt hangs.
+/// A peer close during establishment (EPIPE writing `CONNECT`, EOF before the ack, EOF in the channel
+/// handshake) is retried within `min(timeout, DIAL_RETRY_CAP)`, so one request-scale race does not kill
+/// a session; exhaustion returns the last [`VmmError::GuestUnavailable`]. This is symptom-level
+/// hardening: the trigger is not pinned down, and the guest kernel queues pending vsock dials, so it is
+/// *not* simply the agent being between accepts. Per-attempt deadlines and the returned stream's
+/// timeouts stay the caller's full `timeout`, so the worst case is ~`timeout + DIAL_RETRY_CAP`.
 pub(crate) fn connect_agent_at(
     uds: &Path,
     port: u32,
@@ -93,9 +81,8 @@ pub(crate) fn connect_agent_at(
 }
 
 /// One dial attempt, no retry: the body [`connect_agent_at`] loops over, and what
-/// [`RunningVm::probe_agent`] uses directly, a pool health check must discard a dead clone
-/// (instant ECONNREFUSED on its stale socket) in microseconds, not spend a retry window on a
-/// corpse; an *idle healthy* clone is parked in `accept()`, so the probe needs no retry.
+/// [`RunningVm::probe_agent`] uses directly, so a pool health check discards a dead clone on its
+/// instant ECONNREFUSED rather than spending a retry window on a corpse.
 pub(crate) fn connect_agent_once(
     uds: &Path,
     port: u32,
