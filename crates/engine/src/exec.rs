@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use bsx_channel::{ChannelError, ClientConnection, Response};
 
+use crate::deadline::DeadlineStream;
 use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
@@ -81,10 +82,10 @@ pub(crate) fn connect_agent_bounded(
     uds: &Path,
     port: u32,
     timeout: Duration,
-) -> Result<ClientConnection<DeadlineStream>, VmmError> {
+) -> Result<ClientConnection<DeadlineStream<UnixStream>>, VmmError> {
     with_dial_retry(timeout, || {
         let stream = vsock_connect(uds, port, timeout)?;
-        let bounded = DeadlineStream::new(stream, Instant::now() + timeout);
+        let bounded = DeadlineStream::new(stream, Instant::now() + timeout, "guest exec");
         ClientConnection::connect(bounded).map_err(handshake_err)
     })
 }
@@ -105,64 +106,6 @@ fn with_dial_retry<T>(
             }
             Err(e) => return Err(e),
         }
-    }
-}
-
-/// A `Read`/`Write` adapter bounding **every** syscall by one absolute deadline, the exec channel's
-/// counterpart to the Firecracker API's `DeadlineReader`.
-///
-/// `SO_RCVTIMEO`/`SO_SNDTIMEO` are re-armed by the kernel on each syscall, so a peer that never
-/// pauses a full timeout's worth is never cut off: the socket option bounds one syscall, and
-/// `read_exact` of an `N`-byte frame makes `N` of them. Shrinking the option to the *remaining*
-/// budget before each one makes the sum of them honour a single deadline, which is what turns a
-/// dribbling guest from a host hang into a typed `TimedOut`. Writes are bounded for the same reason
-/// in the other direction: a guest that reads slowly would otherwise park the host in `write_all`.
-pub(crate) struct DeadlineStream {
-    stream: UnixStream,
-    deadline: Instant,
-}
-
-impl DeadlineStream {
-    fn new(stream: UnixStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
-    }
-
-    /// The budget left, or `None` when it is spent. `None` must not be armed as a timeout: the
-    /// kernel reads a zero `SO_RCVTIMEO`/`SO_SNDTIMEO` as "block forever", the hang this exists to
-    /// prevent.
-    fn remaining(&self) -> Option<Duration> {
-        let left = self.deadline.saturating_duration_since(Instant::now());
-        (!left.is_zero()).then_some(left)
-    }
-}
-
-impl Read for DeadlineStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let Some(remaining) = self.remaining() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "guest exec response exceeded its deadline",
-            ));
-        };
-        self.stream.set_read_timeout(Some(remaining))?;
-        self.stream.read(buf)
-    }
-}
-
-impl Write for DeadlineStream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let Some(remaining) = self.remaining() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "guest exec request exceeded its deadline",
-            ));
-        };
-        self.stream.set_write_timeout(Some(remaining))?;
-        self.stream.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.flush()
     }
 }
 
