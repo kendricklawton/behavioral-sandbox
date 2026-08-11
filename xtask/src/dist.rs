@@ -1332,25 +1332,18 @@ mod tests {
                 budget: None,
             },
             Site {
-                file: "crates/engine/src/firecracker.rs",
-                imp: "impl Read for DeadlineReader",
+                file: "crates/engine/src/deadline.rs",
+                imp: "impl<S: Borrow<UnixStream>> Read for",
                 method: "read",
                 sockopt: "set_read_timeout",
-                budget: None,
+                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
             },
             Site {
-                file: "crates/engine/src/exec.rs",
-                imp: "impl Read for DeadlineStream",
-                method: "read",
-                sockopt: "set_read_timeout",
-                budget: Some(("impl DeadlineStream {", "remaining")),
-            },
-            Site {
-                file: "crates/engine/src/exec.rs",
-                imp: "impl Write for DeadlineStream",
+                file: "crates/engine/src/deadline.rs",
+                imp: "impl<S: Borrow<UnixStream>> Write for",
                 method: "write",
                 sockopt: "set_write_timeout",
-                budget: Some(("impl DeadlineStream {", "remaining")),
+                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
             },
         ];
         for Site {

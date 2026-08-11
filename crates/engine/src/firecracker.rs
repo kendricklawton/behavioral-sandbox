@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::VmmError;
+use crate::deadline::DeadlineStream;
 
 /// Per-call socket timeout for the ordinary API calls, which answer instantly; this only bounds a
 /// wedged VMM. The exception is `/snapshot/create` and `/snapshot/load`, whose reply is withheld
@@ -124,7 +125,7 @@ impl ApiClient {
         // every byte that arrives, so a compromised VMM (the jail's stated threat) dripping one byte
         // just inside the timeout would hold this call open indefinitely. The write is one small
         // `write_all` Firecracker drains promptly, so a per-write timeout suffices there; the read
-        // side is re-armed to the *remaining* budget before every read by [`DeadlineReader`].
+        // side is re-armed to the *remaining* budget before every read by [`DeadlineStream`].
         let deadline = crate::spawn::deadline_after(timeout);
         stream
             .set_write_timeout(Some(timeout))
@@ -146,42 +147,9 @@ impl ApiClient {
         (&stream).flush().map_err(|e| io_err(&ctx(), &e))?;
 
         read_response(
-            BufReader::new(DeadlineReader::new(&stream, deadline)),
+            BufReader::new(DeadlineStream::new(&stream, deadline, "firecracker API")),
             &ctx(),
         )
-    }
-}
-
-/// A `Read` adapter that bounds the **whole** response by one `deadline`, not each syscall. The
-/// socket's own `SO_RCVTIMEO` is reset by every byte that arrives, so a peer dripping bytes slower
-/// than the timeout but never pausing a full timeout's worth would never trip it. Re-arming the read
-/// timeout to the *remaining* budget before each underlying read (including those `BufReader` makes
-/// inside `read_line`/`read_exact`) makes the sum of all reads honor one deadline.
-struct DeadlineReader<'a> {
-    stream: &'a UnixStream,
-    deadline: Instant,
-}
-
-impl<'a> DeadlineReader<'a> {
-    fn new(stream: &'a UnixStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
-    }
-}
-
-impl Read for DeadlineReader<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // A blown deadline: fail now rather than arm a zero timeout, which `set_read_timeout` treats
-        // as "block forever", the very hang this guards against.
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                ErrorKind::TimedOut,
-                "firecracker API response exceeded its deadline",
-            ));
-        }
-        self.stream.set_read_timeout(Some(remaining))?;
-        let mut s = self.stream;
-        s.read(buf)
     }
 }
 
@@ -623,7 +591,7 @@ mod tests {
     #[test]
     fn a_drip_feeding_peer_trips_the_whole_response_deadline() {
         // A per-read `SO_RCVTIMEO` is reset by every byte, so a peer dripping faster than the timeout but
-        // never completing the response holds `request` open indefinitely. `DeadlineReader` bounds the
+        // never completing the response holds `request` open indefinitely. `DeadlineStream` bounds the
         // *sum* of reads by one deadline, so a drip that never finishes still fails at the deadline. Here
         // a peer sends a byte every 20 ms against a 200 ms deadline: a per-read scheme would never fire.
         use std::io::Write;
@@ -641,7 +609,7 @@ mod tests {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(200);
         let err = read_response(
-            BufReader::new(DeadlineReader::new(&client, deadline)),
+            BufReader::new(DeadlineStream::new(&client, deadline, "firecracker API")),
             "drip test",
         )
         .expect_err("a never-completing drip must trip the deadline");

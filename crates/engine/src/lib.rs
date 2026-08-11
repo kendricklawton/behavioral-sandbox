@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod console;
+mod deadline;
 pub mod doctor;
 mod drives;
 mod exec;
