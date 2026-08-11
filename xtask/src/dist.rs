@@ -1289,4 +1289,110 @@ mod tests {
             }
         }
     }
+
+    /// Every socket bounded by an absolute deadline refuses a spent budget instead of arming it.
+    ///
+    /// `SO_RCVTIMEO`/`SO_SNDTIMEO` are re-armed by the kernel on every byte, so a peer dripping just
+    /// inside the interval holds the host thread that reads it for as long as it likes. Each adapter
+    /// shrinks the sockopt to what is left of one absolute `Instant` instead. The zero case is the
+    /// load-bearing one: the kernel reads a zero timeout as "block forever", so a copy that arms a
+    /// spent budget is the hang the adapter exists to prevent, which is what design rule 5 forbids.
+    ///
+    /// The copies cannot share a function. `crates/cli` reaching `bsx-engine`'s adapter would put a
+    /// CLI-shaped convenience type on that crate's pinned public API, which `docs/embedding-scope.md`
+    /// draws out of scope. So the invariant is pinned instead. A site names the method that arms the
+    /// sockopt and, where the budget is computed in a helper rather than inline, that helper too.
+    #[test]
+    fn every_deadline_bounded_socket_refuses_a_spent_budget() {
+        /// One bounded direction of one adapter.
+        struct Site {
+            file: &'static str,
+            /// The impl the method lives in. Slicing here first is what stops `fn read` matching a
+            /// `read_response` that comes earlier in the file.
+            imp: &'static str,
+            method: &'static str,
+            /// The sockopt this direction arms.
+            sockopt: &'static str,
+            /// Where the budget is computed, when that is not the method itself.
+            budget: Option<(&'static str, &'static str)>,
+        }
+        /// The body of the first `fn <method>` after `imp`.
+        fn body_after(src: &str, imp: &str, method: &str, file: &str) -> String {
+            assert!(src.contains(imp), "{file} must contain `{imp}`");
+            let at = src.find(imp).expect("asserted present just above");
+            fn_body(&src[at..], method)
+        }
+        let repo = workspace_root();
+        let sites = [
+            Site {
+                file: "crates/cli/src/deadline.rs",
+                imp: "impl<S: Read + SetReadTimeout> Read for",
+                method: "read",
+                sockopt: "set_read_timeout",
+                budget: None,
+            },
+            Site {
+                file: "crates/engine/src/firecracker.rs",
+                imp: "impl Read for DeadlineReader",
+                method: "read",
+                sockopt: "set_read_timeout",
+                budget: None,
+            },
+            Site {
+                file: "crates/engine/src/exec.rs",
+                imp: "impl Read for DeadlineStream",
+                method: "read",
+                sockopt: "set_read_timeout",
+                budget: Some(("impl DeadlineStream {", "remaining")),
+            },
+            Site {
+                file: "crates/engine/src/exec.rs",
+                imp: "impl Write for DeadlineStream",
+                method: "write",
+                sockopt: "set_write_timeout",
+                budget: Some(("impl DeadlineStream {", "remaining")),
+            },
+        ];
+        for Site {
+            file,
+            imp,
+            method,
+            sockopt,
+            budget,
+        } in sites
+        {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            let mut body = body_after(&src, imp, method, file);
+            if let Some((bimp, bmethod)) = budget {
+                body.push_str(&body_after(&src, bimp, bmethod, file));
+            }
+            for (part, why) in [
+                (
+                    "saturating_duration_since",
+                    "the budget must come from one absolute deadline, not a per-syscall timeout a \
+                     dripping peer re-arms",
+                ),
+                (
+                    ".is_zero()",
+                    "a spent budget must be recognised before it is armed: a zero sockopt is \
+                     \"block forever\"",
+                ),
+                (
+                    "ErrorKind::TimedOut",
+                    "a spent budget must read as a typed timeout, not a hang",
+                ),
+                (
+                    sockopt,
+                    "the remaining budget must reach the socket, or the bound is computed and \
+                     thrown away",
+                ),
+            ] {
+                assert!(
+                    body.contains(part),
+                    "{file}'s `{method}` (under `{imp}`) must keep `{part}`: {why}"
+                );
+            }
+        }
+    }
 }
