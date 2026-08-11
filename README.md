@@ -19,8 +19,6 @@
     <span> | </span>
     <a href="docs/architecture.md">Architecture</a>
     <span> | </span>
-    <a href="docs/introduction.md#status">Status</a>
-    <span> | </span>
     <a href="CONTRIBUTING.md">Contributing</a>
   </h3>
 </div>
