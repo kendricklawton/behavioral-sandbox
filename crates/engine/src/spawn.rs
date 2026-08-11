@@ -1176,10 +1176,9 @@ mod tests {
             "fc-flood",
             "echo 'Firecracker v1.16.1'\nyes bsx-flood | head -c 3000000",
         );
-        // Bound and printed, like the hang test above. This assertion failed once during a gate run
-        // and reported nothing but "assertion failed", so the variant is what the next occurrence
-        // needs to say: `Unparseable` means the parse broke, `Unavailable` means the spawn or wait
-        // did (a fork under a loaded gate can fail with EAGAIN, which is not this code's fault).
+        // Bound and printed, like the hang test above. The message names the variant, because that is
+        // what a failure here needs to distinguish: `Unparseable` means the parse broke, `Unavailable`
+        // means the spawn or wait did (a fork under a loaded gate can fail with EAGAIN).
         let probed = probe_fc_version(&flood);
         assert!(
             matches!(probed, FcProbe::Version((1, 16))),

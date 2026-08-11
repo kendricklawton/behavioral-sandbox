@@ -182,14 +182,12 @@ pub struct BootConfig {
     /// and lands in the record's denial trail instead of dying inside the guest. See [`GuestEgress`]
     /// and design decision 9.
     ///
-    /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, and ignored otherwise
-    /// rather than refused: a gateway is a *host* fact set once for every sandbox, so refusing the
-    /// combination would break every run that does not ask for a NIC. Whether a caller *explicitly* asked
-    /// for one is visible only to the layer that parsed the request, and both refuse it there.
+    /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, ignored otherwise
+    /// rather than refused, since a gateway is a host fact set once for every sandbox; the layer that
+    /// parsed the request is the one that can see an explicit ask, and both refuse it there.
     ///
-    /// **Applies at cold boot only.** The addressing rides the kernel command line, which a restored clone
-    /// inherits from the snapshot rather than re-deriving, so this field is inert on [`Vm::restore`]. Set
-    /// it on the config that boots the snapshot source.
+    /// **Applies at cold boot only**: the addressing rides the kernel command line, which a restored
+    /// clone inherits from the snapshot, so this is inert on [`Vm::restore`].
     pub egress: Option<GuestEgress>,
     /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
@@ -200,15 +198,12 @@ pub struct BootConfig {
     /// `enable_network` (the tap lives in a per-VM netns the jailer joins via `--netns`), and
     /// `input_dir`/`output_dir` (the images are built in place inside the chroot).
     pub jail: Option<Jail>,
-    /// Refuse the boot when the cpu/memory cgroup caps can't be applied, instead of the default
-    /// fail-open (warn and boot uncapped). The caps are unavailable two ways: the cgroup v2
-    /// cpu/memory controllers aren't delegated to the cgroup root, or the boot is **unjailed** (the
-    /// caps live on the jailed VMM's cgroup, so an unjailed run has none). `false` (the default) keeps
-    /// the fail-open posture, resource caps are DoS mitigation, not the isolation boundary (which
-    /// never degrades). Set it when a hoster wants the resource envelope to be **load-bearing**: then
-    /// a run the host can't cap is a typed [`VmmError::LimitsUnavailable`], not a silently-uncapped
-    /// one. A host posture, not a per-run quantity (so it lives here, not on [`Limits`]) and not
-    /// client-settable over the wire (the daemon fixes it, like the jail). Layered
+    /// Refuse the boot when the cpu/memory cgroup caps can't be applied, rather than the default
+    /// fail-open (warn and boot uncapped), so a run the host cannot cap is a typed
+    /// [`VmmError::LimitsUnavailable`]. The caps are unavailable two ways: the cgroup v2 controllers
+    /// are not delegated, or the boot is **unjailed** (the caps live on the jailed VMM's cgroup).
+    /// `false` (the default) keeps the fail-open posture, since resource caps are DoS mitigation, not
+    /// the isolation boundary. A host posture, not client-settable over the wire; layered
     /// `flag > env (BSX_REQUIRE_LIMITS) > file > default` at the CLI.
     pub require_limits: bool,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/bsx-<pid>-<n>`), holding the
@@ -848,16 +843,16 @@ impl RunningVm {
     /// [`exec`](Self::exec); the injected files and env ride the exec request's frames, so each is
     /// bounded by the channel's per-frame cap, and the total captured output+artifacts is bounded
     /// by this VM's [`BootConfig::output_cap`] (default 16 MiB).
-    /// **Env scope.** The variables are set on the **spawned command only**, the guest agent
-    /// applies them via `Command::env`, never its own process, so one run's environment can't
-    /// bleed into the agent or a later run.
-    /// **Secret hygiene**, held by `injected_secrets_reach_no_observable_surface`. Injected file
-    /// contents and env *values* do not appear in an
-    /// engine log line, in any [`VmmError`]'s rendering, or on the serial console: an error path may name
-    /// a file *path* or an env *key*, never a value, and the wire copies the driver builds are zero-wiped
-    /// after send. Best-effort, since the caller's own buffers and the kernel's socket buffers are out of
-    /// reach. What the *command* does with its inputs is the run's own data in [`RunResult`], and the
-    /// audit log records paths, keys, and sizes rather than contents.
+    ///
+    /// **Env scope.** The variables are set on the **spawned command only** (the agent applies them via
+    /// `Command::env`, never its own process), so one run's environment cannot bleed into a later run.
+    ///
+    /// **Secret hygiene**, held by `injected_secrets_reach_no_observable_surface`: injected file
+    /// contents and env *values* reach no engine log line, [`VmmError`] rendering, or serial console,
+    /// and the driver's wire copies are zero-wiped after send. An error path may name a file *path* or
+    /// an env *key*, never a value. Best-effort, since the caller's own buffers and the kernel's socket
+    /// buffers are out of reach.
+    ///
     /// # Errors
     /// As [`exec`](Self::exec).
     pub fn exec_with_files(

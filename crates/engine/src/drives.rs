@@ -277,8 +277,8 @@ const SUPERBLOCK_OFFSET: u64 = 1024;
 const SUPERBLOCK_LEN: usize = 1024;
 const SB_BLOCKS_COUNT_LO: usize = 0x04;
 /// The high 32 bits of the block count. `ext4-view` folds it with the low dword into one `u64`
-/// (`u64_from_hilo`) and sizes its block-group descriptor table from the result, so a bound that
-/// read only the low dword let a small low value with a set high dword name billions of blocks.
+/// (`u64_from_hilo`) and sizes its block-group descriptor table from the result, so a bound reading
+/// only the low dword lets a small low value with a set high dword name billions of blocks.
 const SB_BLOCKS_COUNT_HI: usize = 0x150;
 const SB_BLOCKS_PER_GROUP: usize = 0x20;
 const SB_INODES_PER_GROUP: usize = 0x28;
@@ -338,8 +338,7 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
     // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a lower
     // bound on the claim's real size, so a legitimate image (whose blocks are that size or larger)
     // always passes. The count is the full 64 bits the parser reads: a small low dword with the high
-    // dword set names billions of blocks, which is the geometry a fuzz OOM found the low-only bound
-    // waving through.
+    // dword set names billions of blocks.
     let blocks_count = (le32(SB_BLOCKS_COUNT_HI) << 32) | le32(SB_BLOCKS_COUNT_LO);
     let claimed = blocks_count.saturating_mul(MIN_BLOCK_SIZE);
     if claimed > image_len {
@@ -1062,11 +1061,10 @@ mod tests {
             "a MiB of blocks cannot live in a MiB of file"
         );
 
-        // The block count is 64 bits. `sb` above keeps a small, honest low dword (256 blocks) that a
-        // low-only bound waved through; setting the high dword makes the true count over four billion
-        // blocks, which ext4-view folds in (`u64_from_hilo`) before sizing its descriptor table. This
-        // is the field a `cargo xtask fuzz output_image` OOM found the low-only check missing: the
-        // parser asked for tens of gigabytes in one `Vec::with_capacity` and the process aborted.
+        // The block count is 64 bits: `sb` above keeps a small, honest low dword (256 blocks), so
+        // setting the high dword alone makes the true count over four billion blocks, which ext4-view
+        // folds in (`u64_from_hilo`) before sizing its descriptor table. A low-only bound admits this
+        // and the parser aborts on the `Vec::with_capacity` it then attempts.
         let mut hi = sb;
         hi[SB_BLOCKS_COUNT_HI..][..4].copy_from_slice(&1u32.to_le_bytes());
         assert!(
