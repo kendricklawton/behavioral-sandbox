@@ -1133,4 +1133,81 @@ mod tests {
         // And the pin is a real ed25519 SPKI key, not a placeholder.
         bsx_probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
     }
+
+    /// The body of the first `fn <name>` in `src`, from its opening brace to the matching close.
+    /// Braces inside string literals would break the count; none of the functions compared here has
+    /// one, and a change that introduces one fails loudly rather than silently comparing garbage.
+    fn fn_body(src: &str, name: &str) -> String {
+        let needle = format!("fn {name}");
+        assert!(src.contains(&needle), "`fn {name}` must exist");
+        let start = src.find(&needle).expect("asserted present just above");
+        let open = src[start..].find('{').expect("a function has a body") + start;
+        let mut depth = 0usize;
+        let end = src[open..].char_indices().find_map(|(i, c)| match c {
+            '{' => {
+                depth += 1;
+                None
+            }
+            '}' => {
+                depth -= 1;
+                (depth == 0).then_some(i)
+            }
+            _ => None,
+        });
+        assert!(end.is_some(), "`fn {name}`'s braces must balance");
+        src[open..=open + end.expect("asserted balanced just above")].to_string()
+    }
+
+    /// `parse_cap_eff` exists twice, byte-identical, and **cannot be shared**: `bsx-test-support` is
+    /// zero-dependency by decision and is a dev-dependency of `bsx-probes-loader`, so a dependency
+    /// either way round is a cycle. The duplication is therefore deliberate; what is not deliberate
+    /// is the two drifting, and nothing but this test would notice.
+    ///
+    /// The stake is which tests *run*. The loader's copy decides whether a host can load the probes
+    /// at all; the helper's copy decides whether the privileged suites skip themselves. A field
+    /// index that moves in one and not the other reads a capable host as incapable, and a skipped
+    /// test is a pass.
+    #[test]
+    fn the_cap_eff_parse_is_the_same_in_the_loader_and_the_test_support() {
+        let repo = workspace_root();
+        let loader = std::fs::read_to_string(repo.join("crates/probes-loader/src/lib.rs"))
+            .expect("crates/probes-loader/src/lib.rs");
+        let support = std::fs::read_to_string(repo.join("crates/test-support/src/lib.rs"))
+            .expect("crates/test-support/src/lib.rs");
+        assert_eq!(
+            fn_body(&loader, "parse_cap_eff"),
+            fn_body(&support, "parse_cap_eff"),
+            "the two `parse_cap_eff` copies have drifted; they cannot share a function (the \
+             dependency would be a cycle), so they must stay identical by hand"
+        );
+    }
+
+    /// Every resolution of a `/proc/<pid>/cgroup` `0::` line must refuse the **root** cgroup.
+    ///
+    /// A registered cgroup matches every process whose `bpf_get_current_cgroup_id` equals it, so the
+    /// root folds the whole host's syscalls and CPU into one sandbox's signed record. `0::/` is what
+    /// a process in the root cgroup reads, and what every process reads inside a container with the
+    /// default private cgroup namespace. `crates/probes-loader` shipped without this guard while
+    /// `crates/engine` had it, which is the drift this test exists to catch; the two crates have no
+    /// dependency edge in either direction, so a shared function is not available.
+    #[test]
+    fn the_cgroup_resolution_refuses_the_root_cgroup_everywhere() {
+        let repo = workspace_root();
+        // Each resolver, named with the file it lives in so a failure says where to look.
+        let sites = [
+            ("crates/engine/src/jail.rs", "read_cgroup_dir"),
+            ("crates/probes-loader/src/lib.rs", "cgroup_dir_in"),
+            ("crates/engine/tests/common/mod.rs", "cgroup_of"),
+        ];
+        for (file, func) in sites {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            let body = fn_body(&src, func);
+            assert!(
+                body.contains(r#"rel == "/""#),
+                "{file}'s `{func}` must refuse the root cgroup (`rel == \"/\"`), or a sandbox's \
+                 record absorbs every process in it"
+            );
+        }
+    }
 }
