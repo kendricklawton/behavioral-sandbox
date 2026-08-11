@@ -17,7 +17,7 @@
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
 
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Connection framing magic header bytes ("AGCH").
 pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
@@ -318,7 +318,7 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
     }
 }
 
-/// Serializes and sends a `PutFile` request, zeroizing buffers post-send.
+/// Serializes and sends a `PutFile` request, wiping the secret-bearing payload on every exit.
 pub(crate) fn write_put_file(
     w: &mut impl Write,
     path: &str,
@@ -331,12 +331,13 @@ pub(crate) fn write_put_file(
             len: cap,
         });
     }
-    let mut payload = Vec::with_capacity(cap);
+    // `Zeroizing`, not a wipe after the send: a caller-supplied `Write` that unwinds would skip an
+    // explicit call and drop the staged bytes un-wiped. It scrubs only the buffer it drops, so the
+    // exact `cap` above stays load-bearing (`secret_payload_is_exactly_sized_so_one_buffer_holds_it`).
+    let mut payload = Zeroizing::new(Vec::with_capacity(cap));
     put_blob(&mut payload, path.as_bytes());
     put_blob(&mut payload, data);
-    let sent = write_frame(w, Tag::PutFile.as_u8(), &payload);
-    payload.zeroize();
-    sent
+    write_frame(w, Tag::PutFile.as_u8(), &payload)
 }
 
 /// Serializes and sends an `Exec` request, zeroizing buffers post-send.
@@ -372,7 +373,9 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
             len: cap,
         });
     }
-    let mut payload = Vec::with_capacity(cap);
+    // See `write_put_file`: `Zeroizing` wipes on the unwind path too, where an explicit call after
+    // the send does not.
+    let mut payload = Zeroizing::new(Vec::with_capacity(cap));
     put_u32(&mut payload, argv.len() as u32);
     for arg in argv {
         put_blob(&mut payload, arg.as_ref().as_bytes());
@@ -388,9 +391,7 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
         put_blob(&mut payload, key.as_ref().as_bytes());
         put_blob(&mut payload, value.as_ref().as_bytes());
     }
-    let sent = write_frame(w, Tag::Exec.as_u8(), &payload);
-    payload.zeroize();
-    sent
+    write_frame(w, Tag::Exec.as_u8(), &payload)
 }
 
 pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {

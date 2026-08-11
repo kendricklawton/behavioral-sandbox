@@ -12,10 +12,11 @@ description = "The host↔guest wire protocol for the sandbox exec channel (docs
 # Near dependency-free by design: the protocol is hand-rolled over `std::io::{Read, Write}` so it
 # stays tiny and transport-agnostic (vsock in the guest, a unix socket in tests), and both the host
 # driver and the guest agent can depend on it without pulling a serialization stack into a static
-# binary. The one exception is `zeroize`: a `no_std`, zero-transitive-dep crate that gives the
-# post-send secret wipe a volatile store the optimizer cannot elide (see `write_exec`/`write_put_file`).
-# `fill(0)` was dead-store-eligible; this is the fix that keeps the host path
-# `unsafe`-free (the volatile write lives inside the audited crate, not our code).
+# binary. The one exception is `zeroize`: a `no_std`, zero-transitive-dep crate whose `Zeroizing`
+# wipes a secret-bearing payload on every scope exit, the return and the unwind alike (see
+# `write_exec`/`write_put_file`), with a volatile store the optimizer cannot elide where a `fill(0)`
+# is dead-store-eligible. It keeps the host path `unsafe`-free: the volatile write lives inside the
+# audited crate, not in ours.
 [dependencies]
 zeroize = { workspace = true }
 
