@@ -998,8 +998,8 @@ mod tests {
 
     #[test]
     fn the_user_file_supplies_artifact_paths_when_a_project_file_shadows_it() {
-        // The regression this split exists for: a project file that sets one knob used to shadow
-        // the user's whole file, taking the artifact paths with it.
+        // What the split exists for: a project file setting one knob must not shadow the user's whole
+        // file and take the artifact paths with it.
         let home = ScratchDir::created("cfg-home");
         std::fs::write(
             home.path().join(FILE_NAME),
@@ -1088,8 +1088,8 @@ mod tests {
 
     #[test]
     fn no_home_means_no_user_config_and_a_project_file_still_supplies_the_house_defaults() {
-        // 4, not 3: an odd count above 1 is no longer a value this file may carry, and the number
-        // here is incidental to what the test is about.
+        // 4, not 3: an odd count above 1 is not a value this file may carry, and the number here is
+        // incidental to what the test is about.
         let (_dir, leaf) = tree("cfg-nohome", &[("a", "vcpus = 4\n")]);
         let sources = Sources::discover_with(&leaf, None).expect("discover ok");
         assert!(sources.user_path().is_none());
@@ -1098,9 +1098,9 @@ mod tests {
 
     #[test]
     fn a_vcpu_count_the_vmm_cannot_boot_is_refused_by_the_file_that_named_it() {
-        // `--vcpus` has always applied this rule; the file keys applied only `NonZeroU8`'s rejection
-        // of `0`, so an odd count above 1 was carried all the way to `Vm::boot` and refused there,
-        // naming Firecracker's rule but not the file or the key that set it.
+        // The file keys apply the rule `--vcpus` applies, not just `NonZeroU8`'s rejection of `0`: an
+        // odd count above 1 must be refused here, naming the file and the key that set it, rather than
+        // at `Vm::boot`, which can name only Firecracker's rule.
         for bad in ["vcpus = 7\n", "vcpus = 33\n", "max_vcpus = 3\n"] {
             let (_dir, leaf) = tree("cfg-vcpus-bad", &[("a", bad)]);
             let msg = Sources::discover_with(&leaf, None)
@@ -1113,8 +1113,8 @@ mod tests {
             );
         }
 
-        // The reason the *ceiling* takes the same check: `resolve` clamps a house default down to
-        // the ceiling, so `vcpus = 8` under `max_vcpus = 7` used to resolve to 7 and be refused at
+        // Why the *ceiling* takes the same check: `resolve` clamps a house default down to the
+        // ceiling, so `vcpus = 8` under `max_vcpus = 7` would otherwise resolve to 7 and be refused at
         // boot for a number the operator never wrote.
         let (_dir, leaf) = tree("cfg-vcpus-clamp", &[("a", "vcpus = 8\nmax_vcpus = 7\n")]);
         assert!(

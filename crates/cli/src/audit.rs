@@ -58,10 +58,9 @@ impl Observability {
     /// Binds the probes to one booted sandbox by the plain values in `params`, passing `params.egress`
     /// through: `Some(policy)` arms enforcement on the tap before it goes live, `None` is observe-only.
     ///
-    /// **Observation fails open; enforcement does not.** Without the shared probes the bundle doesn't
-    /// attach and the record's coverage explains every unbound axis. But `egress` is a *security control*
-    /// rather than an observation, so a policy that was asked for and could not be armed is a **typed
-    /// refusal**, never a run with the operator's allow-list silently unapplied.
+    /// Without the shared probes the bundle does not attach and the record's coverage explains every
+    /// unbound axis, but `egress` is a security control rather than an observation, so a policy that
+    /// could not be armed is a **typed refusal**, never a silently unapplied allow-list.
     ///
     /// # Errors
     /// [`VmmError::Vmm`] when `params.egress` is `Some` but enforcement could not be armed.
@@ -185,12 +184,10 @@ impl RunProbes {
             .unwrap_or_default()
     }
 
-    /// A **non-destructive** [`RunRecord`] of the run so far, the daemon's `trace` verb, which a
-    /// client may ask for repeatedly mid-session. Unlike [`collect`](Self::collect) it neither
-    /// consumes the bundle nor detaches the probes, so observation continues after it; each call is a
-    /// fresh point-in-time reading built from a live [`snapshot`](SandboxProbes::snapshot) plus the
-    /// coverage gaps recorded so far. Without a bundle it is the honest empty record (every absence
-    /// explained), exactly like `collect`'s fail-open path.
+    /// A **non-destructive** [`RunRecord`] of the run so far (the daemon's `trace` verb), which a
+    /// client may ask for repeatedly mid-session: unlike [`collect`](Self::collect) it neither
+    /// consumes the bundle nor detaches the probes, so each call is a fresh point-in-time reading and
+    /// observation continues after it. Without a bundle it is the honest empty record, like `collect`.
     pub fn live_record(&self, timing: Timing) -> RunRecord {
         match &self.probes {
             Some(probes) => {

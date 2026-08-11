@@ -128,32 +128,29 @@ impl Timeline {
     }
 }
 
-/// Raw-mode + alternate-screen guard: however the view exits (return, error, panic-unwind), the
-/// terminal is restored, a wrecked terminal would violate the "no host wreckage" spirit of the
-/// no-panic path.
+/// Raw-mode + alternate-screen guard, restoring the terminal however the view exits (return, error,
+/// panic-unwind).
 struct Term {
     terminal: Terminal<ratatui::backend::CrosstermBackend<std::io::Stderr>>,
-    /// A listener that restores the terminal if a signal (SIGTERM/SIGINT/SIGHUP) is delivered while
-    /// the view is up, the one exit path `Drop` can't cover (a signal terminates without unwinding).
-    /// `None` on a host that refused the registration (the view still runs; only the signal case is
-    /// unguarded). Closed and joined on `Drop` so a normal exit leaves signal disposition untouched.
+    /// A listener that restores the terminal on SIGTERM/SIGINT/SIGHUP, the one exit path `Drop` cannot
+    /// cover (a signal terminates without unwinding). `None` on a host that refused the registration.
+    /// Closed and joined on `Drop`, so a normal exit leaves signal disposition untouched.
     signal_guard: Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
     /// The hook installed before this guard's, so `Drop` puts *it* back rather than resetting to the
-    /// default. Shared with the hook closure, which is why it is an `Arc`: the closure has to call it
-    /// on a panic while the view is up, and `Drop` has to reinstall it afterwards.
+    /// default. An `Arc` because both the hook closure (on a panic while the view is up) and `Drop`
+    /// need it.
     prev_hook: std::sync::Arc<PanicHook>,
 }
 
 /// The boxed panic hook `std::panic::take_hook` hands back.
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
 
-/// Spawn the view's signal-restore listener: on SIGTERM/SIGINT/SIGHUP, restore the terminal (from
-/// normal thread context, so crossterm is safe to call, the `Signals` iterator does not deliver in
-/// async-signal context) and exit with the signal's conventional status. `Drop` won't run (the
-/// process exits), but the terminal is left sane; the sandbox VM is reaped by the lifetime sentinel
-/// and its residue reclaimed by the next run's startup sweep. External SIGINT is caught here; a
-/// keyboard Ctrl-C stays a key event under raw mode and is handled as quit in the poll loop.
-/// Best-effort: a failed registration returns `None`, keeping the pre-existing behavior.
+/// Spawn the view's signal-restore listener: on SIGTERM/SIGINT/SIGHUP, restore the terminal and exit
+/// with the signal's conventional status. The restore runs on a normal thread, not in async-signal
+/// context (the `Signals` iterator delivers there), so crossterm is safe to call. `Drop` never runs
+/// here, but the VM is reaped by the lifetime sentinel and its residue by the next run's sweep.
+/// External SIGINT is caught here; a keyboard Ctrl-C stays a key event under raw mode. Best-effort: a
+/// failed registration returns `None`.
 fn install_view_signal_restore()
 -> Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)> {
     let mut signals = match signal_hook::iterator::Signals::new([

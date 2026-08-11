@@ -42,16 +42,15 @@ use clap::{Parser, Subcommand};
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
-/// limits). Distinct from the audit record's `bsx_probes_loader::AUDIT_SCHEMA_VERSION`: two
-/// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
-/// bumps it (docs/cli.md).
+/// limits), versioned independently of the audit record's `AUDIT_SCHEMA_VERSION`: additive within a
+/// version, a rename or removal bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
 
-/// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
-/// (and its `kind()` buckets, pinned by embedders) is never minted for faults that are the CLI's
-/// own: a bad flag combination, a refused artifact path, a local file write. `Engine` passes the
-/// driver's error through untouched (`?` converts via `From`); both print as `bsx: <reason>` and
-/// exit 2, the taxonomy is for honesty, not for different handling.
+/// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error (and
+/// its `kind()` buckets, pinned by embedders) is never minted for a fault that is the CLI's own: a bad
+/// flag combination, a refused artifact path, a local file write. `Engine` passes the driver's error
+/// through untouched; both print as `bsx: <reason>` and exit 2, so the split is for honesty rather
+/// than for different handling.
 #[derive(Debug)]
 enum CliError {
     /// A CLI-layer fault (usage or local I/O), phrased for the operator.
@@ -186,9 +185,6 @@ Everything after `--` is the guest command, so its own flags are never parsed he
 
 #[derive(clap::Args)]
 struct RunArgs {
-    // Every flag's doc comment is user-facing: the first line is the one-line summary `-h` lists,
-    // and the detail follows a blank line, where only `--help` shows it. Keeping the summary to one
-    // line is what makes `-h` a usable table rather than a wall of paragraphs.
     /// Boot only, run no command (the boot-only demo).
     #[arg(long)]
     demo_boot: bool,
@@ -446,11 +442,10 @@ fn apply_jail_ids(config: &mut BootConfig, uid: Option<u32>, gid: Option<u32>) {
     }
 }
 
-/// `bsx run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
-/// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
-/// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
-/// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
-/// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
+/// `bsx run`: open (jailed by default), attach the probes when asked (fail-open), run one exec with
+/// the flag-supplied inputs, write the requested artifacts, finalize the audit record while the
+/// sandbox is still alive, close, then report. The record has three faces: the `--trace` human trail,
+/// the `--record` full JSON, and the `--record-summary` model-legible projection.
 fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
     // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
     // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
