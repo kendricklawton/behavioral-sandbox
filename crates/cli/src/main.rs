@@ -360,7 +360,8 @@ fn main() -> ExitCode {
         }
     };
     // Log filter resolves flags > env > project file > user file > default.
-    if let Err(e) = init_tracing(config::resolve_log(cli.log.as_deref(), &sources).as_deref()) {
+    let filter = config::resolve_log(cli.log.as_deref(), &sources);
+    if let Err(e) = init_tracing(filter.as_deref().unwrap_or("warn"), false) {
         let _ = writeln!(std::io::stderr(), "bsx: {e}");
         return ExitCode::from(EXIT_OPERATIONAL);
     }
@@ -1081,30 +1082,32 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
     Ok(buf)
 }
 
-/// Initializes stderr logging from the filter [`config::resolve_log`] already resolved, falling back to
-/// `warn` when nothing set it. Does not re-read the environment, since the precedence is single-sourced
-/// there and this only applies the result.
+/// Installs the stderr subscriber for an **already-resolved** `filter`, optionally as one JSON object
+/// per line. The CLI and the daemon share this; each resolves its own precedence and default first,
+/// because they read different layers (`bsx serve` dispatches before project-file discovery).
 ///
 /// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives a
 /// mistyped key. What this cannot police is `EnvFilter`'s own grammar, where a bare unknown ident parses as
-/// a *target* name, so only what the parser itself rejects is refused
-/// (`an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` pins both entry points).
+/// a *target* name, so only what the parser itself rejects is refused. `try_init` absorbs a double-init.
 ///
 /// # Errors
-/// [`CliError::Cli`] naming the unparseable filter.
-fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
-    let filter = filter.unwrap_or("warn");
+/// A message naming the unparseable filter and the two spellings that would work.
+pub(crate) fn init_tracing(filter: &str, json: bool) -> Result<(), String> {
     let env_filter = tracing_subscriber::EnvFilter::try_new(filter).map_err(|e| {
-        CliError::Cli(format!(
+        format!(
             "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
              directive like \"bsx=debug\")"
-        ))
+        )
     })?;
-    let _ = tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(env_filter)
-        .with_target(false)
-        .try_init();
+        .with_target(false);
+    let _ = if json {
+        builder.json().try_init()
+    } else {
+        builder.try_init()
+    };
     Ok(())
 }
 
@@ -1321,6 +1324,25 @@ mod tests {
         assert!(parse_allow("").is_err(), "empty");
         // The prefix error names the offending token.
         assert!(parse_allow("1.1.1.1/33").unwrap_err().contains("33"));
+    }
+
+    #[test]
+    fn an_unparseable_log_filter_names_the_filter_and_both_spellings_that_work() {
+        // The CLI and the daemon share this refusal, so the advice cannot differ between them.
+        // `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` drives both entry points but
+        // asserts only that the filter is named; the hint is what an operator acts on, so pin it
+        // where it is now written once. The error path installs no global subscriber, so this is
+        // safe to call from a test.
+        let err = super::init_tracing("bsx=notalevel", false).expect_err("unparseable directive");
+        assert!(err.contains("bsx=notalevel"), "names the filter: {err}");
+        assert!(
+            err.contains("warn|info|debug"),
+            "offers a bare level: {err}"
+        );
+        assert!(
+            err.contains("\"bsx=debug\""),
+            "offers the directive form: {err}"
+        );
     }
 
     #[test]

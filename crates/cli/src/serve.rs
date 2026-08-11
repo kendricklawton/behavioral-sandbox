@@ -342,7 +342,7 @@ impl Server {
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
         || std::env::var("BSX_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
-    if let Err(e) = init_tracing(log.as_deref(), log_json) {
+    if let Err(e) = crate::init_tracing(&log_filter(log.as_deref()), log_json) {
         // tracing is not up (that is the failure), so the refusal goes to stderr directly.
         use std::io::Write as _;
         let _ = writeln!(std::io::stderr(), "bsx: {e}");
@@ -1145,36 +1145,21 @@ impl Drop for StagedPath {
     }
 }
 
-/// stderr logging, filter from `--log` else `BSX_LOG` else `info`. `info` (not the CLI's `warn`):
-/// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
-/// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
-/// events themselves are identical either way. A filter `tracing` cannot parse refuses the start,
-/// the same loudness as the CLI's `init_tracing` and this function's other fail-fast startup checks:
-/// a daemon serving with logging the operator did not choose is a silent no-op on its one
-/// operational trace. `try_init` still absorbs a double-init.
-/// # Errors
-/// A message naming the unparseable filter.
-fn init_tracing(flag: Option<&str>, json: bool) -> Result<(), String> {
-    let filter = flag
-        .map(str::to_string)
-        .or_else(|| std::env::var("BSX_LOG").ok())
-        .unwrap_or_else(|| "info".to_string());
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter).map_err(|e| {
-        format!(
-            "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
-             directive like \"bsx=debug\")"
-        )
-    })?;
-    let builder = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(env_filter)
-        .with_target(false);
-    let _ = if json {
-        builder.json().try_init()
-    } else {
-        builder.try_init()
-    };
-    Ok(())
+/// The daemon's log filter: `--log`, else `BSX_LOG`, else `info`. `info` (not the CLI's `warn`)
+/// because a daemon's per-session boot/close lines are its operational trace. This resolution stays
+/// here rather than in [`crate::init_tracing`] because `serve` dispatches before project-file
+/// discovery, so it reads a different set of layers than the CLI does.
+fn log_filter(flag: Option<&str>) -> String {
+    log_filter_with(flag, std::env::var("BSX_LOG").ok())
+}
+
+/// The pure core of [`log_filter`], taking `BSX_LOG` rather than reading it, so the precedence and
+/// the `info` default are unit-testable without mutating the process environment (`set_var` is
+/// `unsafe` in edition 2024 and races the parallel test runner).
+fn log_filter_with(flag: Option<&str>, env: Option<String>) -> String {
+    flag.map(str::to_string)
+        .or(env)
+        .unwrap_or_else(|| "info".to_string())
 }
 
 #[cfg(test)]
@@ -1183,6 +1168,18 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn the_daemon_log_filter_prefers_the_flag_then_the_env_then_info() {
+        assert_eq!(
+            log_filter_with(Some("debug"), Some("trace".into())),
+            "debug"
+        );
+        assert_eq!(log_filter_with(None, Some("trace".into())), "trace");
+        // `info`, not the CLI's `warn`: a daemon's per-session boot/close lines are its operational
+        // trace, and `serve` dispatches before project-file discovery so no file layer can set it.
+        assert_eq!(log_filter_with(None, None), "info");
+    }
 
     /// Parse a `bsx serve` command line into its args, so a test sees the same defaults clap applies
     /// to the real invocation rather than a hand-built struct that could drift from them.
