@@ -14,15 +14,17 @@
 //!   child's pipe can never fill and block `wait()`. A merely *stalled* host only becomes a forward
 //!   error if the connection carries a **write deadline**, so the bound holds only for a stream with
 //!   read/write deadlines set (the caller's job).
-//! - **Tree reaping.** Every command runs in a per-exec cgroup, so a double-forked grandchild or
-//!   `setsid` daemon holding the output pipes open is killed with the rest.
+//! - **Tree reaping (best-effort).** A command runs in a per-exec cgroup where the guest has a
+//!   writable cgroup v2 mount, so a double-forked grandchild or `setsid` daemon holding the output
+//!   pipes open is killed with the rest. Where the cgroup cannot be made the agent warns and falls
+//!   back to killing the direct child only, which such a daemon survives.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -449,6 +451,10 @@ fn resolve_program(
 /// Names the next per-exec cgroup uniquely within this agent process.
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Set once the agent has warned that it cannot make a per-exec cgroup, so the report is one line
+/// per process rather than one per exec.
+static CGROUP_LOSS_REPORTED: AtomicBool = AtomicBool::new(false);
+
 /// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns. cgroup v2
 /// membership is inherited by every child the command forks and cannot be escaped by `setsid`, so
 /// writing `cgroup.kill` reaches the double-fork and daemon cases a direct-child `kill` (or a `killpg`)
@@ -463,15 +469,32 @@ struct ExecCgroup {
 }
 
 impl ExecCgroup {
-    /// Creates a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
+    /// Creates a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a writable cgroup v2
+    /// mount, warning once per agent process on the way so the degradation is not silent.
     fn create() -> Option<Self> {
         let path = PathBuf::from(CGROUP_ROOT).join(format!(
             "bsx-exec-{}-{}",
             std::process::id(),
             CGROUP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&path).ok()?;
-        Some(Self { path })
+        match std::fs::create_dir(&path) {
+            Ok(()) => Some(Self { path }),
+            Err(e) => {
+                // Once, not per exec: this is a property of the guest image, so every later exec
+                // would report the same thing and bury the command's own output on the console the
+                // host reads verbatim.
+                if !CGROUP_LOSS_REPORTED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        cgroup_root = CGROUP_ROOT,
+                        error = %e,
+                        "no per-exec cgroup: whole-tree reaping is off, so a command that \
+                         double-forks a daemon holding its output pipes parks this session until \
+                         that daemon exits (the host's exec deadline is the backstop)"
+                    );
+                }
+                None
+            }
+        }
     }
 
     /// SIGKILLs every process in the cgroup and its descendants, atomically (guest kernel >= 5.14).
