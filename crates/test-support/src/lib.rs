@@ -437,6 +437,11 @@ pub fn have_real_root() -> bool {
 
 /// A process's host thread count (`/proc/<pid>/status` `Threads:`), for the hardware-isolation
 /// assertion that guest forks never become host threads. `0` if the process is gone.
+///
+/// The workspace's one thread-count read: the confinement and hardening suites measure a VMM pid
+/// with it, and `bsx-engine`'s boot soak and wedged-dial test measure their own. **`0` on a failed
+/// read is why every caller floors its baseline first**: a flat-count assertion would otherwise pass
+/// as `0 == 0` having measured nothing.
 #[must_use]
 pub fn process_threads(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -451,7 +456,27 @@ pub fn process_threads(pid: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CAP_NET_ADMIN, parse_cap_eff, serial_requested};
+    use super::{CAP_NET_ADMIN, parse_cap_eff, process_threads, serial_requested};
+
+    #[test]
+    fn the_thread_count_is_live_for_a_live_pid_and_zero_for_a_gone_one() {
+        // Both halves of the contract three suites are built on. A live process always has at least
+        // this thread, so the floor the callers assert (`>= 1`, `>= 2`) is reachable...
+        let live = process_threads(std::process::id());
+        assert!(
+            live >= 1,
+            "this process has at least one thread, got {live}"
+        );
+
+        // ...and a pid that cannot exist reads as `0` rather than propagating an error, which is
+        // exactly what makes those floors load-bearing: without them a flat-count assertion passes
+        // as `0 == 0` on a VMM that died mid-test.
+        assert_eq!(
+            process_threads(u32::MAX),
+            0,
+            "no /proc entry for a pid past pid_max"
+        );
+    }
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()

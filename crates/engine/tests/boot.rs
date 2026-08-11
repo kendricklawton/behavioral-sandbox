@@ -495,7 +495,7 @@ fn repeated_boots_leave_no_leaks() {
     // EMFILE/thread exhaustion across runs. Floors guard against a vacuous read (a failed /proc
     // scan reading as zero-then-zero would pass without proving anything).
     let fds_before = open_fds();
-    let threads_before = process_threads();
+    let threads_before = bsx_test_support::process_threads(std::process::id());
     assert!(
         fds_before >= 3,
         "stdio alone means >= 3 fds; /proc read failed?"
@@ -550,10 +550,10 @@ fn repeated_boots_leave_no_leaks() {
             // Re-read once after a short settle before failing: a thread that has exited but not
             // yet been reaped is a *measurement* race, not a leak, and the two must be told apart
             // rather than papered over. A real leak survives the settle; the census then names it.
-            let threads_now = process_threads();
+            let threads_now = bsx_test_support::process_threads(std::process::id());
             if threads_now != threads_before {
                 std::thread::sleep(std::time::Duration::from_millis(250));
-                let settled = process_threads();
+                let settled = bsx_test_support::process_threads(std::process::id());
                 assert_eq!(
                     settled,
                     threads_before,
@@ -575,7 +575,7 @@ fn repeated_boots_leave_no_leaks() {
     // numbers (the io_throttle reporting convention).
     let vms = vmm_pids.len();
     let fds_after = open_fds();
-    let threads_after = process_threads();
+    let threads_after = bsx_test_support::process_threads(std::process::id());
     let leftovers = scratch_leftovers(&scratch_root, &prefix);
     let netns_left = agent_netns().difference(&netns_before).count();
     eprintln!(
@@ -617,22 +617,6 @@ fn repeated_boots_leave_no_leaks() {
         "threads must return to baseline after the soak\n{}",
         thread_census()
     );
-}
-
-/// Threads in this process, via `/proc/self/status` `Threads:` (0 on a failed read; callers floor
-/// the baseline so that failure is loud, not a vacuous 0 == 0 pass).
-fn process_threads() -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Threads:"))?
-                .split_whitespace()
-                .nth(1)?
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0)
 }
 
 /// A one-line-per-thread census of this process: `tid comm state wchan`. A bare count says a
