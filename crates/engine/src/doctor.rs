@@ -22,6 +22,7 @@ use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::BootConfig;
+use crate::spawn::FcProbe;
 
 /// The **version fallback floor** (`major.minor`), used only when the capability probe below cannot
 /// run. Running untrusted code on an unpatched kernel is a threat-model hole, and 5.15 is a
@@ -372,15 +373,18 @@ fn supported_range() -> String {
     format!("v{lo_maj}.{lo_min}..=v{hi_maj}.{hi_min}, tested on v{hi_maj}.{hi_min}")
 }
 
-/// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.16.1`), or `None` if missing or
-/// unparseable, the same parse the driver runs to warn on an unpinned binary.
+/// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.16.1`), or `None` if the binary
+/// is missing, wedged, or prints something that does not parse.
+///
+/// This is the driver's own probe rather than a second copy of it, so `doctor` reports the version
+/// the driver validates against and inherits the two defences that probe has: a wall, and a file
+/// instead of a pipe for the child's stdout. Both matter more here than on the boot path, because
+/// `doctor` is the command a failed boot tells the operator to run.
 fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
-    let out = std::process::Command::new(fc)
-        .arg("--version")
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    crate::spawn::fc_version_of(&text)
+    match crate::spawn::probe_fc_version(Path::new(fc)) {
+        FcProbe::Version(v) => Some(v),
+        FcProbe::Unavailable | FcProbe::Unparseable => None,
+    }
 }
 
 /// sha256 of the pinned release's `firecracker` binary (not the tarball: the check hashes the
@@ -703,6 +707,46 @@ fn unescape_octal(s: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `doctor` is the command a failed boot points the operator at, so it is the surface that
+    /// least affords a hang. `BSX_FIRECRACKER` may name a wrapper script, and a wrapper that
+    /// backgrounds anything inheriting its stdout keeps a pipe's write end open after the wrapper
+    /// itself is reaped: a read of that pipe blocks for as long as the background process lives,
+    /// which is why the probe hands the child a file.
+    #[test]
+    fn a_firecracker_wrapper_that_backgrounds_a_child_does_not_stall_the_report() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::time::Duration;
+
+        let dir = bsx_test_support::ScratchDir::created("doctor-fcver");
+        let fc = dir.path().join("fc-background");
+        // Prints its version and exits 0 at once, having handed its stdout to a process that
+        // outlives it by half a minute.
+        std::fs::write(
+            &fc,
+            "#!/bin/sh\nsleep 30 &\necho 'Firecracker v1.16.1'\nexit 0\n",
+        )
+        .expect("write the wrapper");
+        std::fs::set_permissions(&fc, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let fc = fc.to_str().expect("a utf-8 scratch path").to_string();
+
+        // The failure this guards against is a stall, and a stall is not a test failure unless the
+        // test bounds it: the probe runs on its own thread and this receive is the bound. Three
+        // seconds is well under the background child's thirty and well over the milliseconds a
+        // wrapper that exits actually takes.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(firecracker_version(&fc));
+        });
+        let probed = rx.recv_timeout(Duration::from_secs(3)).expect(
+            "the report must be back while the wrapper's background child still holds its stdout",
+        );
+        assert_eq!(
+            probed,
+            Some((1, 16)),
+            "the version is read from the file the wrapper wrote, not from a pipe nothing closes"
+        );
+    }
 
     /// The kernel reports every loaded LSM, most of which never arbitrate a jailer operation.
     /// Naming those would make the row noise.
