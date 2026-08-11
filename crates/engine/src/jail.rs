@@ -171,7 +171,10 @@ impl JailIds {
         // but a `Clone` that read the slot table would deadlock a non-reentrant `Mutex`.
         let slot = {
             let mut taken = lock(&self.taken);
-            let last = self.base + taken.len() as u32 - 1;
+            // Grouped so the sum never exceeds the span's own last id: `span` bounds
+            // `base + (count - 1)`, not `base + count`, so the ungrouped form overflows on a span
+            // that reaches the top of the range. `count >= 1` there, so the subtraction is safe.
+            let last = self.base + (taken.len() as u32 - 1);
             let slot = taken.iter().position(|t| !t).ok_or_else(|| {
                 VmmError::Vmm(format!(
                     "every jail id in {}..={last} is in use; widen the span or run fewer sandboxes \
@@ -881,6 +884,26 @@ mod tests {
         // A range running past u32 would wrap into ids nobody asked for, including 0.
         assert!(JailIds::span(u32::MAX, 2).is_err());
         assert!(JailIds::span(u32::MAX, 1).is_ok(), "the last id alone fits");
+    }
+
+    #[test]
+    fn a_span_at_the_top_of_the_range_leases_and_names_itself() {
+        // The span above is valid, so every jailed boot from it calls `lease`. Reaching the span's
+        // last id must not compute `base + count` on the way: that intermediate is one past the
+        // range `span` bounded, which panics the boot path in a debug build and wraps in release.
+        let ids = JailIds::span(u32::MAX, 1).expect("the last id alone is a valid span");
+        let leased = ids.lease().expect("the one pair is free");
+        assert_eq!((leased.uid, leased.gid), (u32::MAX, u32::MAX));
+
+        // Exhaustion is the only reader of that bound, so it is where a wrapped value would show.
+        let err = ids
+            .lease()
+            .expect_err("the span holds one pair and it is taken");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{}..={}", u32::MAX, u32::MAX)),
+            "the refusal names the real span rather than a wrapped one: {msg}"
+        );
     }
 
     // Poisoning a mutex takes a panic while its guard is held, so the state under test cannot be
