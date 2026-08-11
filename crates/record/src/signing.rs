@@ -43,14 +43,9 @@ use crate::RunRecord;
 /// inside carries its own [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION).
 pub const SIGNED_RECORD_SCHEMA_VERSION: u32 = 2;
 
-/// The most bytes [`verify`] accepts as an envelope. The verifier is where attacker-relayed bytes enter
-/// the host, since a record arrives over an untrusted transport by design, so its decode is bounded like
-/// every other untrusted input.
-///
-/// Headroom rather than a budget: [`MAX_NOTABLE`](crate::MAX_NOTABLE) caps the syscall sample, but the
-/// flow, denial, and policy vectors are bounded only by the kernel maps the loader read them from. So
-/// nothing holds a *producer* to this number, and one that outgrew it would be a bug found at verify
-/// time.
+/// The most bytes [`verify`] accepts as an envelope, so an attacker-relayed record is bounded like every
+/// other untrusted input. Headroom, not a producer budget: the flow/denial/policy vectors are bounded
+/// only by the kernel maps, so one that outgrew this is a bug found at verify time.
 pub const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 
 /// A host signing key (an `ed25519` keypair), held host-side where the guest never sees it. Hand
@@ -79,11 +74,8 @@ impl HostKey {
     }
 
     /// Loads the host key from `path`, or **generates and persists** one there on first use, so a hoster
-    /// needs no key ceremony to get a signed record. Custody of the file is theirs.
-    ///
-    /// Concurrent first runs converge on one key: the publish is atomic, and a process that loses the race
-    /// discards its candidate and reloads the winner's file, so no signed record is orphaned by an
-    /// overwritten key.
+    /// needs no key ceremony. Concurrent first runs converge on one key: the publish is atomic, and the
+    /// loser discards its candidate and reloads the winner's file.
     ///
     /// # Errors
     /// [`KeyError`] if the file exists but is unreadable or malformed, or if generation fails.
@@ -91,9 +83,8 @@ impl HostKey {
         if path.exists() {
             return Self::load(path);
         }
-        // The mint judges the directory the load would judge, and does it *after* creating a missing
-        // one (which is then ours) and *before* writing the seed. Without this the first run puts a
-        // fresh secret somewhere another local user can swap it, and only the second run says so.
+        // Judge the directory *after* creating a missing one (which is then ours) and *before* writing
+        // the seed: otherwise the first run drops a fresh secret where another local user can swap it.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(KeyError::Io)?;
         }
@@ -139,17 +130,14 @@ impl HostKey {
         })
     }
 
-    /// Persists the secret seed as hex at `0600` into a directory the caller has already made and
-    /// judged. Publishes **atomically** by
-    /// linking a sibling temp file into place, so a concurrent generator either wins the link or sees the
-    /// winner's file and a reader never observes a partial write. Returns `false` when another process
-    /// published first, in which case the caller reloads that key. Only called on
-    /// first-run generation, so it never widens an existing file's permissions.
+    /// Persists the secret seed as hex at `0600`, publishing **atomically** by hard-linking a sibling
+    /// temp file into place: a concurrent generator either wins the link or sees the winner's file, and a
+    /// reader never observes a partial write. Returns `false` when another process published first (the
+    /// caller then reloads that key). First-run only, so it never widens an existing file's permissions.
     fn persist(&self, path: &Path) -> Result<bool, KeyError> {
-        // The staging file is unlinked by `tmp`'s `Drop` on *every* exit from here on, the write
-        // error, the hard-link outcome, and an unwinding panic in between, so no `<key>.tmp.<n>`
-        // orphan is left in the key directory. The published key is the hard-linked `path`, a separate
-        // name, so removing the staging copy unconditionally is correct.
+        // `tmp`'s `Drop` unlinks the staging file on every exit (write error, link outcome, unwinding
+        // panic), so no `<key>.tmp.<n>` orphan is left; the published key is the separately-named hard
+        // link, so removing the staging copy unconditionally is correct.
         let tmp = StagingFile(temp_sibling(path));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -157,9 +145,9 @@ impl HostKey {
             .mode(0o600)
             .open(tmp.path())
             .map_err(KeyError::Io)?;
-        // The newline is a second write rather than a `push` into the exactly-sized hex string: a push
-        // would reallocate, freeing the old buffer with the full hex seed in it un-zeroized, since
-        // `Zeroizing` scrubs only the final buffer it drops.
+        // The newline is a second write, not a `push` into the exactly-sized hex string: a push would
+        // reallocate, freeing the old buffer with the full seed un-zeroized, since `Zeroizing` scrubs
+        // only the final buffer it drops.
         let seed = Zeroizing::new(self.signing.to_bytes());
         let hex = Zeroizing::new(hex_encode(&*seed));
         f.write_all(hex.as_bytes()).map_err(KeyError::Io)?;
@@ -220,9 +208,9 @@ impl HostKey {
         out.push_str(&sig_hex);
         out.push('"');
         if let Some(p) = prev {
-            // Escaped like any other caller-supplied string: 64 hex chars need none, but this is a `pub fn`
-            // taking an arbitrary `&str`, and an unescaped `"` would emit an envelope that is not the JSON it
-            // looks like.
+            // Escaped like any caller string: 64 hex chars need none, but this is a `pub fn` taking an
+            // arbitrary `&str`, and an unescaped `"` would emit an envelope that is not the JSON it looks
+            // like.
             out.push_str(",\"prev\":\"");
             crate::json::json_escape_into(&mut out, p);
             out.push('"');
@@ -243,19 +231,13 @@ impl HostKey {
 }
 
 /// Opens the signing key if this user's own, refusing a file another local user could have planted,
-/// read, or swapped.
+/// read, or swapped. The `metadata` check before `File::open` is load-bearing: a planted FIFO would
+/// otherwise block the open forever. Owner and mode are then taken from the open descriptor, so the file
+/// judged is the file read.
 ///
-/// The `metadata` call before `File::open` is load-bearing: without it a planted FIFO at the key path
-/// would block the open forever, which is a hang on the host path. The owner and mode are then taken
-/// from the **open descriptor**, so the file judged is the file read.
-///
-/// Two things it does differently from the user-config gate this mirrors
-/// (`open_trusted` in `crates/cli/src/trust.rs`), because the file is different:
-///
-/// - **`0o077`, not `0o022`.** That gate protects integrity, so it refuses only write bits and admits
-///   the `0o644` every editor writes. This one protects a *secret*, which leaks by being read.
-/// - **A non-regular file is refused, not skipped.** A config is optional, so a directory named
-///   `.bsx.toml` is nothing to read. A key at a path the operator configured is not optional.
+/// Stricter than the user-config gate it mirrors (`open_trusted` in `crates/cli/src/trust.rs`) because
+/// this file is a *secret*, not just integrity-sensitive: it refuses group/world read (`0o077`, not
+/// `0o022`), and refuses a non-regular file rather than skipping it (a configured key is not optional).
 fn open_trusted_key(path: &Path) -> Result<File, KeyError> {
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::fs::PermissionsExt as _;
@@ -264,12 +246,11 @@ fn open_trusted_key(path: &Path) -> Result<File, KeyError> {
     let p = path.display();
 
     let link = std::fs::symlink_metadata(path).map_err(KeyError::Io)?;
-    // A symlink's own owner chooses which file gets read, so it needs the same trust as the target.
-    // Its permission bits are always `0o777` on Linux and carry nothing.
+    // A symlink's own owner chooses which file gets read, so it needs the same trust as the target (its
+    // own `0o777` mode bits carry nothing).
     let link_uid = link.file_type().is_symlink().then(|| link.uid());
 
-    // Refusing without an identity would be worse than not checking: the check would depend on a
-    // read that can fail. `open_trusted` and `sweep_orphans` take the same line for the same reason.
+    // No identity is a refusal, not a skip: the same line `open_trusted` and `sweep_orphans` take.
     let Some(ids) = HostIds::current() else {
         return untrusted(format!(
             "cannot read /proc/self/status to check who owns signing-key file {p}; refusing to \
@@ -334,9 +315,9 @@ fn trusted_key_dir(path: &Path, ids: HostIds) -> Result<(), KeyError> {
             dir.display()
         )));
     }
-    // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel refuses to let one
-    // user unlink or rename another's file there. Without the sticky bit, ownership of the file
-    // proves nothing about what will be at that path a moment later.
+    // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel won't let one user
+    // unlink another's file there. Without the sticky bit, file ownership proves nothing about what will
+    // be at that path a moment later.
     let mode = meta.permissions().mode() & 0o7777;
     if mode & 0o022 != 0 && mode & 0o1000 == 0 {
         return Err(KeyError::Untrusted(format!(
@@ -436,9 +417,8 @@ impl TrustedKey {
     }
 }
 
-/// The engine's per-host data directory: `$XDG_DATA_HOME/bsx`, falling back to `$HOME/.local/share/bsx`
-/// then `/var/lib/bsx`. Where an installed deployment keeps host **state** and runtime artifacts, and
-/// what `install.sh` writes into. A relative value in **either** variable is skipped rather than
+/// The engine's per-host data directory for host **state**: `$XDG_DATA_HOME/bsx`, falling back to
+/// `$HOME/.local/share/bsx` then `/var/lib/bsx`. A relative value in either variable is skipped, not
 /// joined, so the host key never lands at a path that moves with the cwd.
 #[must_use]
 pub fn data_dir() -> PathBuf {
@@ -448,14 +428,12 @@ pub fn data_dir() -> PathBuf {
     )
 }
 
-/// The pure core of [`data_dir`], taking the two variables rather than reading them, so each
-/// precedence case is unit-testable without mutating the process environment (`set_var` is `unsafe`
-/// in edition 2024 and races the parallel test runner). `Sources::discover_with` splits for the same
-/// reason.
+/// The pure core of [`data_dir`], taking the two variables rather than reading them, so each precedence
+/// case is unit-testable without mutating the process environment (`set_var` is `unsafe` in edition 2024
+/// and races the parallel test runner).
 fn data_dir_in(xdg: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
-    // A relative value names a different directory depending on where the process started, so it
-    // identifies no host's state. `default_key_path` builds on this, and a relative key path is one
-    // the untrusted repo directory a run starts in can supply.
+    // A relative value names a directory that moves with the cwd, which the untrusted repo dir a run
+    // starts in can supply; skip it so it identifies no host's state.
     let base = xdg
         .filter(|p| p.is_absolute())
         .or_else(|| {
@@ -501,10 +479,9 @@ fn verify_entry(
     }
     let v: serde_json::Value =
         serde_json::from_str(envelope).map_err(|e| VerifyError::Malformed(e.to_string()))?;
-    // Checked before any field is read, so a future envelope shape is "this build cannot read that" rather
-    // than a verdict reached by applying today's rules. `schema` rides *outside* the signed message, so this
-    // gates the shape without attesting it: altering it turns a good record into a rejection, never a
-    // forgery into a pass.
+    // Checked before any field is read, so a future shape is "this build cannot read that" not a verdict
+    // under today's rules. `schema` rides *outside* the signed message, so altering it turns a good record
+    // into a rejection, never a forgery into a pass.
     match v.get("schema").and_then(serde_json::Value::as_u64) {
         Some(s) if s == u64::from(SIGNED_RECORD_SCHEMA_VERSION) => {}
         Some(got) => return Err(VerifyError::Schema { got }),
@@ -523,13 +500,11 @@ fn verify_entry(
     let record = field("record")?;
     let key_id = field("key_id")?;
     let sig_hex = field("signature")?;
-    // `prev` is optional (present only on a chained record) but never free-form: it is the previous
-    // record's [`record_hash`], and its fixed 64-hex shape is what makes the single `\n` in
-    // `link_message` an unambiguous frame. Without this check a signature over
-    // `prev = "A\nB", canonical = "C"` also verifies against an envelope carrying `prev = "A"` and
-    // `record = "B\nC"`, since both build the same message, and `verify` would hand back the second
-    // split as the authentic bytes. A present-but-not-a-string `prev` is malformed here rather than
-    // read as absent, so a broken field is never a silently unchained record.
+    // `prev` is optional but never free-form: its fixed 64-hex shape is what makes the single `\n` in
+    // `link_message` an unambiguous frame. Without the check, one signature over
+    // `prev="A\nB", record="C"` also verifies an envelope split as `prev="A", record="B\nC"` (same
+    // message), and `verify` would return the second split as authentic. A present-but-not-a-string
+    // `prev` is malformed, not absent, so a broken field is never a silently unchained record.
     let prev = match v.get("prev") {
         None => None,
         Some(serde_json::Value::String(p)) if is_chain_hash(p) => Some(p.clone()),
@@ -571,8 +546,7 @@ fn verify_entry(
 /// [`ChainError::Empty`] if there are no envelopes, [`ChainError::Entry`] if one fails to verify, or
 /// [`ChainError::BrokenLink`] if a `prev` link doesn't match the previous record's hash.
 pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<String>, ChainError> {
-    // Nothing verified is not a verified chain: `Ok(vec![])` reads as "checked, and it held". The CLI
-    // guards the empty file in another crate, so an embedder calling this directly needs the check here.
+    // Nothing verified is not a verified chain: `Ok(vec![])` would read as "checked, and it held".
     if envelopes.is_empty() {
         return Err(ChainError::Empty);
     }
@@ -609,9 +583,8 @@ fn temp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// An RAII guard for the pre-publish staging file in [`HostKey::persist`], unlinking it on every scope
-/// exit, an error return *or* an unwinding panic, so a failure between staging and the hard link leaves no
-/// orphan. A `SIGKILL` in that window still leaks, since no in-process guard can close it, but the name is
+/// An RAII guard unlinking [`HostKey::persist`]'s staging file on every scope exit, so a failure between
+/// staging and the hard link leaves no orphan. A `SIGKILL` in that window still leaks, but the name is
 /// process-and-sequence unique, so a leaked file never collides with a later run and is never read.
 struct StagingFile(PathBuf);
 
@@ -721,8 +694,7 @@ impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(m) => write!(f, "not a signed record envelope: {m}"),
-            // "this build", not a role: the same rendering reaches whichever side holds the older code, so
-            // naming one would state the mismatch backwards for the other.
+            // "this build", not a role: the same rendering reaches whichever side holds the older code.
             Self::Schema { got } => write!(
                 f,
                 "unsupported record envelope schema {got} \

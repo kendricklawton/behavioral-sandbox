@@ -116,8 +116,7 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         field(out, "packets", denial.count, false);
         out.push('}');
     }
-    // Additive `flows6`/`denials6` arrays, so a v4-only
-    // consumer is unaffected and the schema stays 1. Addresses render as v6 strings.
+    // Additive `flows6`/`denials6` arrays (schema stays 1), addresses as v6 strings.
     out.push_str("],\"flows6\":[");
     for (i, flow) in net.flows6.iter().enumerate() {
         if i > 0 {
@@ -148,14 +147,13 @@ fn net_to_json(out: &mut String, net: &NetSection) {
     }
     out.push(']');
     // The kernel's drop counters plus the flag a consumer checks before trusting the flow list as
-    // exhaustive. Additive keys, and `0`/`false` is the healthy shape.
+    // exhaustive; `0`/`false` is the healthy shape.
     field(out, "dropped_flows", net.dropped_flows, false);
     field(out, "dropped_denials", net.dropped_denials, false);
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
-    // What was being enforced, and whether the guest had a route to test it with. `null` says the posture
-    // was not read, which is not the same claim as an
-    // empty rule list, so the two render differently on purpose.
+    // `null` posture says it was not read, a different claim from an empty rule list, so the two render
+    // differently on purpose.
     out.push_str(",\"posture\":");
     match &net.posture {
         Some(p) => posture_to_json(out, p),
@@ -316,10 +314,8 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
         out.push_str(",\"comm\":");
         json_str(out, &n.comm);
         field(out, "hits", n.hits, false);
-        // Additive key (schema stays 1), and `false` is the healthy shape: `detail` is a prefix of
-        // the path the guest used, not that path, so a consumer that treats the two alike states
-        // something that never happened. Always emitted, so its absence means an old record rather
-        // than a complete path.
+        // Additive key (schema stays 1): a `true` `detail` is a prefix of the guest's path, not the
+        // path, so a consumer treating the two alike states something that never happened.
         let _ = write!(out, ",\"truncated\":{}", n.truncated);
         out.push('}');
     }
@@ -386,18 +382,17 @@ pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, fir
 }
 
 /// Writes a JSON string literal, escaping per RFC 8259: the two mandatory metacharacters and every
-/// control byte below 0x20. The record's strings are already lossy-UTF-8, so this only has to make them
-/// JSON-safe, never
-/// re-validate UTF-8.
+/// control byte below 0x20. The record's strings are already lossy-UTF-8, so this only makes them
+/// JSON-safe, never re-validates UTF-8.
 pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');
     json_escape_into(out, s);
     out.push('"');
 }
 
-/// [`json_str`] without the surrounding quotes: the escaping itself, so the signing envelope, which
-/// embeds the whole record *as* a JSON string, escapes by the same rules the record does rather than
-/// by a second copy of them. The bytes this produces are the bytes that get signed.
+/// [`json_str`] without the surrounding quotes, so the signing envelope (which embeds the whole record
+/// *as* a JSON string) escapes by the same rules the record does, not a second copy. The bytes this
+/// produces are the bytes that get signed.
 pub(crate) fn json_escape_into(out: &mut String, s: &str) {
     for ch in s.chars() {
         match ch {

@@ -28,24 +28,19 @@ pub struct NetStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResourceSummary {
-    /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running its
-    /// guest, from the scheduler tracepoint. [`Duration::ZERO`] if the cgroup was
-    /// never a metered target.
+    /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running
+    /// its guest, from the scheduler tracepoint. [`Duration::ZERO`] if the cgroup was never a metered
+    /// target.
     pub cpu_time: Duration,
     /// The cgroup's native cgroup v2 counters (memory peak/current, IO bytes, and `cpu.stat`'s
     /// `usage_usec` as an independent cross-check on [`cpu_time`](Self::cpu_time)).
     pub cgroup: CgroupStats,
 }
 
-/// A snapshot of a cgroup's **native cgroup v2** resource counters, the memory and IO axes the
-/// kernel already maintains per cgroup, read straight from the cgroup dir's files. The complement to
-/// `ResourceMeter`'s eBPF CPU accounting: CPU rides a tracepoint (per-event timing earns its keep),
-/// memory and IO ride the counters the kernel keeps anyway. Every field is best-effort, a missing or
-/// unparseable file is [`None`], never an error, since accounting is a metering signal, not the
-/// isolation boundary (it fails open, like the driver's cgroup caps).
-///
-/// Read one with [`read`](Self::read), pointed at the cgroup dir the Firecracker track placed the VMM in
-/// (`<cgroup mount>/<path>`; the driver knows it and supplies it).
+/// A snapshot of a cgroup's **native cgroup v2** memory and IO counters, read straight from the cgroup
+/// dir's files, the complement to `ResourceMeter`'s eBPF CPU accounting. Every field is best-effort: a
+/// missing or unparseable file is [`None`], never an error, since accounting is a metering signal, not
+/// the isolation boundary. Read one with [`read`](Self::read), pointed at the VMM's cgroup dir.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CgroupStats {
@@ -64,9 +59,9 @@ pub struct CgroupStats {
 }
 
 impl CgroupStats {
-    /// Reads the cgroup v2 counters from `cgroup_dir`, best-effort: each
-    /// missing or unreadable file leaves its field [`None`] rather than failing, so a partial cgroup
-    /// (no `io` controller delegated, an older kernel without `memory.peak`) still yields what it has.
+    /// Reads the cgroup v2 counters from `cgroup_dir`, best-effort: each missing or unreadable file
+    /// leaves its field [`None`], so a partial cgroup (no `io` controller, an older kernel without
+    /// `memory.peak`) still yields what it has.
     #[must_use]
     pub fn read(cgroup_dir: &Path) -> Self {
         let read_u64 = |name: &str| {
@@ -114,9 +109,8 @@ fn parse_keyed_u64(text: &str, key: &str) -> Option<u64> {
 }
 
 /// Sum `rbytes=` and `wbytes=` across every device line of a cgroup `io.stat` file, returning
-/// `(read_bytes, write_bytes)`. A device missing a field contributes 0 for it. Pure, so it is
-/// host-unit-testable, and saturating so a pathological
-/// file can't overflow the rollup.
+/// `(read_bytes, write_bytes)`. A device missing a field contributes 0. Pure (host-unit-testable) and
+/// saturating, so a pathological file can't overflow the rollup.
 fn parse_io_bytes(text: &str) -> (u64, u64) {
     let (mut r, mut w) = (0u64, 0u64);
     for line in text.lines() {

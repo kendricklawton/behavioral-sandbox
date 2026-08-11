@@ -4,10 +4,9 @@
 //! that folds the probes' raw output into it. The attach machinery producing those inputs lives in
 //! `bsx-probes-loader`, so keeping this half pure is what lets the whole aggregation be unit-tested on
 //! the host gate with synthetic inputs, no KVM or caps. Every collection is deterministically sorted,
-//! so a record built from the same observations is byte-stable regardless of map-iteration order.
-//! [`MAX_NOTABLE`] is the one exception, and it is about **arrival** order rather than iteration
-//! order: past the cap, which distinct events the sample kept depends on which the ring buffer
-//! delivered first. Every count stays exact and order-independent at any size.
+//! so a record built from the same observations is byte-stable regardless of map-iteration order. The
+//! one exception is *which* distinct events [`MAX_NOTABLE`] keeps past its cap (arrival order); every
+//! count stays exact and order-independent at any size.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
@@ -21,12 +20,9 @@ use bsx_probes_common::{
 use crate::{NetStats, ResourceSummary};
 
 /// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into a
-/// hit count, so this bounds cardinality: a run touching thousands of different paths keeps the first
-/// `MAX_NOTABLE` by arrival order and counts the rest, never growing the record without bound.
-///
-/// First-arrival is what makes the *membership* of the sample depend on ring-buffer order once a run
-/// exceeds the cap. The counts beside it do not: `total`, `by_kind`, and `overflow_events` are exact
-/// whatever the order.
+/// hit count, so this bounds cardinality: a run touching thousands of paths keeps the first `MAX_NOTABLE`
+/// by arrival order and counts the rest. Only sample *membership* depends on arrival order once the cap
+/// is exceeded; `total`, `by_kind`, and `overflow_events` stay exact whatever the order.
 pub const MAX_NOTABLE: usize = 64;
 
 /// **What** a record is about and **when** it happened, both part of the signed bytes: a signature
@@ -128,11 +124,9 @@ pub struct NetSection {
     /// dropped at the tap; only the audit row is missing.
     pub dropped_denials: u64,
     /// The egress policy in force, read back from the kernel, and the route the guest was given. `None`
-    /// when the posture was not read.
-    ///
-    /// Without this a record cannot distinguish an unpoliced run from a policed one: zero flows and zero
-    /// denials is the same shape whether every destination was allowed or none was, because the denial
-    /// trail says what was refused and never what was permitted.
+    /// when not read. Without it a record cannot tell an unpoliced run from a policed one: zero flows and
+    /// zero denials is the same shape either way, since the denial trail says what was refused, never what
+    /// was permitted.
     pub posture: Option<EgressPosture>,
 }
 
@@ -158,15 +152,12 @@ pub struct EgressPosture {
 }
 
 impl NetSection {
-    /// Build a sorted section from the tap monitor's raw reads (`flows`, `totals`, `denials`). Flows
-    /// sort on the full 5-tuple; denials **aggregate by destination**, the kernel keys `DENIALS` by
-    /// the dropped packet's whole 5-tuple, so retries from different guest source ports arrive as
-    /// separate entries, and summing them per `(dst, port, proto)` is what makes the trail both
-    /// meaningful (one row per blocked endpoint) and totally ordered. Total orders on both
-    /// collections are what make the record byte-stable across map-iteration order.
-    ///
-    /// `dropped_flows`/`dropped_denials` are the kernel's full-map drop counters, and they mark the
-    /// section [`truncated`](Self::truncated) so a saturated table never reads as complete.
+    /// Build a sorted section from the tap monitor's raw reads. Flows sort on the full 5-tuple; denials
+    /// **aggregate by destination**, summing the kernel's per-5-tuple `DENIALS` rows per `(dst, port,
+    /// proto)` into one row per blocked endpoint. Both collections are totally ordered, so the record is
+    /// byte-stable across map-iteration order. `dropped_flows`/`dropped_denials` are the kernel's
+    /// full-map drop counters, marking the section [`truncated`](Self::truncated) so a saturated table
+    /// never reads as complete.
     #[must_use]
     pub fn from_tap(
         flows: Vec<(FlowKey, FlowCounts)>,
@@ -220,10 +211,9 @@ impl NetSection {
         self
     }
 
-    /// Folds the IPv6 half of the tap reads into a section built by [`from_tap`](Self::from_tap), sorted
-    /// and aggregated exactly as the v4 ones and summed into [`totals`](Self::totals) so the rollup is
-    /// dual-stack. A builder rather than a `from_tap` parameter, so a v4-only caller is untouched. The v6
-    /// drop counters share the v4 ones, so [`truncated`](Self::truncated) already covers both.
+    /// Folds the IPv6 half of the tap reads into a [`from_tap`](Self::from_tap) section, sorted and
+    /// aggregated as the v4 ones and summed into [`totals`](Self::totals) for a dual-stack rollup. A
+    /// builder, so a v4-only caller is untouched.
     ///
     /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while [`flows6`](Self::flows6) is
     /// *replaced*, so a second call leaves the first call's bytes in the rollup with its flows gone.
@@ -361,9 +351,8 @@ pub struct SyscallFootprint {
     pub notable: Vec<NotableSyscall>,
     /// `true` if the cap was hit and events overflowed it.
     pub notable_truncated: bool,
-    /// **Events**, not distinct keys, that overflowed the notable cap: every occurrence counts, so one
-    /// new path opened 1000 times past the cap adds 1000. They are still tallied in
-    /// [`by_kind`](Self::by_kind), whose totals always sum to [`total`](Self::total) exactly, and absent
+    /// **Events**, not distinct keys, that overflowed the notable cap (one new path opened 1000 times past
+    /// the cap adds 1000). Still tallied in [`by_kind`](Self::by_kind) and [`total`](Self::total); absent
     /// only from the [`notable`](Self::notable) sample, so this is exactly what the sample omits.
     pub overflow_events: u64,
 }
@@ -416,10 +405,9 @@ pub struct NotableSyscall {
     pub comm: String,
     /// How many times this exact `(kind, detail)` occurred.
     pub hits: u64,
-    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix** rather
-    /// than the path the guest used. Two consequences: the row names something never opened under that
-    /// name, and distinct paths sharing a prefix alias into one entry, making [`hits`](Self::hits) a count
-    /// of events rather than of one path's opens.
+    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not the
+    /// path the guest used: the row names something never opened under that name, and distinct paths
+    /// sharing a prefix alias into one entry, making [`hits`](Self::hits) a count of events not of opens.
     pub truncated: bool,
 }
 
@@ -486,18 +474,16 @@ impl SyscallFold {
             Syscall::Openat => self.by_kind.openat += 1,
             Syscall::Connect => self.by_kind.connect += 1,
         }
-        // Probe with the borrowed render, so the common repeat path allocates nothing and the owned key is
-        // built only on a vacant under-cap insert. This runs once per streamed ring-buffer event.
+        // Probe with the borrowed render, so the common repeat path allocates nothing and the owned key
+        // is built only on a vacant under-cap insert.
         let detail = ev.detail_display_cow();
         let inner = self.notable.entry(kind).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
             acc.truncated |= ev.detail_truncated();
-            // The smallest `comm` rather than the first to arrive: several processes commonly produce the
-            // same `(kind, detail)`, so a first-arrival choice would make this field vary with
-            // ring-buffer stream order. Below `MAX_NOTABLE` distinct pairs that leaves the whole
-            // footprint order-independent. The compare borrows `comm`; the owned copy is taken only on
-            // the rare replace.
+            // Smallest `comm`, not first to arrive: several processes commonly produce the same
+            // `(kind, detail)`, so first-arrival would make this field vary with stream order. The
+            // compare borrows `comm`; the owned copy is taken only on the rare replace.
             let comm = ev.comm_lossy();
             if comm.as_ref() < acc.comm.as_str() {
                 acc.comm = comm.into_owned();
