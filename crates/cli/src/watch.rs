@@ -26,7 +26,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::audit::RunProbes;
-use crate::trace::{human_bytes, human_duration, printable, proto_name, syscall_name};
+use crate::trace::{human_bytes, human_duration, printable, proto_name};
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
@@ -110,7 +110,7 @@ impl Timeline {
                         at,
                         format!(
                             "{} {} ({})",
-                            syscall_name(n.kind),
+                            n.kind.name(),
                             printable(&n.detail),
                             printable(&n.comm)
                         ),
@@ -487,7 +487,7 @@ fn draw_syscalls(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
             for n in notable.iter().take(room) {
                 lines.push(Line::from(format!(
                     "  {:<8} {} x{}",
-                    syscall_name(n.kind),
+                    n.kind.name(),
                     printable(&n.detail),
                     n.hits
                 )));

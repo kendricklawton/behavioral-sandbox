@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use bsx_probes_loader::{AxisGap, RunRecord, Syscall};
+use bsx_probes_loader::{AxisGap, RunRecord};
 
 /// How many notable host syscalls the trail prints before folding the rest into a count, the
 /// record itself already caps and truncation-flags the full set; this is only about screen space.
@@ -119,7 +119,7 @@ pub fn render(record: &RunRecord) -> String {
         let _ = writeln!(
             out,
             "    {:<8} {} ({}) x{}",
-            syscall_name(n.kind),
+            n.kind.name(),
             printable(&n.detail),
             printable(&n.comm),
             n.hits
@@ -222,14 +222,6 @@ pub(crate) fn proto_name(proto: u8) -> &'static str {
         6 => "tcp",
         17 => "udp",
         _ => "proto?",
-    }
-}
-
-pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
-    match kind {
-        Syscall::Execve => "execve",
-        Syscall::Openat => "openat",
-        Syscall::Connect => "connect",
     }
 }
 

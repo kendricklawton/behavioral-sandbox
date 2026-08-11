@@ -54,6 +54,20 @@ pub enum Syscall {
     Connect = 2,
 }
 
+impl Syscall {
+    /// The short name a trace line, a summary, or the signed record's JSON renders this as. One
+    /// table, so the three surfaces cannot name the same event differently. `no_std`-friendly (all
+    /// string literals).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Syscall::Execve => "execve",
+            Syscall::Openat => "openat",
+            Syscall::Connect => "connect",
+        }
+    }
+}
+
 /// One host syscall observed by the probes, as written into the ring buffer. Fields run
 /// large-to-small so the `#[repr(C)]` layout is padding-free. This is the **host's** footprint: a
 /// microVM services its own syscalls in-guest and they never trap here.
@@ -163,12 +177,7 @@ impl SyscallEvent {
     /// trace line. `no_std`-friendly (all string literals).
     #[must_use]
     pub fn syscall_name(&self) -> &'static str {
-        match self.kind() {
-            Some(Syscall::Execve) => "execve",
-            Some(Syscall::Openat) => "openat",
-            Some(Syscall::Connect) => "connect",
-            None => "?",
-        }
+        self.kind().map_or("?", Syscall::name)
     }
 
     /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
