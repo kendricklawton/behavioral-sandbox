@@ -1,9 +1,10 @@
-//! Test-only helpers shared by the privileged integration-test binaries **across crates**
-//! (`bsx` and `bsx-probes-loader` tests).
+//! Test-only helpers shared by more than one crate's tests: the host-capability predicates, scratch
+//! guards and small filesystems the privileged integration binaries need, and the deterministic
+//! generator the in-gate fuzz suites drive their decoders with.
 //!
 //! Rust compiles each `tests/*.rs` as its own crate, so a helper used by more than one has to live
 //! in a real (dev-)dependency crate rather than be copy-pasted. Never shipped (`publish = false`)
-//! and pure-std, so it stays a leaf both suites can borrow without coupling.
+//! and pure-std, so it stays a leaf every suite can borrow without coupling.
 #![forbid(unsafe_code)]
 // The helpers panic as the idiomatic test assertion, which the workspace's `clippy::panic` deny
 // doesn't auto-exempt outside `#[test]` fns.
@@ -72,6 +73,58 @@ fn serial_requested(args: &[String], env: Option<&str>) -> bool {
     }
     // The flag wins over the environment.
     env.map(str::trim) == Some("1")
+}
+
+/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only has to
+/// spray varied bytes at a decoder reproducibly.
+///
+/// Shared because the crates that fuzz their own decoders in-gate are leaves that will not take a
+/// `proptest`/`arbitrary` tree as a dev-dependency, and this crate's empty `[dependencies]` costs
+/// them nothing. Fixed seeds mean a failure reproduces exactly and the gate never flakes.
+pub struct Rng(u64);
+
+impl Rng {
+    /// Seeds the generator. Forces the state odd, because zero is a fixed point for xorshift.
+    #[must_use]
+    pub fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+
+    /// Draws the next 64-bit value, advancing the state.
+    pub fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// A value in `0..n`, and 0 when `n == 0`, so callers never divide by zero.
+    pub fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// One byte, taken from the high bits, which `xorshift64*` mixes best.
+    pub fn byte(&mut self) -> u8 {
+        (self.next_u64() >> 33) as u8
+    }
+
+    /// `len` random bytes.
+    pub fn bytes(&mut self, len: usize) -> Vec<u8> {
+        (0..len).map(|_| self.byte()).collect()
+    }
+
+    /// A byte vector of a random length in `0..max`, the two draws sequenced so neither borrows
+    /// `self` inside the other's call.
+    pub fn bytes_upto(&mut self, max: usize) -> Vec<u8> {
+        let len = self.below(max);
+        self.bytes(len)
+    }
 }
 
 /// A host scratch dir reclaimed on drop, so a panicking assertion or an early `?` return can't leak
@@ -482,7 +535,45 @@ pub fn process_threads(pid: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CAP_NET_ADMIN, parse_cap_eff, process_threads, serial_requested, workspace_root};
+    use super::{
+        CAP_NET_ADMIN, Rng, parse_cap_eff, process_threads, serial_requested, workspace_root,
+    };
+
+    /// The generator repeats for a seed and never sticks, the two properties the fuzz suites that
+    /// share it rely on.
+    ///
+    /// Reproducibility is the whole reason these suites hand-rolled a PRNG instead of taking
+    /// `proptest`: a failure has to be re-runnable from its seed alone. A state that sticks is the
+    /// silent version of the same loss, a suite drawing one value forever and reporting a pass.
+    #[test]
+    fn the_generator_repeats_for_a_seed_and_never_sticks() {
+        let draws = |seed| {
+            let mut rng = Rng::new(seed);
+            (0..64).map(|_| rng.next_u64()).collect::<Vec<_>>()
+        };
+        assert_eq!(draws(7), draws(7), "the same seed must replay a failure");
+        assert_ne!(
+            draws(7),
+            draws(8),
+            "a different seed must explore elsewhere"
+        );
+
+        // Zero is xorshift's fixed point, so `new` forces the state odd; without that the whole
+        // corpus below would be one value repeated.
+        let zeroed = draws(0);
+        assert!(
+            zeroed.iter().any(|&x| x != zeroed[0]),
+            "a zero seed must still advance"
+        );
+
+        // `below(0)` is the divide-by-zero the callers lean on being handled, since they pass a
+        // collection length.
+        assert_eq!(Rng::new(1).below(0), 0);
+        let mut rng = Rng::new(3);
+        assert!((0..256).all(|_| rng.below(4) < 4), "`below` stays in range");
+        assert_eq!(Rng::new(5).bytes(9).len(), 9);
+        assert!(Rng::new(5).bytes_upto(16).len() <= 16);
+    }
 
     /// The root resolves from **this** crate's manifest dir, not the caller's.
     ///

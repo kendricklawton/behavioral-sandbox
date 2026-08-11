@@ -10,54 +10,13 @@
 //!
 //! **Dependency-free on purpose.** `bsx-channel` is near dependency-free by design and the supply-chain
 //! gate keeps a tight license allowlist, so rather than pull in `proptest`/`arbitrary` (and their
-//! trees) as dev-dependencies, the generator is a tiny deterministic PRNG. Fixed seeds mean a
-//! failure reproduces exactly and the gate never flakes.
+//! trees) as dev-dependencies, the generator is `bsx_test_support::Rng`, a workspace leaf with an
+//! empty `[dependencies]`. Fixed seeds mean a failure reproduces exactly and the gate never flakes.
+//! The alphabet below stays here, because what is worth generating is this wire's question.
+
+use bsx_test_support::Rng;
 
 use super::*;
-
-/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only has
-/// to spray varied bytes at the decoders reproducibly.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        // A zero state is a fixed point for xorshift, so force it non-zero.
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// A value in `0..n` (0 when `n == 0`, so callers never divide by zero).
-    fn below(&mut self, n: usize) -> usize {
-        if n == 0 {
-            0
-        } else {
-            (self.next_u64() % n as u64) as usize
-        }
-    }
-
-    fn byte(&mut self) -> u8 {
-        (self.next_u64() >> 33) as u8
-    }
-
-    fn bytes(&mut self, len: usize) -> Vec<u8> {
-        (0..len).map(|_| self.byte()).collect()
-    }
-
-    /// A byte vector of a random length in `0..max`, the two draws are sequenced so neither borrows
-    /// `self` inside the other's call.
-    fn bytes_upto(&mut self, max: usize) -> Vec<u8> {
-        let len = self.below(max);
-        self.bytes(len)
-    }
-}
 
 /// Valid-UTF-8 alphabet with multibyte, control, and NUL chars, so generated strings exercise the
 /// `String::from_utf8` and length-prefix paths without ever being invalid by construction.

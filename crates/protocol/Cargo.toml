@@ -16,6 +16,12 @@ description = "The agent wire protocol: the versioned newline-JSON contract the 
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# The deterministic generator the in-gate fuzz tests drive the reader with, shared rather than
+# copied. A dev-dep, so the leaf stays serde-only for anyone linking it, and a workspace leaf with
+# an empty `[dependencies]`, so it pulls nothing into the supply-chain gate.
+[dev-dependencies]
+bsx-test-support = { path = "../test-support" }
+
 # Off by default. Exposes the internal line reader + schema-gated decoder (module `fuzz`) so the
 # `cargo fuzz` target in `fuzz/` can drive the daemon's untrusted-client parse path directly; never
 # enabled in the normal build.
