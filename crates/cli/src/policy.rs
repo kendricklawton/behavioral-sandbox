@@ -13,7 +13,6 @@
 //! **typed refusal** rather than a silent clamp back to the maximum.
 
 use std::fmt;
-use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,22 +77,8 @@ pub fn parse_allow(s: &str) -> Result<AllowRule, String> {
         }
         None => (head, None),
     };
-    let cidr = match addr_cidr.split_once('/') {
-        Some((ip, prefix)) => {
-            let ip: Ipv4Addr = ip
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address {ip:?} in --allow {s:?}"))?;
-            let prefix: u8 = prefix
-                .parse()
-                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in --allow {s:?}"))?;
-            Ipv4Cidr::new(ip, prefix).map_err(|e| format!("--allow {s:?}: {e}"))?
-        }
-        None => Ipv4Cidr::host(
-            addr_cidr
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address {addr_cidr:?} in --allow {s:?}"))?,
-        ),
-    };
+    // The whole rule is the locus, not the address slice, so a refusal quotes what the operator typed.
+    let cidr = crate::config::parse_v4_cidr(addr_cidr, &format!("--allow {s:?}"))?;
     Ok(AllowRule { cidr, port, proto })
 }
 

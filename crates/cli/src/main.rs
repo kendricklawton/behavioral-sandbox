@@ -1324,6 +1324,20 @@ mod tests {
     }
 
     #[test]
+    fn an_allow_refusal_quotes_the_whole_rule_not_the_address_slice() {
+        // `--allow` shares the config file's CIDR parser, which is handed only the address slice.
+        // The locus travels separately for this reason: quoting the slice would send the reader
+        // looking for `"1.1.1.1/33"` in a line where they wrote the port and protocol too.
+        for rule in ["1.1.1.1/33:443/tcp", "999.1.1.1:80", "1.1.1.1/x:80/udp"] {
+            let err = parse_allow(rule).expect_err("malformed");
+            assert!(
+                err.contains(&format!("--allow {rule:?}")),
+                "the refusal quotes the whole rule: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn build_egress_denies_by_default_and_caps_the_rule_count() {
         // No rules is still a policy, deny-everything.
         assert!(build_egress(&[]).expect("empty is valid").is_deny_all());

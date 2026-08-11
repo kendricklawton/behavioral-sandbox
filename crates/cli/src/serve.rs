@@ -218,9 +218,9 @@ enum MaxEgress {
 fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
     let addr = s.split_once('/').map_or(s, |(a, _)| a);
     if addr.contains(':') {
-        crate::config::parse_v6_cidr(s, "--max-egress").map(MaxEgress::V6)
+        crate::config::parse_v6_cidr(s, &format!("--max-egress entry {s:?}")).map(MaxEgress::V6)
     } else {
-        crate::config::parse_v4_cidr(s, "--max-egress").map(MaxEgress::V4)
+        crate::config::parse_v4_cidr(s, &format!("--max-egress entry {s:?}")).map(MaxEgress::V4)
     }
 }
 
