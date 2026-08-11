@@ -26,7 +26,7 @@ Three pieces of framing are load-bearing, and a naive client hangs on each:
 Two bounds exist specifically because the VMM is the thing the jail assumes may be compromised. A
 response body is refused past 1 MiB **before** anything is allocated, and the reader is clamped
 before any line is read, since `read_line` grows without limit on a stream that never sends a
-newline. And `DeadlineReader` re-arms the socket timeout to the *remaining* budget before each read
+newline. And `DeadlineStream` re-arms the socket timeout to the *remaining* budget before each read
 rather than trusting `SO_RCVTIMEO`, which every arriving byte resets: a peer dripping one byte just
 inside the timeout would otherwise hold a call open indefinitely. The test
 `a_drip_feeding_peer_trips_the_whole_response_deadline` feeds a byte every 20 ms forever against a
