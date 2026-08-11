@@ -7,6 +7,7 @@ use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
 use bsx_probes_common::SyscallEvent;
 
+use crate::maps::remove_cgroup_key;
 use crate::meter::TARGET_PRESENT;
 use crate::{ProbeError, check_support, load_object};
 
@@ -294,24 +295,18 @@ impl SyscallTracer {
     }
 
     /// Unregisters `cgroup_id`, so the tracepoints stop emitting its events. Removing a cgroup that was never
-    /// a target is a no-op, not an error (idempotent teardown, like the meter's).
+    /// a target is a no-op, not an error; `maps::remove_cgroup_key` holds which failures it
+    /// swallows and which it surfaces.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other than the
     /// key being absent.
     pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        match self.trace_targets()?.remove(&cgroup_id) {
-            Ok(()) => Ok(()),
-            // Absent key (ENOENT): already gone, so a no-op is intended, don't fail teardown on it.
-            Err(aya::maps::MapError::SyscallError(e))
-                if e.io_error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Ok(())
-            }
-            Err(e) => Err(ProbeError::Map(format!(
-                "unregister cgroup {cgroup_id} from tracing: {e}"
-            ))),
-        }
+        remove_cgroup_key(
+            &mut self.trace_targets()?,
+            cgroup_id,
+            &format!("unregister cgroup {cgroup_id} from tracing"),
+        )
     }
 
     /// Write the filter-mode toggle: `true` = the [`TRACE_TARGETS_MAP`] set, `false` = the single

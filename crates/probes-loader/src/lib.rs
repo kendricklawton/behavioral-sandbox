@@ -58,6 +58,9 @@ pub use bsx_probes_common::{
 /// The egress policy and its address types: what an `--allow` string parses into, before any map
 /// is touched. No aya, so the policy vocabulary is unit-tested and fuzzed host-safe.
 mod egress;
+/// The per-cgroup map removal shared by every teardown path, and the one clause deciding which
+/// failure it swallows.
+mod maps;
 /// Per-sandbox resource accounting: the shared `sched_switch` CPU meter and the cgroup v2 counters
 /// read alongside it.
 mod meter;
