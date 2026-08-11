@@ -11,31 +11,18 @@
 
 use std::process::Command;
 
-use bsx_probes_loader::{ExecveCounter, check_support, object_path};
+use bsx_probes_loader::ExecveCounter;
 
-/// Whether this host can actually load the probe, as a skip reason (`Some`) when it can't, so each
-/// test prints *why* it skipped. Capability-aware: `check_support` passes under
-/// `CAP_BPF`+`CAP_PERFMON`, not just full root, and names the missing BTF/caps legibly; the
-/// built object is the remaining prerequisite.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    None
-}
+mod common;
+
+use common::probe_skip_reason;
 
 #[test]
 #[ignore = "needs /dev/kvm-class privilege (CAP_BPF/root) + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn execve_counter_counts_host_execve_events() {
     // Load + attach the tracepoint, read its per-CPU map, and prove the counter tracks the
     // host's `execve`s, spawn N processes and assert the total rose by at least N.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping execve_counter_counts_host_execve_events: {why}");
         return;
     }
@@ -76,7 +63,7 @@ fn counter_drops_without_pinned_residue() {
     // program alive (kept enumerable by `loaded_programs`), so the resident count returning to baseline
     // catches a leaked program *or* a leaked link. (The pin check alone can't: nothing here ever pins,
     // and a fresh load would succeed even with a leak, since a tracepoint takes many attachments.)
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping counter_drops_without_pinned_residue: {why}");
         return;
     }

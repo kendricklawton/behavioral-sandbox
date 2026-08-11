@@ -15,22 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use bsx_probes_loader::{Syscall, SyscallTracer, cgroup_id_of_self, check_support, object_path};
+use bsx_probes_loader::{Syscall, SyscallTracer, cgroup_id_of_self};
 
-/// Why this host can't load the probe (a skip reason), or `None` when it can, so each test prints
-/// *why* it skipped. Same gate the counter tests use.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    None
-}
+mod common;
+
+use common::probe_skip_reason;
 
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
@@ -38,7 +27,7 @@ fn tracer_captures_this_process_openat_with_its_path() {
     // The ring buffer carries per-event data, not just a count. Filter to our own pid, do an
     // `openat` of a unique (nonexistent) path, and assert that exact event streams back, the path
     // proves the per-event payload, and every captured event being our pid proves the filter.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping tracer_captures_this_process_openat_with_its_path: {why}");
         return;
     }
@@ -83,7 +72,7 @@ fn an_over_long_path_is_captured_as_truncated_not_as_a_shorter_path() {
     // more", which is only correct if `bpf_probe_read_user_str` fills the buffer and reports
     // `DETAIL_CAP - 1`. If that reasoning is wrong the flag silently never fires and every
     // host-safe test still passes, so this is the assertion the rest of them rest on.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!(
             "skipping an_over_long_path_is_captured_as_truncated_not_as_a_shorter_path: {why}"
         );
@@ -146,7 +135,7 @@ fn filter_hides_other_pids_then_watch_all_reveals_a_child_execve() {
     // A pid filter drops a child's events; clearing it reveals them. Spawn `/bin/true` (one
     // execve, in a child with a different tgid) under our-pid filter → not seen; then `watch_all` and
     // spawn again → its execve is seen. Proves the filter both excludes and, cleared, includes.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping filter_hides_other_pids_then_watch_all_reveals_a_child_execve: {why}");
         return;
     }
@@ -196,7 +185,7 @@ fn filter_hides_other_pids_then_watch_all_reveals_a_child_execve() {
 fn tracer_captures_a_connect_sockaddr() {
     // The connect program copies the leading sockaddr bytes. Connect (refused is fine) to a
     // known 127.0.0.1 address and assert the captured detail decodes to that IPv4 address.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping tracer_captures_a_connect_sockaddr: {why}");
         return;
     }
@@ -237,7 +226,7 @@ fn attributes_events_to_this_process_cgroup() {
     // `cgroup_id_of_self` (the inode of our cgroup dir) must equal the `bpf_get_current_cgroup_id`
     // the programs stamp on our events, the whole attribution bridge. Watch that cgroup and prove our
     // own openat comes back carrying it; an empty capture would mean the two ids disagree on this host.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping attributes_events_to_this_process_cgroup: {why}");
         return;
     }
@@ -286,7 +275,7 @@ fn a_workload_child_shows_up_attributed_to_its_cgroup() {
     // the sandbox-attribution axis. The child inherits our cgroup, so watching that id captures
     // the whole process tree (us + the workload) the way `watch_cgroup(vmm_cgroup)` captures a
     // sandbox's host footprint.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping a_workload_child_shows_up_attributed_to_its_cgroup: {why}");
         return;
     }
@@ -346,7 +335,7 @@ fn stream_delivers_a_live_trace_over_a_window() {
     // `stream` must deliver events live and stop on the predicate. Filter to us, keep opening a
     // file from a background thread (same pid, so it passes the filter), stream for a short window, and
     // assert the callback saw events and the returned count matches.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping stream_delivers_a_live_trace_over_a_window: {why}");
         return;
     }

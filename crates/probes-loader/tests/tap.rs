@@ -10,22 +10,11 @@
 
 use std::process::Command;
 
-use bsx_probes_loader::{ProbeError, TapMonitor, check_support, object_path};
+use bsx_probes_loader::{ProbeError, TapMonitor};
 
-/// Why this host can't load the probe (a skip reason), or `None` when it can, so the test prints
-/// *why* it skipped. Same gate the tracer/counter tests use.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    None
-}
+mod common;
+
+use common::probe_skip_reason;
 
 #[test]
 #[ignore = "needs CAP_BPF+CAP_NET_ADMIN/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
@@ -33,7 +22,7 @@ fn attaches_to_a_tap_and_reads_the_flow_map() {
     // Attach the two clsact classifiers to a real ethernet device (a tap, exactly what a VM
     // uses) and read the per-flow map back. Freshly attached on an idle tap it is empty, the point
     // here is that the qdisc-add + ingress/egress attach + map-open path works end to end.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping attaches_to_a_tap_and_reads_the_flow_map: {why}");
         return;
     }

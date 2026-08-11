@@ -26,25 +26,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bsx_client::{Client, OpenParams};
-
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Why this host can't run the demo (a skip reason), or `None` when it can.
-fn skip_reason() -> Option<String> {
-    if !std::path::Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
-}
+use bsx_test_support::{vm_skip_reason, workspace_root};
 
 /// A run result reduced to the three fields both faces render, the golden comparison surface.
 #[derive(Debug, PartialEq, Eq)]
@@ -216,7 +198,7 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
     // and calling the record complete would corrupt the record), so this one errno has to stay
     // the "no stdin" case a terminal already is. Closing fd 0 needs a shell: `Stdio::null()` opens
     // /dev/null, which is a perfectly readable fd and would not exercise this at all.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping a_closed_stdin_is_no_stdin_not_a_failed_run: {why}");
         return;
     }
@@ -245,7 +227,7 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
 #[test]
 #[ignore = "spawns bsx + bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping the_cli_and_the_daemon_render_a_run_identically: {why}");
         return;
     }

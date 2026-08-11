@@ -23,27 +23,16 @@ use bsx_probes_common::{
     ETH_HLEN, ETH_P_ARP, ETH_P_IP, FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FlowKey, IPPROTO_TCP,
     IPPROTO_UDP, MAX_POLICY_RULES, POLICY_RULE_SIZE, PolicyRule, egress_allowed, parse_ipv4_5tuple,
 };
-use bsx_probes_loader::{EgressPolicy, Protocol, check_support, object_path};
+use bsx_probes_loader::{EgressPolicy, Protocol, object_path};
+
+mod common;
+
+use common::probe_skip_reason;
 
 /// `TC_ACT_OK`: the classifier accepted the frame.
 const TC_ACT_OK: u32 = 0;
 /// `TC_ACT_SHOT`: the classifier dropped it.
 const TC_ACT_SHOT: u32 = 2;
-
-/// Why this host can't run these (a skip reason), or `None` when it can. Deliberately shorter than
-/// the other probe tests' guard: no `/dev/kvm`, no rootfs, no `CAP_NET_ADMIN`.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    None
-}
 
 /// Load the object and load (not attach) one classifier by name, ready for `test_run`.
 fn load_classifier(name: &str) -> Ebpf {
@@ -198,7 +187,7 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
 #[test]
 #[ignore = "loads an eBPF program; needs real root + BTF (run via `cargo xtask ci-privileged`)"]
 fn the_kernels_frame_parse_agrees_with_the_host_twin() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping the_kernels_frame_parse_agrees_with_the_host_twin: {why}");
         return;
     }
@@ -242,7 +231,7 @@ fn the_kernels_frame_parse_agrees_with_the_host_twin() {
 #[test]
 #[ignore = "loads an eBPF program; needs real root + BTF (run via `cargo xtask ci-privileged`)"]
 fn the_kernels_egress_verdict_agrees_with_the_host_twin() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping the_kernels_egress_verdict_agrees_with_the_host_twin: {why}");
         return;
     }
@@ -275,7 +264,7 @@ fn the_kernels_egress_verdict_agrees_with_the_host_twin() {
 #[test]
 #[ignore = "loads an eBPF program; needs real root + BTF (run via `cargo xtask ci-privileged`)"]
 fn observe_only_passes_every_frame_enforcement_would_drop() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_skip_reason() {
         eprintln!("skipping observe_only_passes_every_frame_enforcement_would_drop: {why}");
         return;
     }
