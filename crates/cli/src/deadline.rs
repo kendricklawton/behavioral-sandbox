@@ -4,8 +4,9 @@
 //!   every byte, so a per-read timeout alone lets a peer sending one byte just inside the interval
 //!   stretch a single message indefinitely while holding the thread that reads it. Shrinking the
 //!   socket timeout to the time left before one absolute deadline makes the sum of all reads honor
-//!   one wall clock. The VMM's Firecracker socket has its own private copy of this discipline
-//!   (`bsx-engine`'s `DeadlineReader`); an xtask test pins the two to the same invariant.
+//!   one wall clock. `bsx-engine` holds its own copies of this discipline and cannot share this type
+//!   across the crate boundary, so `every_deadline_bounded_socket_refuses_a_spent_budget` pins each
+//!   copy to the same invariant.
 
 use std::io::Read;
 use std::net::TcpStream;
