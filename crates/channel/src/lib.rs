@@ -680,6 +680,23 @@ mod fuzz_tests;
 mod tests {
     use super::*;
 
+    /// A `Write` that records whether any nonempty buffer was ever handed to it, so a test can pin
+    /// that an over-cap encode refuses *before* a byte reaches the stream.
+    #[derive(Default)]
+    struct ProbeWriter {
+        touched: bool,
+    }
+
+    impl Write for ProbeWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.touched |= !buf.is_empty();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn handshake_round_trips() {
         let mut buf = Vec::new();
@@ -1091,5 +1108,69 @@ mod tests {
         let other = ChannelError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
         assert!(!other.is_disconnect());
         assert!(!ChannelError::Protocol("x".into()).is_disconnect());
+    }
+
+    #[test]
+    fn an_over_cap_encode_refuses_before_any_byte_reaches_the_stream() {
+        // The write-side cap is checked before a byte is written; the engine's send-recovery relies
+        // on it (`send_was_disconnect` reads a `PayloadTooLarge` as "wrote nothing to the socket" and
+        // skips the recovery `recv_response` that would otherwise park for the read timeout). Pin it
+        // at every over-cap-capable site. Stdout/Stderr/Error carry no pre-build check, so
+        // `write_frame`'s cap is their only one and a reordered check bites here; File/PutFile/Exec
+        // are additionally pre-checked before their (secret-bearing) payload is even built.
+        fn refuse_untouched(label: &str, sent: Result<(), ChannelError>, touched: bool) {
+            assert!(
+                matches!(sent, Err(ChannelError::PayloadTooLarge { .. })),
+                "{label}: expected PayloadTooLarge, got {sent:?}"
+            );
+            assert!(
+                !touched,
+                "{label}: an over-cap encode wrote a byte before refusing"
+            );
+        }
+
+        let over = MAX_PAYLOAD + 1;
+        let big = "x".repeat(over);
+
+        // Stdout/Stderr/Error: `write_frame`'s cap is the only one, so an over-cap payload alone
+        // trips it.
+        for (label, resp) in [
+            ("Stdout", Response::Stdout(vec![0u8; over])),
+            ("Stderr", Response::Stderr(vec![0u8; over])),
+            ("Error", Response::Error(big.clone())),
+        ] {
+            let mut probe = ProbeWriter::default();
+            let sent = write_response(&mut probe, &resp);
+            refuse_untouched(label, sent, probe.touched);
+        }
+
+        // File/PutFile/Exec: pre-checked before the payload is built, so a payload at the cap plus
+        // its blob framing is over it.
+        let payload = vec![0u8; MAX_PAYLOAD];
+
+        let mut probe = ProbeWriter::default();
+        let sent = write_response(
+            &mut probe,
+            &Response::File {
+                path: "a".into(),
+                data: payload.clone(),
+            },
+        );
+        refuse_untouched("File", sent, probe.touched);
+
+        let mut probe = ProbeWriter::default();
+        let sent = write_put_file(&mut probe, "a", &payload);
+        refuse_untouched("PutFile", sent, probe.touched);
+
+        let mut probe = ProbeWriter::default();
+        let sent = write_exec(
+            &mut probe,
+            std::slice::from_ref(&big),
+            b"",
+            &[] as &[(String, String)],
+            &[] as &[String],
+            None,
+        );
+        refuse_untouched("Exec", sent, probe.touched);
     }
 }
