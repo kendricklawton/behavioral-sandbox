@@ -523,21 +523,6 @@ mod tests {
         );
     }
 
-    /// This process's thread count, the axis the boot soak's leak check asserts on.
-    fn process_threads() -> usize {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find(|l| l.starts_with("Threads:"))?
-                    .split_whitespace()
-                    .nth(1)?
-                    .parse()
-                    .ok()
-            })
-            .unwrap_or(0)
-    }
-
     #[test]
     fn a_refused_dial_keeps_its_errno_and_a_wedged_peer_times_out() {
         use nix::sys::socket::{
@@ -599,16 +584,17 @@ mod tests {
         // The backlog is full here, so each of these dials is that case. A few threads of drift
         // from the parallel test harness are tolerable; sixteen are the bug.
         const WEDGED_DIALS: usize = 16;
-        let threads_before = process_threads();
+        let threads_before = bsx_test_support::process_threads(std::process::id());
         for _ in 0..WEDGED_DIALS {
             assert!(
                 connect_with_timeout(&wedged, Duration::from_millis(20)).is_err(),
                 "the backlog is full; every further dial must time out"
             );
         }
-        let grew = process_threads().saturating_sub(threads_before);
+        let grew =
+            bsx_test_support::process_threads(std::process::id()).saturating_sub(threads_before);
         assert!(
-            grew < WEDGED_DIALS / 2,
+            grew < (WEDGED_DIALS / 2) as u64,
             "timed-out dials stranded {grew} threads (of {WEDGED_DIALS} dials): a wedged peer \
              must cost no threads"
         );
