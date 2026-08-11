@@ -1182,6 +1182,37 @@ mod tests {
         );
     }
 
+    /// `unescape_octal` exists twice, byte-identical, and **cannot be shared**: the parser it
+    /// belongs to (`mountinfo::mounts`) is `pub(crate)`, and `confinement.rs` compiles as a foreign
+    /// crate, so reaching it would put a `/proc` parser on `bsx-engine`'s pinned public API for a
+    /// test's convenience.
+    ///
+    /// The kernel writes a mount point's space, tab, newline and backslash as octal escapes, and
+    /// `BSX_SCRATCH_DIR` is operator-supplied, so a scratch base with a space in it is legal. A copy
+    /// that compares the raw field matches nothing: a crashed run's binds stay attached, the
+    /// following `remove_dir_all` fails `EBUSY`, and the leaked mount goes on answering every later
+    /// test's mountinfo scan.
+    #[test]
+    fn the_mountinfo_escape_decode_is_the_same_in_the_engine_and_its_confinement_test() {
+        let repo = workspace_root();
+        let engine = std::fs::read_to_string(repo.join("crates/engine/src/mountinfo.rs"))
+            .expect("crates/engine/src/mountinfo.rs");
+        let test = std::fs::read_to_string(repo.join("crates/engine/tests/confinement.rs"))
+            .expect("crates/engine/tests/confinement.rs");
+        assert_eq!(
+            fn_body(&engine, "unescape_octal"),
+            fn_body(&test, "unescape_octal"),
+            "the two `unescape_octal` copies have drifted; the parser they belong to is \
+             `pub(crate)` and the test is a foreign crate, so they must stay identical by hand"
+        );
+        // The decoder existing is not the property; the cleanup routing its mount points through it
+        // is. Reverting that call leaves the function behind and the comparison raw again.
+        assert!(
+            fn_body(&test, "detach_mounts_under").contains("unescape_octal"),
+            "confinement.rs's `detach_mounts_under` must decode a mount point before comparing it"
+        );
+    }
+
     /// Every resolution of a `/proc/<pid>/cgroup` `0::` line must refuse the **root** cgroup.
     ///
     /// A registered cgroup matches every process whose `bpf_get_current_cgroup_id` equals it, so the
