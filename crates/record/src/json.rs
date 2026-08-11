@@ -347,11 +347,7 @@ pub(crate) fn proto_name(out: &mut String, proto: u8) {
 }
 
 pub(crate) fn syscall_name(out: &mut String, kind: Syscall) {
-    out.push_str(match kind {
-        Syscall::Execve => "execve",
-        Syscall::Openat => "openat",
-        Syscall::Connect => "connect",
-    });
+    out.push_str(kind.name());
 }
 
 /// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value, the
