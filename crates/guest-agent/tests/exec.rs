@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::num::NonZeroU32;
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -163,6 +164,55 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
         std::env::var_os(key).is_none(),
         "the agent process's own environment must stay untouched"
     );
+}
+
+/// A bare program reachable only through the **injected** `PATH` runs, rather than being refused by
+/// the up-front reachability check.
+///
+/// The check exists so "no such binary" stays a typed error instead of the trampoline's shell-style
+/// 127, which means it has to read the `PATH` the spawn will: both spawn paths resolve the program
+/// against the injected environment. The value here *adds* to the real `PATH` rather than replacing
+/// it, so nothing is taken away and the one directory it contributes is the whole difference.
+#[test]
+fn a_program_on_the_injected_path_runs_rather_than_being_refused() {
+    let scratch = bsx_test_support::ScratchDir::created("agent-injected-path");
+    let bin = scratch.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let tool = bin.join("bsx-probe-tool");
+    std::fs::write(&tool, "#!/bin/sh\nprintf 'ran-from-injected-PATH'\n").expect("write the tool");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let injected = format!("{}:{inherited}", bin.display());
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["bsx-probe-tool".into()],
+            stdin: Vec::new(),
+            env: vec![("PATH".to_string(), injected)],
+            artifacts: Vec::new(),
+            timeout_ms: NonZeroU32::new(30_000),
+        })
+        .expect("send request");
+
+    let mut out = Vec::new();
+    let result = loop {
+        match client.recv_response().expect("read response") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::Exit { code } => break Ok(code),
+            Response::Error(msg) => break Err(msg),
+            other => panic!("unexpected response frame: {other:?}"),
+        }
+    };
+    assert_eq!(
+        result,
+        Ok(0),
+        "the command must run, not be refused up front"
+    );
+    assert_eq!(out, b"ran-from-injected-PATH");
+    let _ = agent.join();
 }
 
 #[test]
