@@ -223,15 +223,7 @@ impl Spawned {
         // Firecracker with the driver's own privilege, so the tap needs no per-uid owner. A failed
         // create reclaims its own half-built netns; we still own the workdir, so reclaim it.
         let tap = if config.enable_network {
-            match Tap::create(&workdir_name(&workdir), None) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    // A failed create best-effort-deletes its own netns, but if that delete failed
-                    // the netns lingers, so gate the dir removal on it (never strand a dir-less netns).
-                    reclaim_scratch_after_tap_failure(&workdir);
-                    return Err(e);
-                }
-            }
+            Some(create_tap_or_reclaim(&workdir, None)?)
         } else {
             None
         };
@@ -346,15 +338,7 @@ impl Spawned {
         // unprivileged (no `CAP_NET_ADMIN`) and can only attach a tap it owns. A failed create reclaims
         // its own netns; we still own the workdir.
         let tap = if networked {
-            match Tap::create(&id, Some((uid, gid))) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    // Gate the dir removal on the netns actually being gone (a failed create's own
-                    // best-effort delete may have failed), so a dir-less netns is never stranded.
-                    reclaim_scratch_after_tap_failure(&workdir);
-                    return Err(e);
-                }
-            }
+            Some(create_tap_or_reclaim(&workdir, Some((uid, gid)))?)
         } else {
             None
         };
@@ -878,6 +862,19 @@ impl Spawned {
 /// pipe, which back-pressures a chatty VMM or feeds it EPIPE when dropped), `abort` reads it back for
 /// diagnostics. On a spawn/console failure the child (if any) is reaped so nothing leaks; the caller
 /// owns `workdir` cleanup.
+/// Create this VM's per-VM netns and tap, named after the scratch dir, reclaiming the dir if the
+/// create fails. `owner` is the jailed uid/gid when Firecracker will run unprivileged and can only
+/// attach a tap it owns, `None` when it runs with the driver's own privilege.
+///
+/// The reclaim is gated on the netns actually being gone, so a failed create never strands a
+/// dir-less netns; [`reclaim_scratch_after_tap_failure`] holds that rule. The caller keeps its own
+/// "is this VM networked" condition, which differs at each site.
+fn create_tap_or_reclaim(workdir: &Path, owner: Option<(u32, u32)>) -> Result<Tap, VmmError> {
+    Tap::create(&workdir_name(workdir), owner).inspect_err(|_| {
+        reclaim_scratch_after_tap_failure(workdir);
+    })
+}
+
 fn spawn_fc(
     firecracker: &Path,
     workdir: &Path,
