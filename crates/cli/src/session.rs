@@ -18,13 +18,14 @@
 //! survives it, while an **infra or transport** fault means the VM is gone, so the session ends and its VM
 //! drops. Losing the whole daemon process can't leak a VM either, since the lifetime sentinel owns that.
 
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use crate::audit::RunProbes;
+use crate::deadline::DeadlineStream;
 use crate::policy::{Policy, Requested, parse_allow};
 use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
 use bsx_engine::{MAX_VCPUS, vcpus_supported};
@@ -63,7 +64,11 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // pin a session thread plus a `--max-sessions` slot. The write half stays a plain socket timeout,
     // since an `exec` reply can be megabytes against a small socket buffer and a client that never reads
     // would park the thread in `write_all`. Best-effort on the sockopts.
-    let mut reader = BufReader::new(DeadlineStream::new(stream, server.idle_timeout));
+    let mut reader = BufReader::new(DeadlineStream::new(
+        stream,
+        server.idle_timeout,
+        IDLE_DEADLINE_MSG,
+    ));
     if let Some(idle) = server.idle_timeout {
         let _ = writer.set_write_timeout(Some(idle));
     }
@@ -970,7 +975,7 @@ fn exec_watching_for_cancel(
     stdin: &str,
     env: &[(String, String)],
     socket: &UnixStream,
-    reader: &BufReader<DeadlineStream>,
+    reader: &BufReader<DeadlineStream<UnixStream>>,
 ) -> (Result<bsx_engine::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
@@ -1060,56 +1065,8 @@ fn wire_kind(kind: ErrorKind) -> FaultKind {
     }
 }
 
-/// The session's read half, bounded by one **absolute deadline per message** instead of a bare
-/// socket timeout. `SO_RCVTIMEO` is re-armed by the OS on every byte, so a per-read timeout alone
-/// lets a slow-drip client (one byte just inside the interval) stretch a single 4 MiB line
-/// indefinitely while holding a session thread and a `--max-sessions` slot; with this wrapper the
-/// whole message must complete within one idle budget of its first-awaited byte, the same
-/// discipline as the metrics endpoint's `read_request_head` and the VMM's `DeadlineReader`. A
-/// `None` budget (idle timeout disabled) reads plain, today's opt-out.
-struct DeadlineStream {
-    stream: UnixStream,
-    /// The per-message budget; [`rearm`](Self::rearm) restarts the clock for the next message.
-    budget: Option<Duration>,
-    /// When the in-flight message must be complete.
-    deadline: Option<Instant>,
-}
-
-impl DeadlineStream {
-    fn new(stream: UnixStream, budget: Option<Duration>) -> Self {
-        let mut s = Self {
-            stream,
-            budget,
-            deadline: None,
-        };
-        s.rearm();
-        s
-    }
-
-    /// Start the next message's budget clock (a no-op when the idle timeout is disabled).
-    fn rearm(&mut self) {
-        self.deadline = self.budget.map(|b| Instant::now() + b);
-    }
-}
-
-impl Read for DeadlineStream {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if let Some(deadline) = self.deadline {
-            // Shrink the socket timeout to the time left, so the sum of all reads honors one wall
-            // clock; a spent budget is the timeout itself. The sockopt stays best-effort (a refusing
-            // platform still gets the spent-budget check on every read return).
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "session message exceeded the idle deadline",
-                ));
-            }
-            let _ = self.stream.set_read_timeout(Some(remaining));
-        }
-        self.stream.read(buf)
-    }
-}
+/// What a blown per-message idle deadline reads as, on the shared [`DeadlineStream`].
+const IDLE_DEADLINE_MSG: &str = "session message exceeded the idle deadline";
 
 /// A [`Duration`] as whole milliseconds, saturating (a run never realistically overflows `u64` ms).
 fn ms(d: Duration) -> u64 {
@@ -1538,7 +1495,11 @@ mod tests {
         // the drip happens before any `open` completes.
         let (client, server_end) = UnixStream::pair().expect("socketpair");
         let budget = Duration::from_millis(200);
-        let mut reader = BufReader::new(DeadlineStream::new(server_end, Some(budget)));
+        let mut reader = BufReader::new(DeadlineStream::new(
+            server_end,
+            Some(budget),
+            IDLE_DEADLINE_MSG,
+        ));
 
         let dripper = std::thread::spawn(move || {
             use std::io::Write;
@@ -1582,7 +1543,7 @@ mod tests {
         let peer = server_end
             .try_clone()
             .expect("the second handle `serve` peeks on");
-        let mut reader = BufReader::new(DeadlineStream::new(server_end, None));
+        let mut reader = BufReader::new(DeadlineStream::new(server_end, None, IDLE_DEADLINE_MSG));
 
         let mut both = Vec::new();
         write_request(
@@ -1623,6 +1584,7 @@ mod tests {
         let mut reader = BufReader::new(DeadlineStream::new(
             server_end,
             Some(Duration::from_millis(200)),
+            IDLE_DEADLINE_MSG,
         ));
 
         let sender = std::thread::spawn(move || {

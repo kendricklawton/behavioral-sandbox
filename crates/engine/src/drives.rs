@@ -272,10 +272,14 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
 }
 
 /// Byte offset of the ext4 superblock, and the fields inside it this check reads. Named rather than
-/// spelled inline so the one place that duplicates on-disk layout says which four values it needs.
+/// spelled inline so the one place that duplicates on-disk layout says which values it needs.
 const SUPERBLOCK_OFFSET: u64 = 1024;
 const SUPERBLOCK_LEN: usize = 1024;
 const SB_BLOCKS_COUNT_LO: usize = 0x04;
+/// The high 32 bits of the block count. `ext4-view` folds it with the low dword into one `u64`
+/// (`u64_from_hilo`) and sizes its block-group descriptor table from the result, so a bound that
+/// read only the low dword let a small low value with a set high dword name billions of blocks.
+const SB_BLOCKS_COUNT_HI: usize = 0x150;
 const SB_BLOCKS_PER_GROUP: usize = 0x20;
 const SB_INODES_PER_GROUP: usize = 0x28;
 const SB_MAGIC: usize = 0x38;
@@ -294,9 +298,10 @@ const MIN_BLOCK_SIZE: u64 = 1024;
 /// unwinding, which takes the driver and every sandbox sharing it down, so it has to be refused
 /// before it is attempted rather than caught after.
 ///
-/// A bound, not a parse: it reads four fields and compares them against one fact the parser does not
-/// have. Anything that is not an ext4 superblock is passed straight through, so the parser stays the
-/// authority on what a valid image is and this never invents a second opinion about it.
+/// A bound, not a parse: it reads the geometry fields (the 64-bit block count and the group sizes)
+/// and compares them against one fact the parser does not have. Anything that is not an ext4
+/// superblock is passed straight through, so the parser stays the authority on what a valid image is
+/// and this never invents a second opinion about it.
 fn refuse_impossible_geometry(image: &Path) -> Result<(), VmmError> {
     let len = std::fs::metadata(image)
         .map_err(|e| VmmError::Vmm(format!("stat the output image {}: {e}", image.display())))?
@@ -332,8 +337,11 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
     }
     // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a lower
     // bound on the claim's real size, so a legitimate image (whose blocks are that size or larger)
-    // always passes.
-    let claimed = le32(SB_BLOCKS_COUNT_LO).saturating_mul(MIN_BLOCK_SIZE);
+    // always passes. The count is the full 64 bits the parser reads: a small low dword with the high
+    // dword set names billions of blocks, which is the geometry a fuzz OOM found the low-only bound
+    // waving through.
+    let blocks_count = (le32(SB_BLOCKS_COUNT_HI) << 32) | le32(SB_BLOCKS_COUNT_LO);
+    let claimed = blocks_count.saturating_mul(MIN_BLOCK_SIZE);
     if claimed > image_len {
         return Err(format!(
             "corrupt superblock: claims at least {claimed} bytes of filesystem in a {image_len}-byte image"
@@ -1052,6 +1060,18 @@ mod tests {
         assert!(
             superblock_admits_parsing(&big, 1 << 20).is_err(),
             "a MiB of blocks cannot live in a MiB of file"
+        );
+
+        // The block count is 64 bits. `sb` above keeps a small, honest low dword (256 blocks) that a
+        // low-only bound waved through; setting the high dword makes the true count over four billion
+        // blocks, which ext4-view folds in (`u64_from_hilo`) before sizing its descriptor table. This
+        // is the field a `cargo xtask fuzz output_image` OOM found the low-only check missing: the
+        // parser asked for tens of gigabytes in one `Vec::with_capacity` and the process aborted.
+        let mut hi = sb;
+        hi[SB_BLOCKS_COUNT_HI..][..4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            superblock_admits_parsing(&hi, 1 << 20).is_err(),
+            "a set high dword names >4 billion blocks no MiB image can hold"
         );
     }
 

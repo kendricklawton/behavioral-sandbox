@@ -10,6 +10,7 @@
 
 mod audit;
 mod config;
+mod deadline;
 mod doctor;
 mod metrics;
 mod policy;

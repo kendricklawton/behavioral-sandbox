@@ -18,9 +18,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bsx_engine::SweepReport;
+
+use crate::deadline::DeadlineStream;
 
 /// Upper bound on one scrape request's head (request line + headers). A scrape is a bare `GET`; far
 /// past this is not a scraper.
@@ -583,11 +585,10 @@ fn answer_scrape(
     sample: &impl Fn() -> CapacitySample,
 ) -> std::io::Result<()> {
     stream.set_write_timeout(Some(SCRAPE_TIMEOUT))?;
-    // Bound the *whole* request head by one absolute deadline, not each read: `SO_RCVTIMEO` is
-    // re-armed by the OS on every byte, so a per-read timeout alone lets a slow-drip peer (one byte
-    // just inside the timeout) hold this single-threaded endpoint until the byte cap, the same
-    // slowloris the VMM's `DeadlineReader` closes on the Firecracker socket.
-    let head = read_request_head(&mut stream, Instant::now() + SCRAPE_TIMEOUT)?;
+    // Bound the *whole* request head by one absolute deadline, not each read: a slow-drip peer
+    // (one byte just inside a bare `SO_RCVTIMEO`) would otherwise hold this single-threaded
+    // endpoint until the byte cap. `DeadlineStream` (inside `read_request_head`) is that bound.
+    let head = read_request_head(&stream, SCRAPE_TIMEOUT)?;
     let (status, content_type, body) = if is_get_metrics(&head) {
         (
             "200 OK",
@@ -609,23 +610,19 @@ fn answer_scrape(
 }
 
 /// Read the request head, through the end of the headers (`\r\n\r\n`), capped at
-/// [`MAX_REQUEST_BYTES`] and by one absolute `deadline` across all reads. A peer that never finishes
-/// its head inside the cap or the deadline is an error, so it can't grow memory or hold the endpoint.
-fn read_request_head(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
+/// [`MAX_REQUEST_BYTES`] and by one absolute `budget` across all reads (the shared
+/// [`DeadlineStream`]). A peer that never finishes its head inside the cap or the deadline is an
+/// error, so it can't grow memory or hold the endpoint.
+fn read_request_head(stream: &TcpStream, budget: Duration) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(256);
     let mut chunk = [0u8; 512];
+    let mut bounded = DeadlineStream::new(
+        stream,
+        Some(budget),
+        "scrape request head exceeded the deadline",
+    );
     loop {
-        // Shrink the socket timeout to the time left before the deadline, so the sum of all reads
-        // honors one wall clock. A zero/elapsed remainder is the timeout itself.
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "scrape request head exceeded the deadline",
-            ));
-        }
-        stream.set_read_timeout(Some(remaining))?;
-        let n = stream.read(&mut chunk)?;
+        let n = bounded.read(&mut chunk)?;
         if n == 0 {
             return Ok(head); // peer closed after (or mid-) request; judge what we have
         }
@@ -974,11 +971,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let mut client = TcpStream::connect(addr).expect("connect");
-        let (mut server, _) = listener.accept().expect("accept");
+        let (server, _) = listener.accept().expect("accept");
         client.write_all(b"G").expect("drip one byte"); // a partial head, never completed
         let start = std::time::Instant::now();
-        let deadline = start + Duration::from_millis(200);
-        let err = read_request_head(&mut server, deadline).expect_err("must time out, not hang");
+        let err = read_request_head(&server, Duration::from_millis(200))
+            .expect_err("must time out, not hang");
         // Bounded either way: the shrunk socket timeout fires (`WouldBlock`) or the deadline guard
         // trips (`TimedOut`); both mean the endpoint was released, not held.
         assert!(
