@@ -552,7 +552,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     // Captured before `config` moves into the boot: the record needs it, and an allowance means
     // something different with a route behind it than without.
     let gateway = config.egress.map(|e| e.gateway());
-    let sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
+    let mut sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
@@ -752,7 +752,7 @@ fn shell(args: ShellArgs, sources: &config::Sources) -> Result<ExitCode, CliErro
         config.require_limits = true;
     }
     apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
-    let sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
+    let mut sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,

@@ -55,7 +55,7 @@ fn a_nicless_run_omits_the_network_section_without_a_gap() {
     let tracer = SharedTracer::load().expect("load the shared syscall tracer");
     let meter = SharedMeter::load().expect("load the shared CPU meter");
 
-    let vm = Vm::boot(nicless_agent_config()).expect("a NIC-less agent microVM should boot");
+    let mut vm = Vm::boot(nicless_agent_config()).expect("a NIC-less agent microVM should boot");
 
     // The sealed posture: a bare `new`, no `Nic`. "No NIC" and "the network axis failed" are
     // different records, and this pins the first: section absent, coverage clean.
@@ -110,7 +110,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // Boot a networked sandbox. Unjailed on purpose: the proof is the fused record and the tap flows,
     // not the jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
 
     // Attach the bundle to *this* sandbox by the plain values the driver exposes, the exact
@@ -231,7 +231,7 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
 
     let tracer = SharedTracer::load().expect("load the shared syscall tracer");
     let meter = SharedMeter::load().expect("load the shared CPU meter");
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip6 = vm
         .ipv6()
         .expect("a networked VM exposes its v6 host end")

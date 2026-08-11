@@ -111,7 +111,7 @@ pub fn jailed_overlay_config() -> BootConfig {
 // A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
 // workspace lints only re-allow inside test functions.
 pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (bsx_engine::Snapshot, Duration) {
-    let source = match Vm::boot(guest_rootfs_config()) {
+    let mut source = match Vm::boot(guest_rootfs_config()) {
         Ok(vm) => vm,
         Err(e) => panic!("agent microVM should boot: {e}"),
     };

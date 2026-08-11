@@ -130,7 +130,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // Boot the session's VM: a warm clone from the pool when this is a bare-default `open`, else a
     // cold boot with the requested envelope. A boot failure is fatal to the session (there is no
     // sandbox), reported and then done.
-    let (vm, pooled) = match boot_session_vm(server, limits, bare, net.nic) {
+    let (mut vm, pooled) = match boot_session_vm(server, limits, bare, net.nic) {
         Ok(booted) => booted,
         Err(e) => {
             server.metrics.open_failed();
@@ -229,7 +229,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 server.metrics.request(Verb::Exec);
                 let t0 = Instant::now();
                 let (result, interrupted) = exec_watching_for_cancel(
-                    &vm,
+                    &mut vm,
                     &argv,
                     stdin.as_deref().unwrap_or(""),
                     env.as_deref().unwrap_or(&[]),
@@ -965,7 +965,7 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// `cancel` in the same call as its `exec` has already had that line pulled into the `BufReader`,
 /// leaving the peek blind to it. Nothing reads the reader again until this returns.
 fn exec_watching_for_cancel(
-    vm: &RunningVm,
+    vm: &mut RunningVm,
     argv: &[String],
     stdin: &str,
     env: &[(String, String)],

@@ -244,7 +244,7 @@ fn overlay_is_writable_and_base_is_untouched() {
     // Boot twice: writing to `/etc` (a path that lives on the read-only base) succeeds only because
     // the overlay redirects the write to the tmpfs upper. A fresh tmpfs per boot, so each is clean.
     for i in 0..2 {
-        let vm = Vm::boot(guest_rootfs_config())
+        let mut vm = Vm::boot(guest_rootfs_config())
             .unwrap_or_else(|e| panic!("overlay microVM boot {i} failed: {e}"));
         let out = vm
             .exec(
@@ -300,7 +300,7 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
         before.dev(),
     );
 
-    let vm = Vm::boot(jailed_overlay_config())
+    let mut vm = Vm::boot(jailed_overlay_config())
         .expect("jailed overlay microVM should boot to the agent's readiness marker");
 
     // Memory-sharing, proven three ways: the chroot's root disk is a *mount* at all (a full copy would create
@@ -439,7 +439,7 @@ fn is_firecracker(pid: u32) -> bool {
 fn boot_exec_shutdown(net: bool) -> u32 {
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = net;
-    let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("soak boot failed: {e}"));
+    let mut vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("soak boot failed: {e}"));
     let pid = vm.vmm_pid();
     let out = vm
         .exec(&["echo".into(), "soak".into()], b"")

@@ -460,7 +460,10 @@ pub struct ExecMetrics {
 /// is `open → exec (with files + env) → collect outputs → snapshot → close`, every step synchronous
 /// and every failure a typed [`VmmError`]. Repeated `exec`s form a **stateful session**:
 /// the VM is the session, every exec shares its persistent working directory and overlay, and
-/// closing the sandbox discards the state.
+/// closing the sandbox discards the state. That sharing is what makes `exec` take `&mut self`: the
+/// execs are a sequence, and two in flight at once would read and write each other's files (see
+/// [`RunningVm::exec_with_files`]). Run concurrent work in separate sandboxes, which is the unit of
+/// isolation anyway.
 ///
 /// **Confined by default.** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run the VMM **under the
 /// jailer**, adding a chroot, a uid/gid drop, seccomp, and its own mount and network namespaces on top of
@@ -534,7 +537,7 @@ impl Sandbox {
     ///
     /// # Errors
     /// [`VmmError`] on any exec/channel failure (a non-zero command exit is a normal [`RunResult`]).
-    pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
+    pub fn exec(&mut self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
         self.vm.exec(argv, stdin)
     }
 
@@ -551,7 +554,7 @@ impl Sandbox {
     /// # Errors
     /// As [`exec`](Sandbox::exec).
     pub fn exec_with_files(
-        &self,
+        &mut self,
         argv: &[String],
         stdin: &[u8],
         files_in: &[(String, Vec<u8>)],

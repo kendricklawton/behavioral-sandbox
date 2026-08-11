@@ -71,7 +71,7 @@ fn a_snapshot_onto_a_full_disk_leaves_a_bundle_or_nothing() {
     };
     // The guest rootfs (not the CI one): the "still running" half of this test needs the exec
     // channel, and a VM that only reaches a getty prompt cannot answer.
-    let vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
+    let mut vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
     let bundle = fs.path().join("bundle");
 
     // Room for the dir and a partial write, far under the memory file's size.
@@ -158,7 +158,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
         "a read_only_root snapshot should reference the shared base, not copy it into the bundle"
     );
 
-    let restored =
+    let mut restored =
         Vm::restore(&snap, &guest_rootfs_config()).expect("prewarmed restore should resume");
     let restore_latency = restored.boot_latency();
     let argv = ["python3", "-c", "print(2 + 2)"].map(String::from);
@@ -196,7 +196,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     let bundle = TmpDir::new("snap-warm-clones");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
-    let clones: Vec<_> = (0..N)
+    let mut clones: Vec<_> = (0..N)
         .map(|i| {
             Vm::restore(&snap, &guest_rootfs_config())
                 .unwrap_or_else(|e| panic!("clone {i} should restore concurrently: {e}"))
@@ -212,7 +212,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     );
 
     // Each clone runs its own code and returns its own result, while the others are still alive.
-    for (i, clone) in clones.iter().enumerate() {
+    for (i, clone) in clones.iter_mut().enumerate() {
         let argv = ["python3", "-c", &format!("print({i} * {i})")].map(String::from);
         let out = clone
             .exec(&argv, &[])
@@ -254,7 +254,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
     let readbacks: Vec<(String, String)> = clones
         .into_iter()
         .enumerate()
-        .map(|(i, clone)| {
+        .map(|(i, mut clone)| {
             std::thread::spawn(move || {
                 let secret = format!("bleed-secret-{i}-{}", clone.vmm_pid());
                 let write =
@@ -321,8 +321,8 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     source.shutdown().expect("source shutdown");
 
     // Two clones, live simultaneously, which only the per-VM netns makes possible.
-    let clone_a = Vm::restore(&snap, &cfg).expect("networked clone A should resume");
-    let clone_b = Vm::restore(&snap, &cfg).expect("networked clone B should resume");
+    let mut clone_a = Vm::restore(&snap, &cfg).expect("networked clone A should resume");
+    let mut clone_b = Vm::restore(&snap, &cfg).expect("networked clone B should resume");
 
     // Each reuses the snapshot's baked identity (same tap name + guest IP, collision-free because
     // each lives in its own netns), and the two netns are distinct (the isolation boundary).
@@ -346,7 +346,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 
     // Both are actually functional at the same time: each guest reaches its own host end (proving the
     // recreated tap in each netns is live), and stays deny-by-default (no default route).
-    for (label, clone) in [("A", &clone_a), ("B", &clone_b)] {
+    for (label, clone) in [("A", &mut clone_a), ("B", &mut clone_b)] {
         let host_ip = clone.ipv4().expect("clone ipv4").host.to_string();
         let ping = clone
             .exec(
@@ -423,7 +423,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     };
 
     // Direct jailed restore: confined, exec-ready, and actually functional.
-    let clone = Vm::restore(&snap, &cfg).expect("jailed prewarmed restore should resume");
+    let mut clone = Vm::restore(&snap, &cfg).expect("jailed prewarmed restore should resume");
     assert_eq!(
         vmm_uid(clone.vmm_pid()).as_deref(),
         Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
@@ -452,7 +452,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
             "every pooled VMM should run as the dropped jail uid"
         );
     }
-    let vm = pool.take().expect("take a confined clone");
+    let mut vm = pool.take().expect("take a confined clone");
     let out = vm
         .exec(&["echo".into(), "confined".into()], b"")
         .expect("exec on the pooled confined clone");
@@ -510,7 +510,7 @@ fn pooled_clones_do_not_share_a_jail_uid() {
     );
 
     // A taken clone keeps the id it was restored under, and gives it back on shutdown.
-    let vm = pool.take().expect("take a spanned clone");
+    let mut vm = pool.take().expect("take a spanned clone");
     let taken_uid = uid_of(vm.vmm_pid());
     assert!(uids.contains(&taken_uid));
     let out = vm
@@ -554,7 +554,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
 
     let mut cfg = guest_rootfs_config();
     cfg.jail = Some(Jail::default());
-    let clone = Vm::restore(&snap, &cfg).expect("jailed private-disk restore should resume");
+    let mut clone = Vm::restore(&snap, &cfg).expect("jailed private-disk restore should resume");
     let out = clone
         .exec(&["echo".into(), "confined-private".into()], b"")
         .expect("exec on the jailed private-disk clone");
@@ -570,7 +570,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     // And pooled, the daemon's actual consumer of this path.
     let mut pool = Pool::new(snap, cfg, 2).expect("jailed private-disk pool should prefill");
     assert_eq!(pool.ready(), 2, "both private-disk clones should be pooled");
-    let vm = pool.take().expect("take a confined clone");
+    let mut vm = pool.take().expect("take a confined clone");
     let out = vm
         .exec(&["echo".into(), "pooled".into()], b"")
         .expect("exec on the pooled clone");
@@ -613,7 +613,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     let mut cfg = guest_rootfs_config();
     cfg.jail = Some(Jail::default());
     assert_eq!(cfg.vcpus.get(), 1, "the restoring config declares 1 vCPU");
-    let clone = Vm::restore(&snap, &cfg).expect("jailed restore of the 2-vCPU snapshot");
+    let mut clone = Vm::restore(&snap, &cfg).expect("jailed restore of the 2-vCPU snapshot");
     let cgroup = cgroup_of(clone.vmm_pid()).expect("the jailed clone lives in a cgroup");
     let cpu_max =
         std::fs::read_to_string(cgroup.join("cpu.max")).expect("read the clone's cpu.max");
@@ -672,7 +672,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     std::thread::sleep(SNAPSHOT_AGE);
 
     let draw = |label: &str| {
-        let clone = Vm::restore(&snap, &guest_rootfs_config())
+        let mut clone = Vm::restore(&snap, &guest_rootfs_config())
             .unwrap_or_else(|e| panic!("clone {label} should restore: {e}"));
         let out = clone
             .exec(
@@ -797,7 +797,7 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // Fast path: take a ready clone and run code on it. The take is a pop + probe, so it must come
     // in far under a cold boot (the measured margin is printed, the bound asserted is generous).
     let t0 = std::time::Instant::now();
-    let vm = pool.take().expect("take from a full pool");
+    let mut vm = pool.take().expect("take from a full pool");
     let take_latency = t0.elapsed();
     let out = vm
         .exec(&["python3".into(), "-c".into(), "print(1 + 1)".into()], b"")
@@ -823,7 +823,7 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     assert!(killed.success(), "SIGKILL the pooled VMM");
     std::thread::sleep(Duration::from_millis(100)); // let the socket die
 
-    let vm2 = pool
+    let mut vm2 = pool
         .take()
         .expect("take must discard the dead clone and restore a fresh one");
     let out2 = vm2
@@ -883,7 +883,7 @@ fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
 
     let t0 = std::time::Instant::now();
-    let restored =
+    let mut restored =
         Vm::restore(&snap, &guest_rootfs_config()).expect("prewarmed restore should resume");
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = restored

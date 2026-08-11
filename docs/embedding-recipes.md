@@ -11,7 +11,7 @@ fn main() -> Result<(), VmmError> {
     let config = BootConfig::from_env();
 
     // 2. Open a sandbox (confined by default under the jailer)
-    let sandbox = Sandbox::open(config)?;
+    let mut sandbox = Sandbox::open(config)?;
 
     // 3. Execute a command in the sandbox
     let result = sandbox.exec(&["python3".into(), "-c".into(), "print('Hello from bsx!')".into()], b"")?;
@@ -44,7 +44,7 @@ fn main() -> Result<(), VmmError> {
 
     // Apply limits onto boot config
     let config = BootConfig::from_env().with_limits(limits);
-    let sandbox = Sandbox::open(config)?;
+    let mut sandbox = Sandbox::open(config)?;
 
     // Execute with environment variables and input files
     let result = sandbox.exec_with_files(
@@ -88,7 +88,7 @@ fn main() -> Result<(), VmmError> {
     let mut pool = Pool::new(snapshot, pool_cfg, 4)?;
 
     // 3. Take a warm clone from the pool: a restore rather than a cold boot
-    let warm_vm = pool.take()?;
+    let mut warm_vm = pool.take()?;
     let result = warm_vm.exec(&["echo".into(), "warm start".into()], b"")?;
     println!("Execution completed: {}", String::from_utf8_lossy(&result.stdout));
 

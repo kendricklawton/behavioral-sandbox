@@ -39,7 +39,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
 
     // Boot a networked sandbox. Unjailed on purpose: the proof is about the tap enforcement, not
     // the jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
-    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let mut vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let netns = vm
         .netns()
         .expect("a networked VM exposes its netns")
@@ -142,7 +142,7 @@ fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
     let mut cfg = networked_agent_config();
     let host_end = bsx_engine::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
     cfg.egress = Some(host_end);
-    let vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
+    let mut vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
     let netns = vm
         .netns()
         .expect("a networked VM exposes its netns")
