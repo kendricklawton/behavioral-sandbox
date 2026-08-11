@@ -420,8 +420,8 @@ pub(crate) fn spawn_jailer(
     match Console::spawn(stdout) {
         Ok(console) => Ok((child, console, socket, chroot_root)),
         Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            // Bounded like every other reap on this path; no console to drain (its spawn failed).
+            crate::drives::kill_and_reap_briefly(&mut child, "jailer", crate::vm::VMM_REAP_GRACE);
             // The jailer creates the VM's cgroup early (before it execs Firecracker), but on this
             // failure the lifetime sentinel isn't armed yet and no `Chroot` exists to carry the dir
             // into teardown, so remove it here (best-effort) rather than leak an empty cgroup. This

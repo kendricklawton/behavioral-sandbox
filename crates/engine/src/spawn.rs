@@ -768,15 +768,28 @@ impl Spawned {
         });
         // Flag before the reap, so an outstanding `KillHandle` can't signal a recycled pid.
         self.lifetime.mark_down();
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        // Bounded, exactly as `teardown`'s reap is: `abort` exists to turn a broken boot into a typed
+        // error, so a VMM wedged in uninterruptible sleep (a hung scratch filesystem, a stuck KVM
+        // ioctl) must not park it instead. An unreaped child is the accepted trade there and here.
+        let reaped = match self.child.take() {
+            Some(mut child) => crate::drives::kill_and_reap_briefly(
+                &mut child,
+                "firecracker",
+                crate::vm::VMM_REAP_GRACE,
+            ),
+            // No child left to hold the console's write end open.
+            None => true,
+        };
         if let Some(cgroup) = cgroup {
             remove_cgroup(&cgroup);
         }
         self.lifetime.teardown();
-        self.console.join();
+        // The console reader only ends at the child's stdout EOF, so joining it is exactly as
+        // unbounded as the `wait` above: skip it when the reap didn't land, or the bound just moves
+        // from one call to the next. The tail below is then whatever was captured before the detach.
+        if reaped {
+            self.console.join();
+        }
         // Bounded, and from the *tail*: the guest can drive Firecracker's stderr for the whole boot
         // or restore window, so this file has no size the driver picked, and the lines that name the
         // failure are the last ones. An unreadable file is no diagnostic, never a failure of its own.
@@ -919,8 +932,13 @@ fn spawn_fc(
     match Console::spawn(stdout) {
         Ok(console) => Ok((child, console)),
         Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            // Bounded like every other reap on this path: there is no console to drain here (its
+            // spawn is what failed), so nothing else waits on this child's stdout.
+            crate::drives::kill_and_reap_briefly(
+                &mut child,
+                "firecracker",
+                crate::vm::VMM_REAP_GRACE,
+            );
             Err(e)
         }
     }

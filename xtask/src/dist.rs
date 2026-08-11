@@ -1211,6 +1211,46 @@ mod tests {
         }
     }
 
+    /// Every reap of a spawned child on the host path is bounded.
+    ///
+    /// A child in uninterruptible sleep (a hung scratch filesystem, a stuck KVM ioctl) does not die
+    /// on `SIGKILL` and never returns from `wait`, so a bare `child.wait()` is a driver hang, which is
+    /// what design rule 5 forbids. `drives::kill_and_reap_briefly` is the bounded form: it gives up
+    /// and detaches, taking an unreaped zombie over a parked thread. The hazard cannot be staged in a
+    /// test (it needs a filesystem that stops answering), so the shape is pinned instead.
+    #[test]
+    fn every_child_reap_on_the_host_path_is_bounded() {
+        let repo = workspace_root();
+        for file in [
+            "crates/engine/src/spawn.rs",
+            "crates/engine/src/jail.rs",
+            "crates/engine/src/vm.rs",
+            "crates/engine/src/lifetime.rs",
+            "crates/engine/src/drives.rs",
+        ] {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            // Only the production half: a test may reap its own helper however it likes. Split on
+            // the test *module*, not the first `#[cfg(test)]`: several of these files carry
+            // test-only `use` lines near the top, and splitting there would leave almost the whole
+            // file unscanned.
+            let prod = src
+                .split("#[cfg(test)]\nmod tests {")
+                .next()
+                .unwrap_or_default();
+            for (n, line) in prod.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                assert!(
+                    !code.contains(".wait()"),
+                    "{file}:{} reaps with a bare `wait()`; use `kill_and_reap_briefly` so a \
+                     D-state child detaches instead of parking the driver: {}",
+                    n + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
     /// Both escapers that stand between a guest-authored string and the operator's terminal cover the
     /// same `Bidi_Control` set.
     ///

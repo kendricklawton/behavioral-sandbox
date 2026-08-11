@@ -248,10 +248,15 @@ impl VmLifetime {
                     Ok(None) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    // Timed out or unwaitable: no-hang beats politeness.
+                    // Timed out or unwaitable: no-hang beats politeness, so the reap after the kill
+                    // is bounded too. A bare `wait` here would be the hang this arm exists to avoid,
+                    // just moved one line down.
                     _ => {
-                        let _ = sentinel.kill();
-                        let _ = sentinel.wait();
+                        crate::drives::kill_and_reap_briefly(
+                            &mut sentinel,
+                            "lifetime sentinel",
+                            SENTINEL_REAP_TIMEOUT,
+                        );
                         break;
                     }
                 }
