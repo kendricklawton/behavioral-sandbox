@@ -8,6 +8,7 @@ use aya::maps::{Array, HashMap as AyaHashMap, MapData};
 use aya::programs::TracePoint;
 use bsx_record::{CgroupStats, ResourceSummary};
 
+use crate::maps::remove_cgroup_key;
 use crate::{ProbeError, cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object};
 
 /// The `account_sched_switch` program's name (its `#[tracepoint] fn` symbol in `crates/probes`).
@@ -112,20 +113,11 @@ impl ResourceMeter {
     /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other than
     /// the key being absent.
     pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        match self.targets()?.remove(&cgroup_id) {
-            Ok(()) => Ok(()),
-            // An absent key means nothing to remove, so a no-op is the intended
-            // outcome, don't turn "already gone" into a failure. Any *other* syscall error (a
-            // permission/fd fault) still surfaces, so this only swallows the idempotent case.
-            Err(aya::maps::MapError::SyscallError(e))
-                if e.io_error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Ok(())
-            }
-            Err(e) => Err(ProbeError::Map(format!(
-                "unregister cgroup {cgroup_id}: {e}"
-            ))),
-        }
+        remove_cgroup_key(
+            &mut self.targets()?,
+            cgroup_id,
+            &format!("unregister cgroup {cgroup_id}"),
+        )
     }
 
     /// Zero the accumulated on-CPU total for `cgroup_id` (write a `0` entry), so a following
@@ -164,19 +156,11 @@ impl ResourceMeter {
             .ok_or_else(|| ProbeError::Map(format!("map `{CPU_NS_MAP}` not found")))?;
         let mut cpu: AyaHashMap<_, u64, u64> = AyaHashMap::try_from(map)
             .map_err(|e| ProbeError::Map(format!("open `{CPU_NS_MAP}` as a hash map: {e}")))?;
-        match cpu.remove(&cgroup_id) {
-            Ok(()) => Ok(()),
-            // Absent key (ENOENT): the row was never created (the cgroup never ran), so a no-op is
-            // the intended outcome, exactly as `remove_target` treats an already-gone target.
-            Err(aya::maps::MapError::SyscallError(e))
-                if e.io_error.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Ok(())
-            }
-            Err(e) => Err(ProbeError::Map(format!(
-                "clear cgroup {cgroup_id} CPU total: {e}"
-            ))),
-        }
+        remove_cgroup_key(
+            &mut cpu,
+            cgroup_id,
+            &format!("clear cgroup {cgroup_id} CPU total"),
+        )
     }
 
     /// Turn the **meter-everything** toggle on or off. Off (the default) meters only the registered
