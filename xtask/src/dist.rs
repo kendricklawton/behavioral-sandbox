@@ -1210,4 +1210,41 @@ mod tests {
             );
         }
     }
+
+    /// Both escapers that stand between a guest-authored string and the operator's terminal cover the
+    /// same `Bidi_Control` set.
+    ///
+    /// `char::is_control` is category `Cc` only, so the bidi controls pass it and a guest `Error`
+    /// string or a captured `openat` path can reorder the trail line it lands in. `bsx-channel` guards
+    /// the wire half and `bsx-cli`'s trail guards the probe half; `crates/cli` has no dependency edge
+    /// to `crates/channel`, and adding one for a text helper would put a utility on that crate's
+    /// pinned surface, so a shared function is not available and the twins are pinned instead.
+    #[test]
+    fn the_terminal_escapers_agree_on_the_bidi_controls() {
+        let repo = workspace_root();
+        let sites = [
+            ("crates/channel/src/lib.rs", "is_bidi_control"),
+            ("crates/cli/src/trace.rs", "is_bidi_control"),
+        ];
+        // The Unicode `Bidi_Control` property, as the two predicates spell it.
+        let required = [
+            r"'\u{061C}'",
+            r"'\u{200E}'",
+            r"'\u{200F}'",
+            r"'\u{202A}'..='\u{202E}'",
+            r"'\u{2066}'..='\u{2069}'",
+        ];
+        for (file, func) in sites {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            let body = fn_body(&src, func);
+            for point in required {
+                assert!(
+                    body.contains(point),
+                    "{file}'s `{func}` must cover {point}: a bidi control it misses reaches the \
+                     operator's terminal and reorders the line around it"
+                );
+            }
+        }
+    }
 }

@@ -151,17 +151,29 @@ pub fn render(record: &RunRecord) -> String {
     out
 }
 
-/// A probe-captured string made safe to write to a terminal: control characters are escaped, so an
-/// `openat` path or a `comm` carrying ESC or CSI cannot forge lines in the audit trail. Borrowed
-/// when there is nothing to escape, which is every ordinary path, since the live view renders this
-/// once per poll. Needs no length cap: `DETAIL_CAP` and `COMM_CAP` bound these bytes at capture.
+/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
+/// [`char::is_control`] is category `Cc` only and returns `false` for every one of them, so a path or
+/// `comm` carrying an override reorders the trail line around it (the Trojan-Source class). The twin
+/// of `bsx_channel`'s predicate of the same name, which guards the other guest-authored string that
+/// reaches this terminal; `the_terminal_escapers_agree_on_the_bidi_controls` pins the pair.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A probe-captured string made safe to write to a terminal: control and bidi-control characters are
+/// escaped, so an `openat` path or a `comm` carrying ESC, CSI, or an RTL override cannot forge or
+/// reorder lines in the audit trail. Borrowed when there is nothing to escape, which is every
+/// ordinary path, since the live view renders this once per poll. Needs no length cap: `DETAIL_CAP`
+/// and `COMM_CAP` bound these bytes at capture.
 pub(crate) fn printable(s: &str) -> Cow<'_, str> {
-    if !s.chars().any(char::is_control) {
+    let needs_escape = |c: char| c.is_control() || is_bidi_control(c);
+    if !s.chars().any(needs_escape) {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
-        if c.is_control() {
+        if needs_escape(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -359,6 +371,11 @@ audit trail (host-observed, from outside the guest)
         assert_eq!(printable("a\x7fb"), "a\\u{7f}b", "DEL");
         // CSI in its 8-bit form: `char::is_control` covers C1, which a C0-only check would miss.
         assert_eq!(printable("a\u{9b}b"), "a\\u{9b}b");
+        // The bidi controls are category `Cf`, so `is_control` alone passes them straight through and
+        // a path carrying one reorders the trail line it lands in.
+        assert_eq!(printable("a\u{202E}b"), "a\\u{202e}b", "RTL override");
+        assert_eq!(printable("a\u{2066}b"), "a\\u{2066}b", "isolate");
+        assert_eq!(printable("a\u{061C}b"), "a\\u{61c}b", "arabic letter mark");
     }
 
     #[test]

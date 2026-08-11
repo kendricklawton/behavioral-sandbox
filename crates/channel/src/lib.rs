@@ -31,7 +31,18 @@ pub const MAX_PAYLOAD: usize = 1 << 20;
 /// Maximum length of guest error messages to prevent terminal/log flooding (4 KiB).
 const ERROR_MSG_CAP: usize = 4 << 10;
 
-/// Escapes control characters and truncates guest error messages to prevent terminal injection.
+/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
+/// [`char::is_control`] is category `Cc` only and returns `false` for every one of them, so a guest
+/// error string carrying an override reorders the operator's line around it (the Trojan-Source
+/// class). Spelled out rather than taken from a Unicode table crate, because this crate carries one
+/// dependency on purpose and the property is 12 stable code points.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Escapes control and bidi-control characters and truncates guest error messages to prevent
+/// terminal injection.
 fn sanitize_error_msg(msg: &str) -> String {
     let mut out = String::with_capacity(msg.len().min(ERROR_MSG_CAP));
     for c in msg.chars() {
@@ -39,7 +50,7 @@ fn sanitize_error_msg(msg: &str) -> String {
             out.push('…');
             break;
         }
-        if c.is_control() {
+        if c.is_control() || is_bidi_control(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -939,12 +950,23 @@ mod tests {
             sanitized.contains("boom") && sanitized.contains("split"),
             "text kept: {sanitized:?}"
         );
-        let capped = sanitize_error_msg(&"x".repeat(MAX_PAYLOAD));
+        // A bidi override is escaped too, and it is what sets the overshoot bound below: the loop
+        // tests the cap *before* each push, so the worst case is a full buffer one byte under the cap
+        // plus one escape plus the ellipsis. `\u{202e}` is 8 bytes where a C0 escape is 6.
+        let bidi = sanitize_error_msg("safe\u{202E}txet_desrever");
         assert!(
-            capped.len() <= ERROR_MSG_CAP + 8,
-            "capped near {ERROR_MSG_CAP}, got {}",
-            capped.len()
+            !bidi.contains('\u{202E}') && bidi.contains("\\u{202e}"),
+            "the RTL override is escaped, not passed through: {bidi:?}"
         );
+
+        for filler in ["x", "\u{202E}"] {
+            let capped = sanitize_error_msg(&filler.repeat(MAX_PAYLOAD / 4));
+            assert!(
+                capped.len() <= ERROR_MSG_CAP + 10,
+                "capped near {ERROR_MSG_CAP} for {filler:?}, got {}",
+                capped.len()
+            );
+        }
     }
 
     #[test]
