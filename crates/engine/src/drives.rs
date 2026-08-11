@@ -283,6 +283,14 @@ const SB_BLOCKS_COUNT_HI: usize = 0x150;
 const SB_BLOCKS_PER_GROUP: usize = 0x20;
 const SB_INODES_PER_GROUP: usize = 0x28;
 const SB_MAGIC: usize = 0x38;
+/// The block-size exponent: the block is `2^(10 + this)` bytes. `ext4-view` sizes its block cache
+/// from the result at load, before it parses anything, so an oversized value asks for that many
+/// bytes eight times over.
+const SB_LOG_BLOCK_SIZE: usize = 0x18;
+/// ext4's largest on-disk block, 64 KiB. The parser admits exponents far past the format's own
+/// ceiling (up to 2 GiB blocks) and sizes an allocation from them, so this bound holds the format
+/// where the parser does not.
+const MAX_LOG_BLOCK_SIZE: u64 = 6;
 /// ext4's smallest block size. Used as the conservative multiplier when sizing the filesystem's
 /// claim against the file: the real block size is this or larger, so a claim rejected under it would
 /// be rejected under any of them.
@@ -292,16 +300,16 @@ const MIN_BLOCK_SIZE: u64 = 1024;
 /// the parser sizes an allocation from that description.
 ///
 /// **This is the one bound `catch_unwind` cannot provide.** `ext4-view` reads through a trait and so
-/// never learns the image's real length; its block-group descriptor table is sized from the
-/// superblock's own claim, so a 2 KiB image naming billions of blocks asks for tens of gigabytes in
-/// one `Vec::with_capacity`. A failed allocation of that size **aborts** the process rather than
-/// unwinding, which takes the driver and every sandbox sharing it down, so it has to be refused
-/// before it is attempted rather than caught after.
+/// never learns the image's real length; it sizes its block-group descriptor table and its block
+/// cache from the superblock's own claims, so a 2 KiB image naming billions of blocks, or one block
+/// of two gigabytes, asks for tens of gigabytes before it parses anything. A failed allocation of
+/// that size **aborts** the process rather than unwinding, which takes the driver and every sandbox
+/// sharing it down, so it has to be refused before it is attempted rather than caught after.
 ///
-/// A bound, not a parse: it reads the geometry fields (the 64-bit block count and the group sizes)
-/// and compares them against one fact the parser does not have. Anything that is not an ext4
-/// superblock is passed straight through, so the parser stays the authority on what a valid image is
-/// and this never invents a second opinion about it.
+/// A bound, not a parse: it reads the fields that size those allocations (the 64-bit block count, the
+/// group sizes, and the block-size exponent) and holds each against one fact the parser does not
+/// apply, the image's real length or ext4's own format ceiling. Anything that is not an ext4
+/// superblock is passed straight through, so the parser stays the authority on what a valid image is.
 fn refuse_impossible_geometry(image: &Path) -> Result<(), VmmError> {
     let len = std::fs::metadata(image)
         .map_err(|e| VmmError::Vmm(format!("stat the output image {}: {e}", image.display())))?
@@ -334,6 +342,16 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
     // Both are divisors in the parser's geometry maths, and zero is expressible on disk.
     if le32(SB_BLOCKS_PER_GROUP) == 0 || le32(SB_INODES_PER_GROUP) == 0 {
         return Err("corrupt superblock: a zero blocks- or inodes-per-group".into());
+    }
+    // The parser builds its block cache from this exponent alone, eight entries plus a read buffer,
+    // before it reads an inode: independent of the block *count*, so a filesystem claiming one block
+    // of two gigabytes fits any image-length check and still asks for eighteen gigabytes at load.
+    let log_block_size = le32(SB_LOG_BLOCK_SIZE);
+    if log_block_size > MAX_LOG_BLOCK_SIZE {
+        return Err(format!(
+            "corrupt superblock: names a 2^{}-byte block, past ext4's 64 KiB ceiling",
+            log_block_size + 10
+        ));
     }
     // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a lower
     // bound on the claim's real size, so a legitimate image (whose blocks are that size or larger)
@@ -1070,6 +1088,27 @@ mod tests {
         assert!(
             superblock_admits_parsing(&hi, 1 << 20).is_err(),
             "a set high dword names >4 billion blocks no MiB image can hold"
+        );
+
+        // The block-size exponent sizes the parser's block cache on its own, independent of the count
+        // above, so an image-length check cannot see it: `sb`'s honest 256 blocks stay, and only the
+        // exponent moves. ext4-view admits up to 2^21 (2 GiB blocks) and allocates eight of them plus
+        // a read buffer at load, which is the abort this refuses.
+        let mut huge_block = sb;
+        huge_block[SB_LOG_BLOCK_SIZE..][..4].copy_from_slice(&21u32.to_le_bytes());
+        assert!(
+            superblock_admits_parsing(&huge_block, 1 << 20).is_err(),
+            "a 2 GiB block is past ext4's ceiling whatever the block count says"
+        );
+
+        // The ceiling itself is admitted, so the bound never refuses a filesystem ext4 can really
+        // write. 64 KiB blocks cap the parser's cache at well under a megabyte.
+        let mut at_ceiling = sb;
+        at_ceiling[SB_LOG_BLOCK_SIZE..][..4]
+            .copy_from_slice(&(MAX_LOG_BLOCK_SIZE as u32).to_le_bytes());
+        assert!(
+            superblock_admits_parsing(&at_ceiling, 1 << 20).is_ok(),
+            "64 KiB is a legal ext4 block size"
         );
     }
 
