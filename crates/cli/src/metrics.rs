@@ -866,13 +866,10 @@ mod tests {
         }
 
         let m = Metrics::default();
-        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = || {
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
-        };
+        // The shared generator, seeded exactly as the local one was: `Rng::new` forces the seed
+        // odd and this one already is, so the sequence is the same walk as before.
+        let mut rng = bsx_test_support::Rng::new(0x9E37_79B9_7F4A_7C15);
+        let mut next = || rng.next_u64();
         let mut prev = samples(&m.render(&CapacitySample::pool(None)));
         let mut compared = 0usize;
         for _ in 0..500 {

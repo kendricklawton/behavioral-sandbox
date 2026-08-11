@@ -9,55 +9,17 @@
 //! and never buffers past [`MAX_REQUEST_BYTES`](crate::MAX_REQUEST_BYTES).
 //!
 //! **No `proptest`/`arbitrary`.** This crate is a deliberately-thin leaf (serde only); rather than
-//! pull a fuzzing framework into its tree, the generator is a tiny deterministic PRNG. Fixed seeds
-//! mean a failure reproduces exactly and the gate never flakes. Valid messages are built with the
-//! crate's own `write_message`, so the generator can't drift from the wire format.
+//! pull a fuzzing framework into its tree, the generator is `bsx_test_support::Rng`, a workspace
+//! leaf with an empty `[dependencies]`. Fixed seeds mean a failure reproduces exactly and the gate
+//! never flakes. Valid messages are built with the crate's own `write_message`, so the generator
+//! can't drift from the wire format.
 
 use std::io::Cursor;
 
+use bsx_test_support::Rng;
 use serde_json::json;
 
 use super::*;
-
-/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic; it only sprays
-/// varied bytes at the reader reproducibly.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        if n == 0 {
-            0
-        } else {
-            (self.next_u64() % n as u64) as usize
-        }
-    }
-
-    fn byte(&mut self) -> u8 {
-        (self.next_u64() >> 33) as u8
-    }
-
-    fn bytes(&mut self, len: usize) -> Vec<u8> {
-        (0..len).map(|_| self.byte()).collect()
-    }
-
-    fn bytes_upto(&mut self, max: usize) -> Vec<u8> {
-        let len = self.below(max);
-        self.bytes(len)
-    }
-}
 
 /// A small valid-UTF-8 alphabet, including a JSON metacharacter, a quote, and a multibyte char, so
 /// generated strings exercise serde's escaping without being invalid by construction.

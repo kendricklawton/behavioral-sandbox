@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 publish = false
-description = "Test-only helpers shared across the integration-test crates (cgroup caps, host-capability probes). Never shipped."
+description = "Test-only helpers shared across crates (cgroup caps, host-capability probes, the fuzz generator). Never shipped."
 
 # No dependencies by design: pure-std helpers (`/proc`, `/sys`, `std::fs`), so this stays a leaf both
 # the driver and the loader test suites can borrow without coupling to either.

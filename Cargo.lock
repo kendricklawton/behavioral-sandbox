@@ -221,6 +221,7 @@ dependencies = [
 name = "bsx-channel"
 version = "0.0.3"
 dependencies = [
+ "bsx-test-support",
  "zeroize",
 ]
 
@@ -278,6 +279,7 @@ dependencies = [
 name = "bsx-protocol"
 version = "0.0.3"
 dependencies = [
+ "bsx-test-support",
  "serde",
  "serde_json",
 ]
