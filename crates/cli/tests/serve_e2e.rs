@@ -30,25 +30,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bsx_client::{Client, OpenParams};
-
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Why this host can't run the demo (a skip reason), or `None` when it can.
-fn skip_reason() -> Option<String> {
-    if !std::path::Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
-}
+use bsx_test_support::{vm_skip_reason, workspace_root};
 
 /// A spawned `bsx serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VMs are then reaped by the lifetime sentinel; the socket file it leaves is cleared on the
@@ -216,7 +198,7 @@ impl RawClient {
 #[test]
 #[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn agent_serves_the_full_wire_api_over_a_unix_socket() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping agent_serves_the_full_wire_api_over_a_unix_socket: {why}");
         return;
     }
@@ -457,7 +439,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
 #[test]
 #[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_run_whose_output_outgrows_a_request_line_still_reaches_the_client() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!(
             "skipping a_run_whose_output_outgrows_a_request_line_still_reaches_the_client: {why}"
         );
@@ -502,7 +484,7 @@ fn a_run_whose_output_outgrows_a_request_line_still_reaches_the_client() {
 #[test]
 #[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");
         return;
     }
@@ -611,7 +593,7 @@ fn the_reference_client_drives_a_full_session() {
 #[test]
 #[ignore = "spawns bsx --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");
         return;
     }
@@ -644,7 +626,7 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
     // private disk, and every jailed clone stages that disk into its chroot; a staging regression
     // there once killed every jailed pool build while the unjailed suite and the `bsx`-level
     // shared-base pool test both stayed green. This is the missing gate.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping a_jailed_daemon_serves_prewarmed_opens: {why}");
         return;
     }
@@ -686,7 +668,7 @@ fn cancel_reclaims_a_session_wedged_in_a_long_exec() {
     // has no way to reach the daemon: hanging up works, but the session thread stays inside
     // `exec` until the wall budget lapses, holding its `--max-sessions` slot and the guest's RAM.
     // Here the exec would run 60s; the cancel must end it in a small fraction of that.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping cancel_reclaims_a_session_wedged_in_a_long_exec: {why}");
         return;
     }
@@ -753,7 +735,7 @@ fn a_cancel_after_the_idle_deadline_still_gets_its_ack() {
     // that looks for the client's `cancel` must run on a fresh budget, or the ack is replaced by
     // a silent connection drop exactly for the long execs cancel exists to interrupt. (The VM is
     // killed either way; what this pins is the client-visible `cancelled` reply.)
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping a_cancel_after_the_idle_deadline_still_gets_its_ack: {why}");
         return;
     }
@@ -867,7 +849,7 @@ fn a_binary_get_is_flagged_lossy_and_a_text_get_is_not() {
     // The wire is text (`content` is lossy UTF-8), so fetching a file whose bytes are not valid
     // UTF-8 substitutes replacement characters. The `lossy` flag is what keeps that substitution
     // from being silent: without it a client has no way to know its bytes are not the file's.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = vm_skip_reason() {
         eprintln!("skipping a_binary_get_is_flagged_lossy_and_a_text_get_is_not: {why}");
         return;
     }

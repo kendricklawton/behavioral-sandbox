@@ -11,6 +11,32 @@
 
 use std::path::{Path, PathBuf};
 
+/// The workspace root, from the calling crate's manifest dir, so a test finds `artifacts/` whatever
+/// the cwd. `CARGO_MANIFEST_DIR` expands where this crate is compiled (`crates/test-support`), so
+/// the same two levels up hold for every caller.
+#[must_use]
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Why this host cannot boot a guest, or `None` when it can: the two artifacts every VM test needs.
+///
+/// A test that skips itself is a **pass**, so the predicates deciding that belong in one place
+/// rather than in each `tests/*.rs`. Returns a reason a test can print, so a skip says why.
+#[must_use]
+pub fn vm_skip_reason() -> Option<String> {
+    if !Path::new("/dev/kvm").exists() {
+        return Some("/dev/kvm not present".into());
+    }
+    if !workspace_root()
+        .join("artifacts/rootfs-guest.ext4")
+        .is_file()
+    {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
+    }
+    None
+}
+
 /// Refuses to run a test that measures **process-global** state beside its siblings.
 ///
 /// libtest runs tests in parallel by default. A test asserting on open fds, thread count, mounts, or
@@ -456,7 +482,30 @@ pub fn process_threads(pid: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CAP_NET_ADMIN, parse_cap_eff, process_threads, serial_requested};
+    use super::{CAP_NET_ADMIN, parse_cap_eff, process_threads, serial_requested, workspace_root};
+
+    /// The root resolves from **this** crate's manifest dir, not the caller's.
+    ///
+    /// `CARGO_MANIFEST_DIR` expands where the macro is written, so hoisting this helper out of the
+    /// test binaries that each had their own copy silently re-anchored it from `crates/<caller>` to
+    /// `crates/test-support`. Both are two levels down, which is why the same `../..` still holds,
+    /// and this is what says so rather than leaving it to a privileged run to discover.
+    #[test]
+    fn the_workspace_root_resolves_from_this_crates_manifest_dir() {
+        let root = workspace_root();
+        assert!(
+            root.join("crates/test-support/Cargo.toml").is_file(),
+            "workspace_root() must land on the workspace, got {}",
+            root.display()
+        );
+        // The artifact paths every caller builds on it, so a wrong root is caught here, not by a
+        // privileged suite skipping itself with "guest rootfs not built".
+        assert!(
+            root.join("crates").is_dir() && root.join("xtask").is_dir(),
+            "the root holds the workspace's own directories: {}",
+            root.display()
+        );
+    }
 
     #[test]
     fn the_thread_count_is_live_for_a_live_pid_and_zero_for_a_gone_one() {

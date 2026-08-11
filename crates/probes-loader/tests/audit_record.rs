@@ -21,63 +21,20 @@
 //! audit trail the exit gate calls for.
 #![allow(clippy::panic)]
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use bsx_engine::{BootConfig, Vm};
 use bsx_probes_loader::{
     AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
-    SharedTracer, Timing, check_support, object_path,
+    SharedTracer, Timing,
 };
+
+mod common;
+
+use common::{networked_agent_config, probe_and_vm_skip_reason};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;
-
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
-/// skipped, like the other probe tests.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    if !Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
-}
-
-/// A networked agent-rootfs boot config pointed at the workspace artifacts (absolute paths, so it's
-/// cwd-independent). Read-only shared base + tmpfs overlay, vsock exec on, and a NIC.
-fn networked_agent_config() -> BootConfig {
-    let root = workspace_root();
-    let mut cfg = BootConfig::from_env();
-    if std::env::var_os("BSX_KERNEL").is_none() {
-        cfg.kernel = root.join("artifacts/vmlinux");
-    }
-    cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");
-    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
-    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    cfg.read_only_root = true;
-    cfg.enable_network = true;
-    cfg.boot_timeout = Duration::from_secs(30);
-    cfg
-}
 
 /// The [`networked_agent_config`] boot without its NIC, for the no-NIC attach path, where the
 /// record's network section must be absent rather than gapped.
@@ -90,7 +47,7 @@ fn nicless_agent_config() -> BootConfig {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_nicless_run_omits_the_network_section_without_a_gap() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!("skipping a_nicless_run_omits_the_network_section_without_a_gap: {why}");
         return;
     }
@@ -141,7 +98,7 @@ fn a_nicless_run_omits_the_network_section_without_a_gap() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!("skipping a_networked_file_touching_run_yields_a_faithful_audit_record: {why}");
         return;
     }
@@ -267,7 +224,7 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
     // sends UDP to two v6 ports on the on-link host: :9999 (allowed) and :8888 (denied). Both reach the
     // tap (the host end is the on-link neighbour, so ND resolves), so `flows6` records both and
     // `denials6` records the blocked port, the v6 audit trail folded into the record.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!("skipping an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record: {why}");
         return;
     }

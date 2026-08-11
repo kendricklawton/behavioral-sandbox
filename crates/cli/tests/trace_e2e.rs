@@ -12,16 +12,11 @@
 // workspace's deny doesn't auto-exempt outside `#[test]` fns (same note as the `bsx` suites).
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bsx_probes_loader::{check_support, object_path};
 use bsx_test_support::ScratchDir;
-
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+use bsx_test_support::{vm_skip_reason, workspace_root};
 
 /// Why this host can't run the test (a skip reason), or `None` when it can.
 fn skip_reason() -> Option<String> {
@@ -34,16 +29,7 @@ fn skip_reason() -> Option<String> {
             object_path().display()
         ));
     }
-    if !Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
+    vm_skip_reason()
 }
 
 #[test]

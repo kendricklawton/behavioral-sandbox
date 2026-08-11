@@ -16,15 +16,18 @@
 //! consolidates the *observed and recorded* dimensions of containment.
 #![allow(clippy::panic)]
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use bsx_engine::Vm;
 use bsx_probes_loader::{
     AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
-    SharedTracer, Timing, check_support, object_path,
+    SharedTracer, Timing,
 };
 use bsx_test_support::{LimitCgroup, have_real_root, process_threads};
+
+mod common;
+
+use common::{networked_agent_config, probe_and_vm_skip_reason};
 
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.
@@ -36,54 +39,6 @@ const ALLOWED_PORT: u16 = 9999;
 /// the tap and land in the record's denial trail.
 const BLOCKED_PORT: u16 = 8888;
 
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Why this host can't run the suite (a skip reason), or `None` when it can, so it prints *why* it
-/// skipped, like the other probe tests.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    if !Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
-}
-
-/// A networked agent-rootfs boot config pointed at the workspace artifacts (absolute paths, so it's
-/// cwd-independent). Read-only shared base + tmpfs overlay, vsock exec on, and a NIC. Unjailed on
-/// purpose: the proof is the fused record + the tap enforcement, not the jailer, and the unjailed
-/// path doesn't depend on the `/dev/kvm` jail-uid ACL.
-fn networked_agent_config() -> BootConfig {
-    let root = workspace_root();
-    let mut cfg = BootConfig::from_env();
-    if std::env::var_os("BSX_KERNEL").is_none() {
-        cfg.kernel = root.join("artifacts/vmlinux");
-    }
-    cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");
-    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
-    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    cfg.read_only_root = true;
-    cfg.enable_network = true;
-    cfg.boot_timeout = Duration::from_secs(30);
-    cfg
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_hostile_guest_is_contained_and_the_record_shows_it() {
@@ -92,7 +47,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     // *contained* and *recorded*. Exfiltration is denied at the tap and the drop lands in the audit
     // record; the storm creates zero host threads (hardware isolation) and the VM stays responsive;
     // the record's coverage stays clean throughout, so the observation itself survived the attack.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!("skipping a_hostile_guest_is_contained_and_the_record_shows_it: {why}");
         return;
     }
@@ -256,7 +211,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     // file, or device that reaches any of it. The proof is behavioural: a guest that spends its run
     // looking for the observability and then generating traffic is still fully recorded, because it
     // never had a handle on the probe to begin with.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!("skipping a_guest_cannot_see_or_disable_the_host_side_probes: {why}");
         return;
     }
@@ -354,7 +309,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     // its CPU quota and creates zero host threads), and the **egress policy** caps the network (a
     // packet flood to a blocked endpoint is dropped at the tap, at volume, and recorded). This is the
     // multi-tenant-safety centerpiece: a guest that does its worst on all fronts stays in its lane.
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!(
             "skipping all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy: {why}"
         );

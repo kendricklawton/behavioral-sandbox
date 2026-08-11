@@ -11,11 +11,14 @@
 //! reach exactly what the policy admits and nothing more.
 #![allow(clippy::panic)]
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
-use bsx_probes_loader::{EgressPolicy, Protocol, TapMonitor, check_support, object_path};
+use bsx_engine::Vm;
+use bsx_probes_loader::{EgressPolicy, Protocol, TapMonitor};
+
+mod common;
+
+use common::{networked_agent_config, probe_and_vm_skip_reason};
 
 /// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
@@ -24,56 +27,10 @@ const ALLOWED_PORT: u16 = 9999;
 /// A port the guest is *not* allowed to reach, the "blocked from everything else" half.
 const BLOCKED_PORT: u16 = 8888;
 
-/// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
-/// skipped, like the other probe tests.
-fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    if !Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm not present".into());
-    }
-    if !workspace_root()
-        .join("artifacts/rootfs-guest.ext4")
-        .is_file()
-    {
-        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
-    }
-    None
-}
-
-/// A networked agent-rootfs boot config pointed at the workspace artifacts (absolute paths, so it's
-/// cwd-independent). Read-only shared base + tmpfs overlay, vsock exec on, and a NIC.
-fn networked_agent_config() -> BootConfig {
-    let root = workspace_root();
-    let mut cfg = BootConfig::from_env();
-    if std::env::var_os("BSX_KERNEL").is_none() {
-        cfg.kernel = root.join("artifacts/vmlinux");
-    }
-    cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");
-    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
-    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    cfg.read_only_root = true;
-    cfg.enable_network = true;
-    cfg.boot_timeout = Duration::from_secs(30);
-    cfg
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!(
             "skipping a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest: {why}"
         );
@@ -168,7 +125,7 @@ const OFF_LINK: &str = "192.0.2.1";
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
-    if let Some(why) = skip_reason() {
+    if let Some(why) = probe_and_vm_skip_reason() {
         eprintln!(
             "skipping a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail: {why}"
         );
