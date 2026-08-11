@@ -207,7 +207,7 @@ where
     // Resolve the program up front so "no such binary" stays the typed spawn error the host knows:
     // with the trampoline, the real `execvp` happens inside the child, where a failure can only
     // surface as a shell-style 127 on stderr.
-    if let Err(e) = resolve_program(program, workdir.path()) {
+    if let Err(e) = resolve_program(program, workdir.path(), effective_path(&env).as_deref()) {
         let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
         return Err(AgentError::Spawn(e));
     }
@@ -393,14 +393,34 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// **sequenced before the `exec` in the child itself**, which a parent-side write cannot be.
 const TRAMPOLINE_SCRIPT: &str = r#"{ echo $$ > "$1/cgroup.procs"; } 2>/dev/null; shift; exec "$@""#;
 
+/// The `PATH` the spawned command will resolve against: the injected environment's entry if it names
+/// one, the agent's own otherwise, which is what [`Command::env`] leaves the child holding.
+///
+/// The **last** duplicate wins, because that is what the `cmd.env(key, value)` loop applying these
+/// pairs leaves behind, and a check that disagreed with the spawn it gates is the defect this exists
+/// to close.
+fn effective_path(env: &[(String, String)]) -> Option<std::ffi::OsString> {
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"))
+}
+
 /// Mirrors `execvp`'s lookup just enough to report a missing or non-executable program as the typed
 /// spawn error before the trampoline runs. TOCTOU-tolerant: a program vanishing between this check and
 /// the child's `exec` surfaces as the trampoline's shell-style 127 instead.
 ///
-/// A `/`-bearing relative program is resolved against `workdir` (the child's cwd), so it is judged
-/// where the trampoline's `exec` will resolve it. Resolving against the agent's own cwd instead would
-/// falsely reject a program injected via `--put` or built by an earlier exec in the session.
-fn resolve_program(program: &str, workdir: &Path) -> Result<(), std::io::Error> {
+/// Judged where the child will resolve it, on both axes: `path` is the **command's** `PATH`
+/// ([`effective_path`]), not the agent's, and every candidate is rooted at `workdir` (the child's
+/// cwd), which `join` leaves alone when it is already absolute. Resolving against the agent's own
+/// environment or cwd instead would falsely reject a program injected via `--put`, built by an
+/// earlier exec in the session, or reached through a `PATH` the caller set.
+fn resolve_program(
+    program: &str,
+    workdir: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt as _;
     let executable = |p: &Path| {
         std::fs::metadata(p)
@@ -408,12 +428,13 @@ fn resolve_program(program: &str, workdir: &Path) -> Result<(), std::io::Error> 
             .unwrap_or(false)
     };
     let found = if program.contains('/') {
-        let p = Path::new(program);
-        executable(&workdir.join(p)) // `join` keeps an absolute `p` as-is, else roots it at workdir
+        executable(&workdir.join(program))
     } else {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|dir| executable(&dir.join(program))))
-            .unwrap_or(false)
+        path.is_some_and(|paths| {
+            // An empty `PATH` entry means the cwd, which for the child is `workdir`, and that is
+            // the same rooting the `/`-bearing branch above does.
+            std::env::split_paths(paths).any(|dir| executable(&workdir.join(dir).join(program)))
+        })
     };
     if found {
         Ok(())
@@ -643,9 +664,81 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EXEC_TIMEOUT, budget_from};
+    use super::{MAX_EXEC_TIMEOUT, budget_from, effective_path, resolve_program};
+    use bsx_test_support::ScratchDir;
     use std::num::NonZeroU32;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
     use std::time::Duration;
+
+    /// Writes an executable no-op at `path`, creating its parent.
+    fn tool_at(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("a tool has a parent dir")).expect("mkdir");
+        std::fs::write(path, "#!/bin/sh\ntrue\n").expect("write the tool");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    fn env_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// The check reads the `PATH` the **child** gets, not the agent's.
+    ///
+    /// The two disagree exactly when a caller injects `PATH`, which is wire-reachable through
+    /// `ExecParams.env`. The gate then refuses, as a typed spawn error, a program that the `spawn`
+    /// thirty lines later would have found and run.
+    #[test]
+    fn the_program_is_resolved_against_the_commands_path_not_the_agents() {
+        let scratch = ScratchDir::created("agent-path");
+        let bin = scratch.path().join("bin");
+        let work = scratch.path().join("work");
+        std::fs::create_dir_all(&work).expect("work dir");
+        tool_at(&bin.join("mytool"));
+        let bin = bin.to_str().expect("a utf-8 scratch path");
+
+        assert!(
+            resolve_program("mytool", &work, std::env::var_os("PATH").as_deref()).is_err(),
+            "precondition: `mytool` must not be on this host's own PATH"
+        );
+
+        let with = |pairs: &[(&str, &str)]| {
+            resolve_program("mytool", &work, effective_path(&env_of(pairs)).as_deref())
+        };
+        assert!(with(&[("PATH", bin)]).is_ok(), "the injected PATH is read");
+        assert!(
+            with(&[]).is_err(),
+            "no injected PATH falls back to the agent's"
+        );
+        assert!(
+            with(&[("OTHER", bin)]).is_err(),
+            "an unrelated variable must not stand in for PATH"
+        );
+        // `cmd.env` applies the pairs in order, so the last duplicate is what the child holds and
+        // the only one this may agree with.
+        assert!(with(&[("PATH", "/nonexistent"), ("PATH", bin)]).is_ok());
+        assert!(with(&[("PATH", bin), ("PATH", "/nonexistent")]).is_err());
+    }
+
+    /// A non-absolute `PATH` entry is rooted at the child's cwd, which is what `execvp` does with an
+    /// empty entry and what the `/`-bearing branch already did.
+    #[test]
+    fn a_relative_path_entry_is_rooted_at_the_childs_working_dir() {
+        let scratch = ScratchDir::created("agent-relpath");
+        let work = scratch.path();
+        tool_at(&work.join("tools/mytool"));
+        tool_at(&work.join("here"));
+
+        let path = |p: &str| resolve_program("mytool", work, Some(std::ffi::OsStr::new(p)));
+        assert!(path("tools").is_ok(), "a relative entry sits under the cwd");
+        assert!(path("/tools").is_err(), "an absolute entry is left alone");
+        assert!(
+            resolve_program("here", work, Some(std::ffi::OsStr::new(""))).is_ok(),
+            "an empty entry means the cwd"
+        );
+    }
 
     #[test]
     fn budget_clamps_and_treats_none_as_ceiling() {

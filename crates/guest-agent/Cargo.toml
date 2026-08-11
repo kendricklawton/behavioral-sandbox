@@ -26,5 +26,10 @@ tracing-subscriber = { workspace = true }
 # ours (this crate stays `#![forbid(unsafe_code)]`). Pinned; all of its tree is MIT/Apache.
 vsock = "0.5.4"
 
+# The shared scratch-dir guard, so the `PATH`-resolution tests stage a real executable without a
+# hand-rolled temp dir. A dev-dep, so the static musl binary baked into the rootfs is unaffected.
+[dev-dependencies]
+bsx-test-support = { path = "../test-support" }
+
 [lints]
 workspace = true

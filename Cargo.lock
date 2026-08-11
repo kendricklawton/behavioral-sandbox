@@ -254,6 +254,7 @@ name = "bsx-guest-agent"
 version = "0.0.3"
 dependencies = [
  "bsx-channel",
+ "bsx-test-support",
  "tracing",
  "tracing-subscriber",
  "vsock",
