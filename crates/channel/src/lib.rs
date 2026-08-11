@@ -220,7 +220,10 @@ impl From<std::io::Error> for ChannelError {
 }
 
 impl ChannelError {
-    /// Returns `true` if the failure was caused by clean EOF/disconnect.
+    /// Returns `true` only for a clean read-side EOF (`UnexpectedEof`): the peer closed between
+    /// frames. A send-path close (`BrokenPipe`/`ConnectionReset`, a peer gone mid-write) is
+    /// deliberately not one, so a caller that needs the wider "peer is gone" set classifies the
+    /// `io::ErrorKind` itself rather than reaching for this. Pinned by `is_disconnect_flags_eof_only`.
     #[must_use]
     pub fn is_disconnect(&self) -> bool {
         matches!(self, ChannelError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof)
