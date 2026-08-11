@@ -1064,7 +1064,7 @@ fn wire_kind(kind: ErrorKind) -> FaultKind {
 const IDLE_DEADLINE_MSG: &str = "session message exceeded the idle deadline";
 
 /// A [`Duration`] as whole milliseconds, saturating (a run never realistically overflows `u64` ms).
-fn ms(d: Duration) -> u64 {
+pub(crate) fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 

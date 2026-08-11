@@ -685,10 +685,7 @@ impl Spawned {
         self.api.put("/actions", &Action::InstanceStart)?;
         self.await_userspace(&config.userspace_marker, deadline)?;
         let latency = started.elapsed();
-        tracing::info!(
-            boot_ms = latency.as_millis() as u64,
-            "microVM reached userspace"
-        );
+        tracing::info!(boot_ms = crate::ms(latency), "microVM reached userspace");
         Ok(latency)
     }
 

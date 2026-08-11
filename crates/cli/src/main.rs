@@ -671,8 +671,8 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 .map(|a| serde_json::json!({ "path": a.path, "bytes": a.data.len() }))
                 .collect::<Vec<_>>(),
             "metrics": {
-                "boot_ms": boot_latency.as_millis() as u64,
-                "exec_wall_ms": result.metrics.wall.as_millis() as u64,
+                "boot_ms": session::ms(boot_latency),
+                "exec_wall_ms": session::ms(result.metrics.wall),
             },
             // The effective limits this run actually booted with, the flag values folded onto the
             // defaults, echoed back so a `--json` caller sees what it got, not just what it asked.
