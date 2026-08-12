@@ -186,8 +186,12 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     Verify(verify::VerifyArgs),
     /// Run the driver daemon.
     ///
-    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API), so a local client drives microVMs without linking the engine. Access control is
-    /// the socket directory's permissions (no auth, a recorded non-goal).
+    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API), so a
+    /// local client drives microVMs without linking the engine. Access control is the socket
+    /// directory's permissions (no auth, a recorded non-goal).
+    ///
+    /// Every flag here is the operator's: the wire carries no identity, so no client names any of
+    /// them, and a ceiling refuses an `open` that exceeds it rather than quietly clamping it.
     Serve(Box<serve::ServeArgs>),
 }
 
