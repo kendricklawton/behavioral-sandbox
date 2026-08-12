@@ -51,7 +51,7 @@ impl std::fmt::Display for ClientError {
                 fatal,
                 kind,
             } => {
-                write!(f, "daemon error ({kind:?}, fatal={fatal}): {message}")
+                write!(f, "daemon error ({kind}, fatal={fatal}): {message}")
             }
             ClientError::AtCapacity { retry_after_ms } => {
                 write!(f, "daemon at capacity (retry after {retry_after_ms}ms)")
@@ -109,7 +109,12 @@ fn describe(resp: &Response) -> String {
         Response::TraceSummary { .. } => "trace_summary".to_string(),
         Response::Closed => "closed".to_string(),
         Response::Cancelled => "cancelled".to_string(),
-        Response::Error { kind, fatal, .. } => format!("error ({kind:?}, fatal={fatal})"),
+        Response::Error { kind, fatal, .. } => {
+            // An `Unknown` kind carries daemon-sent text of any length, and this rendering is
+            // bounded by contract, so the kind is cut like the payloads are elided.
+            let kind: String = kind.to_string().chars().take(32).collect();
+            format!("error ({kind}, fatal={fatal})")
+        }
         Response::AtCapacity { .. } => "at_capacity".to_string(),
         _ => "unrecognised reply".to_string(),
     }
@@ -465,11 +470,12 @@ mod tests {
             Response::opened(12, true),
             Response::result(0, big.clone(), big.clone(), 1),
             Response::put("p".into()),
-            Response::got("p".into(), big, true, true),
+            Response::got("p".into(), big.clone(), true, true),
             Response::snapshotted("d".into()),
             Response::trace(serde_json::Value::Null),
             Response::trace_summary(serde_json::Value::Null),
             Response::error("m".into(), true, FaultKind::Protocol),
+            Response::error("m".into(), true, FaultKind::Unknown(big.clone())),
             Response::at_capacity(5),
             Response::Closed,
             Response::Cancelled,
