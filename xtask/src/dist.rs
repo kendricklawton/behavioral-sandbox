@@ -1182,6 +1182,72 @@ mod tests {
         );
     }
 
+    /// The scalar initializer of a `const`, the [`const_list`] shape for a value that is not a
+    /// list: the text between its `=` and the closing `;`, trimmed.
+    fn const_value(src: &str, decl: &str) -> String {
+        let at = src.find(decl);
+        assert!(at.is_some(), "`{decl}` must be declared");
+        let at = at.expect("asserted declared just above");
+        let open = src[at..].find('=');
+        assert!(open.is_some(), "`{decl}` must be initialized");
+        let open = at + open.expect("asserted initialized just above") + 1;
+        let close = src[open..].find(';');
+        assert!(close.is_some(), "`{decl}`'s initializer must end");
+        src[open..open + close.expect("asserted ended just above")]
+            .trim()
+            .to_string()
+    }
+
+    /// The cgroup-limit derivation exists twice and **cannot be shared**: `bsx-test-support` is
+    /// zero-dependency by decision and a dev-dependency of `bsx-engine`, so a dependency either
+    /// way round is a cycle. `LimitCgroup` mirrors `jail`'s constants and arithmetic so the
+    /// privileged enforcement tests cap a VMM exactly where the jailer would.
+    ///
+    /// The stake is what those tests measure. If `jail.rs` moves the overhead or reshapes a
+    /// formula and the mirror does not, the enforcement suites keep capping at the old numbers
+    /// and stay green while measuring a limit production no longer sets.
+    #[test]
+    fn the_cgroup_limit_derivation_is_the_same_in_the_jail_and_the_test_support() {
+        let repo = workspace_root();
+        let jail = std::fs::read_to_string(repo.join("crates/engine/src/jail.rs"))
+            .expect("crates/engine/src/jail.rs");
+        let support = std::fs::read_to_string(repo.join("crates/test-support/src/lib.rs"))
+            .expect("crates/test-support/src/lib.rs");
+        // The values must match; the declared types deliberately differ (`u32` widened at the
+        // jail's use site, `u64` in the helper), so the comparison is initializer text.
+        for name in ["const MEMORY_OVERHEAD_MIB", "const CPU_PERIOD_US"] {
+            assert_eq!(
+                const_value(&jail, name),
+                const_value(&support, name),
+                "`{name}` differs between the jail and test-support"
+            );
+        }
+        // And the arithmetic that uses them, pinned as the exact expressions (each side spells
+        // its own integer widening), so a formula reshaped on one side forces a look at its
+        // mirror in the same commit.
+        let jail_body = fn_body(&jail, "cgroup_args_for");
+        for needle in [
+            "u64::from(vcpus.get()) * CPU_PERIOD_US",
+            "(u64::from(mem_mib.get()) + u64::from(MEMORY_OVERHEAD_MIB)) * 1024 * 1024",
+            "cpu.max={quota} {CPU_PERIOD_US}",
+        ] {
+            assert!(
+                jail_body.contains(needle),
+                "`cgroup_args_for` must contain `{needle}`"
+            );
+        }
+        for needle in [
+            "u64::from(vcpus) * CPU_PERIOD_US",
+            "(u64::from(mem_mib) + MEMORY_OVERHEAD_MIB) * 1024 * 1024",
+            "{cpu_quota_us} {CPU_PERIOD_US}",
+        ] {
+            assert!(
+                support.contains(needle),
+                "test-support's `LimitCgroup` must contain `{needle}`"
+            );
+        }
+    }
+
     /// Every public `exec` on the engine takes `&mut self`, the one thing keeping two of them off a
     /// single sandbox.
     ///
