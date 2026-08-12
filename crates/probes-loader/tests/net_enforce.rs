@@ -14,14 +14,13 @@
 use std::time::Duration;
 
 use bsx_engine::Vm;
+use bsx_probes_common::IPPROTO_UDP;
 use bsx_probes_loader::{EgressPolicy, Protocol, TapMonitor};
 
 mod common;
 
 use common::{networked_agent_config, probe_and_vm_skip_reason};
 
-/// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
-const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 /// The one port the guest is allowed to reach on its host end; every other port is denied.
 const ALLOWED_PORT: u16 = 9999;
 /// A port the guest is *not* allowed to reach, the "blocked from everything else" half.

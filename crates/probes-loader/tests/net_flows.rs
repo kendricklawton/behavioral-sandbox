@@ -9,14 +9,12 @@
 use std::time::Duration;
 
 use bsx_engine::Vm;
+use bsx_probes_common::IPPROTO_UDP;
 use bsx_probes_loader::TapMonitor;
 
 mod common;
 
 use common::{networked_agent_config, probe_and_vm_skip_reason};
-
-/// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
-const IPPROTO_UDP: u8 = 17;
 
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
