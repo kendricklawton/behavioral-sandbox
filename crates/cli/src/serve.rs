@@ -637,6 +637,27 @@ fn charge(current: &AtomicU64, ceiling: u64, amount: u64) -> bool {
     }
 }
 
+/// Shape `config` the way every daemon-served VM is shaped, whether it cold-boots for one session
+/// or restores as a pool clone: the daemon's confinement posture (the launch choice, never a
+/// client's) and the vsock exec channel forced on, which is what
+/// [`Sandbox::open`](bsx_engine::Sandbox::open) does for an embedder. One place, because a pooled
+/// session and a cold one must be the same shape of VM or the pool changes what a client gets.
+pub(crate) fn daemon_shaped(
+    mut config: BootConfig,
+    isolation: crate::policy::IsolationMode,
+) -> BootConfig {
+    // An unjailed daemon clears a jail the env or a file configured: the posture is the flag's.
+    config.jail = if isolation.is_jailed() {
+        Some(config.jail.unwrap_or_default())
+    } else {
+        None
+    };
+    if config.guest_cid.is_none() {
+        config.guest_cid = Some(DEFAULT_GUEST_CID);
+    }
+    config
+}
+
 /// The resource profile every pre-warmed clone holds, single-sourced so the pool builder, the
 /// admission charges, and the take-handoff release cannot disagree about a clone's footprint.
 pub(crate) fn pool_clone_limits() -> Limits {
@@ -911,15 +932,7 @@ fn build_pool_from(
 
     // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). They
     //    inherit the snapshot's vsock, so a session execs over it exactly like a cold boot.
-    let mut pool_config = base.clone().with_limits(pool_clone_limits());
-    pool_config.jail = if isolation.is_jailed() {
-        Some(pool_config.jail.unwrap_or_default())
-    } else {
-        None
-    };
-    if pool_config.guest_cid.is_none() {
-        pool_config.guest_cid = Some(DEFAULT_GUEST_CID);
-    }
+    let pool_config = daemon_shaped(base.clone().with_limits(pool_clone_limits()), isolation);
     Pool::new(snapshot, pool_config, target)
 }
 
@@ -1336,6 +1349,54 @@ mod tests {
             "nothing is listening, so the file is reclaimable"
         );
         assert!(!someone_is_listening(&scratch.path().join("absent.sock")));
+    }
+
+    /// Every VM the daemon serves goes through one shaping seam, so a pooled session and a cold one
+    /// cannot differ in confinement or in whether they have an exec channel at all. Each clause is
+    /// separate: the posture is the daemon's launch choice, and the vsock default must not overwrite
+    /// a cid an operator set.
+    #[test]
+    fn the_daemon_shapes_every_vm_it_serves_the_same_way() {
+        use crate::policy::IsolationMode;
+
+        // Jailed is the default posture, and a jail the env or a file configured survives it.
+        let jailed = daemon_shaped(BootConfig::default(), IsolationMode::Jailed);
+        assert!(jailed.jail.is_some(), "the default posture is confined");
+        assert_eq!(
+            jailed.guest_cid,
+            Some(DEFAULT_GUEST_CID),
+            "a served VM always has the exec channel; nothing else turns it on"
+        );
+        let mut preset = BootConfig::default();
+        let mut configured_jail = bsx_engine::Jail::default();
+        configured_jail.uid = 4242;
+        preset.jail = Some(configured_jail);
+        assert_eq!(
+            daemon_shaped(preset, IsolationMode::Jailed)
+                .jail
+                .map(|j| j.uid),
+            Some(4242),
+            "a configured jail is kept, not replaced by the default"
+        );
+
+        // `--unjailed` is the daemon-wide opt-out, so it must *clear* a jail the lower layers set,
+        // not merely decline to add one.
+        let mut configured = BootConfig::default();
+        configured.jail = Some(bsx_engine::Jail::default());
+        assert!(
+            daemon_shaped(configured, IsolationMode::Unjailed)
+                .jail
+                .is_none(),
+            "--unjailed must win over an env- or file-configured jail"
+        );
+
+        // An operator who named a cid keeps it: the default fills a gap, it does not overwrite.
+        let mut chosen = BootConfig::default();
+        chosen.guest_cid = Some(DEFAULT_GUEST_CID + 7);
+        assert_eq!(
+            daemon_shaped(chosen, IsolationMode::Jailed).guest_cid,
+            Some(DEFAULT_GUEST_CID + 7)
+        );
     }
 
     /// The names a daemon mints and the names its successor's sweep reclaims are one round trip, so

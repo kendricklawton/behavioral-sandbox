@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use crate::audit::RunProbes;
 use crate::deadline::DeadlineStream;
 use crate::policy::{Policy, Requested, parse_allow};
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
+use bsx_engine::{ErrorKind, Limits, RunningVm, Vm, VmmError};
 use bsx_engine::{MAX_VCPUS, vcpus_supported};
 use bsx_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 use bsx_protocol::{
@@ -553,25 +553,8 @@ fn boot_session_vm(
     }
     let mut config = server.base.clone().with_limits(limits);
     config.enable_network = nic;
-    Ok((cold_boot(config, server.isolation)?, false))
-}
-
-/// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
-/// [`Sandbox::open`](bsx_engine::Sandbox::open) does before booting, force the vsock exec channel on,
-/// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
-fn cold_boot(
-    mut config: BootConfig,
-    isolation: crate::policy::IsolationMode,
-) -> Result<RunningVm, VmmError> {
-    config.jail = if isolation.is_jailed() {
-        Some(config.jail.unwrap_or_default())
-    } else {
-        None
-    };
-    if config.guest_cid.is_none() {
-        config.guest_cid = Some(DEFAULT_GUEST_CID);
-    }
-    Vm::boot(config)
+    let vm = Vm::boot(crate::serve::daemon_shaped(config, server.isolation))?;
+    Ok((vm, false))
 }
 
 /// Why a `snapshot` produced no bundle. Split by fault: a disk ceiling is the operator's posture and
