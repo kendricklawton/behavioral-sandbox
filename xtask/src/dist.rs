@@ -1464,6 +1464,16 @@ mod tests {
                     "{file}'s `{method}` (under `{imp}`) must keep `{part}`: {why}"
                 );
             }
+            // The write half needs one more thing the read half does not. `sendmsg` loops inside the
+            // kernel until the caller's whole buffer is sent, re-applying `SO_SNDTIMEO` to each
+            // internal wait, so a whole frame in one `write` is a single syscall that a slowly
+            // draining peer stretches with no deadline check in between. `recvmsg` returns what is
+            // available instead of filling the buffer, so reads need no cap.
+            assert!(
+                method != "write" || body.contains("WRITE_CHUNK"),
+                "{file}'s `write` must cap what one syscall hands the kernel (`WRITE_CHUNK`), or \
+                 the deadline is only checked once for the whole buffer"
+            );
         }
     }
 }

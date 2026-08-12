@@ -5,8 +5,9 @@
 //!   off: the option bounds one syscall, and `read_exact` of an `N`-byte frame makes `N` of them.
 //!   Shrinking the option to the budget left before one absolute deadline makes the sum of them
 //!   honour a single wall clock, which is what turns a dribbling peer from a host hang into a typed
-//!   `TimedOut`. Writes are bounded the same way: a peer that reads slowly would otherwise park the
-//!   host in `write_all`.
+//!   `TimedOut`. Writes are bounded the same way, and additionally **capped per syscall**
+//!   ([`WRITE_CHUNK`]), because `sendmsg` loops inside the kernel until the whole buffer is gone and
+//!   would otherwise stretch one `write` past the deadline while a guest drains it slowly.
 //! - **A spent budget is refused, never armed.** The kernel reads a zero timeout as "block forever",
 //!   so arming one is the hang this exists to prevent.
 //!
@@ -60,6 +61,15 @@ impl<S: Borrow<UnixStream>> Read for DeadlineStream<S> {
     }
 }
 
+/// The most one bounded `write` hands the kernel at a time.
+///
+/// **The deadline is checked between syscalls, so the syscalls have to be small.** A unix socket's
+/// `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent, re-applying
+/// `SO_SNDTIMEO` to each internal wait, so a whole frame in one `write` is one syscall that a slowly
+/// draining peer stretches with no check in between. Reads need no such cap: `recvmsg` returns what
+/// is available rather than filling the buffer, so `read_exact` already makes one syscall per chunk.
+const WRITE_CHUNK: usize = 64 * 1024;
+
 impl<S: Borrow<UnixStream>> Write for DeadlineStream<S> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let Some(remaining) = self.remaining() else {
@@ -70,7 +80,7 @@ impl<S: Borrow<UnixStream>> Write for DeadlineStream<S> {
         };
         let mut sock: &UnixStream = self.stream.borrow();
         sock.set_write_timeout(Some(remaining))?;
-        sock.write(buf)
+        sock.write(&buf[..buf.len().min(WRITE_CHUNK)])
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -115,6 +125,44 @@ mod tests {
             .read(&mut [0u8; 8])
             .expect_err("a spent budget must not read");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// A guest that drains slowly cannot stretch one `write` past the deadline.
+    ///
+    /// The host writes the exec request (argv, stdin, injected files) to an agent a hostile guest
+    /// fully controls, so this is the host path design rule 5 governs. Without the per-syscall cap
+    /// the whole frame goes to the kernel in one `sendmsg`, which loops internally re-applying
+    /// `SO_SNDTIMEO`, and the deadline check between calls never runs.
+    #[test]
+    fn a_slow_draining_peer_cannot_stretch_one_write_past_the_deadline() {
+        let (a, mut b) = UnixStream::pair().expect("socketpair");
+        let peer = std::thread::spawn(move || {
+            // Fast enough to keep each `write` progressing, slow enough that draining the payload
+            // would take far longer than the budget below.
+            let mut buf = vec![0u8; 32 * 1024];
+            for _ in 0..400 {
+                std::thread::sleep(Duration::from_millis(50));
+                match b.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let mut bounded =
+            DeadlineStream::new(a, Instant::now() + Duration::from_millis(300), "test");
+        let started = Instant::now();
+        let err = bounded
+            .write_all(&vec![0u8; 8 * 1024 * 1024])
+            .expect_err("a slow-draining peer must hit the deadline");
+        let held = started.elapsed();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            held < Duration::from_secs(5),
+            "the write must end at the absolute deadline; held {held:?}"
+        );
+        drop(bounded);
+        let _ = peer.join();
     }
 
     /// A live budget arms the socket and reads what is there, so the bound does not break traffic.
