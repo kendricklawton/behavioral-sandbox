@@ -15,7 +15,7 @@ use std::net::Ipv4Addr;
 
 use bsx_engine::{GuestEgress, Vm};
 
-use common::{guest_rootfs_config, have_net_admin};
+use common::{assert_no_route, guest_rootfs_config, have_net_admin, ping};
 
 /// The host end of every guest's /30 (`net.rs` keeps it constant across netns), which is the only
 /// address a guest can reach without a gateway and therefore the only sensible gateway to configure.
@@ -192,57 +192,18 @@ fn addresses_the_guest_and_routes_host_to_guest() {
     );
 
     // Host<->guest reachability: the guest can reach the host end of the point-to-point /30.
-    let ping = vm
-        .exec(
-            &[
-                "ping".into(),
-                "-c".into(),
-                "1".into(),
-                "-W".into(),
-                "1".into(),
-                host_ip.clone(),
-            ],
-            b"",
-        )
-        .expect("ping the host tap IP");
+    let reached = ping(&mut vm, &host_ip);
     assert_eq!(
-        ping.exit_code,
+        reached.exit_code,
         0,
         "guest should reach the host tap IP {host_ip}; console:\n{}",
         vm.console()
     );
 
-    // Deny-by-default: an off-subnet address is unreachable (a fast ENETUNREACH, no route, not a
-    // timeout), proving there's no default route or masquerade opening the guest to the world.
-    let off = vm
-        .exec(
-            &[
-                "ping".into(),
-                "-c".into(),
-                "1".into(),
-                "-W".into(),
-                "1".into(),
-                "192.0.2.1".into(), // RFC 5737 TEST-NET-1, provably off the /30
-            ],
-            b"",
-        )
-        .expect("ping an off-subnet address");
-    assert_ne!(
-        off.exit_code, 0,
-        "deny-by-default: the guest must not reach an off-subnet address"
-    );
-    // Pin the *reason*: no route (ENETUNREACH), not a timeout. TEST-NET is bogon-filtered on the
-    // public internet too, so a plain non-zero exit would also pass with a full default route +
-    // masquerade, the exact regression this probe exists to catch.
-    let off_err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&off.stdout),
-        String::from_utf8_lossy(&off.stderr)
-    );
-    assert!(
-        off_err.contains("nreachable"),
-        "the block must be no-route, not a timeout; output: {off_err}"
-    );
+    // Deny-by-default: RFC 5737 TEST-NET-1 is provably off the /30, so a guest with no default
+    // route and no masquerade has nowhere to send it.
+    let off = ping(&mut vm, "192.0.2.1");
+    assert_no_route(&off, "the guest must not reach an off-subnet address");
 
     vm.shutdown().expect("shutdown should succeed");
 }
@@ -288,59 +249,18 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
     );
 
     // Host<->guest v6 reachability: the guest reaches the host end of the connected /64.
-    let ping = vm
-        .exec(
-            &[
-                "ping".into(),
-                "-6".into(),
-                "-c".into(),
-                "1".into(),
-                "-W".into(),
-                "1".into(),
-                host_ip6.clone(),
-            ],
-            b"",
-        )
-        .expect("ping the host tap v6 address");
+    let reached = ping(&mut vm, &host_ip6);
     assert_eq!(
-        ping.exit_code,
+        reached.exit_code,
         0,
         "guest should reach the host v6 end {host_ip6}; console:\n{}",
         vm.console()
     );
 
-    // Deny-by-default: an off-link v6 address is unreachable (no v6 default route). RFC 3849
-    // documentation range `2001:db8::/32` is provably off the /64.
-    let off = vm
-        .exec(
-            &[
-                "ping".into(),
-                "-6".into(),
-                "-c".into(),
-                "1".into(),
-                "-W".into(),
-                "1".into(),
-                "2001:db8::1".into(),
-            ],
-            b"",
-        )
-        .expect("ping an off-link v6 address");
-    assert_ne!(
-        off.exit_code, 0,
-        "deny-by-default: the guest must not reach an off-link v6 address"
-    );
-    // Pin the reason (no route, not a timeout), and the mechanism (no v6 default route), the same
-    // two binds the v4 twin carries: `2001:db8::/32` is bogon-filtered on the public internet, so
-    // the bare non-zero exit would also pass with full v6 egress.
-    let off_err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&off.stdout),
-        String::from_utf8_lossy(&off.stderr)
-    );
-    assert!(
-        off_err.contains("nreachable"),
-        "the v6 block must be no-route, not a timeout; output: {off_err}"
-    );
+    // Deny-by-default: the RFC 3849 documentation range `2001:db8::/32` is provably off the /64.
+    let off = ping(&mut vm, "2001:db8::1");
+    assert_no_route(&off, "the guest must not reach an off-link v6 address");
+    // The mechanism behind that refusal, stated by the routing table itself: no v6 default route.
     let route = vm
         .exec(&["ip".into(), "-6".into(), "route".into()], b"")
         .expect("show guest v6 routes");
@@ -391,31 +311,11 @@ fn two_networked_vms_run_in_isolated_netns() {
     // Deny-by-default holds per VM: neither guest can reach an off-/30 address, and the other VM lives
     // entirely in a separate netns, so it is off every route either guest has.
     for (vm, other) in [(&mut vm_a, ns_b), (&mut vm_b, ns_a)] {
-        let off = vm
-            .exec(
-                &[
-                    "ping".into(),
-                    "-c".into(),
-                    "1".into(),
-                    "-W".into(),
-                    "1".into(),
-                    "192.0.2.1".into(), // RFC 5737 TEST-NET-1, off the /30
-                ],
-                b"",
-            )
-            .expect("ping an off-subnet address");
-        assert_ne!(
-            off.exit_code, 0,
-            "each guest must be deny-by-default, so it can't reach the other in netns {other}"
-        );
-        let off_err = format!(
-            "{}{}",
-            String::from_utf8_lossy(&off.stdout),
-            String::from_utf8_lossy(&off.stderr)
-        );
-        assert!(
-            off_err.contains("nreachable"),
-            "the block must be no-route, not a timeout; output: {off_err}"
+        // RFC 5737 TEST-NET-1, off the /30.
+        let off = ping(vm, "192.0.2.1");
+        assert_no_route(
+            &off,
+            &format!("this guest must not reach the other in netns {other}"),
         );
     }
 

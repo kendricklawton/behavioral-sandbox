@@ -16,8 +16,8 @@ use std::time::Duration;
 use bsx_engine::{DEFAULT_JAIL_UID, Jail, Pool, Vm};
 
 use common::{
-    TmpDir, cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
-    prewarmed_python_snapshot,
+    TmpDir, assert_no_route, cgroup_of, config, guest_rootfs_config, have_jailer_privileges,
+    have_net_admin, ping, prewarmed_python_snapshot,
 };
 
 #[test]
@@ -348,41 +348,17 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     // recreated tap in each netns is live), and stays deny-by-default (no default route).
     for (label, clone) in [("A", &mut clone_a), ("B", &mut clone_b)] {
         let host_ip = clone.ipv4().expect("clone ipv4").host.to_string();
-        let ping = clone
-            .exec(
-                &[
-                    "ping".into(),
-                    "-c".into(),
-                    "1".into(),
-                    "-W".into(),
-                    "1".into(),
-                    host_ip.clone(),
-                ],
-                b"",
-            )
-            .expect("clone pings its host end");
+        let reached = ping(clone, &host_ip);
         assert_eq!(
-            ping.exit_code,
+            reached.exit_code,
             0,
             "clone {label} should reach its host end {host_ip}; console:\n{}",
             clone.console()
         );
-        let off = clone
-            .exec(
-                &[
-                    "ping".into(),
-                    "-c".into(),
-                    "1".into(),
-                    "-W".into(),
-                    "1".into(),
-                    "192.0.2.1".into(),
-                ],
-                b"",
-            )
-            .expect("ping an off-subnet address");
-        assert_ne!(
-            off.exit_code, 0,
-            "clone {label} must stay deny-by-default (no default route)"
+        let off = ping(clone, "192.0.2.1");
+        assert_no_route(
+            &off,
+            &format!("clone {label} must stay deny-by-default (no default route)"),
         );
     }
 
