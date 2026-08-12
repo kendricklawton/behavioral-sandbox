@@ -149,13 +149,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // `BootConfig` rather than the wire, since whether a route out exists is the operator's posture.
     let gateway = server.base.egress.map(|e| e.gateway());
     let enforcing = net.egress.is_some();
-    let mut attach_params = bsx_probes_loader::AttachParams::new(vm.vmm_pid());
-    attach_params.nic = match (vm.netns(), vm.tap_name()) {
-        (Some(netns), Some(tap)) => Some(bsx_probes_loader::Nic { netns, tap }),
-        _ => None,
-    };
-    attach_params.egress = net.egress.as_ref();
-    attach_params.gateway = gateway;
+    let attach_params = crate::audit::attach_params(&vm, net.egress.as_ref(), gateway);
     let probes = match server.observ.attach(vm.name(), attach_params) {
         Ok(p) => Some(p),
         Err(e) => {
