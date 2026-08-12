@@ -17,7 +17,7 @@
 //!   logic and defaults are not duplicated. `log` has no `BootConfig` field; the CLI reads it here.
 
 use std::ffi::OsString;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
@@ -440,42 +440,34 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
 /// Parse one IPv4 CIDR, `IP` or `IP/PREFIX`. `context` is the whole phrase naming where the
 /// operator wrote it, so one parser serves callers whose locus has a different shape.
 pub(crate) fn parse_v4_cidr(s: &str, context: &str) -> Result<Ipv4Cidr, String> {
-    match s.split_once('/') {
-        Some((ip, prefix)) => {
-            let addr: Ipv4Addr = ip
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address {ip:?} in {context}"))?;
-            let prefix: u8 = prefix
-                .parse()
-                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in {context}"))?;
-            Ipv4Cidr::new(addr, prefix).map_err(|e| format!("{context}: {e}"))
-        }
-        None => {
-            let addr: Ipv4Addr = s
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address in {context}"))?;
-            Ok(Ipv4Cidr::host(addr))
-        }
-    }
+    parse_cidr(s, context, "IPv4")
 }
 
 /// The v6 twin of [`parse_v4_cidr`].
 pub(crate) fn parse_v6_cidr(s: &str, context: &str) -> Result<Ipv6Cidr, String> {
+    parse_cidr(s, context, "IPv6")
+}
+
+/// The one body behind both family parsers; `family` names the address family in the message.
+fn parse_cidr<A>(s: &str, context: &str, family: &str) -> Result<bsx_probes_loader::Cidr<A>, String>
+where
+    A: bsx_probes_loader::CidrAddr + std::str::FromStr,
+{
     match s.split_once('/') {
         Some((ip, prefix)) => {
-            let addr: Ipv6Addr = ip
+            let addr: A = ip
                 .parse()
-                .map_err(|_| format!("invalid IPv6 address {ip:?} in {context}"))?;
+                .map_err(|_| format!("invalid {family} address {ip:?} in {context}"))?;
             let prefix: u8 = prefix
                 .parse()
                 .map_err(|_| format!("invalid CIDR prefix {prefix:?} in {context}"))?;
-            Ipv6Cidr::new(addr, prefix).map_err(|e| format!("{context}: {e}"))
+            bsx_probes_loader::Cidr::new(addr, prefix).map_err(|e| format!("{context}: {e}"))
         }
         None => {
-            let addr: Ipv6Addr = s
+            let addr: A = s
                 .parse()
-                .map_err(|_| format!("invalid IPv6 address in {context}"))?;
-            Ok(Ipv6Cidr::host(addr))
+                .map_err(|_| format!("invalid {family} address in {context}"))?;
+            Ok(bsx_probes_loader::Cidr::host(addr))
         }
     }
 }
