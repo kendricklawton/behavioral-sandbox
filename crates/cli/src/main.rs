@@ -399,11 +399,11 @@ fn main() -> ExitCode {
 fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => {
-            sweep_vm_residue(sources);
+            sweep_vm_residue(&base_config(sources).scratch_dir, None);
             run_command(*args, sources)
         }
         Cmd::Shell(args) => {
-            sweep_vm_residue(sources);
+            sweep_vm_residue(&base_config(sources).scratch_dir, None);
             shell(args, sources)
         }
         Cmd::Doctor(args) => Ok(doctor::report(&base_config(sources), &args, sources)),
@@ -417,21 +417,31 @@ fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
     }
 }
 
-/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `bsx`
-/// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
-/// the VM process but the scratch dir and netns are out of its scope. Run once before a
-/// boot subcommand as the boot-time GC the engine owes its host. Best-effort and
-/// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
-/// concurrent run's live sandbox.
-fn sweep_vm_residue(sources: &config::Sources) {
-    match sweep_orphans(&base_config(sources).scratch_dir) {
-        Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
-            dirs = r.dirs_reclaimed,
-            netns = r.netns_reclaimed,
-            "reclaimed crashed-run VM residue at startup"
-        ),
-        Ok(_) => {}
-        Err(e) => tracing::debug!(error = %e, "startup orphan sweep skipped"),
+/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `bsx` left: a
+/// `Ctrl-C`/SIGKILL skips `Drop`, so the lifetime sentinel reaps the VM process but the scratch dir
+/// and netns are out of its scope. Run once at startup by every path that boots a VM, the CLI's
+/// subcommands and the daemon alike, which is why it takes `metrics` (`None` off the daemon) rather
+/// than living beside either caller. Best-effort and conservative: [`sweep_orphans`] only reclaims
+/// this euid's dead-pid dirs, so it never touches a concurrent run's live sandbox.
+fn sweep_vm_residue(scratch: &std::path::Path, metrics: Option<&metrics::Metrics>) {
+    match sweep_orphans(scratch) {
+        Ok(r) => {
+            if let Some(m) = metrics {
+                m.record_sweep(&r);
+            }
+            if r.dirs_reclaimed + r.netns_reclaimed > 0 {
+                tracing::info!(
+                    dirs = r.dirs_reclaimed,
+                    netns = r.netns_reclaimed,
+                    "reclaimed crashed-run VM residue at startup"
+                );
+            }
+        }
+        // The scratch base is `/tmp` unless an operator named one, so an unreadable base is a real
+        // condition (a wrong `BSX_SCRATCH_DIR`, or permissions) and leaves residue unreclaimed.
+        Err(e) => {
+            tracing::warn!(error = %e, "startup orphan sweep failed; residue is left in place")
+        }
     }
 }
 
@@ -1128,11 +1138,36 @@ mod tests {
     use super::{
         AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_posture, build_egress,
         parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_output_cap, parse_vcpus,
-        shell_policy, write_artifacts_in,
+        shell_policy, sweep_vm_residue, write_artifacts_in,
     };
     use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use bsx_test_support::ScratchDir;
     use clap::CommandFactory;
+
+    /// The CLI and the daemon reclaim crashed-run residue through the same sweep, and the only
+    /// thing that differs is whether a metrics registry is there to charge: `None` off the daemon.
+    /// A registry that stops being charged is a gauge that reads zero on a host that is leaking.
+    #[test]
+    fn the_daemon_sweep_charges_its_registry_and_the_cli_sweep_needs_none() {
+        let scratch = ScratchDir::created("sweep-seam");
+        // `bsx-<pid>-<seq>`, the per-VM workdir shape, owned by us with a pid that cannot be live.
+        let dead = |seq: u32| scratch.path().join(format!("bsx-{}-{seq}", u32::MAX - 1));
+        std::fs::create_dir(dead(0)).expect("stage a dead run's dir");
+
+        let metrics = crate::metrics::Metrics::default();
+        sweep_vm_residue(scratch.path(), Some(&metrics));
+        assert!(!dead(0).exists(), "a dead run's dir must be reclaimed");
+        let rendered = metrics.render(&crate::metrics::CapacitySample::default());
+        assert!(
+            rendered.contains("bsx_sweep_reclaimed_total{resource=\"dirs\"} 1"),
+            "the daemon's counter must see what the sweep reclaimed:\n{rendered}"
+        );
+
+        // The same call with no registry: the CLI's path, which must reclaim just the same.
+        std::fs::create_dir(dead(1)).expect("stage another");
+        sweep_vm_residue(scratch.path(), None);
+        assert!(!dead(1).exists(), "no registry must not mean no sweep");
+    }
 
     /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
     /// real terminal width. Clap wraps nothing unless the `wrap_help` feature is on, and it was not:
