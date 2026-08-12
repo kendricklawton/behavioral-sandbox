@@ -357,12 +357,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
     let mut base = BootConfig::from_env();
-    // Flag layer over `BSX_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
-    // hardening posture, so an absent flag leaves an env-set `true` intact (it never forces `false`).
-    if args.require_limits {
-        base.require_limits = true;
-    }
-    crate::apply_jail_ids(&mut base, args.jail_uid, args.jail_gid);
+    crate::apply_posture(&mut base, args.require_limits, args.jail_uid, args.jail_gid);
     let isolation = crate::policy::IsolationMode::from_unjailed(args.unjailed);
 
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an

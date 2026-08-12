@@ -60,6 +60,21 @@ fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
 }
 
 #[test]
+fn require_limits_without_the_jailer_is_refused_before_any_vmm() {
+    // `require_limits` caps the *jailed* VMM's cgroup. The engine owns this contradiction
+    // (`LimitsUnavailable`, raised before any VMM is spawned), so the CLI keeps no second copy of
+    // the rule; `serve`'s startup check is the one deliberate pre-check, because a daemon must
+    // fail at bind time rather than refuse every later session.
+    let dir = PolicyDir::with_toml("limits-unjailed", "");
+    let (code, stderr) = run_in(&dir, &["--require-limits"]);
+    assert_eq!(code, Some(2), "a posture contradiction exits 2: {stderr}");
+    assert!(
+        stderr.contains("resource limits unavailable") && stderr.contains("unjailed"),
+        "the engine's typed refusal reaches the caller before any VMM is looked for: {stderr}"
+    );
+}
+
+#[test]
 fn require_record_refuses_a_run_that_would_leave_no_audit_record() {
     // The posture's contract (docs/cli-config.md): "Refuses any run that would leave no audit
     // record." Three shapes, one gate:

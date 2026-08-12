@@ -430,29 +430,33 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         return Err(refused);
     }
 
+    // The keys that survived the trust gate go back into a policy-only [`UserConfig`], so
+    // [`UserConfig::policy`] is the one place the defaults and the CIDR conversion live.
+    let honored = UserConfig {
+        vcpus,
+        mem_mib,
+        wall_secs,
+        output_cap,
+        max_vcpus,
+        max_mem_mib,
+        max_wall_secs,
+        max_output_cap,
+        require_jail,
+        allow_net,
+        require_record,
+        // `records_dir` is user-only and was refused above.
+        records_dir: None,
+        max_egress_v4,
+        max_egress_v6,
+        ..UserConfig::default()
+    };
     Ok(ProjectConfig {
         marker,
         log,
         // Only the strengthening direction travels, so a project `false` contributes nothing and
         // cannot displace a user file's `true` in the composed lookup.
         require_limits: require_limits.unwrap_or(false),
-        policy: Policy {
-            vcpus,
-            mem_mib,
-            wall_secs,
-            output_cap,
-            max_vcpus,
-            max_mem_mib,
-            max_wall_secs,
-            max_output_cap,
-            require_jail: require_jail.unwrap_or(false),
-            allow_net,
-            require_record: require_record.unwrap_or(false),
-            // `records_dir` is user-only and was refused above.
-            records_dir: None,
-            max_egress_v4: cidrs_v4(max_egress_v4.as_deref()),
-            max_egress_v6: cidrs_v6(max_egress_v6.as_deref()),
-        },
+        policy: honored.policy(),
     })
 }
 

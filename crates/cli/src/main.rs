@@ -106,6 +106,14 @@ impl From<config::ConfigError> for CliError {
     }
 }
 
+impl From<policy::PolicyError> for CliError {
+    /// A policy refusal is a caller-facing CLI error: the message already names the knob, the
+    /// ceiling, and the fix.
+    fn from(e: policy::PolicyError) -> Self {
+        Self::Cli(e.to_string())
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "bsx",
@@ -431,14 +439,26 @@ fn base_config(sources: &config::Sources) -> BootConfig {
     BootConfig::from_env_with(sources.boot_lookup())
 }
 
-/// Apply the `--jail-uid`/`--jail-gid` flag layer over the env/file ids `base_config` already
-/// folded. Shared by `run`, `shell`, and `serve` so the three cannot drift on which layer wins.
-/// An unjailed boot drops the whole `Jail` later, so setting ids for one is inert rather than wrong.
-fn apply_jail_ids(config: &mut BootConfig, uid: Option<u32>, gid: Option<u32>) {
-    if let Some(uid) = uid {
+/// Fold the shared hardening posture into `config`, the flag layer over what env/file already set:
+/// `--require-limits` only *strengthens* (an env/file `true` survives an absent flag, never forced
+/// `false`), and `--jail-uid`/`--jail-gid` overlay the folded ids. Shared by `run`, `shell`, and
+/// `serve` so the three cannot drift on which layer wins. An unjailed boot drops the whole `Jail`
+/// later, so setting ids for one is inert rather than wrong, and the require_limits/unjailed
+/// contradiction is owned by the engine (`LimitsUnavailable`, before any VMM); `serve` alone
+/// pre-checks it, because a daemon must fail at startup rather than refuse every session.
+fn apply_posture(
+    config: &mut BootConfig,
+    require_limits: bool,
+    jail_uid: Option<u32>,
+    jail_gid: Option<u32>,
+) {
+    if require_limits {
+        config.require_limits = true;
+    }
+    if let Some(uid) = jail_uid {
         config.jail.get_or_insert_default().uid = uid;
     }
-    if let Some(gid) = gid {
+    if let Some(gid) = jail_gid {
         config.jail.get_or_insert_default().gid = gid;
     }
 }
@@ -457,20 +477,14 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     // guardrail rather than a boundary (a local caller owns the config file, and `docs/security.md`
     // trusts them), but it keeps a host's defaults and ceilings consistent across both entry points.
     let host_policy = config::policy_of(sources);
-    let limits = host_policy
-        .resolve(&Requested {
-            vcpus: args.vcpus,
-            mem_mib: args.mem,
-            wall_secs: args.wall,
-            output_cap: args.output_cap,
-        })
-        .map_err(|e| CliError::Cli(e.to_string()))?;
-    host_policy
-        .check_jail(policy::IsolationMode::from_unjailed(args.unjailed))
-        .map_err(|e| CliError::Cli(e.to_string()))?;
-    host_policy
-        .check_net(args.net)
-        .map_err(|e| CliError::Cli(e.to_string()))?;
+    let limits = host_policy.resolve(&Requested {
+        vcpus: args.vcpus,
+        mem_mib: args.mem,
+        wall_secs: args.wall,
+        output_cap: args.output_cap,
+    })?;
+    host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
+    host_policy.check_net(args.net)?;
     // The effective signed-record destination: an explicit `--record` wins; otherwise the
     // operator's `records_dir` records every run there by default (which is also how a
     // `require_record` host is satisfied without callers remembering a flag).
@@ -482,9 +496,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     // (its own flag doc), so a summary-only run leaves nothing verifiable, exactly what
     // `require_record` exists to refuse ("refuses any run that would leave no audit record",
     // docs/cli-config.md). `require_record_refuses_a_run_that_would_leave_no_audit_record` pins it.
-    host_policy
-        .check_record(record_path.is_some())
-        .map_err(|e| CliError::Cli(e.to_string()))?;
+    host_policy.check_record(record_path.is_some())?;
 
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
     if args.watch && !std::io::stderr().is_terminal() {
@@ -510,9 +522,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
         Some(policy)
     };
     if let Some(ref pol) = egress {
-        host_policy
-            .check_egress(pol)
-            .map_err(|e| CliError::Cli(e.to_string()))?;
+        host_policy.check_egress(pol)?;
     }
 
     // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
@@ -543,12 +553,12 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
         }
         config.egress = Some(egress);
     }
-    // Flag layer over env/file (both folded by `base_config`): the flag only strengthens the
-    // posture, so an env/file `true` survives an absent flag.
-    if args.require_limits {
-        config.require_limits = true;
-    }
-    apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
+    apply_posture(
+        &mut config,
+        args.require_limits,
+        args.jail_uid,
+        args.jail_gid,
+    );
     // Captured before `config` moves into the boot: the record needs it, and an allowance means
     // something different with a route behind it than without.
     let gateway = config.egress.map(|e| e.gateway());
@@ -748,10 +758,12 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
 fn shell(args: ShellArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
     let limits = shell_policy(&args, &config::policy_of(sources))?;
     let mut config = base_config(sources).with_limits(limits);
-    if args.require_limits {
-        config.require_limits = true;
-    }
-    apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
+    apply_posture(
+        &mut config,
+        args.require_limits,
+        args.jail_uid,
+        args.jail_gid,
+    );
     let mut sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     let mut err_out = std::io::stderr();
     let _ = writeln!(
@@ -853,17 +865,13 @@ fn default_record_path(dir: &Path) -> PathBuf {
 /// default profile, not the bare engine default. Shell has no `--net`, so the net/egress checks
 /// have nothing to check.
 fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliError> {
-    let limits = host_policy
-        .resolve(&Requested {
-            vcpus: args.vcpus,
-            mem_mib: args.mem,
-            wall_secs: None,
-            output_cap: None,
-        })
-        .map_err(|e| CliError::Cli(e.to_string()))?;
-    host_policy
-        .check_jail(policy::IsolationMode::from_unjailed(args.unjailed))
-        .map_err(|e| CliError::Cli(e.to_string()))?;
+    let limits = host_policy.resolve(&Requested {
+        vcpus: args.vcpus,
+        mem_mib: args.mem,
+        wall_secs: None,
+        output_cap: None,
+    })?;
+    host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
     // A shell session writes no audit record, so a record-requiring host refuses it outright
     // rather than hosting an unauditable execution path.
     host_policy
@@ -1114,7 +1122,7 @@ pub(crate) fn init_tracing(filter: &str, json: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_jail_ids, build_egress,
+        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_posture, build_egress,
         parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_output_cap, parse_vcpus,
         shell_policy, write_artifacts_in,
     };
@@ -1229,14 +1237,14 @@ mod tests {
             "BSX_JAIL_GID" => Some("30002".into()),
             _ => None,
         });
-        apply_jail_ids(&mut config, Some(20001), None);
+        apply_posture(&mut config, false, Some(20001), None);
         let jail = config.jail.expect("the jail survives the flag layer");
         assert_eq!(jail.uid, 20001, "the flag wins over the env");
         assert_eq!(jail.gid, 30002, "an absent flag leaves the env value alone");
 
         // With nothing anywhere, the jail stays unset and the CLI's own default supplies the ids.
         let mut bare = bsx_engine::BootConfig::from_env_with(|_| None);
-        apply_jail_ids(&mut bare, None, None);
+        apply_posture(&mut bare, false, None, None);
         assert!(bare.jail.is_none());
     }
 
