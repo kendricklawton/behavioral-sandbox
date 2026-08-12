@@ -26,7 +26,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::audit::RunProbes;
-use crate::trace::{human_bytes, human_duration, printable, proto_name};
+use bsx_probes_loader::ProtoName;
+
+use crate::trace::{human_bytes, human_duration, printable};
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
@@ -90,7 +92,7 @@ impl Timeline {
                             "denied  {}:{} {} (+{})",
                             std::net::Ipv4Addr::from(denial.dst_addr.to_be_bytes()),
                             denial.dst_port,
-                            proto_name(denial.proto),
+                            ProtoName(denial.proto),
                             denial.count - before
                         ),
                     );
@@ -419,7 +421,7 @@ fn draw_network(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
                         "  denied {}:{} {} · {} pkt(s)",
                         std::net::Ipv4Addr::from(denial.dst_addr.to_be_bytes()),
                         denial.dst_port,
-                        proto_name(denial.proto),
+                        ProtoName(denial.proto),
                         denial.count
                     ),
                     Style::default().fg(Color::Red),

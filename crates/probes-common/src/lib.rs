@@ -400,6 +400,22 @@ pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
+/// An IP protocol number rendered for a human: `tcp`, `udp`, or `proto <n>` for one this engine does
+/// not name. The one rendering, so the flow keys, the signed record and the CLI's trail cannot
+/// disagree about what a protocol is called; `core::fmt` only, so the `#![no_std]` half can use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtoName(pub u8);
+
+impl core::fmt::Display for ProtoName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            IPPROTO_TCP => f.write_str("tcp"),
+            IPPROTO_UDP => f.write_str("udp"),
+            p => write!(f, "proto {p}"),
+        }
+    }
+}
+
 /// IP protocol number for **ICMPv6**. Unlike ARP (its own v4 ethertype, cleanly separable from
 /// routable IP), ICMPv6 rides the IPv6 ethertype and can carry a routable Echo, so egress enforcement
 /// spares it only to **on-link** destinations ([`icmp6_dst_on_link`]) and polices the rest like any
@@ -475,11 +491,7 @@ impl core::fmt::Display for FlowKey {
             "{}.{}.{}.{}:{} -> {}.{}.{}.{}:{} ",
             s[0], s[1], s[2], s[3], self.src_port, d[0], d[1], d[2], d[3], self.dst_port
         )?;
-        match self.proto {
-            IPPROTO_TCP => f.write_str("tcp"),
-            IPPROTO_UDP => f.write_str("udp"),
-            p => write!(f, "proto {p}"),
-        }
+        write!(f, "{}", ProtoName(self.proto))
     }
 }
 
@@ -759,11 +771,7 @@ impl core::fmt::Display for FlowKey6 {
         let src = core::net::Ipv6Addr::from(self.src_addr);
         let dst = core::net::Ipv6Addr::from(self.dst_addr);
         write!(f, "[{src}]:{} -> [{dst}]:{} ", self.src_port, self.dst_port)?;
-        match self.proto {
-            IPPROTO_TCP => f.write_str("tcp"),
-            IPPROTO_UDP => f.write_str("udp"),
-            p => write!(f, "proto {p}"),
-        }
+        write!(f, "{}", ProtoName(self.proto))
     }
 }
 
@@ -1071,6 +1079,24 @@ mod flow_tests {
 
 #[cfg(test)]
 mod policy_tests {
+    /// The one protocol rendering every surface now reaches for: the flow keys' `Display`, the
+    /// signed record's JSON, and the CLI's audit trail. An unnamed protocol keeps its **number**,
+    /// which is what an operator needs to look it up; the CLI's own copy used to drop it.
+    #[test]
+    fn a_protocol_number_renders_the_same_wherever_it_is_named() {
+        assert_eq!(ProtoName(IPPROTO_TCP).to_string(), "tcp");
+        assert_eq!(ProtoName(IPPROTO_UDP).to_string(), "udp");
+        assert_eq!(ProtoName(IPPROTO_ICMPV6).to_string(), "proto 58");
+        assert_eq!(ProtoName(0).to_string(), "proto 0");
+
+        // The flow keys render through it rather than beside it, so a key and a record naming the
+        // same flow cannot disagree about the protocol.
+        let v4 = FlowKey::new(0, 0, 0, 443, IPPROTO_TCP).to_string();
+        assert!(v4.ends_with("tcp"), "{v4}");
+        let v6 = FlowKey6::new([0u8; 16], [0u8; 16], 0, 443, IPPROTO_ICMPV6).to_string();
+        assert!(v6.ends_with("proto 58"), "{v6}");
+    }
+
     use super::*;
 
     /// A dotted-quad as the host-order `u32` the parser and policy use.

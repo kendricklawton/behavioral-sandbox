@@ -152,7 +152,7 @@ fn denial_line(out: &mut String, dst: impl std::fmt::Display, proto: u8, count: 
     let _ = writeln!(
         out,
         "    denied   {dst} {} · {} packet(s) dropped by the egress policy",
-        proto_name(proto),
+        bsx_probes_loader::ProtoName(proto),
         count
     );
 }
@@ -221,14 +221,6 @@ pub fn human_bytes(b: u64) -> String {
 /// never a fake zero.
 fn opt_bytes(v: Option<u64>) -> String {
     v.map_or_else(|| "n/a".to_string(), human_bytes)
-}
-
-pub(crate) fn proto_name(proto: u8) -> &'static str {
-    match proto {
-        6 => "tcp",
-        17 => "udp",
-        _ => "proto?",
-    }
 }
 
 #[cfg(test)]
