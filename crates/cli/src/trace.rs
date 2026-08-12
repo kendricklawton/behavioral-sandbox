@@ -44,51 +44,29 @@ pub fn render(record: &RunRecord) -> String {
                 human_bytes(net.totals.egress_bytes)
             );
             for flow in &net.flows {
-                let _ = writeln!(
-                    out,
-                    "    flow     {} · sent {} pkts / {} · received {} pkts / {}",
-                    flow.key,
-                    flow.counts.ingress_packets,
-                    human_bytes(flow.counts.ingress_bytes),
-                    flow.counts.egress_packets,
-                    human_bytes(flow.counts.egress_bytes)
-                );
+                flow_line(&mut out, flow.key, &flow.counts);
             }
             for denial in &net.denials {
-                let d = denial.dst_addr.to_be_bytes();
-                let _ = writeln!(
-                    out,
-                    "    denied   {}.{}.{}.{}:{} {} · {} packet(s) dropped by the egress policy",
-                    d[0],
-                    d[1],
-                    d[2],
-                    d[3],
-                    denial.dst_port,
-                    proto_name(denial.proto),
-                    denial.count
+                let dst = std::net::Ipv4Addr::from(denial.dst_addr.to_be_bytes());
+                denial_line(
+                    &mut out,
+                    format!("{}:{}", dst, denial.dst_port),
+                    denial.proto,
+                    denial.count,
                 );
             }
-            // The IPv6 half (dual-stack): the same lines for v6 flows/denials. `FlowKey6`'s
-            // `Display` already renders `[v6]:port -> [v6]:port proto`.
+            // The IPv6 half (dual-stack). `FlowKey6`'s `Display` already renders
+            // `[v6]:port -> [v6]:port proto`.
             for flow in &net.flows6 {
-                let _ = writeln!(
-                    out,
-                    "    flow     {} · sent {} pkts / {} · received {} pkts / {}",
-                    flow.key,
-                    flow.counts.ingress_packets,
-                    human_bytes(flow.counts.ingress_bytes),
-                    flow.counts.egress_packets,
-                    human_bytes(flow.counts.egress_bytes)
-                );
+                flow_line(&mut out, flow.key, &flow.counts);
             }
             for denial in &net.denials6 {
-                let _ = writeln!(
-                    out,
-                    "    denied   [{}]:{} {} · {} packet(s) dropped by the egress policy",
-                    std::net::Ipv6Addr::from(denial.dst_addr),
-                    denial.dst_port,
-                    proto_name(denial.proto),
-                    denial.count
+                let dst = std::net::Ipv6Addr::from(denial.dst_addr);
+                denial_line(
+                    &mut out,
+                    format!("[{}]:{}", dst, denial.dst_port),
+                    denial.proto,
+                    denial.count,
                 );
             }
         }
@@ -149,6 +127,34 @@ pub fn render(record: &RunRecord) -> String {
         let _ = writeln!(out, "  gap        {line}");
     }
     out
+}
+
+/// Writes one flow line. The single writer for both address families, so the v4 and v6 halves of
+/// the trail cannot drift apart.
+fn flow_line(
+    out: &mut String,
+    key: impl std::fmt::Display,
+    counts: &bsx_probes_loader::FlowCounts,
+) {
+    let _ = writeln!(
+        out,
+        "    flow     {key} · sent {} pkts / {} · received {} pkts / {}",
+        counts.ingress_packets,
+        human_bytes(counts.ingress_bytes),
+        counts.egress_packets,
+        human_bytes(counts.egress_bytes)
+    );
+}
+
+/// Writes one denial line for a pre-rendered `addr:port` destination, the one part that differs
+/// between the address families.
+fn denial_line(out: &mut String, dst: impl std::fmt::Display, proto: u8, count: u64) {
+    let _ = writeln!(
+        out,
+        "    denied   {dst} {} · {} packet(s) dropped by the egress policy",
+        proto_name(proto),
+        count
+    );
 }
 
 /// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
