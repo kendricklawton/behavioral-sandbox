@@ -26,6 +26,7 @@ KVM, and no reason to trust the host that produced it. The two share only
 | `tracer.rs` | `ExecveCounter`, `SyscallTracer`: the syscall tracepoints |
 | `tap.rs` | `TapMonitor`: the tc classifiers, the flow and denial maps, the netns join |
 | `egress.rs` | `EgressPolicy`, `Ipv4Cidr`, `Ipv6Cidr`: **no eBPF**, just what an `--allow` string parses into, separately fuzzed |
+| `maps.rs` | the shared aya-object plumbing: the map and program opens, the load-and-attach, the toggle write, and the per-cgroup target registration |
 | `meter.rs` | `ResourceMeter`: the shared CPU meter and cgroup counters |
 | `observer.rs` | the per-sandbox bundle over the three probes, degrading a lost axis to a gap |
 | `lib.rs` | the error types, object-path resolution, cgroup id helpers, the capability check |

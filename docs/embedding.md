@@ -48,8 +48,9 @@ by a forgotten flag ([decision 3](./architecture-decisions.md#3-jailed-execution
 Artifacts (kernel, rootfs, `firecracker`) layer from the environment
 (`BSX_KERNEL`, `BSX_ROOTFS`, …) under explicit `BootConfig` fields.
 
-Networking is off by default. `enable_network` gives the guest a tap whose only reachable address is
-the host end of its /30; `egress` additionally hands it a default route and a resolver, which is read
+Networking is off by default. `enable_network` gives the guest a tap whose only reachable addresses
+are the host ends of its own /30 and its IPv6 ULA (`RunningVm::ipv4`/`ipv6` report both, the v6 end
+best-effort); `egress` additionally hands it a default route and a resolver, which is read
 only when `enable_network` is set and ignored otherwise. Neither builds a path: no veth, bridge,
 forwarding, or NAT, so on a netns nothing has furnished the reachable set is unchanged and only what
 the host can *observe* widens. Attaching an uplink is the embedder's, per
