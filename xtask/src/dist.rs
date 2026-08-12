@@ -1658,6 +1658,72 @@ mod tests {
         }
     }
 
+    /// Every readiness poll that owns a VMM fails fast when that VMM dies.
+    ///
+    /// `await_api_socket`, `await_userspace`, `await_guest_ready` and the snapshot resume wait each
+    /// poll a probe under a deadline. One that watches only the clock reports a VMM that died
+    /// mid-wait as a timeout at the far end of its wall, instead of naming the exit status at once,
+    /// which is how the snapshot resume behaved for its full 10-second window. Staging that needs a
+    /// real microVM dying under a pause, so the shape is pinned instead.
+    ///
+    /// Scoped to the loops holding a child handle. `exec.rs`'s dial retry and `firecracker.rs`'s UDS
+    /// dial also back off, but they are short inner retries reached *through* these four, take no
+    /// child, and are already covered by the liveness check of whichever of these wraps them.
+    #[test]
+    fn every_readiness_poll_checks_the_vmm_is_still_alive() {
+        let repo = workspace_root();
+        let mut checked = 0usize;
+        for file in [
+            "crates/engine/src/spawn.rs",
+            "crates/engine/src/snapshot.rs",
+        ] {
+            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
+            assert!(!src.is_empty(), "{file} must be readable and non-empty");
+            let prod = src
+                .split("#[cfg(test)]\nmod tests {")
+                .next()
+                .unwrap_or_default();
+
+            // Segment at each function declaration, so one loop's liveness check cannot satisfy the
+            // next one down the file.
+            let mut name = String::from("<file scope>");
+            let mut body = String::new();
+            let mut segments: Vec<(String, String)> = Vec::new();
+            for line in prod.lines() {
+                let trimmed = line.trim_start();
+                let decl = trimmed
+                    .strip_prefix("pub(crate) fn ")
+                    .or_else(|| trimmed.strip_prefix("pub fn "))
+                    .or_else(|| trimmed.strip_prefix("fn "));
+                if let Some(rest) = decl {
+                    segments.push((std::mem::take(&mut name), std::mem::take(&mut body)));
+                    name = rest.split('(').next().unwrap_or(rest).to_string();
+                }
+                body.push_str(line);
+                body.push('\n');
+            }
+            segments.push((name, body));
+
+            for (name, body) in segments {
+                if !body.contains("PollBackoff::new()") {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    body.contains("try_wait") || body.contains("exited()"),
+                    "{file}'s `{name}` polls for readiness without checking the VMM is still \
+                     alive, so a VMM that dies mid-wait surfaces as a timeout at the end of its \
+                     wall rather than by its exit status"
+                );
+            }
+        }
+        assert_eq!(
+            checked, 4,
+            "expected four VMM-owning readiness polls; a new one must check liveness too, or be \
+             excluded here with its reason"
+        );
+    }
+
     /// Every reap of a spawned child on the host path is bounded.
     ///
     /// A child in uninterruptible sleep (a hung scratch filesystem, a stuck KVM ioctl) does not die
