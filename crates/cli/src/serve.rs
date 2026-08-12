@@ -698,20 +698,31 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     let _ = bsx_protocol::write_response(&mut stream, &refusal);
 }
 
+/// Every bundle-dir name prefix a daemon mints, each completed by its pid. The one source for both
+/// halves of the round trip: [`bundle_dir`] writes these names and [`sweep_stale_agent_bundles`]
+/// reclaims exactly what matches them, so a dir shape absent here is a dir nothing sweeps.
+const BUNDLE_PREFIXES: [&str; 2] = ["bsx-prewarm-", "bsx-snapshots-"];
+
+/// A bundle dir named `<prefix><pid>` under the engine's scratch knob. `pid` is a parameter so a
+/// test can mint another daemon's name; every caller here passes this process's.
+fn bundle_dir(scratch: &Path, prefix: &str, pid: u32) -> PathBuf {
+    scratch.join(format!("{prefix}{pid}"))
+}
+
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
 fn prewarm_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("bsx-prewarm-{}", std::process::id()))
+    bundle_dir(scratch, BUNDLE_PREFIXES[0], std::process::id())
 }
 
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("bsx-snapshots-{}", std::process::id()))
+    bundle_dir(scratch, BUNDLE_PREFIXES[1], std::process::id())
 }
 
-/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead**
-/// prior daemons, whose guest-memory-sized files are pure leak once their owner is gone. Skips this
-/// pid and any live one: a dead daemon is not this process's unreaped child, so absence from
-/// `/proc` is a sound liveness check.
+/// Reclaims this-user [`BUNDLE_PREFIXES`] dirs left by **dead** prior daemons, whose
+/// guest-memory-sized files are pure leak once their owner is gone. Skips this pid and any live
+/// one: a dead daemon is not this process's unreaped child, so absence from `/proc` is a sound
+/// liveness check.
 fn sweep_stale_agent_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Some(me) = crate::trust::own_euid() else {
@@ -723,11 +734,8 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(pid) = name
-            .strip_prefix("bsx-prewarm-")
-            .or_else(|| name.strip_prefix("bsx-snapshots-"))
-        else {
-            continue; // not a bundle dir this daemon mints
+        let Some(pid) = BUNDLE_PREFIXES.iter().find_map(|p| name.strip_prefix(p)) else {
+            continue; // not a bundle dir a daemon mints
         };
         let Ok(pid) = pid.parse::<u32>() else {
             continue;
@@ -1328,6 +1336,64 @@ mod tests {
             "nothing is listening, so the file is reclaimable"
         );
         assert!(!someone_is_listening(&scratch.path().join("absent.sock")));
+    }
+
+    /// The names a daemon mints and the names its successor's sweep reclaims are one round trip, so
+    /// this stages every shape through the minting function and lets the sweep find them. A prefix
+    /// that only one half knows is a guest-RAM-sized dir that leaks in silence.
+    #[test]
+    fn every_bundle_dir_a_daemon_mints_is_one_the_sweep_reclaims() {
+        let scratch = bsx_test_support::ScratchDir::created("bundle-sweep");
+        // A pid past `pid_max`, so the sweep's liveness check cannot keep these dirs.
+        let dead = u32::MAX - 1;
+        let mints: [fn(&Path) -> PathBuf; 2] = [prewarm_dir, snapshots_dir];
+
+        // Each dead daemon's dir is named by re-minting what the minting function itself writes,
+        // with a dead pid in place of ours. Staging from `BUNDLE_PREFIXES` instead would only prove
+        // the sweep reads its own list, which is not where the drift lives.
+        let mut staged = Vec::new();
+        for mint in mints {
+            let ours = mint(scratch.path());
+            let name = ours
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("a minted bundle dir has a UTF-8 name");
+            let prefix = name
+                .strip_suffix(&std::process::id().to_string())
+                .expect("a minted bundle dir ends in this daemon's pid");
+            let dir = scratch.path().join(format!("{prefix}{dead}"));
+            std::fs::create_dir(&dir).expect("stage a dead daemon's bundle dir");
+            std::fs::write(dir.join("payload"), b"guest ram").expect("stage its contents");
+            staged.push(dir);
+        }
+
+        // This daemon's own dirs: the sweep runs at *our* startup, so reclaiming them would take
+        // out the bundle the pool being built right now references.
+        let mine = mints.map(|mint| mint(scratch.path()));
+        for dir in &mine {
+            std::fs::create_dir(dir).expect("stage our own bundle dir");
+        }
+        // A per-VM workdir is `sweep_vm_residue`'s to judge, never this one's.
+        let bystander = scratch.path().join("bsx-1234-0");
+        std::fs::create_dir(&bystander).expect("stage a per-VM workdir");
+
+        sweep_stale_agent_bundles(scratch.path());
+
+        for dir in &staged {
+            assert!(
+                !dir.exists(),
+                "a dead daemon's {} must be reclaimed",
+                dir.display()
+            );
+        }
+        for dir in &mine {
+            assert!(
+                dir.exists(),
+                "this daemon's own {} must survive its own sweep",
+                dir.display()
+            );
+        }
+        assert!(bystander.exists(), "a per-VM workdir is the other sweep's");
     }
 
     #[test]
