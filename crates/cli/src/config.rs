@@ -175,23 +175,14 @@ impl UserConfig {
         None
     }
 
-    /// Read + parse one `.bsx.toml`, naming the file in any error.
-    fn parse_file(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
-        Self::parse(&text).map_err(|message| ConfigError::Parse {
-            path: path.to_path_buf(),
-            message,
-        })
-    }
-
-    /// Read + parse an already-opened `.bsx.toml`, so the file parsed is the one that was judged.
-    fn parse_open(mut file: std::fs::File, path: &Path) -> Result<Self, ConfigError> {
-        use std::io::Read as _;
+    /// Read + parse one `.bsx.toml`, naming `path` in any error. Takes an already-opened reader
+    /// rather than the path, because the user file is parsed from the handle
+    /// [`open_trusted`](crate::trust::open_trusted) already judged: the file parsed has to be the
+    /// file that was judged, not whatever the path names by the time it is read again.
+    fn parse_open(mut source: impl std::io::Read, path: &Path) -> Result<Self, ConfigError> {
         let mut text = String::new();
-        file.read_to_string(&mut text)
+        source
+            .read_to_string(&mut text)
             .map_err(|e| ConfigError::Read {
                 path: path.to_path_buf(),
                 message: e.to_string(),
@@ -200,6 +191,16 @@ impl UserConfig {
             path: path.to_path_buf(),
             message,
         })
+    }
+
+    /// [`parse_open`](Self::parse_open) by path, for the project layer, which carries no trust gate
+    /// to hand a handle down.
+    fn parse_file(path: &Path) -> Result<Self, ConfigError> {
+        let file = std::fs::File::open(path).map_err(|e| ConfigError::Read {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        Self::parse_open(file, path)
     }
 
     /// Parse TOML text into a [`UserConfig`], surfacing an unknown-key/type error as a plain string
@@ -982,6 +983,38 @@ mod tests {
             policy_of(&sources).vcpus.map(NonZeroU8::get),
             Some(2),
             "and the nearer file still wins for a house default"
+        );
+    }
+
+    /// A parse failure has to name **which** `.bsx.toml` broke: two layers can be in play, they
+    /// live in different directories, and an operator told only "expected a value" has to guess.
+    /// Both layers reach the parser through one body, so this covers the user file and the project
+    /// file at once.
+    #[test]
+    fn a_broken_file_is_named_by_the_layer_it_came_from() {
+        let home = ScratchDir::created("cfg-broken-home");
+        let user_file = home.path().join(FILE_NAME);
+        std::fs::write(&user_file, "vcpus = \n").expect("write a broken user file");
+        let (_dir, leaf) = tree("cfg-broken-user", &[("a", "vcpus = 2\n")]);
+        let err = Sources::discover_with(&leaf, Some(home.path().to_path_buf()))
+            .expect_err("a broken user file is a typed error")
+            .to_string();
+        assert!(
+            err.contains(&user_file.display().to_string()),
+            "the refusal must name the user file: {err}"
+        );
+
+        // And the project layer, which arrives by path rather than through the trust gate.
+        let home = ScratchDir::created("cfg-broken-home2");
+        std::fs::write(home.path().join(FILE_NAME), "vcpus = 1\n").expect("write user file");
+        let (dir, leaf) = tree("cfg-broken-project", &[("a", "vcpus = \n")]);
+        let project_file = dir.path().join("a").join(FILE_NAME);
+        let err = Sources::discover_with(&leaf, Some(home.path().to_path_buf()))
+            .expect_err("a broken project file is a typed error")
+            .to_string();
+        assert!(
+            err.contains(&project_file.display().to_string()),
+            "the refusal must name the project file: {err}"
         );
     }
 
