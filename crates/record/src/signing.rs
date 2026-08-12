@@ -1498,11 +1498,7 @@ mod ed25519_wire_compat {
         );
         let sig = key.sign_detached(b"record signing wire-compat fixture");
         assert_eq!(
-            sig.iter().fold(String::new(), |mut s, b| {
-                use std::fmt::Write as _;
-                let _ = write!(s, "{b:02x}");
-                s
-            }),
+            hex_encode(&sig),
             "02792eeb720cafe7cd7ef7bdd99d3bacc817057ff957a78644b237c2b4b1f9fe72a979223ca5ebe054dc2a109ca3d69e9939c076e5e857c56a019188862bde00",
             "the detached signature over a fixed message moved: every record signed before this \
              bump would stop verifying"
