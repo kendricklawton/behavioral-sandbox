@@ -24,18 +24,29 @@ use bsx_client::{Client, ClientError, FaultKind, OpenParams, ProtocolError};
 
 const CORPUS: &str = include_str!("../../protocol/tests/fixtures/wire-messages.jsonl");
 
-/// One pinned wire line from the corpus, by direction and name, without its terminator.
+/// One pinned wire line from the corpus, by direction and name, without its terminator. Exactly
+/// one match, because protocol's `corpus()` refuses a duplicated line loudly and this reader must
+/// not paper over the same fault by taking the first.
 fn fixture(dir: &str, name: &str) -> String {
-    CORPUS
+    let matches: Vec<_> = CORPUS
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
             serde_json::from_str::<serde_json::Value>(l)
                 .unwrap_or_else(|e| panic!("corpus line is not JSON: {e}"))
         })
-        .find(|v| v["dir"] == dir && v["name"] == name)
-        .and_then(|v| v["line"].as_str().map(str::to_string))
-        .unwrap_or_else(|| panic!("the corpus holds no {dir} fixture named {name}"))
+        .filter(|v| v["dir"] == dir && v["name"] == name)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "the corpus holds {} {dir} fixtures named {name}, want exactly one",
+        matches.len()
+    );
+    matches[0]["line"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("the {dir} fixture {name} carries no line"))
 }
 
 /// What the fake daemon does with one incoming request line.
