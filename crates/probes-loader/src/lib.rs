@@ -74,7 +74,7 @@ mod tap;
 /// The syscall tracepoints: a single-syscall counter and the multi-syscall tracer.
 mod tracer;
 
-pub use egress::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, PolicyError};
+pub use egress::{Cidr, CidrAddr, EgressPolicy, Ipv4Cidr, Ipv6Cidr, PolicyError};
 pub use meter::ResourceMeter;
 pub use tap::TapMonitor;
 pub use tracer::{ExecveCounter, SyscallTracer};
