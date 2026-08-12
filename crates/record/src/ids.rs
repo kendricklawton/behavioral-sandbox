@@ -72,6 +72,16 @@ impl HostIds {
     pub fn trusts(self, uid: u32) -> bool {
         uid == self.effective || uid == 0 || self.sudo_invoker() == Some(uid)
     }
+
+    /// Whether a directory owned by `uid` with permission bits `mode` can be trusted to keep
+    /// holding the file found in it: a trusted owner, and no group/world write without the sticky
+    /// bit. A sticky world-writable directory (`/tmp` at `0o1777`) qualifies, because the kernel
+    /// won't let one user unlink or rename another's file there; without the sticky bit, ownership
+    /// of a file proves nothing about what will be at that path a moment later.
+    #[must_use]
+    pub fn trusts_dir(self, uid: u32, mode: u32) -> bool {
+        self.trusts(uid) && (mode & 0o022 == 0 || mode & 0o1000 != 0)
+    }
 }
 
 /// The `(real, effective)` uids from a `/proc/self/status` body.
@@ -95,6 +105,27 @@ mod tests {
 
     fn ids(effective: u32, real: u32, sudo: Option<u32>) -> HostIds {
         HostIds::from_parts(real, effective, sudo)
+    }
+
+    #[test]
+    fn a_directory_is_trusted_by_its_owner_and_its_sticky_or_write_bits() {
+        let me = ids(1000, 1000, None);
+        // (dir uid, dir mode, trusted, why)
+        let cases = [
+            (1000, 0o755, true, "our own private dir"),
+            (1000, 0o777, false, "world-writable, no sticky"),
+            (1000, 0o775, false, "group-writable, no sticky"),
+            (0, 0o1777, true, "/tmp: the sticky carve-out"),
+            (1000, 0o1775, true, "group-writable but sticky"),
+            (1001, 0o755, false, "another user's dir, perfect mode"),
+        ];
+        for (uid, mode, want, why) in cases {
+            assert_eq!(
+                me.trusts_dir(uid, mode),
+                want,
+                "{why} (uid {uid}, mode {mode:04o})"
+            );
+        }
     }
 
     #[test]

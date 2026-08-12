@@ -315,11 +315,8 @@ fn trusted_key_dir(path: &Path, ids: HostIds) -> Result<(), KeyError> {
             dir.display()
         )));
     }
-    // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel won't let one user
-    // unlink another's file there. Without the sticky bit, file ownership proves nothing about what will
-    // be at that path a moment later.
     let mode = meta.permissions().mode() & 0o7777;
-    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+    if !ids.trusts_dir(uid, mode) {
         return Err(KeyError::Untrusted(format!(
             "signing-key file {p} sits in {}, mode {mode:04o}: a group/world-writable directory \
              without the sticky bit lets another local user replace the key; `chmod go-w` it, or \
