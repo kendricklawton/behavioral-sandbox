@@ -20,6 +20,48 @@ use std::time::Duration;
 use bsx_engine::{Limits, MAX_VCPUS};
 use bsx_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
 
+/// Whether every `asked` CIDR sits inside `ceiling`, the containment check both address families
+/// take. An empty ceiling is no ceiling: the tap still denies by default, so an operator who set
+/// none has only declined to bound *what* a caller may ask for.
+///
+/// # Errors
+/// [`PolicyError::EgressNotAllowed`] naming the first CIDR that reaches outside every entry.
+fn within<C>(ceiling: &[C], asked: impl IntoIterator<Item = C>) -> Result<(), PolicyError>
+where
+    C: Contains + fmt::Display,
+{
+    if ceiling.is_empty() {
+        return Ok(());
+    }
+    for asked in asked {
+        if !ceiling.iter().any(|allowed| allowed.contains(&asked)) {
+            return Err(PolicyError::EgressNotAllowed {
+                asked: asked.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A CIDR that can say whether it covers another of its own family, so [`within`] runs one loop for
+/// both. The two loader types carry the same inherent method and no shared trait.
+trait Contains {
+    /// Whether `other` is entirely inside this CIDR.
+    fn contains(&self, other: &Self) -> bool;
+}
+
+impl Contains for Ipv4Cidr {
+    fn contains(&self, other: &Self) -> bool {
+        Ipv4Cidr::contains(self, other)
+    }
+}
+
+impl Contains for Ipv6Cidr {
+    fn contains(&self, other: &Self) -> bool {
+        Ipv6Cidr::contains(self, other)
+    }
+}
+
 /// The refusal for a vCPU count the pinned VMM will not boot, in one wording for every surface that
 /// refuses one. `subject` names what was asked: the CLI says `vCPUs`, the wire and the config file
 /// say the field or key, since only the thing being refused differs, never the rule.
@@ -386,33 +428,8 @@ impl Policy {
     /// # Errors
     /// [`PolicyError::EgressNotAllowed`] when a requested CIDR is not contained within the operator's allowed list.
     pub fn check_egress(&self, egress: &EgressPolicy) -> Result<(), PolicyError> {
-        if !self.max_egress_v4.is_empty() {
-            for asked in egress.cidrs_v4() {
-                if !self
-                    .max_egress_v4
-                    .iter()
-                    .any(|allowed| allowed.contains(&asked))
-                {
-                    return Err(PolicyError::EgressNotAllowed {
-                        asked: asked.to_string(),
-                    });
-                }
-            }
-        }
-        if !self.max_egress_v6.is_empty() {
-            for asked in egress.cidrs_v6() {
-                if !self
-                    .max_egress_v6
-                    .iter()
-                    .any(|allowed| allowed.contains(&asked))
-                {
-                    return Err(PolicyError::EgressNotAllowed {
-                        asked: asked.to_string(),
-                    });
-                }
-            }
-        }
-        Ok(())
+        within(&self.max_egress_v4, egress.cidrs_v4())?;
+        within(&self.max_egress_v6, egress.cidrs_v6())
     }
 
     /// Refuse a run without an audit record on a host that requires recording.
@@ -709,6 +726,53 @@ mod tests {
             ),
             "asking outside 10.0.0.0/8 is refused"
         );
+    }
+
+    /// The v6 half of the same ceiling. Both families run one containment check, and the v6 leg had
+    /// no test: a check_egress that returned after the v4 leg would have passed every suite here
+    /// while a client's v6 allow-list reached wherever it liked.
+    #[test]
+    fn the_v6_egress_ceiling_permits_narrowing_and_refuses_widening() {
+        use std::net::Ipv6Addr;
+
+        let policy = Policy {
+            max_egress_v6: vec![
+                Ipv6Cidr::new(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8).expect("valid /8"),
+            ],
+            ..Policy::default()
+        };
+
+        let inside = EgressPolicy::deny_all().allow_host6(
+            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
+            Some(443),
+            None,
+        );
+        assert!(
+            policy.check_egress(&inside).is_ok(),
+            "a host inside fd00::/8 is permitted"
+        );
+
+        // RFC 3849 documentation range, provably outside `fd00::/8`.
+        let outside = EgressPolicy::deny_all().allow_host6(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            None,
+            None,
+        );
+        assert!(
+            matches!(
+                policy.check_egress(&outside),
+                Err(PolicyError::EgressNotAllowed { .. })
+            ),
+            "asking outside fd00::/8 is refused"
+        );
+
+        // A v4-only ceiling does not bound v6, and vice versa: an empty list is no ceiling, never
+        // an implicit deny, since the tap already denies by default.
+        let v4_only = Policy {
+            max_egress_v4: vec![Ipv4Cidr::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8).unwrap()],
+            ..Policy::default()
+        };
+        assert!(v4_only.check_egress(&outside).is_ok());
     }
 
     #[test]
