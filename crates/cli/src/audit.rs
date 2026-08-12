@@ -13,9 +13,63 @@
 
 use bsx_engine::VmmError;
 use bsx_probes_loader::{
-    AttachParams, AxisGap, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
-    SharedMeter, SharedTracer, SyscallFootprint, Timing,
+    AttachParams, AxisGap, EgressPolicy, LiveSnapshot, Nic, RecordSubject, ResourceSummary,
+    RunRecord, SandboxProbes, SharedMeter, SharedTracer, SyscallFootprint, Timing,
 };
+
+/// A booted thing the CLI binds probes to: a [`Sandbox`](bsx_engine::Sandbox) for a one-shot `run`,
+/// a [`RunningVm`](bsx_engine::RunningVm) for a daemon session. Both already expose the same three
+/// plain values; naming that lets [`attach_params`] assemble either.
+pub(crate) trait ProbeSubject {
+    /// The VMM's host pid.
+    fn vmm_pid(&self) -> u32;
+    /// The per-VM network namespace, or `None` when the sandbox has no NIC.
+    fn netns(&self) -> Option<&str>;
+    /// The tap device inside that namespace, or `None` when the sandbox has no NIC.
+    fn tap_name(&self) -> Option<&str>;
+}
+
+impl ProbeSubject for bsx_engine::Sandbox {
+    fn vmm_pid(&self) -> u32 {
+        self.vmm_pid()
+    }
+    fn netns(&self) -> Option<&str> {
+        self.netns()
+    }
+    fn tap_name(&self) -> Option<&str> {
+        self.tap_name()
+    }
+}
+
+impl ProbeSubject for bsx_engine::RunningVm {
+    fn vmm_pid(&self) -> u32 {
+        self.vmm_pid()
+    }
+    fn netns(&self) -> Option<&str> {
+        self.netns()
+    }
+    fn tap_name(&self) -> Option<&str> {
+        self.tap_name()
+    }
+}
+
+/// The per-run [`AttachParams`] for `subject`. Both NIC names come from the engine's single tap
+/// field, so they are `Some` together or not at all; pairing them here rather than at each call
+/// site is what keeps two same-typed strings off a caller's hands.
+pub(crate) fn attach_params<'a>(
+    subject: &'a impl ProbeSubject,
+    egress: Option<&'a EgressPolicy>,
+    gateway: Option<std::net::Ipv4Addr>,
+) -> AttachParams<'a> {
+    let mut params = AttachParams::new(subject.vmm_pid());
+    params.nic = match (subject.netns(), subject.tap_name()) {
+        (Some(netns), Some(tap)) => Some(Nic { netns, tap }),
+        _ => None,
+    };
+    params.egress = egress;
+    params.gateway = gateway;
+    params
+}
 
 /// The host-wide shared probes, loaded **once** per process (one `sched_switch` meter, one set of
 /// `sys_enter_*` tracepoints, the bounded-overhead shared model) and handed to every run's
@@ -234,6 +288,80 @@ impl RunProbes {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A stand-in for the two engine handles, so the pairing is testable without booting a VM.
+    struct FakeSubject {
+        netns: Option<&'static str>,
+        tap: Option<&'static str>,
+    }
+
+    impl ProbeSubject for FakeSubject {
+        fn vmm_pid(&self) -> u32 {
+            4242
+        }
+        fn netns(&self) -> Option<&str> {
+            self.netns
+        }
+        fn tap_name(&self) -> Option<&str> {
+            self.tap
+        }
+    }
+
+    /// `run` and a daemon session assemble these params from the same seam, and the two NIC names
+    /// are same-typed strings: crossed, the tap monitor is asked for a device in the wrong
+    /// namespace, and the record's whole network section is missing or wrong.
+    #[test]
+    fn a_nic_is_paired_in_the_order_the_engine_names_it_or_not_at_all() {
+        let params = attach_params(
+            &FakeSubject {
+                netns: Some("ns-of-this-vm"),
+                tap: Some("tap-of-this-vm"),
+            },
+            None,
+            None,
+        );
+        assert_eq!(params.vmm_pid, 4242);
+        let nic = params.nic.expect("a sandbox with both names has a NIC");
+        assert_eq!(nic.netns, "ns-of-this-vm", "the namespace is the namespace");
+        assert_eq!(nic.tap, "tap-of-this-vm", "and the tap is the tap");
+
+        // Both names come from one engine field, so a half-configured NIC is a bug either way:
+        // it must read as "no NIC" (an absent network section) rather than as a NIC to bind.
+        for half in [
+            FakeSubject {
+                netns: Some("ns"),
+                tap: None,
+            },
+            FakeSubject {
+                netns: None,
+                tap: Some("tap"),
+            },
+            FakeSubject {
+                netns: None,
+                tap: None,
+            },
+        ] {
+            assert!(
+                attach_params(&half, None, None).nic.is_none(),
+                "half a NIC is no NIC"
+            );
+        }
+
+        // The sealed posture is what `AttachParams::new` starts at, and the caller's policy and
+        // route travel through untouched.
+        let policy = EgressPolicy::default();
+        let gw = std::net::Ipv4Addr::new(10, 200, 0, 1);
+        let armed = attach_params(
+            &FakeSubject {
+                netns: None,
+                tap: None,
+            },
+            Some(&policy),
+            Some(gw),
+        );
+        assert!(armed.egress.is_some(), "the policy reaches enforcement");
+        assert_eq!(armed.gateway, Some(gw));
+    }
 
     #[test]
     fn unattached_probes_collect_an_honest_empty_record() {
