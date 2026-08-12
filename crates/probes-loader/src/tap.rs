@@ -546,9 +546,7 @@ fn denial_counts<const N: usize, K: Wire<N>>(
 fn load_classifiers() -> Result<Ebpf, ProbeError> {
     let mut ebpf = load_object()?;
     for program in [CLS_INGRESS, CLS_EGRESS] {
-        let cls: &mut SchedClassifier = crate::maps::program_mut(&mut ebpf, program, "classifier")?;
-        cls.load()
-            .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
+        crate::maps::load_program::<SchedClassifier>(&mut ebpf, program, "classifier")?;
     }
     Ok(ebpf)
 }

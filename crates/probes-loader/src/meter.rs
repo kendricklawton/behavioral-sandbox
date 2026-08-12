@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use aya::Ebpf;
 use aya::maps::{HashMap as AyaHashMap, MapData};
-use aya::programs::TracePoint;
 use bsx_record::{CgroupStats, ResourceSummary};
 
 use crate::maps::{add_cgroup_key, remove_cgroup_key};
@@ -28,6 +27,7 @@ const METER_TARGETS_MAP: &str = "METER_TARGETS";
 /// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` meters only the target set,
 /// `1` meters every cgroup, the whole-host escape hatch, not the default.
 const METER_ALL_MAP: &str = "METER_ALL";
+
 /// A loaded, attached **resource meter**: the `sched/sched_switch` tracepoint accumulates each
 /// registered cgroup's on-CPU time into a map, which [`cpu_time`](Self::cpu_time) reads back per cgroup id.
 /// This is the host CPU a sandbox's VMM burns running the guest vCPUs, attributed to the sandbox's own
@@ -68,16 +68,7 @@ impl ResourceMeter {
         check_support()?;
         let mut ebpf = load_object()?;
 
-        let program: &mut TracePoint =
-            crate::maps::program_mut(&mut ebpf, PROG_SCHED_SWITCH, "tracepoint")?;
-        program
-            .load()
-            .map_err(|e| ProbeError::Load(format!("verify/load `{PROG_SCHED_SWITCH}`: {e}")))?;
-        program.attach(TP_SCHED, TP_SCHED_SWITCH).map_err(|e| {
-            ProbeError::Attach(format!(
-                "attach `{PROG_SCHED_SWITCH}` to {TP_SCHED}/{TP_SCHED_SWITCH}: {e}"
-            ))
-        })?;
+        crate::maps::attach_tracepoint(&mut ebpf, PROG_SCHED_SWITCH, TP_SCHED, TP_SCHED_SWITCH)?;
 
         Ok(Self { ebpf })
     }

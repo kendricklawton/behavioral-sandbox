@@ -9,7 +9,7 @@
 //!   cgroup ids, so the next sandbox handed that id inherits the attribution in its signed record.
 
 use aya::maps::{Array, HashMap as AyaHashMap, Map, MapData, MapError};
-use aya::programs::Program;
+use aya::programs::{Program, ProgramError, SchedClassifier, TracePoint};
 use aya::{Ebpf, Pod};
 
 use crate::ProbeError;
@@ -60,6 +60,70 @@ where
         .ok_or_else(|| ProbeError::Load(format!("program `{name}` not found in object")))?;
     P::try_from(program)
         .map_err(|e| ProbeError::Load(format!("program `{name}` is not a {kind}: {e}")))
+}
+
+/// The kernel verify-and-load step, which aya spells as an inherent `load` on each program type and
+/// no trait covers, so [`load_program`] can write the fetch-then-load pair once.
+pub(crate) trait Loadable {
+    /// Submits the program to the kernel's verifier and loads it, not yet attached to anything.
+    ///
+    /// # Errors
+    /// Whatever the kernel refused the program for (no `CAP_BPF`, no BTF, a verifier reject).
+    fn load(&mut self) -> Result<(), ProgramError>;
+}
+
+impl Loadable for TracePoint {
+    fn load(&mut self) -> Result<(), ProgramError> {
+        Self::load(self)
+    }
+}
+
+impl Loadable for SchedClassifier {
+    fn load(&mut self) -> Result<(), ProgramError> {
+        Self::load(self)
+    }
+}
+
+/// Fetch the named program as `P` and load it, leaving it attached to nothing; `kind` names the
+/// expected program type in the error messages.
+///
+/// # Errors
+/// [`ProbeError::Load`] if the object holds no such program, it is not a `P`, or the kernel refuses
+/// it.
+pub(crate) fn load_program<'a, P>(
+    ebpf: &'a mut Ebpf,
+    name: &str,
+    kind: &str,
+) -> Result<&'a mut P, ProbeError>
+where
+    P: Loadable,
+    &'a mut P: TryFrom<&'a mut Program>,
+    <&'a mut P as TryFrom<&'a mut Program>>::Error: std::fmt::Display,
+{
+    let program: &mut P = program_mut(ebpf, name, kind)?;
+    program
+        .load()
+        .map_err(|e| ProbeError::Load(format!("verify/load `{name}`: {e}")))?;
+    Ok(program)
+}
+
+/// Load the named tracepoint program and attach it to `category`/`event`. The attachment lives with
+/// the program, so dropping the owning [`Ebpf`] detaches it.
+///
+/// # Errors
+/// [`ProbeError::Load`] as [`load_program`]; [`ProbeError::Attach`] if the kernel refuses the
+/// attach (no such tracepoint, or no permission).
+pub(crate) fn attach_tracepoint(
+    ebpf: &mut Ebpf,
+    name: &str,
+    category: &str,
+    event: &str,
+) -> Result<(), ProbeError> {
+    let program: &mut TracePoint = load_program(ebpf, name, "tracepoint")?;
+    program
+        .attach(category, event)
+        .map_err(|e| ProbeError::Attach(format!("attach `{name}` to {category}/{event}: {e}")))?;
+    Ok(())
 }
 
 /// The value stored for a registered cgroup in a target set. The set is a map, so the value is a

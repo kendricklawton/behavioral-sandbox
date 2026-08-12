@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
-use aya::programs::TracePoint;
 use bsx_probes_common::{
     ARG_SLOT, FILTER_CGROUP, FILTER_MODE_SLOT, FILTER_TGID, SyscallEvent, TRACEPOINT_ARGS,
 };
@@ -47,15 +46,7 @@ impl ExecveCounter {
         check_support()?;
         let mut ebpf = load_object()?;
 
-        let program: &mut TracePoint = crate::maps::program_mut(&mut ebpf, PROGRAM, "tracepoint")?;
-        program
-            .load()
-            .map_err(|e| ProbeError::Load(format!("verify/load `{PROGRAM}`: {e}")))?;
-        program.attach(TP_SYSCALLS, TP_NAME).map_err(|e| {
-            ProbeError::Attach(format!(
-                "attach `{PROGRAM}` to {TP_SYSCALLS}/{TP_NAME}: {e}"
-            ))
-        })?;
+        crate::maps::attach_tracepoint(&mut ebpf, PROGRAM, TP_SYSCALLS, TP_NAME)?;
 
         Ok(Self { ebpf })
     }
@@ -272,12 +263,7 @@ impl SyscallTracer {
         let mut ebpf = load_object()?;
 
         for (program, event) in TRACERS {
-            let tp: &mut TracePoint = crate::maps::program_mut(&mut ebpf, program, "tracepoint")?;
-            tp.load()
-                .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
-            tp.attach(TP_SYSCALLS, event).map_err(|e| {
-                ProbeError::Attach(format!("attach `{program}` to {TP_SYSCALLS}/{event}: {e}"))
-            })?;
+            crate::maps::attach_tracepoint(&mut ebpf, program, TP_SYSCALLS, event)?;
         }
 
         // Build the ring-buffer consumer once (see the field doc). `take_map` moves the map's owned
