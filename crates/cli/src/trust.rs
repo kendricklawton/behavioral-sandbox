@@ -84,10 +84,7 @@ fn judge(facts: &FileFacts, ids: HostIds) -> Result<(), Refusal> {
     if !ids.trusts(facts.dir_uid) {
         return Err(Refusal::DirOwner(facts.dir_uid));
     }
-    // A sticky world-writable directory (`/tmp` at `0o1777`) is fine: the kernel refuses to let one
-    // user unlink or rename another's file there. Without the sticky bit, ownership of the file
-    // proves nothing about what will be at that path a moment later.
-    if facts.dir_mode & 0o022 != 0 && facts.dir_mode & 0o1000 == 0 {
+    if !ids.trusts_dir(facts.dir_uid, facts.dir_mode) {
         return Err(Refusal::DirMode(facts.dir_mode));
     }
     Ok(())
