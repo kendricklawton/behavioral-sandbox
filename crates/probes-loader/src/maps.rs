@@ -1,5 +1,5 @@
-//! The shared aya-object plumbing: the map and program opens every surface runs, the toggle write,
-//! and the per-cgroup target registration and removal every surface runs, in one place.
+//! The shared aya-object plumbing: the map and program opens, the load-and-attach, the toggle
+//! write, and the per-cgroup target registration and removal, each in one place.
 //!
 //! - **An absent key is the intended outcome, any other failure is not.** Teardown is idempotent:
 //!   removing a cgroup that was never registered, or that a previous close already removed, must
