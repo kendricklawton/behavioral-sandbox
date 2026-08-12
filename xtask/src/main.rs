@@ -430,6 +430,17 @@ fn fuzz_smoke(seconds: u64) -> Result<()> {
 
 /// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
 /// check needs no libc call.
+/// The controllers the cgroup-enforcement tests need but `subtree` (the root
+/// `cgroup.subtree_control` text) does not delegate, or `None` when both are there. A word match,
+/// not a substring one, because `cpuset` must never satisfy `cpu`.
+fn missing_cgroup_controllers(subtree: &str) -> Option<String> {
+    let missing: Vec<&str> = ["cpu", "memory"]
+        .into_iter()
+        .filter(|c| !subtree.split_whitespace().any(|w| w == *c))
+        .collect();
+    (!missing.is_empty()).then(|| missing.join(" and "))
+}
+
 pub(crate) fn effective_uid() -> Result<u32> {
     let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
     parse_effective_uid(&status).context("parse the effective uid from /proc/self/status")
@@ -843,6 +854,29 @@ fn privileged_preflight() -> Result<()> {
             "/sys/kernel/btf/vmlinux not present — the eBPF probe tests skip themselves without \
              BTF, and a skipped test looks like a pass (need a CONFIG_DEBUG_INFO_BTF=y kernel)"
         );
+    }
+    // The cgroup-enforcement tests build their limit cgroup under /sys/fs/cgroup, and real root
+    // (checked above) is not what that needs: it is cgroup v2 with `cpu` and `memory` delegated at
+    // the root. A v1/hybrid host presents that path as ordinary files, so the fixture refuses (and
+    // its callers skip) — and a skipped test looks like a pass. Asked of the kernel, not a distro
+    // list: the delegation file either exists and names the controllers, or the host cannot run
+    // these tests.
+    match std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control") {
+        Err(_) => bail!(
+            "/sys/fs/cgroup is not a cgroup v2 mount (no cgroup.subtree_control) — the cgroup \
+             enforcement tests would skip themselves, and a skipped test looks like a pass \
+             (mount cgroup2 on /sys/fs/cgroup)"
+        ),
+        Ok(subtree) => {
+            if let Some(missing) = missing_cgroup_controllers(&subtree) {
+                bail!(
+                    "{missing} not delegated in /sys/fs/cgroup/cgroup.subtree_control — the \
+                     cgroup enforcement tests would skip themselves, and a skipped test looks \
+                     like a pass.\n  Delegate with:\n    echo '+cpu +memory' | sudo tee \
+                     /sys/fs/cgroup/cgroup.subtree_control"
+                );
+            }
+        }
     }
     // The jailed-boot tests build a chroot under the scratch dir (mknod'd /dev/kvm, an exec'd
     // firecracker copy); on a `nodev` mount (every systemd `/tmp` default) or a `noexec` one
@@ -1676,6 +1710,28 @@ exclude = ["crates/probes", "fuzz"]
             "a named channel has no version"
         );
         assert_eq!(major_minor("nightly-2026-01-01"), None);
+    }
+
+    /// The delegation gate is a word match: `cpuset` in the root's subtree_control must never
+    /// satisfy `cpu`, or a host with cpuset-only delegation sails past the preflight and the
+    /// cgroup suites skip into a hollow green.
+    #[test]
+    fn the_delegation_check_matches_controller_words_not_substrings() {
+        assert_eq!(
+            super::missing_cgroup_controllers("cpuset cpu io memory hugetlb pids"),
+            None,
+            "a typical delegated root passes"
+        );
+        assert_eq!(
+            super::missing_cgroup_controllers("cpuset io memory"),
+            Some("cpu".to_string()),
+            "cpuset must not pass for cpu"
+        );
+        assert_eq!(
+            super::missing_cgroup_controllers(""),
+            Some("cpu and memory".to_string()),
+            "an empty delegation names both"
+        );
     }
 
     #[test]
