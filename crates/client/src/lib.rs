@@ -300,7 +300,19 @@ impl Client {
         if let Some(cause) = self.poisoned.get() {
             return Err(ClientError::Desynced { cause });
         }
-        write_request(&mut self.writer, req).map_err(ClientError::Protocol)
+        write_request(&mut self.writer, req).map_err(|e| {
+            // Only an io failure can leave part of the frame on the wire; everything else
+            // (`TooLarge`, an encode refusal) errs before any byte moves and the stream stays
+            // clean, so poisoning there would cost a healthy session.
+            if let ProtocolError::Io(io) = &e {
+                self.poison(if io.kind() == std::io::ErrorKind::BrokenPipe {
+                    "the daemon closed the connection"
+                } else {
+                    "a request may be half-written"
+                });
+            }
+            ClientError::Protocol(e)
+        })
     }
 
     fn recv(&mut self) -> Result<Response, ClientError> {
