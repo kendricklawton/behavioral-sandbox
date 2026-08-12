@@ -5,11 +5,11 @@
 // A test binary: panicking on setup failure is the idiomatic assertion here.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::num::NonZeroU32;
-use std::os::unix::net::UnixStream;
-
-use bsx_channel::{ClientConnection, Request, Response};
 use bsx_test_support::LogSink;
+
+mod common;
+
+use common::{Agent, Exec};
 
 /// Whether this host lets the agent make a per-exec cgroup, answered by doing it rather than by
 /// guessing from a uid: the privileged gate runs as real root with a writable cgroup v2 mount, an
@@ -34,31 +34,14 @@ fn log_of_execs(n: usize) -> String {
     let sink = LogSink::default();
     for _ in 0..n {
         let agent_sink = sink.clone();
-        let (host, guest) = UnixStream::pair().expect("socketpair");
-        let agent = std::thread::spawn(move || {
+        let mut agent = Agent::spawn(move |guest| {
             tracing::subscriber::with_default(agent_sink.subscriber(), || {
                 bsx_guest_agent::serve(guest)
             })
         });
-
-        let mut client = ClientConnection::connect(host).expect("client handshake");
-        client
-            .send_request(&Request::Exec {
-                argv: vec!["true".into()],
-                stdin: Vec::new(),
-                env: Vec::new(),
-                artifacts: Vec::new(),
-                timeout_ms: NonZeroU32::new(30_000),
-            })
-            .expect("send request");
-        loop {
-            match client.recv_response().expect("read response") {
-                Response::Exit { .. } | Response::Error(_) => break,
-                _ => {}
-            }
-        }
-        drop(client);
-        let _ = agent.join();
+        agent.exec(Exec::new(&["true"]));
+        let _ = agent.drain();
+        agent.finish();
     }
     sink.contents()
 }
