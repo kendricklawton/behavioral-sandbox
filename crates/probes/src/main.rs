@@ -37,12 +37,25 @@
 //! [`bsx_probes_common::TRACEPOINT_ARGS`], which is an ABI assumption; the loader compares each one
 //! against the kernel's own tracepoint `format` file before it attaches.
 //!
+//! **Counters, and which losses are visible.** A **per-CPU** counter is contention-free (each CPU
+//! writes its own copy) and the loader sums it; a **shared** map value every CPU writes goes through
+//! [`add_shared`], because a plain `+=` there loses an increment under concurrency and no drop
+//! counter can see it. A full map is the other loss, and every bounded map counts what it turned
+//! away, so the loader can report it as a coverage gap rather than a thinner record that looks
+//! whole.
+//!
 //! **The verifier's rules, hit on purpose.** Loops are bounded by compile-time constants so
 //! termination is provable, and a map lookup result is dereferenced only after the null-check the
 //! verifier demands. Every helper is `#[inline(always)]`, so each program stays one self-contained
 //! unit with no BPF-to-BPF call.
 #![no_std]
 #![no_main]
+// The only unstable feature this crate takes, for the one thing stable `core` cannot express on this
+// target: an atomic add on a shared map value. See [`add_shared`].
+#![feature(core_intrinsics)]
+#![allow(internal_features)]
+
+use core::intrinsics::{AtomicOrdering, atomic_xadd};
 
 use aya_ebpf::{
     helpers::{
@@ -76,9 +89,9 @@ static _LICENSE: [u8; 4] = *b"GPL\0";
 static EXECVE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// Per-PID `execve` counts (keyed by tgid) for **every** pid on the host, since [`count_execve`]
-/// filters on nothing, bounded at [`MAX_PIDS`]; a full map drops new keys.
-/// Best-effort: the lookup-or-init is not atomic across CPUs, so two concurrent first-sightings of
-/// one pid can each insert `1` and lose an increment, which is why [`EXECVE_COUNT`] is the
+/// filters on nothing, bounded at [`MAX_PIDS`]; a full map drops new keys (counted in
+/// [`PID_DROPS`]). The counts accumulate through [`add_shared`], but two concurrent first-sightings
+/// of one pid can each insert `1` and lose an increment, which is why [`EXECVE_COUNT`] is the
 /// authoritative total.
 #[map]
 static EXECVE_BY_PID: HashMap<u32, u64> = HashMap::with_max_entries(MAX_PIDS, 0);
@@ -109,7 +122,7 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
     // dereferenced inside the `Some` arm (the mandatory null-check), never held across a helper call.
     unsafe {
         if let Some(slot) = EXECVE_BY_PID.get_ptr_mut(pid) {
-            *slot += 1;
+            add_shared(slot, 1);
         } else if EXECVE_BY_PID.insert(pid, 1, 0).is_err() {
             count_map_drop(&PID_DROPS);
         }
@@ -303,9 +316,10 @@ pub fn trace_connect(ctx: TracePointContext) -> u32 {
 }
 
 /// Per-flow byte/packet counters keyed by the directional IPv4 [`FlowKey`], bounded at
-/// [`MAX_FLOWS`]; a full map drops new flows (counted in [`FLOW_DROPS`]). Best-effort: a flow's
-/// read-modify-write is not atomic across CPUs, so a burst racing two CPUs on one flow can lose an
-/// update.
+/// [`MAX_FLOWS`]; a full map drops new flows (counted in [`FLOW_DROPS`]). Accumulation goes through
+/// [`add_shared`], so a burst racing two CPUs on one flow loses nothing; what remains is the
+/// **first** sighting of a key, where two CPUs can both miss the lookup and each insert a fresh
+/// count, losing one packet. Bounded at one per key, and never an over-count.
 #[map]
 static FLOWS: HashMap<FlowKey, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
@@ -345,6 +359,33 @@ static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// the flow view silently. ARP is deliberately not counted (expected on-link, not a flow).
 #[map]
 static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// Adds `n` to a counter inside a **shared** (not per-CPU) map value, atomically.
+///
+/// A plain `*slot += n` is a load, an add and a store, so two CPUs writing one key at the same
+/// instant each read the same value and one of the two increments is lost. **No drop counter catches
+/// that**, which is what separates it from every other loss here: the insert succeeded, the map is
+/// not full, and the value is simply lower than the truth. The loss scales with contention rather
+/// than being a one-off, and [`DENIALS`] is keyed by destination only, so a guest flooding one
+/// blocked endpoint from many source ports has its packets spread across CPUs by the NIC and then
+/// collapsed back onto that single key, which is the shape that maximizes it.
+///
+/// `core::sync::atomic`'s read-modify-write methods are unavailable here: rustc declares
+/// `bpfel-unknown-none` as `atomic-cas: false` (BPF has the atomic add but no compare-and-swap
+/// below ISA v3), so `AtomicU64` offers only load and store. The intrinsic is what reaches the
+/// instruction. Its result is unused, which is what lets the backend emit the plain `lock ... +=`
+/// rather than the fetching form that would need a newer ISA; there is no silent fallback to a
+/// load-add-store, since the backend errors instead.
+///
+/// A **per-CPU** map value needs none of this and keeps its plain `+=`: each CPU writes its own copy
+/// and the loader sums them.
+#[inline(always)]
+unsafe fn add_shared(slot: *mut u64, n: u64) {
+    // SAFETY: the caller passes a pointer into a map value the verifier proved in-bounds and
+    // null-checked, 8-byte aligned as every map value is, and every counter reached this way is a
+    // `u64` field of a `#[repr(C)]` value made only of them.
+    unsafe { atomic_xadd::<u64, u64, { AtomicOrdering::Relaxed }>(slot, n) };
+}
 
 /// Bumps one of the per-CPU drop counters after a failed map insert.
 #[inline(always)]
@@ -488,8 +529,10 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     }
 }
 
-/// Records one denied guest-sent packet against its destination flow in [`DENIALS`]. Best-effort: a
-/// lookup-or-init counter, not atomic across CPUs, so a burst can undercount by one.
+/// Records one denied guest-sent packet against its destination flow in [`DENIALS`]. The count
+/// itself is atomic ([`add_shared`]), so the flood this exists to record is counted whole; the
+/// lookup-or-init below can still lose the very first packet to a concurrent first sighting of the
+/// same destination, once per key.
 #[inline(always)]
 fn record_denial(key: &FlowKey) {
     // Key by **destination only** (src addr/port zeroed): keying on the guest's ephemeral source
@@ -500,7 +543,7 @@ fn record_denial(key: &FlowKey) {
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
         if let Some(count) = DENIALS.get_ptr_mut(dst) {
-            *count += 1;
+            add_shared(count, 1);
         } else if DENIALS.insert(dst, 1, 0).is_err() {
             count_map_drop(&DENIAL_DROPS);
         }
@@ -516,7 +559,7 @@ fn record_denial6(key: &FlowKey6) {
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
         if let Some(count) = DENIALS6.get_ptr_mut(dst) {
-            *count += 1;
+            add_shared(count, 1);
         } else if DENIALS6.insert(dst, 1, 0).is_err() {
             count_map_drop(&DENIAL_DROPS);
         }
@@ -579,12 +622,12 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
         if let Some(counts) = FLOWS.get_ptr_mut(key) {
             match dir {
                 Direction::Ingress => {
-                    (*counts).ingress_packets += 1;
-                    (*counts).ingress_bytes += bytes;
+                    add_shared(&raw mut (*counts).ingress_packets, 1);
+                    add_shared(&raw mut (*counts).ingress_bytes, bytes);
                 }
                 Direction::Egress => {
-                    (*counts).egress_packets += 1;
-                    (*counts).egress_bytes += bytes;
+                    add_shared(&raw mut (*counts).egress_packets, 1);
+                    add_shared(&raw mut (*counts).egress_bytes, bytes);
                 }
             }
         } else {
@@ -617,12 +660,12 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
         if let Some(counts) = FLOWS6.get_ptr_mut(key) {
             match dir {
                 Direction::Ingress => {
-                    (*counts).ingress_packets += 1;
-                    (*counts).ingress_bytes += bytes;
+                    add_shared(&raw mut (*counts).ingress_packets, 1);
+                    add_shared(&raw mut (*counts).ingress_bytes, bytes);
                 }
                 Direction::Egress => {
-                    (*counts).egress_packets += 1;
-                    (*counts).egress_bytes += bytes;
+                    add_shared(&raw mut (*counts).egress_packets, 1);
+                    add_shared(&raw mut (*counts).egress_bytes, bytes);
                 }
             }
         } else {
@@ -702,8 +745,9 @@ fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
 
 /// Per-cgroup accumulated on-CPU time in **nanoseconds**, keyed by the same cgroup id
 /// [`bsx_probes_loader::cgroup_id_of_pid`] resolves from a VMM pid, so the loader reads exactly the
-/// sandbox it means. Bounded at [`MAX_CGROUPS`]. Best-effort: the add across CPUs isn't atomic, so a
-/// heavily-parallel cgroup can undercount by a hair.
+/// sandbox it means. Bounded at [`MAX_CGROUPS`] (overflow counted in [`CPU_DROPS`]). Slices
+/// accumulate through [`add_shared`], so a cgroup running on many CPUs at once loses none of them;
+/// the first switch that creates the row can lose one slice to a concurrent first sighting.
 #[map]
 static CPU_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
@@ -777,7 +821,7 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     // only inside the `Some` arm and never held across a helper call.
     unsafe {
         if let Some(acc) = CPU_NS.get_ptr_mut(cgroup) {
-            *acc += delta;
+            add_shared(acc, delta);
         } else if CPU_NS.insert(cgroup, delta, 0).is_err() {
             count_map_drop(&CPU_DROPS);
         }

@@ -1253,6 +1253,73 @@ mod tests {
         );
     }
 
+    /// No counter in a **shared** probe map is incremented with a plain `+=`.
+    ///
+    /// A `HashMap` value is one copy every CPU writes, so a load-add-store loses an increment
+    /// whenever two CPUs hit the same key at once, and this is the one loss in the crate that no
+    /// counter can express: the insert succeeded, the map is not full, and the value is simply lower
+    /// than the truth. `DENIALS` is keyed by destination only, so a guest flooding one blocked
+    /// endpoint from many source ports is steered across CPUs by the NIC and collapsed back onto a
+    /// single key, which is exactly the shape that maximizes it.
+    ///
+    /// A `PerCpuArray` keeps its plain `+=` and is meant to: each CPU writes its own copy. So the
+    /// pin reads the map declarations rather than a list of sites, and the next shared map inherits
+    /// it.
+    #[test]
+    fn no_shared_probe_map_is_incremented_non_atomically() {
+        let repo = workspace_root();
+        let src = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
+            .expect("crates/probes/src/main.rs");
+        let lines: Vec<&str> = src.lines().collect();
+
+        // The shared maps are the `HashMap` statics; `PerCpuArray`/`Array` are not shared this way.
+        let shared: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.contains(": HashMap<"))
+            .filter_map(|l| l.split_whitespace().nth(1)?.strip_suffix(':'))
+            .collect();
+        assert!(
+            shared.len() >= 5,
+            "expected the shared maps to be found by declaration, got {shared:?}"
+        );
+
+        let mut checked = 0;
+        for (n, line) in lines.iter().enumerate() {
+            let Some(map) = shared
+                .iter()
+                .find(|m| line.contains(&format!("{m}.get_ptr_mut(")))
+            else {
+                continue;
+            };
+            // The guarded block is the `Some` arm: from the lookup to its `} else`.
+            let end = (n + 1..lines.len())
+                .find(|&i| lines[i].trim_start().starts_with("} else"))
+                .unwrap_or(lines.len());
+            let block = lines[n..end].join("\n");
+            assert!(
+                block.contains("add_shared("),
+                "`{map}` is a shared map, so its counter must be bumped through `add_shared` \
+                 (crates/probes/src/main.rs:{})",
+                n + 1
+            );
+            assert!(
+                !block.contains("+="),
+                "`{map}` is a shared map, so a `+=` on its value loses increments under \
+                 concurrency and nothing counts the loss (crates/probes/src/main.rs:{})",
+                n + 1
+            );
+            checked += 1;
+        }
+        // Not every shared map is a counter: `TRACE_TARGETS`/`METER_TARGETS` are membership sets
+        // read with `get_ptr`, which mutates nothing. This only keeps the pin from passing
+        // vacuously if the sites it checks stop matching.
+        assert!(
+            checked >= 6,
+            "the pin saw {checked} shared-map read-modify-write sites; it is meant to see one per \
+             counter map"
+        );
+    }
+
     /// Every bounded map in the probes counts what a full map turned away.
     ///
     /// The crate's stated discipline is that best-effort loss is *visible*: the loader reads each
