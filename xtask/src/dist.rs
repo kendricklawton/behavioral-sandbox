@@ -1253,6 +1253,51 @@ mod tests {
         );
     }
 
+    /// The tc teardown reads the link kind the attach reported, never a kernel version.
+    ///
+    /// A TCX `bpf_link` owns an fd and detaches netns-independently on drop; the classic netlink
+    /// clsact filter holds no fd and detaches in the *dropping thread's* netns. They demand opposite
+    /// teardown, so the loader has to know which it got, and `SchedClassifier::attach` picks by
+    /// `KernelVersion::at_least(6, 6, 0)` without saying what it picked. Re-deriving that threshold
+    /// is a copy of aya's constant, and `aya = "0.14"` is a caret requirement, so a routine
+    /// `cargo update` can move aya's side with no diff that mentions this line.
+    ///
+    /// Both ways of being wrong are silent: forgetting a TCX link leaks its fd, one per classifier
+    /// per run, walking a long-lived daemon toward `EMFILE`; dropping a netlink link in the wrong
+    /// netns detaches whatever that ifindex names there. So the attach asks for a named option and
+    /// reports the kind, which is also what the repo's own rule asks for: probe the capability, do
+    /// not compare a version.
+    #[test]
+    fn the_tc_teardown_does_not_predict_the_link_kind_from_a_kernel_version() {
+        let repo = workspace_root();
+        let file = "crates/probes-loader/src/tap.rs";
+        let src = std::fs::read_to_string(repo.join(file)).expect(file);
+        // Comments are stripped: naming aya's threshold in prose is how the choice is explained,
+        // and the property is about what the code branches on.
+        let code: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("KernelVersion"),
+            "{file} must not select its teardown from a kernel version: ask for a named \
+             `TcAttachOptions` and let the attach report the kind, or the branch is a copy of aya's \
+             threshold that drifts on a bump"
+        );
+        // The positive half: the kind must come back from the attach and reach the teardown.
+        let body = fn_body(&src, "attach_classifier");
+        assert!(
+            body.contains("TcAttachOptions::TcxOrder") && body.contains("TcAttachOptions::Netlink"),
+            "{file}'s `attach_classifier` must name both link kinds, so what it returns is what the \
+             kernel gave rather than what a version implied"
+        );
+        assert!(
+            fn_body(&src, "attach_classifiers").contains("TcLink::Netlink"),
+            "{file}'s teardown must branch on the reported link kind"
+        );
+    }
+
     /// No counter in a **shared** probe map is incremented with a plain `+=`.
     ///
     /// A `HashMap` value is one copy every CPU writes, so a load-add-store loses an increment

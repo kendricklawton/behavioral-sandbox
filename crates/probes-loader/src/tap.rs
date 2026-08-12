@@ -7,7 +7,8 @@ use std::path::Path;
 
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap};
-use aya::programs::{SchedClassifier, TcAttachType, tc};
+use aya::programs::tc::{NlOptions, SchedClassifierLinkId, TcAttachOptions};
+use aya::programs::{LinkOrder, SchedClassifier, TcAttachType, tc};
 use bsx_probes_common::{
     FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FLOW_KEY6_SIZE, FlowCounts, FlowKey, FlowKey6,
     MAX_POLICY_RULES, POLICY_RULE_SIZE, POLICY_RULE6_SIZE, PolicyRule, PolicyRule6,
@@ -544,6 +545,62 @@ fn load_classifiers() -> Result<Ebpf, ProbeError> {
     Ok(ebpf)
 }
 
+/// Which kind of link a classifier attach produced. The two demand **opposite** teardown, so the
+/// value the attach reports is the value the teardown reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TcLink {
+    /// A TCX `bpf_link`. It owns an fd, and its drop detaches through the link, which is
+    /// netns-independent.
+    Tcx,
+    /// The classic netlink clsact filter. It holds no fd, and its drop issues the filter-delete in
+    /// the *dropping thread's* netns.
+    Netlink,
+}
+
+/// Attach one classifier to `interface`, **asking the kernel for TCX and falling back to the netlink
+/// clsact filter**, and report which kind it gave.
+///
+/// `SchedClassifier::attach` makes this choice from `KernelVersion::at_least(6, 6, 0)` and does not
+/// report what it chose, so a caller that must know the kind has to mirror that threshold, and a
+/// mirrored threshold is a copy that drifts on an aya bump with no diff that mentions it. Both ways
+/// of being wrong are silent: predicting TCX where aya used netlink drops a netlink link in the
+/// wrong netns, detaching an unrelated device's filter, and predicting netlink where aya used TCX
+/// forgets an fd-owning link, one per classifier per run. Naming the option instead makes the answer
+/// a value rather than a prediction, and a kernel that cannot do TCX refuses the request.
+///
+/// The options are the ones `attach` itself passes, so behaviour on both kernels is unchanged. If
+/// the fallback also fails, both errors ride the message, since the TCX attempt failing for a reason
+/// other than "this kernel has no TCX" (no `CAP_NET_ADMIN`, the interface gone) is the case where
+/// swallowing it would mislead.
+fn attach_classifier(
+    cls: &mut SchedClassifier,
+    program: &str,
+    interface: &str,
+    attach_type: TcAttachType,
+) -> Result<(SchedClassifierLinkId, TcLink), ProbeError> {
+    let tcx = cls.attach_with_options(
+        interface,
+        attach_type,
+        TcAttachOptions::TcxOrder(LinkOrder::default()),
+    );
+    let tcx_err = match tcx {
+        Ok(link_id) => return Ok((link_id, TcLink::Tcx)),
+        Err(e) => e,
+    };
+    cls.attach_with_options(
+        interface,
+        attach_type,
+        TcAttachOptions::Netlink(NlOptions::default()),
+    )
+    .map(|link_id| (link_id, TcLink::Netlink))
+    .map_err(|e| {
+        ProbeError::Attach(format!(
+            "attach `{program}` to {interface} ({attach_type:?}): netlink: {e} (TCX first: \
+             {tcx_err})"
+        ))
+    })
+}
+
 /// Attach the already-loaded classifiers to `interface`'s clsact ingress and egress hooks, adding the
 /// clsact qdisc first. **Namespace-scoped**: the caller must already be in the netns that owns
 /// `interface` (the current netns for [`TapMonitor::attach`], the sandbox's for
@@ -564,14 +621,6 @@ fn attach_classifiers(
             "add clsact qdisc on {interface}: {e}"
         )));
     }
-    // aya's `SchedClassifier::attach` picks its link kind by host kernel: a TCX bpf_link (which owns
-    // an fd) on >= 6.6, the classic netlink clsact filter (no held fd) below that. The two demand
-    // opposite teardown, so detect which one we got. This 6.6 threshold mirrors aya's own and must
-    // be re-checked on every aya bump; if it drifts from aya's, we either leak an fd (forgetting a
-    // TCX link) or detach in the wrong netns (dropping a netlink link), so it is load-bearing.
-    let tcx_link = aya::util::KernelVersion::current()
-        .map(|v| v >= aya::util::KernelVersion::new(6, 6, 0))
-        .unwrap_or(false);
     for (program, attach_type) in [
         (CLS_INGRESS, TcAttachType::Ingress),
         (CLS_EGRESS, TcAttachType::Egress),
@@ -583,13 +632,9 @@ fn attach_classifiers(
             .map_err(|e| {
                 ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
             })?;
-        let link_id = cls.attach(interface, attach_type).map_err(|e| {
-            ProbeError::Attach(format!(
-                "attach `{program}` to {interface} ({attach_type:?}): {e}"
-            ))
-        })?;
-        if forget_links && !tcx_link {
-            // Netns-attached, pre-6.6 netlink clsact only: the in-kernel `tc` filter is reclaimed by
+        let (link_id, link) = attach_classifier(cls, program, interface, attach_type)?;
+        if forget_links && link == TcLink::Netlink {
+            // Netns-attached, netlink clsact only: the in-kernel `tc` filter is reclaimed by
             // the sandbox's **netns teardown** (the documented model), so take the link out of the
             // program and forget it. Otherwise aya's `Ebpf` drop would issue the netlink
             // filter-delete in the *dropping thread's* netns, where this ifindex may name an
@@ -600,9 +645,9 @@ fn attach_classifiers(
             })?;
             std::mem::forget(link);
         }
-        // On the TCX path (>= 6.6) the link *owns an fd*, and its drop detaches via the bpf_link,
-        // which is netns-independent (no wrong-netns hazard). So leave it with the program: dropping
-        // the monitor both closes the fd and detaches cleanly. Forgetting it here would leak that fd
+        // On the TCX path the link *owns an fd*, and its drop detaches via the bpf_link, which is
+        // netns-independent (no wrong-netns hazard). So leave it with the program: dropping the
+        // monitor both closes the fd and detaches cleanly. Forgetting it here would leak that fd
         // (one per classifier, per run), walking a long-lived daemon toward EMFILE.
     }
     Ok(())
