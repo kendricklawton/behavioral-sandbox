@@ -24,13 +24,6 @@ const ALPHABET: &[char] = &[
     'a', 'z', ' ', '\n', '\t', '0', '/', '.', '-', 'é', '🦀', '\u{0}',
 ];
 
-fn rand_string(rng: &mut Rng) -> String {
-    let n = rng.below(12);
-    (0..n)
-        .map(|_| ALPHABET[rng.below(ALPHABET.len())])
-        .collect()
-}
-
 /// How many inputs each property explores. Parsing is cheap, so this stays in the milliseconds while
 /// covering far more shapes than the hand-written unit tests.
 const ITERS: usize = 20_000;
@@ -96,15 +89,19 @@ fn rand_request(rng: &mut Rng) -> Request {
     // Only the two sendable variants, `Unknown` is decode-only (`write_request` rejects it).
     if rng.below(2) == 0 {
         Request::PutFile {
-            path: rand_string(rng),
+            path: rng.string_from(ALPHABET, 12),
             data: rng.bytes_upto(64),
         }
     } else {
-        let argv = (0..rng.below(8)).map(|_| rand_string(rng)).collect();
-        let env = (0..rng.below(4))
-            .map(|_| (rand_string(rng), rand_string(rng)))
+        let argv = (0..rng.below(8))
+            .map(|_| rng.string_from(ALPHABET, 12))
             .collect();
-        let artifacts = (0..rng.below(4)).map(|_| rand_string(rng)).collect();
+        let env = (0..rng.below(4))
+            .map(|_| (rng.string_from(ALPHABET, 12), rng.string_from(ALPHABET, 12)))
+            .collect();
+        let artifacts = (0..rng.below(4))
+            .map(|_| rng.string_from(ALPHABET, 12))
+            .collect();
         Request::Exec {
             argv,
             stdin: rng.bytes_upto(64),
@@ -126,7 +123,7 @@ fn rand_response(rng: &mut Rng) -> Response {
         0 => Response::Stdout(rng.bytes_upto(64)),
         1 => Response::Stderr(rng.bytes_upto(64)),
         2 => Response::File {
-            path: rand_string(rng),
+            path: rng.string_from(ALPHABET, 12),
             data: rng.bytes_upto(64),
         },
         3 => Response::Exit {
@@ -135,7 +132,7 @@ fn rand_response(rng: &mut Rng) -> Response {
         4 => Response::TimedOut {
             elapsed_ms: rng.next_u64() as u32,
         },
-        _ => Response::Error(rand_string(rng)),
+        _ => Response::Error(rng.string_from(ALPHABET, 12)),
     }
 }
 
