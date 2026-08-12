@@ -18,6 +18,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use bsx_client::{Client, ClientError, FaultKind, OpenParams};
 
@@ -41,6 +42,8 @@ fn fixture(dir: &str, name: &str) -> String {
 enum Answer {
     /// Read a request, answer with this wire line.
     Reply(String),
+    /// Read a request, wait, then answer: the late reply a fired client timeout leaves owed.
+    After(Duration, String),
     /// Read a request, then hang up without answering.
     HangUp,
 }
@@ -70,17 +73,20 @@ fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>)
                 .read_line(&mut line)
                 .unwrap_or_else(|e| panic!("read a request line: {e}"));
             requests.push(line.trim_end_matches('\n').to_string());
-            match answer {
-                Answer::Reply(reply) => {
-                    writer
-                        .write_all(reply.as_bytes())
-                        .unwrap_or_else(|e| panic!("write the reply: {e}"));
-                    writer
-                        .write_all(b"\n")
-                        .unwrap_or_else(|e| panic!("terminate the reply: {e}"));
+            let reply = match answer {
+                Answer::Reply(reply) => reply,
+                Answer::After(delay, reply) => {
+                    std::thread::sleep(delay);
+                    reply
                 }
                 Answer::HangUp => break,
-            }
+            };
+            writer
+                .write_all(reply.as_bytes())
+                .unwrap_or_else(|e| panic!("write the reply: {e}"));
+            writer
+                .write_all(b"\n")
+                .unwrap_or_else(|e| panic!("terminate the reply: {e}"));
         }
         requests
     });
@@ -175,6 +181,7 @@ fn an_error_reply_is_typed_with_the_wire_fault_kind() {
     let script = vec![
         Answer::Reply(fixture("response", "error")),
         Answer::Reply(fixture("response", "at_capacity")),
+        Answer::Reply(fixture("response", "closed")),
     ];
     let (path, daemon) = daemon("error-replies", script);
     let mut c = connect(&path);
@@ -208,6 +215,10 @@ fn an_error_reply_is_typed_with_the_wire_fault_kind() {
         "backpressure is its own variant, got {err}"
     );
 
+    // Both are real replies: the pairing is intact, so the session must still be usable.
+    c.close()
+        .expect("an error reply must not poison the session");
+
     drop(c);
     daemon.join().expect("the fake daemon's thread");
     let _ = std::fs::remove_file(&path);
@@ -224,7 +235,74 @@ fn a_hang_up_without_a_reply_is_closed_not_a_decode_error() {
         matches!(err, ClientError::Closed),
         "EOF while a reply is owed is Closed, got {err}"
     );
+    let err = c.exec(&argv, "").expect_err("the session is over");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "a dead session refuses by name instead of erring on the write, got {err}"
+    );
 
+    daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The finding's exact transcript: a timeout fires, the daemon's late reply is still coming, and
+/// the next call would read it as its own well-typed `Ok`. The poison turns that silent
+/// misattribution into a typed refusal.
+#[test]
+fn a_fired_timeout_poisons_the_session_instead_of_desyncing_it() {
+    let script = vec![Answer::After(
+        Duration::from_millis(400),
+        fixture("response", "result"),
+    )];
+    let (path, daemon) = daemon("late-reply", script);
+    let mut c = connect(&path);
+    c.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("arm the read timeout");
+
+    let argv = ["first".to_string()];
+    let err = c.exec(&argv, "").expect_err("the reply is late");
+    assert!(
+        matches!(err, ClientError::Protocol(_)),
+        "the fired timeout surfaces as an io error, got {err}"
+    );
+
+    // Without the poison this second call reads the late reply for "first" and returns it as its
+    // own Ok, with nothing in the value to tell the two apart.
+    let argv = ["second".to_string()];
+    let err = c.exec(&argv, "").expect_err("a reply is owed");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "the session owes a reply and must refuse, got {err}"
+    );
+
+    // Joined before the drop: the daemon's late write still has a peer, which is the scenario.
+    daemon.join().expect("the fake daemon's thread");
+    drop(c);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A well-formed reply of the wrong shape is proof the pairing is already off, so it poisons too.
+#[test]
+fn a_mismatched_reply_poisons_the_session() {
+    let script = vec![Answer::Reply(fixture("response", "closed"))];
+    let (path, daemon) = daemon("mismatched-reply", script);
+    let mut c = connect(&path);
+
+    let argv = ["true".to_string()];
+    let err = c
+        .exec(&argv, "")
+        .expect_err("closed is not an exec's reply");
+    assert!(
+        matches!(err, ClientError::Unexpected(_)),
+        "the mismatched shape is carried whole, got {err}"
+    );
+    let err = c.exec(&argv, "").expect_err("the pairing is off");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "a mismatched reply must poison, got {err}"
+    );
+
+    drop(c);
     daemon.join().expect("the fake daemon's thread");
     let _ = std::fs::remove_file(&path);
 }

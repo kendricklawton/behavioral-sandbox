@@ -5,6 +5,7 @@
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bsx_protocol::{ExecParams, GetParams, PutParams, Request, read_response, write_request};
@@ -30,6 +31,12 @@ pub enum ClientError {
     Unexpected(Response),
     /// The daemon closed the connection without replying.
     Closed,
+    /// The session's request/reply pairing can no longer be trusted; drop this client and
+    /// reconnect. Refusing here is what keeps a stale reply from returning as another call's `Ok`.
+    Desynced {
+        /// What broke the pairing.
+        cause: &'static str,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -50,6 +57,12 @@ impl std::fmt::Display for ClientError {
                 write!(f, "unexpected reply from daemon: {}", describe(resp))
             }
             ClientError::Closed => write!(f, "daemon closed the connection without replying"),
+            ClientError::Desynced { cause } => {
+                write!(
+                    f,
+                    "session out of sync ({cause}); drop this client and reconnect"
+                )
+            }
         }
     }
 }
@@ -134,10 +147,18 @@ pub struct ExecOutcome {
 }
 
 /// One connection to a running `bsx serve` session.
+///
+/// - **A failed read is the end of the session, not a retry point.** Once a reply is lost (a fired
+///   timeout, a decode failure, a mismatched shape, a hang-up), the request/reply pairing is gone
+///   and the next reply on the wire belongs to an earlier call. The client poisons itself and every
+///   later call returns [`ClientError::Desynced`]: a typed refusal, where reusing the stream would
+///   return another command's result as a plain `Ok`.
 #[derive(Debug)]
 pub struct Client {
     writer: UnixStream,
     reader: BufReader<UnixStream>,
+    /// The first cause that broke the session, shared so every handle refuses together.
+    poisoned: Arc<OnceLock<&'static str>>,
 }
 
 impl Client {
@@ -148,10 +169,12 @@ impl Client {
         Ok(Self {
             writer,
             reader: BufReader::new(stream),
+            poisoned: Arc::new(OnceLock::new()),
         })
     }
 
-    /// Bound how long a call blocks waiting for a reply.
+    /// Bound each read while a call waits for a reply. A timeout that fires leaves that reply owed,
+    /// so the call errs and every later call is refused as [`ClientError::Desynced`]; reconnect.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
         self.reader.get_ref().set_read_timeout(timeout)
     }
@@ -168,7 +191,7 @@ impl Client {
             Response::Opened {
                 boot_ms, pooled, ..
             } => Ok(Opened { boot_ms, pooled }),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -201,7 +224,7 @@ impl Client {
                 stderr,
                 exec_wall_ms,
             }),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -213,7 +236,7 @@ impl Client {
         )))?;
         match self.recv()? {
             Response::Put { .. } => Ok(()),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -224,7 +247,7 @@ impl Client {
             Response::Got {
                 content, present, ..
             } => Ok(present.then_some(content)),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -233,7 +256,7 @@ impl Client {
         self.send(&Request::Snapshot)?;
         match self.recv()? {
             Response::Snapshotted { dir, .. } => Ok(dir),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -242,7 +265,7 @@ impl Client {
         self.send(&Request::Trace)?;
         match self.recv()? {
             Response::Trace { record, .. } => Ok(record),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -251,7 +274,7 @@ impl Client {
         self.send(&Request::TraceSummary)?;
         match self.recv()? {
             Response::TraceSummary { summary, .. } => Ok(summary),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -260,7 +283,7 @@ impl Client {
         self.send(&Request::Close)?;
         match self.recv()? {
             Response::Closed => Ok(()),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
@@ -269,37 +292,58 @@ impl Client {
         self.send(&Request::Cancel)?;
         match self.recv()? {
             Response::Cancelled => Ok(()),
-            other => Err(unexpected(other)),
+            other => Err(self.unexpected(other)),
         }
     }
 
     fn send(&mut self, req: &Request) -> Result<(), ClientError> {
+        if let Some(cause) = self.poisoned.get() {
+            return Err(ClientError::Desynced { cause });
+        }
         write_request(&mut self.writer, req).map_err(ClientError::Protocol)
     }
 
     fn recv(&mut self) -> Result<Response, ClientError> {
-        match read_response(&mut self.reader)? {
-            None => Err(ClientError::Closed),
-            Some(Response::Error {
+        // `Remote` and `AtCapacity` are real replies: the pairing is intact and the session stays
+        // usable. Everything below the early returns lost a reply, and poisons.
+        let err = match read_response(&mut self.reader) {
+            Ok(Some(Response::Error {
                 message,
                 fatal,
                 kind,
                 ..
-            }) => Err(ClientError::Remote {
-                message,
-                fatal,
-                kind,
-            }),
-            Some(Response::AtCapacity { retry_after_ms, .. }) => {
-                Err(ClientError::AtCapacity { retry_after_ms })
+            })) => {
+                return Err(ClientError::Remote {
+                    message,
+                    fatal,
+                    kind,
+                });
             }
-            Some(resp) => Ok(resp),
-        }
+            Ok(Some(Response::AtCapacity { retry_after_ms, .. })) => {
+                return Err(ClientError::AtCapacity { retry_after_ms });
+            }
+            Ok(Some(resp)) => return Ok(resp),
+            Ok(None) => ClientError::Closed,
+            Err(e) => ClientError::Protocol(e),
+        };
+        self.poison(match err {
+            ClientError::Closed => "the daemon closed the connection",
+            _ => "a read failed with a reply outstanding",
+        });
+        Err(err)
     }
-}
 
-fn unexpected(resp: Response) -> ClientError {
-    ClientError::Unexpected(resp)
+    /// Marks the session unusable; the first cause wins and every later call refuses with it.
+    fn poison(&self, cause: &'static str) {
+        let _ = self.poisoned.set(cause);
+    }
+
+    /// A well-formed reply that is not the shape this call sent for: proof the pairing is already
+    /// off, so it poisons as well as erring.
+    fn unexpected(&self, resp: Response) -> ClientError {
+        self.poison("a reply arrived for a different request");
+        ClientError::Unexpected(resp)
+    }
 }
 
 #[cfg(test)]
