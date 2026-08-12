@@ -1169,14 +1169,6 @@ mod tests {
     /// constructors, variant attributes) exactly as long as this test cannot tell.
     #[test]
     fn the_wire_bytes_of_every_message_shape_are_pinned() {
-        // Generic over both directions because this pins *bytes*, which the direction's bound has
-        // no say in; the larger cap keeps a pinned shape from tripping it.
-        fn line<T: serde::Serialize>(msg: &T) -> String {
-            let mut wire = Vec::new();
-            write_message(&mut wire, msg, MAX_RESPONSE_BYTES).expect("every pinned shape encodes");
-            String::from_utf8(wire).expect("the wire is UTF-8")
-        }
-
         let corpus = corpus();
         let mut claimed = std::collections::BTreeSet::new();
 
@@ -1379,6 +1371,16 @@ mod tests {
         reencode: Option<String>,
     }
 
+    /// One message as its encoded wire line, terminator included.
+    ///
+    /// Generic over both directions because this renders *bytes*, which the direction's bound has
+    /// no say in; the larger cap keeps a pinned shape from tripping it.
+    fn line<T: serde::Serialize>(msg: &T) -> String {
+        let mut wire = Vec::new();
+        write_message(&mut wire, msg, MAX_RESPONSE_BYTES).expect("a test message encodes");
+        String::from_utf8(wire).expect("the wire is UTF-8")
+    }
+
     /// A `put` whose encoded **line content** is exactly `line_len` bytes, the newline excluded.
     ///
     /// The per-message overhead is measured by encoding an empty-content `put` and dropping the
@@ -1461,15 +1463,10 @@ mod tests {
     /// Reads one line through the reader for its direction, re-encoding what decoded so both
     /// directions share one set of assertions.
     fn read_and_reencode(dir: &str, wire: &[u8]) -> Result<Option<String>, ProtocolError> {
-        fn reencode<T: serde::Serialize>(msg: &T) -> String {
-            let mut w = Vec::new();
-            write_message(&mut w, msg, MAX_RESPONSE_BYTES).expect("what decoded re-encodes");
-            String::from_utf8(w).expect("the wire is UTF-8")
-        }
         if dir == "request" {
-            Ok(read_request(&mut &wire[..])?.map(|m| reencode(&m)))
+            Ok(read_request(&mut &wire[..])?.map(|m| line(&m)))
         } else {
-            Ok(read_response(&mut &wire[..])?.map(|m| reencode(&m)))
+            Ok(read_response(&mut &wire[..])?.map(|m| line(&m)))
         }
     }
 
