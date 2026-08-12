@@ -880,11 +880,6 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
     Ok(limits)
 }
 
-/// Parse `--vcpus` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing straight into the non-zero type
-/// rejects `0` (and any non-number / u8 overflow); [`vcpus_supported`] rejects the rest of what the
-/// pinned VMM won't boot, an over-32 count or an odd one above 1. Either way it is a **typed CLI
-/// error, never a silent clamp**: the value is refused at parse, not narrowed behind the caller's
-/// back or surfaced as a late boot error.
 /// Parse `--jail-uid`/`--jail-gid`. Zero is refused by name rather than accepted and quietly
 /// undoing the drop: `setuid(0)` leaves the VMM as root, which is the one id the jail exists to
 /// leave. A typed CLI error here, where the env layer can only warn and fall back.
@@ -900,6 +895,11 @@ fn parse_jail_id(s: &str) -> Result<u32, String> {
     }
 }
 
+/// Parse `--vcpus` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing straight into the non-zero type
+/// rejects `0` (and any non-number / u8 overflow); [`vcpus_supported`] rejects the rest of what the
+/// pinned VMM won't boot, an over-32 count or an odd one above 1. Either way it is a **typed CLI
+/// error, never a silent clamp**: the value is refused at parse, not narrowed behind the caller's
+/// back or surfaced as a late boot error.
 fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     let vcpus: NonZeroU8 = s
         .parse()
