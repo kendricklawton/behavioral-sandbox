@@ -22,10 +22,13 @@
 //!   accumulates each registered cgroup's on-CPU nanoseconds into [`CPU_NS`]. Memory and IO ride the
 //!   kernel's native cgroup v2 counters on the loader side.
 //!
-//! **Target filtering.** Each program consults [`FILTER`] (single sandbox) or a target *set*
-//! ([`TRACE_TARGETS`], [`METER_TARGETS`]) before recording. The global tracepoints make a
+//! **Target filtering.** Every program that feeds an audit record consults [`FILTER`] (single
+//! sandbox) or a target *set* ([`TRACE_TARGETS`], [`METER_TARGETS`]) before recording: the three
+//! [`record`]-based tracers, and [`account_sched_switch`]. The global tracepoints make a
 //! program-per-sandbox O(sandboxes) per event, so one shared program plus a set keeps the hot path a
-//! single hash lookup.
+//! single hash lookup. [`count_execve`] is the exception and is **host-wide on purpose**: it counts
+//! every `execve` on the machine, whoever ran it, and its only consumer is
+//! `bsx_probes_loader::ExecveCounter`, which never reaches a record.
 //!
 //! **Built against BTF (CO-RE).** The object carries `.BTF` / `.BTF.ext` (emitted by `bpf-linker
 //! --btf`), which aya relocates against the running kernel's BTF at load. No program here reads a
@@ -72,7 +75,8 @@ static _LICENSE: [u8; 4] = *b"GPL\0";
 #[map]
 static EXECVE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
-/// Per-PID `execve` counts (keyed by tgid), bounded at [`MAX_PIDS`]; a full map drops new keys.
+/// Per-PID `execve` counts (keyed by tgid) for **every** pid on the host, since [`count_execve`]
+/// filters on nothing, bounded at [`MAX_PIDS`]; a full map drops new keys.
 /// Best-effort: the lookup-or-init is not atomic across CPUs, so two concurrent first-sightings of
 /// one pid can each insert `1` and lose an increment, which is why [`EXECVE_COUNT`] is the
 /// authoritative total.
@@ -84,7 +88,9 @@ static EXECVE_BY_PID: HashMap<u32, u64> = HashMap::with_max_entries(MAX_PIDS, 0)
 const MAX_PIDS: u32 = 4096;
 
 /// Attaches to `tracepoint/syscalls/sys_enter_execve`, bumping the global per-CPU total and then a
-/// per-PID count. A tracepoint returns 0.
+/// per-PID count. Consults **no target filter**: it counts every `execve` on the host, whoever ran
+/// it, which is what its one consumer (`bsx_probes_loader::ExecveCounter`) reports. A tracepoint
+/// returns 0.
 #[tracepoint]
 pub fn count_execve(_ctx: TracePointContext) -> u32 {
     if let Some(total) = EXECVE_COUNT.get_ptr_mut(0) {
