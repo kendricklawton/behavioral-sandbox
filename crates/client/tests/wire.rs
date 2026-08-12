@@ -44,6 +44,8 @@ enum Answer {
     Reply(String),
     /// Read a request, wait, then answer: the late reply a fired client timeout leaves owed.
     After(Duration, String),
+    /// Read a request and answer nothing, leaving the caller blocked awaiting its reply.
+    Swallow,
     /// Read a request, then hang up without answering.
     HangUp,
 }
@@ -79,6 +81,7 @@ fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>)
                     std::thread::sleep(delay);
                     reply
                 }
+                Answer::Swallow => continue,
                 Answer::HangUp => break,
             };
             writer
@@ -122,7 +125,6 @@ fn every_verb_round_trips_and_speaks_the_pinned_bytes() {
         Answer::Reply(fixture("response", "snapshotted")),
         Answer::Reply(fixture("response", "trace")),
         Answer::Reply(fixture("response", "trace_summary")),
-        Answer::Reply(fixture("response", "cancelled")),
         Answer::Reply(fixture("response", "closed")),
     ];
     let (path, daemon) = daemon("every-verb", script);
@@ -154,7 +156,6 @@ fn every_verb_round_trips_and_speaks_the_pinned_bytes() {
     assert_eq!(c.snapshot().expect("snapshot"), "/var/lib/bsx/snap-1");
     assert_eq!(c.trace().expect("trace")["schema"], 1);
     assert_eq!(c.trace_summary().expect("trace_summary")["schema"], 1);
-    c.cancel().expect("cancel");
     c.close().expect("close");
     drop(c);
 
@@ -168,7 +169,6 @@ fn every_verb_round_trips_and_speaks_the_pinned_bytes() {
         "snapshot",
         "trace",
         "trace_summary",
-        "cancel",
         "close",
     ]
     .map(|name| fixture("request", name));
@@ -381,5 +381,85 @@ fn get_surfaces_the_lossy_flag_and_maps_absent_to_none() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The one verb legal while a request is in flight, through the shape built for it: the call
+/// blocks on one thread, the [`Canceller`] speaks from another, and the blocked call comes back
+/// typed. This is the wire exchange `cancel` exists for, and its request bytes are pinned here.
+#[test]
+fn a_canceller_reaches_a_session_blocked_in_a_call() {
+    let script = vec![
+        Answer::Swallow,
+        Answer::Reply(fixture("response", "cancelled")),
+    ];
+    let (path, daemon) = daemon("cancel-in-flight", script);
+    let mut c = connect(&path);
+    let mut canceller = c.canceller();
+
+    std::thread::scope(|scope| {
+        let blocked = scope.spawn(|| {
+            let argv = ["echo".to_string(), "hi".to_string()];
+            c.exec_with_env(&argv, "in\n", &[("K".to_string(), "V".to_string())])
+        });
+        // Late enough that the exec line is on the wire first; the daemon reads in order either
+        // way, but the byte pin below asserts the order this test means to stage.
+        std::thread::sleep(Duration::from_millis(200));
+        canceller.cancel().expect("write the cancel");
+
+        let err = blocked
+            .join()
+            .expect("the blocked thread")
+            .expect_err("the exec was cancelled");
+        assert!(
+            matches!(err, ClientError::Cancelled),
+            "the interrupted call returns the typed cancel, got {err}"
+        );
+    });
+
+    let err = c
+        .exec(&["true".to_string()], "")
+        .expect_err("the session is over");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "a cancelled session refuses whatever comes next, got {err}"
+    );
+
+    let requests = daemon.join().expect("the fake daemon's thread");
+    let pinned = ["exec_full", "cancel"].map(|name| fixture("request", name));
+    assert_eq!(
+        requests, pinned,
+        "the canceller speaks the pinned cancel bytes"
+    );
+    drop(c);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The race the cancel contract covers: the exec's result reaches the wire before the cancel line
+/// does, so the call returns `Ok` and the daemon is already tearing down. Cancelling is what ends
+/// the session, not the ack's arrival, so the next call must refuse without touching the wire.
+#[test]
+fn a_cancel_that_loses_the_race_still_ends_the_session() {
+    let script = vec![
+        Answer::Reply(fixture("response", "result")),
+        Answer::Swallow,
+    ];
+    let (path, daemon) = daemon("cancel-race", script);
+    let mut c = connect(&path);
+    let mut canceller = c.canceller();
+
+    let argv = ["true".to_string()];
+    let outcome = c.exec(&argv, "").expect("the result won the race");
+    assert_eq!(outcome.exit_code, 3);
+
+    canceller.cancel().expect("the cancel is written either way");
+    let err = c.exec(&argv, "").expect_err("the session was cancelled");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "a cancelled session refuses even when the cancel lost the race, got {err}"
+    );
+
+    daemon.join().expect("the fake daemon's thread");
+    drop(c);
     let _ = std::fs::remove_file(&path);
 }

@@ -5,7 +5,7 @@
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bsx_protocol::{ExecParams, GetParams, PutParams, Request, read_response, write_request};
@@ -31,6 +31,9 @@ pub enum ClientError {
     Unexpected(Response),
     /// The daemon closed the connection without replying.
     Closed,
+    /// The in-flight request was cancelled from a [`Canceller`]. The daemon tears the session down
+    /// after this reply, so the client is done either way.
+    Cancelled,
     /// The session's request/reply pairing can no longer be trusted; drop this client and
     /// reconnect. Refusing here is what keeps a stale reply from returning as another call's `Ok`.
     Desynced {
@@ -57,6 +60,9 @@ impl std::fmt::Display for ClientError {
                 write!(f, "unexpected reply from daemon: {}", describe(resp))
             }
             ClientError::Closed => write!(f, "daemon closed the connection without replying"),
+            ClientError::Cancelled => {
+                write!(f, "the request was cancelled; the session is over")
+            }
             ClientError::Desynced { cause } => {
                 write!(
                     f,
@@ -166,7 +172,9 @@ pub struct ExecOutcome {
 ///   return another command's result as a plain `Ok`.
 #[derive(Debug)]
 pub struct Client {
-    writer: UnixStream,
+    /// Behind a lock shared with every [`Canceller`], so a cancel line can never land inside
+    /// another request's frame.
+    writer: Arc<Mutex<UnixStream>>,
     reader: BufReader<UnixStream>,
     /// The first cause that broke the session, shared so every handle refuses together.
     poisoned: Arc<OnceLock<&'static str>>,
@@ -176,7 +184,7 @@ impl Client {
     /// Connect to the daemon listening at `socket`.
     pub fn connect(socket: impl AsRef<Path>) -> std::io::Result<Self> {
         let stream = UnixStream::connect(socket)?;
-        let writer = stream.try_clone()?;
+        let writer = Arc::new(Mutex::new(stream.try_clone()?));
         Ok(Self {
             writer,
             reader: BufReader::new(stream),
@@ -192,7 +200,15 @@ impl Client {
 
     /// Bound how long a call blocks writing a request.
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
-        self.writer.set_write_timeout(timeout)
+        lock(&self.writer).set_write_timeout(timeout)
+    }
+
+    /// A handle that can cancel this session while a call is in flight; see [`Canceller`].
+    pub fn canceller(&self) -> Canceller {
+        Canceller {
+            writer: Arc::clone(&self.writer),
+            poisoned: Arc::clone(&self.poisoned),
+        }
     }
 
     /// Open the session's sandbox.
@@ -302,20 +318,11 @@ impl Client {
         }
     }
 
-    /// Abandon an in-flight request and kill the sandbox session.
-    pub fn cancel(&mut self) -> Result<(), ClientError> {
-        self.send(&Request::Cancel)?;
-        match self.recv()? {
-            Response::Cancelled => Ok(()),
-            other => Err(self.unexpected(other)),
-        }
-    }
-
     fn send(&mut self, req: &Request) -> Result<(), ClientError> {
         if let Some(cause) = self.poisoned.get() {
             return Err(ClientError::Desynced { cause });
         }
-        write_request(&mut self.writer, req).map_err(|e| {
+        write_request(&mut *lock(&self.writer), req).map_err(|e| {
             // Only an io failure can leave part of the frame on the wire; everything else
             // (`TooLarge`, an encode refusal) errs before any byte moves and the stream stays
             // clean, so poisoning there would cost a healthy session.
@@ -349,12 +356,16 @@ impl Client {
             Ok(Some(Response::AtCapacity { retry_after_ms, .. })) => {
                 return Err(ClientError::AtCapacity { retry_after_ms });
             }
+            // The ack of a `Canceller`'s cancel, surfacing in the call it interrupted. The wire
+            // says `cancelled` is the connection's last reply, so the session is over.
+            Ok(Some(Response::Cancelled)) => ClientError::Cancelled,
             Ok(Some(resp)) => return Ok(resp),
             Ok(None) => ClientError::Closed,
             Err(e) => ClientError::Protocol(e),
         };
         self.poison(match err {
             ClientError::Closed => "the daemon closed the connection",
+            ClientError::Cancelled => "the session was cancelled",
             _ => "a read failed with a reply outstanding",
         });
         Err(err)
@@ -370,6 +381,39 @@ impl Client {
     fn unexpected(&self, resp: Response) -> ClientError {
         self.poison("a reply arrived for a different request");
         ClientError::Unexpected(resp)
+    }
+}
+
+/// The shared writer, with a poisoned lock recovered: the stream has no invariant a panicked
+/// holder could have broken that the session poison does not already cover.
+fn lock(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
+    writer.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Cancels a session while a call is in flight, which is the one thing [`Client`]'s `&mut self`
+/// methods cannot express: a caller blocked in a long `exec` holds the borrow for the whole call.
+/// Hold one of these before the call, and cancel from another thread once the call is blocked
+/// awaiting its reply; the blocked call returns [`ClientError::Cancelled`] when the ack arrives.
+///
+/// - **After any cancel the `Client` is done**, whatever the blocked call returned. The daemon
+///   tears the session down after acking, and if the call's own reply won the race to the wire,
+///   the ack is still queued behind it; cancelling poisons the shared session state up front, so
+///   the pending replies are reported and everything after them is refused.
+/// - The write lock is shared with the `Client`, so a cancel line cannot land inside another
+///   request's frame; a cancel during a blocked `send` waits for that write's own timeout.
+#[derive(Debug)]
+pub struct Canceller {
+    writer: Arc<Mutex<UnixStream>>,
+    poisoned: Arc<OnceLock<&'static str>>,
+}
+
+impl Canceller {
+    /// Abandon the in-flight request and kill the sandbox session.
+    pub fn cancel(&mut self) -> Result<(), ClientError> {
+        // Poisoned before the line is written: the session is over from this point whether the
+        // cancel or the in-flight call's reply wins the race to the daemon.
+        let _ = self.poisoned.set("the session was cancelled");
+        write_request(&mut *lock(&self.writer), &Request::Cancel).map_err(ClientError::Protocol)
     }
 }
 
