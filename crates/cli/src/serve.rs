@@ -2,32 +2,27 @@
 //! [wire API](bsx_protocol) over a **unix socket**, so a local client drives microVMs without linking
 //! `bsx-engine`.
 //!
-//! The engine's programmatic interface, a thin host of the same public API the CLI and embedders use.
 //! No tenancy, no auth, no billing, no scheduler; those are the hoster's, above this.
 //!
-//! - **Shape.** One connection is one sandbox **session**, served on its own thread, synchronous, with
-//!   no async runtime. The wire is the versioned newline-JSON contract in [`bsx_protocol`], and the
-//!   confinement posture is the daemon's launch choice rather than a client's. `tracing` goes to
-//!   stderr; the socket carries only the protocol.
-//! - **Fast `open`.** With `--prewarm N` the daemon keeps a [`Pool`] of pre-warmed clones and serves a
-//!   bare-default `open` from it; a custom resource profile cold-boots. Building the pool needs KVM,
-//!   and it is **fail-open**: a host that can't build it logs one warning and every session
-//!   cold-boots.
-//! - **Observable by the hoster.** Structured `tracing` lines on stderr, JSON with `--log-json`, and
-//!   `--metrics ADDR` serves a Prometheus endpoint ([`crate::metrics`]). The daemon exposes its
-//!   numbers; dashboards and alerting are the hoster's.
+//! - **Shape.** One connection is one sandbox **session**, on its own thread, synchronous, no async
+//!   runtime. The wire is the versioned newline-JSON contract in [`bsx_protocol`], and the
+//!   confinement posture is the daemon's launch choice, never a client's. `tracing` goes to stderr;
+//!   the socket carries only the protocol.
+//! - **Fast `open`.** `--prewarm N` keeps a [`Pool`] of clones and serves a bare-default `open` from
+//!   it; a custom resource profile cold-boots. **Fail-open**: a host that cannot build the pool logs
+//!   one warning and every session cold-boots.
+//! - **Observable by the hoster.** `tracing` on stderr (JSON with `--log-json`) and a Prometheus
+//!   endpoint at `--metrics ADDR` ([`crate::metrics`]). Dashboards and alerting are the hoster's.
 //! - **Access control is the hoster's.** No authentication, a recorded non-goal: who may connect is
-//!   governed by the filesystem permissions on the socket and its directory. The metrics endpoint is
-//!   plain HTTP with no auth, so bind it to loopback or a private scrape network.
+//!   the filesystem permissions on the socket and its directory. The metrics endpoint is plain HTTP
+//!   with no auth, so bind it to loopback or a private scrape network.
 //! - **Bounded concurrency.** Every session is a full microVM, so at the `--max-sessions` ceiling (or
 //!   an aggregate `--max-committed-*` one) a new connection gets the distinct `at_capacity` reply
-//!   *before* any VM boots, rather than walking the host into OOM or fd exhaustion. Admission control
-//!   is engine self-protection, not tenancy.
-//! - **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
-//!   ends, and losing the whole daemon process can't leak a VM either, since the lifetime sentinel
-//!   reaps it and the next start clears a stale socket file. SIGTERM/SIGINT logs, unlinks the socket,
-//!   and exits cleanly, with in-flight sessions ending crash-consistently. A graceful *drain* is not
-//!   implemented.
+//!   *before* any VM boots. Admission control is engine self-protection, not tenancy.
+//! - **Teardown is crash-safe, shutdown is prompt.** A session's VM drops with its connection, and a
+//!   lost daemon process cannot leak one either: the lifetime sentinel reaps it and the next start
+//!   clears a stale socket file. SIGTERM/SIGINT unlinks the socket and exits 0, in-flight sessions
+//!   ending crash-consistently. A graceful *drain* is not implemented.
 
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -44,19 +39,16 @@ use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError,
 
 use crate::metrics::Metrics;
 
-// The operational-failure exit code (a bad socket path, a bind failure) is the CLI's own
-// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `bsx` binary.
 use crate::EXIT_OPERATIONAL;
 
-/// How long an accept loop pauses after a **resource-exhaustion** accept error, so a condition
-/// that fails instantly and persistently (see [`accept_error_is_exhaustion`]) cannot spin a core
-/// and flood the log. Long enough to matter under pressure, short enough that recovery is prompt.
+/// How long an accept loop pauses after a **resource-exhaustion** accept error, so a condition that
+/// fails instantly and persistently ([`accept_error_is_exhaustion`]) cannot spin a core.
 pub(crate) const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Whether an `accept` error is the kind that will keep failing immediately (out of file
-/// descriptors, process- or system-wide, or out of memory), which is what makes an unpaced retry
-/// loop harmful. Everything else, notably `ECONNABORTED` from a peer that hung up mid-handshake,
-/// is transient and routine: pausing on those would hand any local peer a throttle.
+/// Whether an `accept` error is the kind that keeps failing immediately (out of file descriptors,
+/// process- or system-wide, or out of memory), which is what makes an unpaced retry harmful.
+/// Everything else, notably `ECONNABORTED` from a peer that hung up mid-handshake, is routine:
+/// pausing on those would hand any local peer a throttle.
 pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
     /// `EMFILE` (per-process fd limit), `ENFILE` (system-wide), and `ENOBUFS` (which `accept(2)`
     /// documents alongside `ENOMEM` as "not enough free memory"), none of which `io::ErrorKind`
@@ -69,27 +61,26 @@ pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
 }
 
 /// The default `--max-wall-secs`, finite because the wall a client asks for becomes the *host's* own
-/// give-up deadline, so an unbounded ask lets a guest that never reports its command's end hold a
-/// session slot, its VM, and its committed memory for as long as the client named. One hour matches
-/// the ceiling the in-guest agent already clamps a command to.
+/// give-up deadline: an unbounded ask holds a session slot and its VM for as long as the client
+/// named. One hour is the ceiling the in-guest agent already clamps a command to.
 const DEFAULT_MAX_WALL_SECS: u64 = 3600;
 
-/// The default `--max-snapshots`. Finite because a bundle **outlives its session** by design: the
-/// wire hands back a host path and carries no verb that consumes it, so nothing reclaims one but the
-/// operator. Sixteen matches the default `--max-sessions`, one bundle per session slot, which is the
-/// smallest ceiling that does not refuse a workload where every session snapshots once.
+/// The default `--max-snapshots`, finite because a bundle **outlives its session** by design: the
+/// wire hands back a host path and carries no verb that consumes it. Sixteen matches the default
+/// `--max-sessions`, the smallest ceiling that serves a workload where every session snapshots once.
 const DEFAULT_MAX_SNAPSHOTS: usize = 16;
 
 /// The default `--max-output-cap`, finite because the cap a client asks for bounds a **host-side**
-/// buffer: at `usize::MAX` the collect loop's per-frame charge never refuses, so one guest streaming
-/// stdout grows the daemon's heap until the host is out of memory. Anchored to the engine's own
-/// [`Limits::output_cap`] default, so it refuses only asks above the shipped default.
+/// buffer: at `usize::MAX` the collect loop's per-frame charge never refuses. Anchored to
+/// [`Limits::output_cap`], so it refuses only asks above the engine's own shipped default.
 fn default_max_output_cap() -> usize {
     Limits::default().output_cap
 }
 
-/// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
-/// is the shared global flag on the `bsx` CLI, so it is not repeated here.
+/// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter is
+/// the shared global flag on the `bsx` CLI, so it is not repeated here. Every flag is the
+/// operator's, and every ceiling refuses rather than clamps: `crate::Commands::Serve`'s own help
+/// states that once, so no flag below repeats it.
 #[derive(clap::Args)]
 pub struct ServeArgs {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
@@ -101,22 +92,18 @@ pub struct ServeArgs {
     /// built (no KVM, no root for jailed clones), every session cold-boots. Omit (or `0`) to disable.
     #[arg(long, value_name = "N")]
     prewarm: Option<usize>,
-    /// Run every session's VMM without the jailer. The default is confined (jailed,
-    /// needs real root + the `jailer` binary); this is the daemon-wide opt-out for hosts that can't
-    /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
+    /// Run every session's VMM without the jailer. The default is confined (jailed, needs real root
+    /// + the `jailer` binary); this is the daemon-wide opt-out for hosts that cannot jail.
     #[arg(long)]
     unjailed: bool,
     /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
-    /// the default warn-and-boot-uncapped. Makes the resource envelope load-bearing on a
-    /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
-    /// controllers. Also settable via `BSX_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
+    /// the default warn-and-boot-uncapped. Needs the jailer (so not with `--unjailed`) and delegated
+    /// cgroup v2 controllers. Also settable via `BSX_REQUIRE_LIMITS`.
     #[arg(long)]
     require_limits: bool,
     /// The uid the jailer drops each session's VMM to (default 10000). Every session on this daemon
     /// shares it, and so does a second daemon left at the default, so two daemons meant to separate
-    /// tenants need different ids. A hoster posture, no client chooses it: the wire carries no
-    /// identity, and a client that could name its own id could name a neighbour's. Also settable via
-    /// `BSX_JAIL_UID`.
+    /// tenants need different ids. Also settable via `BSX_JAIL_UID`.
     #[arg(long, value_name = "UID", value_parser = crate::parse_jail_id)]
     jail_uid: Option<u32>,
     /// The gid the jailer drops each session's VMM to (default 10000). See `--jail-uid`.
@@ -132,91 +119,81 @@ pub struct ServeArgs {
     #[arg(long)]
     log_json: bool,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
-    /// cgroup), so the daemon bounds its own core resource: at the ceiling a new connection is
-    /// refused with the distinct `at_capacity` reply *before* any VM boots, rather than exhausting the
-    /// host. For a memory-heterogeneous fleet add `--max-committed-mem-mib`/`--max-committed-vcpus`.
-    /// Size it to the host (sessions × guest memory must fit in RAM); `0` = unlimited.
+    /// cgroup), so at the ceiling a new connection gets the distinct `at_capacity` reply *before* any
+    /// VM boots. Size it to the host (sessions × guest memory must fit in RAM); for a
+    /// memory-heterogeneous fleet add `--max-committed-mem-mib`/`--max-committed-vcpus`.
+    /// `0` = unlimited.
     #[arg(long, value_name = "N", default_value_t = 16)]
     max_sessions: usize,
-    /// Drop a session after this many seconds with **no progress** on the connection, whether the
-    /// client stopped sending requests or stopped reading replies, so a wedged or forgotten
-    /// connection can't pin a microVM and a `--max-sessions` slot forever (the idle half of the same
-    /// capacity guarantee the ceiling gives). Both directions get one **absolute deadline per
-    /// message**, not a bare socket timeout, so a client that drips a request in or drains a reply
-    /// out just fast enough to keep each syscall progressing is dropped like one that goes silent.
-    /// The write side is what bounds a large reply: 33 MiB (the wire's ceiling) inside the default
-    /// is ~113 KiB/s, below any real client. Applies to the wait for the first `open` too. A client
-    /// streaming requests keeps resetting it; `0` disables the timeout. Default 300 (5 min).
+    /// Drop a session after this many seconds with **no progress** on the connection, in either
+    /// direction, so a wedged or forgotten connection can't pin a microVM and a `--max-sessions`
+    /// slot forever. It is one absolute deadline per message, not a socket timeout, so a client that
+    /// drips a request in or drains a reply out just fast enough to keep each syscall progressing is
+    /// dropped like one that went silent. Applies to the wait for the first `open` too; a client
+    /// streaming requests keeps resetting it. `0` disables it. Default 300 (5 min).
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
-    /// Ceiling on the vCPUs a session's `open` may ask for. Past it the `open` is **refused**, never
-    /// quietly clamped. A hoster posture, no client chooses it. Takes the same 1-or-even rule as
+    /// Ceiling on the vCPUs a session's `open` may ask for. Takes the same 1-or-even rule as
     /// `run --vcpus`, since a ceiling no VM could boot at means the even number below it.
     #[arg(long, value_name = "N", value_parser = crate::parse_vcpus)]
     max_vcpus: Option<NonZeroU8>,
     /// Ceiling on the guest memory (MiB) a session's `open` may ask for.
     #[arg(long, value_name = "MIB")]
     max_mem_mib: Option<NonZeroU32>,
-    /// Ceiling on the wall-clock budget (seconds) a session's `open` may ask for. Past it the `open`
-    /// is **refused**. This is also what bounds one exec's hold on a slot: `--idle-timeout` does not
-    /// arm while a command runs (a long quiet command is a working session, not a wedged one), so
-    /// the wall is the only thing that ends an exec whose guest stops reporting. Default 3600 (1 h),
-    /// the in-guest agent's own command ceiling; `0` = unlimited.
+    /// Ceiling on the wall-clock budget (seconds) a session's `open` may ask for. This is what
+    /// bounds one exec's hold on a slot: `--idle-timeout` does not arm while a command runs (a long
+    /// quiet command is a working session, not a wedged one), so the wall is the only thing that
+    /// ends an exec whose guest stops reporting. Default 3600 (1 h), the in-guest agent's own
+    /// command ceiling; `0` = unlimited.
     #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_MAX_WALL_SECS)]
     max_wall_secs: u64,
-    /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for. Past it the
-    /// `open` is **refused**. What it bounds is the *daemon's* memory, not the guest's: the host
-    /// buffers one exec's whole stdout, stderr, and artifacts before it can reply, so this, and not
-    /// `--max-committed-mem-mib` (guest RAM), is what stops a session that streams output from
-    /// growing this process. Defaults to the engine's own `output_cap` default; `0` = unlimited.
+    /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for. It bounds the
+    /// *daemon's* memory, not the guest's: the host buffers one exec's whole stdout, stderr and
+    /// artifacts before it can reply, so this, not `--max-committed-mem-mib` (guest RAM), is what
+    /// stops a session that streams output from growing this process. Defaults to the engine's own
+    /// `output_cap`; `0` = unlimited.
     #[arg(long, value_name = "BYTES", default_value_t = default_max_output_cap())]
     max_output_cap: usize,
     /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions *and*
-    /// pre-warmed pool clones (their RAM is real before any session exists), the resource
-    /// counterpart to `--max-sessions`: a session whose `open` would push committed
-    /// memory past this is refused with `at_capacity`, *before* booting, so a memory-heterogeneous
-    /// fleet can't overcommit the host into OOM. A `--prewarm` that alone exceeds it refuses to
-    /// start. Distinct from `--max-mem-mib`, which bounds one
-    /// request. `0` (the default) is unlimited: the count ceiling alone applies.
+    /// pre-warmed pool clones, whose RAM is real before any session exists. The resource counterpart
+    /// to `--max-sessions`: an `open` that would push committed memory past this is refused with
+    /// `at_capacity` before booting, and a `--prewarm` that alone exceeds it refuses to start.
+    /// Distinct from `--max-mem-mib`, which bounds one request. `0` (the default) is unlimited.
     #[arg(long, value_name = "MIB", default_value_t = 0)]
     max_committed_mem_mib: u64,
-    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions and
-    /// pre-warmed pool clones.
-    /// Past it a session's `open` is refused with `at_capacity` before booting. Set it to your CPU
-    /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
+    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions and pre-warmed
+    /// pool clones. Set it to your CPU oversubscription budget (e.g. physical cores × a ratio).
+    /// `0` (the default) is unlimited.
     #[arg(long, value_name = "N", default_value_t = 0)]
     max_committed_vcpus: u64,
-    /// Ceiling on the snapshot bundles this daemon holds on disk at once; a `snapshot` past it is
-    /// refused. Each bundle is roughly the session's guest RAM plus a copy of its root disk, and
-    /// bundles **persist after the session closes** (the reply is a host path, and no wire verb
-    /// consumes it), so this, not `--max-committed-mem-mib`, is what bounds the scratch filesystem.
-    /// Counted from disk on each request, so removing a bundle you have consumed frees budget.
-    /// Reachable only on an `--unjailed` daemon, since snapshotting a jailed session is a typed
-    /// refusal. Default 16, one per default session slot; `0` = unlimited.
+    /// Ceiling on the snapshot bundles this daemon holds on disk at once. Each bundle is roughly the
+    /// session's guest RAM plus a copy of its root disk, and bundles **persist after the session
+    /// closes** (the reply is a host path, and no wire verb consumes it), so this, not
+    /// `--max-committed-mem-mib`, is what bounds the scratch filesystem. Counted from disk on each
+    /// request, so removing a bundle you have consumed frees budget. Reachable only on an
+    /// `--unjailed` daemon, since snapshotting a jailed session is a typed refusal.
+    /// Default 16, one per default session slot; `0` = unlimited.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_SNAPSHOTS)]
     max_snapshots: usize,
     /// Ceiling on the egress destinations a session's `open` may name (repeatable; `IP` or
     /// `IP/PREFIX`, either address family). An `open` whose `allow` rules reach outside every entry
-    /// is **refused**, naming the CIDR it asked for. Unset is no CIDR ceiling, not an open tap: the
-    /// tap denies by default, so a client still reaches only what it asked for and the operator only
-    /// loses the say over *what* it may ask for.
+    /// is refused, naming the CIDR it asked for. Unset is no CIDR ceiling, not an open tap: the tap
+    /// still denies by default, so the operator loses only the say over what a client may ask for.
     #[arg(long, value_name = "CIDR", value_parser = parse_max_egress)]
     max_egress: Vec<MaxEgress>,
 }
 
-/// One `--max-egress` entry. A single flag rather than a `-v4`/`-v6` pair, because an operator
-/// setting a ceiling thinks in destinations; which of [`Policy`]'s two lists it lands in follows from
-/// the address it names.
+/// One `--max-egress` entry. One flag rather than a `-v4`/`-v6` pair: which of [`Policy`]'s two
+/// lists it lands in follows from the address it names.
 #[derive(Debug, Clone, Copy)]
 enum MaxEgress {
     V4(bsx_probes_loader::Ipv4Cidr),
     V6(bsx_probes_loader::Ipv6Cidr),
 }
 
-/// Parse one `--max-egress` entry, sharing the config file's CIDR parsers so the two spellings of
-/// this ceiling cannot drift. The family comes from the address rather than from trying one parser
-/// and falling back to the other, so a typo'd IPv4 address is reported as a bad IPv4 address instead
-/// of as a bad IPv6 one.
+/// Parse one `--max-egress` entry through the config file's CIDR parsers, so the two spellings of
+/// this ceiling cannot drift. The family comes from the address rather than from a parse-and-fall-
+/// back, so a typo'd IPv4 address is reported as a bad IPv4 address, not as a bad IPv6 one.
 fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
     let addr = s.split_once('/').map_or(s, |(a, _)| a);
     if addr.contains(':') {
@@ -226,10 +203,10 @@ fn parse_max_egress(s: &str) -> Result<MaxEgress, String> {
     }
 }
 
-/// The per-`open` ceilings, built from the daemon's own flags rather than a discovered `.bsx.toml`,
-/// because a daemon must not read a security control out of whatever directory it was started in.
-/// Jail and networking are already daemon-wide and client-immutable, so only the ceilings travel to
-/// the session boundary. On a ceiling with a finite default, `0` is the unlimited opt-out.
+/// The per-`open` ceilings, from the daemon's own flags rather than a discovered `.bsx.toml`: a
+/// daemon must not read a security control out of whatever directory it was started in. Jail and
+/// networking are already daemon-wide, so only the ceilings travel to the session boundary. On a
+/// ceiling with a finite default, `0` is the unlimited opt-out.
 fn operator_policy(args: &ServeArgs) -> Policy {
     // Wildcard-free, so a third address family cannot be dropped on the floor by this split.
     let mut max_egress_v4 = Vec::new();
@@ -251,27 +228,23 @@ fn operator_policy(args: &ServeArgs) -> Policy {
     }
 }
 
-/// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
-/// each session boots from, the launch-time confinement posture, the process-wide host-side probes
-/// (loaded once, one `sched_switch` meter, one tracer, the bounded-overhead shared model), the
-/// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
-// `pub(crate)` (not private) because the `session` module is a crate-root sibling of `serve` (both
-// flat under `src/`), so it reaches the daemon context through crate visibility, not the ancestor
-// visibility a submodule would have. Still crate-internal, this is the `bsx` binary, not a library.
+/// The daemon's shared context, handed by `Arc` to every session thread: the base config each
+/// session boots from, the launch-time confinement posture, the process-wide host-side probes
+/// (loaded once), the optional pre-warmed pool, and the admission counters.
+// `pub(crate)` because `session` is a crate-root sibling of `serve` (both flat under `src/`), so it
+// reaches this through crate visibility, not the ancestor visibility a submodule would have.
 pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     pub(crate) base: BootConfig,
     /// The confinement posture no client can weaken.
     pub(crate) isolation: crate::policy::IsolationMode,
-    /// The operator's per-run policy, built from the daemon's own flags at startup (a daemon
-    /// deliberately reads no `.bsx.toml` out of its cwd; see [`serve`]). This is the enforcing
-    /// copy: a client controls neither those flags nor this process's environment, so the ceilings
-    /// here bound what any `open` may ask for.
+    /// The operator's per-run policy, from the daemon's own flags at startup ([`operator_policy`]).
+    /// The enforcing copy: a client controls neither those flags nor this process's environment.
     pub(crate) policy: Policy,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
-    /// The host record-signing key: the `trace` reply signs the finalized record with
-    /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
+    /// The host record-signing key the `trace` reply signs its finalized record with. Host-side;
+    /// the guest never sees it.
     pub(crate) signing_key: bsx_probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
@@ -290,12 +263,11 @@ pub(crate) struct Server {
     /// The per-session idle timeout (`None` = disabled), from `--idle-timeout`: a read that waits this
     /// long with no client bytes ends the session, freeing its VM and `--max-sessions` slot.
     pub(crate) idle_timeout: Option<std::time::Duration>,
-    /// Live sessions right now, the counter the admission check compares against the ceiling.
-    /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
+    /// Live sessions right now, incremented by a successful [`SessionTicket::acquire`] and
+    /// decremented by the ticket's `Drop`.
     pub(crate) active_sessions: AtomicUsize,
     /// Summed guest memory (MiB) committed across live sessions, charged by a [`ResourceReservation`]
-    /// once an `open`'s `Limits` are known and released on its `Drop`. The resource
-    /// counterpart to [`active_sessions`](Self::active_sessions).
+    /// once an `open`'s `Limits` are known and released on its `Drop`.
     pub(crate) committed_mem_mib: AtomicU64,
     /// Summed vCPUs committed across live sessions; charged and released like
     /// [`committed_mem_mib`](Self::committed_mem_mib).
@@ -319,10 +291,9 @@ impl Server {
         self.snapshot_base.join(format!("snap-{n}"))
     }
 
-    /// How many snapshot bundles this daemon is holding, counted from the filesystem rather than
-    /// tallied: bundles outlive their sessions, so an operator who consumes one and removes it gets
-    /// the budget back, which a monotonic counter would not give. One `read_dir` is nothing beside
-    /// pausing a VM and copying its RAM and disk.
+    /// How many snapshot bundles this daemon holds, counted from the filesystem rather than tallied:
+    /// bundles outlive their sessions, so removing a consumed one gives the budget back, which a
+    /// monotonic counter would not.
     ///
     /// # Errors
     /// The base directory not existing yet is zero bundles, not an error. Any other read failure is
@@ -338,10 +309,9 @@ impl Server {
 }
 
 /// Run the daemon (`bsx serve`): the `--log` filter comes from the CLI's shared global flag, the
-/// rest of the knobs from [`ServeArgs`]. Its own [`log_filter`] resolution (info default, optional
-/// JSON) and its own config (flags + environment, no `.bsx.toml`), so the CLI dispatches this
-/// **before** its project-file/tracing setup ([`crate::main`]). The subscriber it installs is
-/// [`crate::init_tracing`], shared with the CLI so one mistyped filter gets one answer.
+/// rest from [`ServeArgs`]. Its own [`log_filter`] resolution and its own config (flags +
+/// environment, no `.bsx.toml`), so the CLI dispatches this **before** its project-file/tracing
+/// setup ([`crate::main`]); the subscriber is [`crate::init_tracing`], shared with the CLI.
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
         || std::env::var("BSX_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
@@ -353,17 +323,15 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     }
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.bsx.toml` cwd discovery, that's a CLI-in-a-project convenience;
-    // a daemon's config is its own flags + environment. Computed up front so the signal handler and
-    // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
+    // on top). Computed up front so the signal handler and the startup sweep both know where this
+    // daemon's guest-memory-sized bundle dirs live.
     let mut base = BootConfig::from_env();
     crate::apply_posture(&mut base, args.require_limits, args.jail_uid, args.jail_gid);
     let isolation = crate::policy::IsolationMode::from_unjailed(args.unjailed);
 
-    // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
-    // unjailed daemon could never satisfy it and would accept connections only to refuse every
-    // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
-    // `BSX_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
+    // `require_limits` caps the *jailed* VMM's cgroup, so an unjailed daemon could only accept
+    // connections and refuse every session with `LimitsUnavailable`. Refuse at startup instead of
+    // running a daemon that looks healthy and serves nothing.
     if base.require_limits && isolation.is_unjailed() {
         tracing::error!(
             "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
@@ -379,10 +347,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
-    // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
-    // never depends on the stale-path heuristic), remove this daemon's bundle dirs (else a
-    // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
-    // end crash-consistently; their VMs are reaped by the lifetime sentinel.
+    // The bundle dirs are named here rather than inside the handler so a restart cannot leak the
+    // guest-RAM-sized bundle a `--prewarm` daemon staged.
     install_signal_handler(
         args.socket.clone(),
         vec![
@@ -390,12 +356,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
             snapshots_dir(&base.scratch_dir),
         ],
     );
-    // Reclaim bundle dirs a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one
-    // adds its own. Best-effort, this-user, dead-pid only.
+    // Reclaim what a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one adds
+    // its own.
     sweep_stale_agent_bundles(&base.scratch_dir);
-    // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
-    // explicitly either works or the daemon refuses to start, an operational surface the hoster
-    // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
+    // Bound *before* any session is served: a scrape target the hoster asked for explicitly either
+    // works or the daemon refuses to start, never silently absent (as `--allow` refuses).
     let metrics_listener = match args.metrics.map(TcpListener::bind).transpose() {
         Ok(l) => l,
         Err(e) => {
@@ -403,9 +368,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
-    // The endpoint is plain HTTP with no auth (the doc says bind loopback or a private scrape
-    // network); a public bind may be a deliberate private-network choice, so warn, don't refuse,
-    // a fat-fingered `0.0.0.0` must at least be visible in the startup log.
+    // A public bind may be a deliberate private-network choice, so warn rather than refuse; a
+    // fat-fingered `0.0.0.0` on a no-auth endpoint must at least be visible in the startup log.
     if let Some(addr) = args.metrics
         && !addr.ip().is_loopback()
     {
@@ -415,15 +379,13 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
              auth, make sure this is a private scrape network"
         );
     }
-    // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
-    // (`BSX_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
-    // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
-    // large artifact (boot scratch, prewarm, snapshots) follows.
+    // Guest-memory-sized, so under the engine's own scratch knob (`BSX_SCRATCH_DIR`) rather than a
+    // hardcoded `$TMPDIR`: the operator points scratch at real disk once and every large artifact
+    // follows it.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
-    // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
-    // signed envelope. Fail-closed like the metrics bind: refuse to start rather than
-    // serve records that claim to be verifiable but aren't signed. The daemon has no `.bsx.toml`
-    // layer (env + flags only), so the path resolves from `BSX_SIGNING_KEY` or the default.
+    // Fail-closed like the metrics bind: refuse to start rather than serve records that claim to be
+    // verifiable and are not signed. No `.bsx.toml` layer, so the path is `BSX_SIGNING_KEY` or the
+    // default.
     let signing_key = match bsx_probes_loader::HostKey::load_or_generate(
         &crate::config::signing_key_path(&crate::config::Sources::default()),
     ) {
@@ -434,14 +396,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     };
     let pool = build_optional_pool(args.prewarm, &base, isolation);
-    // The pool's clones hold real guest RAM before any session exists, so they charge the
-    // committed ceilings from the start (the gauges then show true headroom, and admission can't
-    // overcommit the host by the pool's footprint). A --prewarm the ceiling can't even hold is a
-    // misconfiguration: refused here, loudly, not silently overcommitted.
+    // The pool's clones hold real guest RAM before any session exists, so they charge the committed
+    // ceilings from the start; a `--prewarm` the ceiling cannot hold is refused below, loudly.
     let clone = pool_clone_limits();
-    // A poisoned lock still guards a real pool: its clones exist and their RAM is committed, so
-    // reading `0` through the poison would leave that memory uncharged against the ceilings for the
-    // daemon's whole life. Take the guard through the poison, the same way `jail.rs` does.
+    // Through the poison, as `jail.rs` does: a poisoned lock still guards a real pool, and reading
+    // `0` would leave its RAM uncharged for the daemon's whole life.
     let pool_ready = pool.as_ref().map_or(0, |p| {
         p.lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -485,8 +444,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         max_snapshots: args.max_snapshots,
     });
 
-    // Reclaim the per-VM residue (scratch dirs + network namespaces) a crashed *driver* left
-    // behind before serving sessions, recording what was reclaimed into metrics.
+    // The per-VM residue (scratch dirs, netns) a crashed *driver* left, reclaimed before sessions.
     sweep_orphaned_vms(&server.base.scratch_dir, Some(&server.metrics));
 
     if let Some(metrics_listener) = metrics_listener {
@@ -500,16 +458,14 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         "bsx listening"
     );
 
-    // Accept forever, one thread per connection. A daemon runs until its supervisor stops it; the
-    // sentinel guarantees no VM leak on process death, so there is no accept-loop exit to manage.
+    // Accept forever, one thread per connection: a daemon runs until its supervisor stops it, and
+    // the sentinel covers VM reclaim on process death, so there is no loop exit to manage.
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => spawn_session(stream, Arc::clone(&server)),
-            // An accept error must not end the daemon. Resource exhaustion is paced, since
-            // `EMFILE`/`ENFILE` persist and fail instantly and an unpaced retry would pin a core and flood
-            // the log while the host is already overloaded. A transient error is *not* paced: it is
-            // routine, and sleeping on it would let any local peer throttle the daemon by dialing and
-            // dropping in a loop.
+            // An accept error must not end the daemon. Only exhaustion is paced: it persists and
+            // fails instantly, while sleeping on a routine error would let any local peer throttle
+            // the daemon by dialing and dropping in a loop.
             Err(e) => {
                 tracing::warn!(error = %e, "accept failed");
                 if accept_error_is_exhaustion(&e) {
@@ -521,9 +477,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Serve the metrics endpoint on its own thread, sampling the pool's live stock per scrape. The
-/// thread runs for the daemon's whole life (the endpoint has no drain to manage, crash-only, like
-/// the sessions).
+/// Serve the metrics endpoint on its own thread, sampling the pool's live stock per scrape. Runs for
+/// the daemon's whole life: crash-only, like the sessions.
 fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
     let sampled = Arc::clone(server);
@@ -531,11 +486,10 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
         .name("bsx-metrics".into())
         .spawn(move || {
             crate::metrics::serve(listener, registry, move || {
-                // `try_lock`, never a blocking acquire: the scrape must not stall behind a
-                // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, so `bsx_pool_ready` is momentarily absent, the same absent-rather-than-zero
-                // shape a daemon with no pool gives, instead of the visibility surface freezing under the
-                // load it exists to report on. The committed gauges read the live admission atomics.
+                // `try_lock`, never a blocking acquire: a scrape must not stall behind a session's
+                // pool refill. On contention or poison `bsx_pool_ready` is absent for that scrape,
+                // the same absent-rather-than-zero shape a daemon with no pool gives, instead of the
+                // visibility surface freezing under the load it exists to report on.
                 crate::metrics::CapacitySample {
                     pool_ready: sampled
                         .pool
@@ -550,17 +504,15 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
             })
         });
     if let Err(e) = spawned {
-        // The listener was bound (the hoster's ask is satisfiable); a spawn failure here is the
-        // same transient-resource class as a session-thread failure, log loudly, keep serving.
+        // The listener is bound, so the hoster's ask was satisfiable; a spawn failure is the same
+        // transient-resource class as a session thread's. Log loudly, keep serving.
         tracing::error!(error = %e, "cannot spawn the metrics thread; endpoint will not answer");
     }
 }
 
-/// Serve one accepted connection on its own thread, behind the `--max-sessions` admission check:
-/// at the ceiling the client gets a typed "at capacity" refusal *before* any VM resource is
-/// committed (the whole point of the cap; thread-spawn EAGAIN would fire only after the boot was
-/// already under way). A thread-spawn failure (EAGAIN under load) drops just that connection,
-/// never the daemon.
+/// Serve one accepted connection on its own thread, behind the `--max-sessions` admission check, so
+/// a refusal lands *before* any VM resource is committed. A thread-spawn failure (EAGAIN under load)
+/// drops that connection, never the daemon.
 fn spawn_session(stream: UnixStream, server: Arc<Server>) {
     let Some(ticket) = SessionTicket::acquire(&server) else {
         refuse_at_capacity(stream, &server);
@@ -569,8 +521,8 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
     let spawned = std::thread::Builder::new()
         .name("bsx-session".into())
         .spawn(move || {
-            // The ticket lives exactly as long as the session: its `Drop` releases the slot
-            // however `serve` ends (clean close, client hang-up, or a panic unwinding).
+            // The ticket's `Drop` releases the slot however `serve` ends: clean close, client
+            // hang-up, or an unwinding panic.
             let _ticket = ticket;
             crate::session::serve(stream, &server);
         });
@@ -616,10 +568,10 @@ impl Drop for SessionTicket {
     }
 }
 
-/// A committed-resource reservation (guest memory + vCPUs) held for a session's lifetime: the
-/// aggregate counterpart to [`SessionTicket`]'s count. Acquired once an `open`'s resources are known
-/// (after `open_limits`) and released on `Drop`, so a memory-heterogeneous fleet can't be admitted
-/// past the host's real capacity even while under the session-count ceiling.
+/// A committed-resource reservation (guest memory + vCPUs) held for a session's lifetime, the
+/// aggregate counterpart to [`SessionTicket`]'s count: a memory-heterogeneous fleet can sit under
+/// the session-count ceiling and still be past the host's real capacity. Acquired once an `open`'s
+/// resources are known (after `open_limits`), released on `Drop`.
 pub(crate) struct ResourceReservation<'a> {
     server: &'a Server,
     mem_mib: u64,
@@ -628,9 +580,8 @@ pub(crate) struct ResourceReservation<'a> {
 
 impl<'a> ResourceReservation<'a> {
     /// Reserve `mem_mib` + `vcpus` against the daemon's aggregate ceilings, or `None` if either would
-    /// be exceeded (a `0` ceiling is unlimited). Both dimensions commit together: if the vCPU charge
-    /// would exceed its ceiling after the memory charge succeeded, the memory charge is rolled back,
-    /// so a partial reservation never lingers.
+    /// be exceeded (a `0` ceiling is unlimited). Both dimensions commit together: a refused vCPU leg
+    /// rolls the memory charge back, so a partial reservation never lingers.
     pub(crate) fn try_acquire(server: &'a Server, mem_mib: u64, vcpus: u64) -> Option<Self> {
         if !charge(
             &server.committed_mem_mib,
@@ -685,18 +636,15 @@ fn charge(current: &AtomicU64, ceiling: u64, amount: u64) -> bool {
     }
 }
 
-/// The resource profile every pre-warmed clone holds: the engine default, single-sourced here so
-/// the pool builder, the admission charges, and the take-handoff release can never disagree about
-/// a clone's real footprint.
+/// The resource profile every pre-warmed clone holds, single-sourced so the pool builder, the
+/// admission charges, and the take-handoff release cannot disagree about a clone's footprint.
 pub(crate) fn pool_clone_limits() -> Limits {
     Limits::default()
 }
 
-/// Reserve committed-resource headroom for up to `want` pool clones (per clone: mem then vcpus,
-/// the mem charge rolled back if the vcpu leg refuses, the same shape as
-/// [`ResourceReservation::try_acquire`]), returning how many were paid for. The refill that
-/// follows restores at most that many, so topping the pool up can never push the daemon past a
-/// ceiling that live sessions' reservations are holding.
+/// Reserve headroom for up to `want` pool clones (per clone, the roll-back shape of
+/// [`ResourceReservation::try_acquire`]), returning how many were paid for. The refill restores at
+/// most that many, so topping the pool up cannot push past a ceiling live sessions are holding.
 pub(crate) fn reserve_pool_clones(server: &Server, want: usize, clone: &Limits) -> usize {
     let mem = u64::from(clone.mem_mib.get());
     let vcpus = u64::from(clone.vcpus.get());
@@ -730,16 +678,13 @@ pub(crate) fn release_pool_clones(server: &Server, n: usize, clone: &Limits) {
         .fetch_sub(n * u64::from(clone.vcpus.get()), Ordering::Relaxed);
 }
 
-/// Backoff hint sent with an [`bsx_protocol::Response::AtCapacity`] refusal. A hint only: the daemon
-/// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
-/// than waiting, so this is a modest "come back shortly" value, not a promise.
+/// Backoff hint sent with an [`bsx_protocol::Response::AtCapacity`] refusal. A hint, not a promise:
+/// the daemon cannot know when a slot frees.
 pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 
-/// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed
-/// [`bsx_protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
-/// backpressure signal a dispatcher fails over on), then the connection drops. The
-/// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
-/// refusal itself must never take the daemon down.
+/// Refuse a connection past the `--max-sessions` ceiling with one typed
+/// [`bsx_protocol::Response::AtCapacity`], then drop it. The write is timeout-bounded so a stalled
+/// client cannot park the accept loop, and best-effort: a refusal must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     server.metrics.open_refused(false);
     tracing::warn!(
@@ -762,9 +707,8 @@ fn snapshots_dir(scratch: &Path) -> PathBuf {
     scratch.join(format!("bsx-snapshots-{}", std::process::id()))
 }
 
-/// Reclaims the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
-/// ([`bsx_engine::sweep_orphans`]), logging what it reclaimed. The complement of
-/// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
+/// Reclaims the per-VM scratch dirs and network namespaces a crashed driver left behind
+/// ([`bsx_engine::sweep_orphans`]), the complement of [`sweep_stale_agent_bundles`]. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
     match sweep_orphans(scratch) {
@@ -784,10 +728,10 @@ fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
     }
 }
 
-/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead** prior
-/// daemons, whose guest-memory-sized files are pure leak once their owner is gone. Best-effort per
-/// entry, skipping this pid and any live one: a dead daemon is not this process's unreaped child, so
-/// absence from `/proc` is a sound liveness check.
+/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead**
+/// prior daemons, whose guest-memory-sized files are pure leak once their owner is gone. Skips this
+/// pid and any live one: a dead daemon is not this process's unreaped child, so absence from
+/// `/proc` is a sound liveness check.
 fn sweep_stale_agent_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Some(me) = crate::trust::own_euid() else {
@@ -833,17 +777,14 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
 
 /// Remove `socket` only while it is still the same inode this daemon published there.
 ///
-/// The unlink is by path, and a path is not an identity: between this daemon's start and its stop,
-/// another can publish its own socket at that path (the bind's stale-socket reclaim and rename are
-/// not one atomic step). Unlinking by path alone would then take out the **live** daemon's socket on
-/// the way out, leaving it listening on an inode no client can dial. Comparing device and inode
-/// against what was published makes a shutdown that lost the path a no-op instead.
+/// A path is not an identity: another daemon can publish its own socket at this path while this one
+/// runs (the bind's stale-socket reclaim and rename are not one atomic step), and unlinking by path
+/// would take out that **live** daemon's socket, leaving it on an inode no client can dial.
 ///
 /// An inode number alone would be too weak, since the kernel recycles one as soon as its last
-/// reference goes. What makes it an identity here is that this daemon's own listener is still bound
-/// when the signal thread runs (the accept loop holds it and the thread exits the process): a bound
-/// `AF_UNIX` socket holds a reference to its path, so the inode cannot be freed and its number
-/// cannot land under a successor while this daemon is still here to mistake it for its own.
+/// reference goes. It is an identity here because this daemon's own listener is still bound when the
+/// signal thread runs, and a bound `AF_UNIX` socket holds a reference to its path: the number cannot
+/// land under a successor while this daemon is still here to mistake it for its own.
 fn unlink_own_socket(socket: &Path, published: Option<(u64, u64)>) {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -863,11 +804,10 @@ fn unlink_own_socket(socket: &Path, published: Option<(u64, u64)>) {
     }
 }
 
-/// Install the SIGTERM/SIGINT handler: log, unlink this daemon's own socket, remove its own bundle
-/// dirs (`cleanup_dirs`, guest-memory-sized), then exit 0 (a clean stop for a supervisor).
-/// Best-effort, a host where the handler can't be installed keeps the crash-only behavior (the
-/// sentinel still reaps VMs; the next start clears the stale socket and the startup sweep reclaims
-/// the leaked bundle dirs).
+/// Install the SIGTERM/SIGINT handler: unlink this daemon's own socket, remove its own bundle dirs
+/// (`cleanup_dirs`, guest-memory-sized), then exit 0. Best-effort: a host where the handler cannot
+/// be installed keeps the crash-only path, where the next start clears the stale socket and the
+/// startup sweep reclaims the bundle dirs.
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -891,9 +831,8 @@ fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
             };
             if let Some(signal) = signals.forever().next() {
                 tracing::info!(signal, "shutting down: removing the socket and bundle dirs, exiting");
-                // In-flight sessions end crash-consistently (their VMs reaped by the sentinel);
-                // the unlink is what a plain process kill would leave behind, and the bundle dirs
-                // are guest-memory-sized files a plain kill would leak.
+                // In-flight sessions end crash-consistently, their VMs reaped by the sentinel;
+                // what follows is only what a plain kill would leave behind.
                 unlink_own_socket(&socket, published);
                 for dir in &cleanup_dirs {
                     let _ = std::fs::remove_dir_all(dir);
@@ -906,9 +845,8 @@ fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     }
 }
 
-/// Build the pre-warmed pool when `--prewarm N` (N > 0) asked for one, degrading any failure to
-/// `None` (every session then cold-boots), a warning, never a refusal to start, since a pool is a
-/// latency optimization, not a correctness requirement.
+/// Build the pre-warmed pool when `--prewarm N` (N > 0) asked for one. Any failure degrades to
+/// `None` and a warning, never a refusal to start: a pool is latency, not correctness.
 fn build_optional_pool(
     prewarm: Option<usize>,
     base: &BootConfig,
@@ -943,12 +881,9 @@ fn build_pool(
     isolation: crate::policy::IsolationMode,
     target: usize,
 ) -> Result<Pool, VmmError> {
-    // Snapshot into a per-daemon dir under the engine's scratch knob (`BSX_SCRATCH_DIR`), the same
-    // routing as the session bundles: guest-memory-sized files belong where the operator pointed
-    // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
-    // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
-    // **failure** below, nothing references it, so remove it rather than leak a guest-RAM-sized bundle.
-    // [`StagedPath`] so the reclaim also covers a *panic* inside the build, not just its `Err`.
+    // A successful build leaves the pool's clones referencing this bundle, so it lives until
+    // shutdown; on any failure below nothing references it, so it must not survive as a
+    // guest-RAM-sized leak. [`StagedPath`], so the reclaim covers a *panic* here too, not just `Err`.
     let snap_dir = StagedPath::new(prewarm_dir(&base.scratch_dir));
     std::fs::create_dir_all(snap_dir.path()).map_err(|e| {
         VmmError::Vmm(format!(
@@ -971,26 +906,23 @@ fn build_pool_from(
     target: usize,
     snap_dir: &Path,
 ) -> Result<Pool, VmmError> {
-    // 1. An unjailed prewarm source running only the default profile (no untrusted code, the source
-    //    is the daemon's own, its clones are where sessions run). `require_limits` is cleared here:
-    //    the source *must* be unjailed to be snapshotted, and an unjailed boot can't be capped, so a
-    //    require_limits daemon would otherwise refuse to build its own pool. The enforcement lands on
-    //    the jailed clones (step 3), which is where untrusted code actually runs.
+    // 1. An unjailed prewarm source running only the default profile: no untrusted code runs here,
+    //    it runs in the clones. `require_limits` is cleared because the source *must* be unjailed to
+    //    be snapshotted and an unjailed boot cannot be capped; enforcement lands on the clones.
     let mut source_config = base.clone().with_limits(pool_clone_limits());
     source_config.require_limits = false;
     let mut source = Sandbox::open_unjailed(source_config)?;
 
     // 2. Snapshot it into the per-daemon bundle dir the caller prepared.
     let snapshot = source.snapshot(snap_dir)?;
-    // The source has served its purpose (its state is captured); tear it down before the pool fills.
-    // Best-effort: the snapshot is the artifact that matters and it is already on disk, so a
-    // teardown error must not discard a working pool. `Drop` reclaims the source either way.
+    // Best-effort: the snapshot is already on disk, so a teardown error must not discard a working
+    // pool. `Drop` reclaims the source either way.
     if let Err(e) = source.shutdown() {
         tracing::warn!(error = %e, "prewarm source teardown reported an error; snapshot already captured");
     }
 
-    // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). The
-    //    clones inherit the snapshot's vsock, so sessions exec over it exactly like a cold boot.
+    // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). They
+    //    inherit the snapshot's vsock, so a session execs over it exactly like a cold boot.
     let mut pool_config = base.clone().with_limits(pool_clone_limits());
     pool_config.jail = if isolation.is_jailed() {
         Some(pool_config.jail.unwrap_or_default())
@@ -1005,11 +937,9 @@ fn build_pool_from(
 
 /// Whether a daemon is listening at `socket`, without waiting on one that is.
 ///
-/// The connect is **non-blocking** on purpose. A blocking `connect` to an `AF_UNIX` socket waits
-/// when the listener's backlog is full, so a live-but-wedged daemon that has stopped accepting would
-/// hang a new daemon's startup rather than being reported. Non-blocking, that case is `EAGAIN`, which
-/// is still a listener and so still a refusal; a dead daemon's leftover socket is `ECONNREFUSED` at
-/// once either way.
+/// The connect is **non-blocking**: a blocking one waits on a full `AF_UNIX` backlog, so a
+/// live-but-wedged daemon would hang a new daemon's startup rather than be reported. Non-blocking,
+/// that case is `EAGAIN`, still a listener and so still a refusal.
 fn someone_is_listening(socket: &Path) -> bool {
     use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr};
 
@@ -1033,15 +963,12 @@ fn someone_is_listening(socket: &Path) -> bool {
 }
 
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
-/// **live** daemon. If the path exists, a successful connect means another `bsx` is already
-/// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
-/// remove it and bind. The parent directory must already exist (the hoster's to create, with the
-/// permissions that gate access).
+/// **live** daemon ([`someone_is_listening`] decides which). The parent directory must already
+/// exist: it is the hoster's to create, with the permissions that gate access.
 fn bind(socket: &Path) -> Result<UnixListener, String> {
     if socket.exists() {
-        // Only a socket is reclaimable. A mistyped `--socket` naming a real file (config, data)
-        // must be a refusal, not a deletion: this daemon often runs as root, so the remove below
-        // would take out anything root can write.
+        // Only a socket is reclaimable: this daemon often runs as root, so the remove below would
+        // take out whatever a mistyped `--socket` named.
         let is_socket = std::fs::symlink_metadata(socket)
             .map(|m| {
                 use std::os::unix::fs::FileTypeExt as _;
@@ -1060,25 +987,22 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
                 socket.display()
             ));
         }
-        // Nothing answered: a stale socket from a dead daemon. Reclaim it (own-your-scratch-path,
-        // the same discipline as the guest agent's unix listener and the driver's scratch dirs).
+        // Nothing answered: a stale socket from a dead daemon, so reclaim it.
         std::fs::remove_file(socket)
             .map_err(|e| format!("remove stale socket {}: {e}", socket.display()))?;
         tracing::warn!(socket = %socket.display(), "removed a stale socket from a dead daemon");
     }
-    // Bind at a temp path in the **same directory**, narrow the mode, then rename atomically into place,
-    // so the socket never exists at its client-known path with the ambient umask's mode. Binding directly
-    // and chmod-ing after leaves a window where a permissive umask lets another local user connect first,
-    // and the temp path is not one clients dial. Defense-in-depth: the parent directory's permissions are
-    // the designed access control, so wider access is a deliberate grant rather than a umask accident.
+    // Bind at a temp path in the **same directory**, narrow the mode, then rename into place, so the
+    // socket never exists at its client-known path with the ambient umask's mode. Binding directly
+    // and chmod-ing after leaves a window a permissive umask opens to another local user, and no
+    // client dials the temp path. Defence in depth: the parent directory is the access control.
     let listener = {
         use std::os::unix::fs::PermissionsExt as _;
         let mut tmp = socket.as_os_str().to_os_string();
 
         tmp.push(format!(".{}.tmp", std::process::id()));
-        // The guard unlinks the temp socket on every exit from here on, error returns and an
-        // unwinding panic alike, until the rename publishes it (disarm), so a failed start leaves
-        // no `.tmp` orphan beside the canonical path.
+        // Unlinked on every exit from here until the rename disarms the guard, so a failed start
+        // leaves no `.tmp` orphan beside the canonical path.
         let tmp = StagedPath::new(std::path::PathBuf::from(tmp));
         let _ = std::fs::remove_file(tmp.path()); // clear a leftover temp from a prior crashed start
         let listener = UnixListener::bind(tmp.path()).map_err(|e| {
@@ -1110,10 +1034,9 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
 }
 
 /// An RAII guard for a staged-then-published path (the daemon's temp socket, a pool's snapshot
-/// bundle dir): `Drop` removes it, file or directory, on every scope exit, an error return *or* an
-/// unwinding panic, until [`published`](Self::published) disarms it. Closes the leak a panic
-/// between staging and publishing would otherwise leave behind; a `SIGKILL` in that
-/// window still leaks, which the next start's stale-path reclaim covers.
+/// bundle dir): `Drop` removes it, file or directory, on an error return *or* an unwinding panic,
+/// until [`published`](Self::published) disarms it. A `SIGKILL` in that window still leaks, which
+/// the next start's stale-path reclaim covers.
 struct StagedPath {
     path: PathBuf,
     armed: bool,
@@ -1143,17 +1066,16 @@ impl Drop for StagedPath {
     }
 }
 
-/// The daemon's log filter: `--log`, else `BSX_LOG`, else `info`. `info` (not the CLI's `warn`)
-/// because a daemon's per-session boot/close lines are its operational trace. This resolution stays
-/// here rather than in [`crate::init_tracing`] because `serve` dispatches before project-file
-/// discovery, so it reads a different set of layers than the CLI does.
+/// The daemon's log filter: `--log`, else `BSX_LOG`, else `info` (not the CLI's `warn`, since a
+/// daemon's per-session boot/close lines are its operational trace). Resolved here rather than in
+/// [`crate::init_tracing`] because `serve` dispatches before project-file discovery, so it reads a
+/// different set of layers than the CLI does.
 fn log_filter(flag: Option<&str>) -> String {
     log_filter_with(flag, std::env::var("BSX_LOG").ok())
 }
 
-/// The pure core of [`log_filter`], taking `BSX_LOG` rather than reading it, so the precedence and
-/// the `info` default are unit-testable without mutating the process environment (`set_var` is
-/// `unsafe` in edition 2024 and races the parallel test runner).
+/// The pure core of [`log_filter`], taking `BSX_LOG` rather than reading it, so the precedence is
+/// unit-testable without `set_var` (`unsafe` in edition 2024, and it races the parallel runner).
 fn log_filter_with(flag: Option<&str>, env: Option<String>) -> String {
     flag.map(str::to_string)
         .or(env)
@@ -1196,9 +1118,8 @@ mod tests {
     fn the_default_wall_ceiling_bounds_what_one_exec_can_hold() {
         use crate::policy::Requested;
 
-        // The ask becomes the host's own give-up deadline on a guest that stops reporting, and
-        // `--idle-timeout` does not arm while a command runs, so without a ceiling one `open` plus
-        // one stalled exec holds a session slot and its VM for as long as the client asked for.
+        // `--idle-timeout` does not arm while a command runs, so without this ceiling one `open`
+        // plus one stalled exec holds a slot and its VM for as long as the client asked for.
         let policy = operator_policy(&serve_args(&[]));
         assert_eq!(policy.max_wall_secs, Some(DEFAULT_MAX_WALL_SECS));
 
@@ -1229,9 +1150,8 @@ mod tests {
     fn the_default_output_ceiling_bounds_the_daemons_own_heap() {
         use crate::policy::Requested;
 
-        // The ask becomes the bound the exec collect loop charges every frame against, and that
-        // buffer is this process's heap rather than the guest's RAM, so an unbounded ask is a
-        // charge that never refuses while a streaming guest keeps sending.
+        // The exec collect loop charges every frame against this ask, and the buffer is this
+        // process's heap, not the guest's RAM: unbounded is a charge that never refuses.
         let policy = operator_policy(&serve_args(&[]));
         assert_eq!(policy.max_output_cap, Some(Limits::default().output_cap));
 
@@ -1292,9 +1212,8 @@ mod tests {
     fn the_egress_ceiling_reaches_the_policy_a_session_is_resolved_against() {
         use bsx_probes_loader::EgressPolicy;
 
-        // The defect was not a missing check: `session::open_network` has always called
-        // `check_egress`. The daemon just never put anything in the lists it checks, so the ceiling
-        // was dead. What this pins is that the flag reaches the enforcing copy.
+        // `session::open_network` calls `check_egress`, so what needs pinning is not the check but
+        // that the flag reaches the lists it reads: an empty list is a dead ceiling.
         let policy = operator_policy(&serve_args(&["--max-egress", "10.0.0.0/8"]));
         assert_eq!(
             policy.max_egress_v4.len(),
@@ -1361,12 +1280,12 @@ mod tests {
 
     #[test]
     fn the_liveness_probe_answers_promptly_with_a_full_backlog() {
-        // A listener that never accepts fills its backlog, and a *blocking* connect then waits on it
-        // indefinitely, so a wedged-but-alive daemon would hang a new daemon's startup rather than
-        // being reported as live. Bounded here by the clock: the answer must be "yes, live", promptly.
+        // A listener that never accepts fills its backlog, and a *blocking* connect waits on that
+        // indefinitely, so a wedged-but-alive daemon would hang a new daemon's startup. The answer
+        // must be "yes, live", and prompt, which is why the clock is asserted on.
         //
-        // The listener is built by hand with a backlog of **1**: `UnixListener::bind` uses 128, and
-        // queueing past that many connections to reproduce the hang is not worth the fds.
+        // Built by hand with a backlog of **1**: `UnixListener::bind` uses 128, and queueing past
+        // that many connections to reproduce the hang is not worth the fds.
         use std::os::fd::AsRawFd as _;
         let scratch = bsx_test_support::ScratchDir::created("bind-wedged");
         let path = scratch.path().join("wedged.sock");
@@ -1433,9 +1352,8 @@ mod tests {
 
     #[test]
     fn a_mistyped_socket_path_is_refused_not_deleted() {
-        // The daemon reclaims a stale socket by removing it, and it often runs as root, so a
-        // `--socket` naming a real file (a config, a database) would have been a deletion of
-        // whatever root can write. What matters here is not the error, it is the survival.
+        // The daemon reclaims a stale socket by removing it and often runs as root, so a `--socket`
+        // naming a real file would be a deletion. What matters here is the survival, not the error.
         let dir = bsx_test_support::ScratchDir::created("bind");
         let victim = dir.path().join("precious.toml");
         std::fs::write(&victim, b"do not delete me").expect("write the victim");
@@ -1451,9 +1369,8 @@ mod tests {
 
     #[test]
     fn only_exhaustion_accept_errors_are_paced() {
-        // The predicate is what keeps the backoff off the routine path, so pin both halves: a
-        // bare errno list drifts silently (nothing else in the tree names these numbers), and a
-        // predicate that crept wider would hand any local peer a throttle by dialing and dropping.
+        // Both halves: nothing else in the tree names these errnos, so a bare list drifts silently,
+        // and a predicate that crept wider would hand any local peer a throttle.
         for errno in [
             24,  /* EMFILE */
             23,  /* ENFILE */
@@ -1517,9 +1434,8 @@ mod tests {
 
     #[test]
     fn the_ceiling_admits_exactly_max_sessions_and_a_freed_slot_readmits() {
-        // The admission property under clients that never terminate: tickets are what bound the
-        // daemon, and a slot only frees when its ticket drops. Idle connections hold tickets
-        // without booting VMs, so the whole contract is host-safe.
+        // A slot frees only when its ticket drops. An idle connection holds one without booting a
+        // VM, so the whole admission contract is provable host-safe.
         let server = test_server(2);
         let first = SessionTicket::acquire(&server).expect("first admitted");
         let _second = SessionTicket::acquire(&server).expect("second admitted");
@@ -1538,9 +1454,8 @@ mod tests {
 
     #[test]
     fn the_aggregate_memory_ceiling_admits_until_full_and_a_freed_reservation_readmits() {
-        // Resource-aware admission bounds summed committed memory, not session count: with a 1024 MiB
-        // aggregate ceiling, two 512 MiB sessions fit, a third (of any size) is refused, and freeing
-        // one readmits. Reservations touch no sandbox, so this is host-safe like the count test.
+        // Admission on summed memory rather than session count: under a 1024 MiB ceiling two
+        // 512 MiB sessions fit, a third of any size is refused, and freeing one readmits.
         let server = build_test_server(0, 1024, 0);
         let first =
             ResourceReservation::try_acquire(&server, 512, 1).expect("first 512 MiB admitted");
@@ -1668,9 +1583,8 @@ mod tests {
     #[test]
     #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
     fn a_staged_path_is_removed_even_when_the_scope_unwinds() {
-        // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
-        // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
-        // the disarm: a published path must survive the guard's drop.
+        // A panic between staging a path and publishing it must not strand it. Both the file and
+        // dir flavours, plus the disarm: a published path must survive the guard's drop.
         let scratch = bsx_test_support::ScratchDir::created("staged");
         let base = scratch.path();
 
@@ -1696,9 +1610,8 @@ mod tests {
 
     #[test]
     fn a_refused_connection_gets_the_typed_at_capacity_reply_in_bounded_time() {
-        // The refused client's experience: a distinct typed `AtCapacity` reply (backpressure a
-        // dispatcher fails over on), delivered within the refusal's 1s write bound even
-        // though the daemon commits no VM resources to it.
+        // The refused client's experience: a distinct typed `AtCapacity` reply, delivered within the
+        // refusal's 1s write bound, with no VM resource committed to it.
         let server = test_server(1);
         let (client, daemon_end) = UnixStream::pair().expect("socketpair");
         let started = Instant::now();
