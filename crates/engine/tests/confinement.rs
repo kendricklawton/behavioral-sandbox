@@ -33,14 +33,6 @@ const HELPER_ENV: &str = "BSX_CONFINEMENT_HELPER";
 /// **networked** boot, so the crash leaves the residue that matters, a per-VM netns holding a tap.
 const HELPER_NET_ENV: &str = "BSX_CONFINEMENT_HELPER_NET";
 
-/// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
-/// specific pid via `comm`, so a reaped-then-recycled pid running something else reads as gone).
-fn is_firecracker(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|c| c.trim() == "firecracker")
-        .unwrap_or(false)
-}
-
 /// Poll `cond` up to `timeout`, returning whether it became true.
 fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
@@ -527,7 +519,7 @@ fn driver_death_cannot_leak_a_vm() {
         return;
     }
     assert!(
-        is_firecracker(vmm_pid),
+        common::is_firecracker(vmm_pid),
         "victim's VMM should be alive before the crash"
     );
 
@@ -538,7 +530,7 @@ fn driver_death_cannot_leak_a_vm() {
     // The sentinel (a child of the victim, in its own process group, now orphaned) must kill the
     // VMM via its cgroup and remove the cgroup dir, promptly, not eventually.
     assert!(
-        eventually(Duration::from_secs(10), || !is_firecracker(vmm_pid)),
+        eventually(Duration::from_secs(10), || !common::is_firecracker(vmm_pid)),
         "VMM {vmm_pid} must die when its driver dies (sentinel failed?)"
     );
     let cg = PathBuf::from(&cgroup);
@@ -570,18 +562,6 @@ fn helper_boot_networked_and_park() {
 /// Whether a network namespace named `name` exists (its `/run/netns/<name>` handle is present).
 fn netns_exists(name: &str) -> bool {
     Path::new("/run/netns").join(name).exists()
-}
-
-/// How many per-VM scratch dirs under `base` belong to driver `pid`.
-fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
-    let prefix = format!("bsx-{pid}-");
-    std::fs::read_dir(base)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-                .count()
-        })
-        .unwrap_or(0)
 }
 
 #[test]
@@ -658,12 +638,12 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
     // The sweep owns fs/net residue, never processes: those are the sentinel's, and where the
     // sentinel is degraded (no writable cgroup v2, e.g. under a plain userns), the leaked VMM is
     // reaped here by hand so the sweep's still-running-VMM guard doesn't (correctly) skip the dir.
-    if !eventually(Duration::from_secs(10), || !is_firecracker(vmm_pid)) {
+    if !eventually(Duration::from_secs(10), || !common::is_firecracker(vmm_pid)) {
         let _ = std::process::Command::new("sh")
             .args(["-c", &format!("kill -9 {vmm_pid}")])
             .status();
         assert!(
-            eventually(Duration::from_secs(10), || !is_firecracker(vmm_pid)),
+            eventually(Duration::from_secs(10), || !common::is_firecracker(vmm_pid)),
             "leaked VMM {vmm_pid} should die when killed"
         );
     }
@@ -674,7 +654,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
         "the crashed driver's netns {victim_netns} should linger until swept"
     );
     assert!(
-        scratch_dirs_of(&scratch_base, victim_pid) > 0,
+        common::scratch_dirs_of(&scratch_base, victim_pid) > 0,
         "the crashed driver's scratch dir should linger until swept"
     );
 
@@ -687,7 +667,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
         "sweep must reclaim the orphaned netns {victim_netns}"
     );
     assert_eq!(
-        scratch_dirs_of(&scratch_base, victim_pid),
+        common::scratch_dirs_of(&scratch_base, victim_pid),
         0,
         "sweep must reclaim the victim's scratch dirs"
     );
@@ -706,7 +686,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
         "sweep must spare the live driver's netns {live_netns}"
     );
     assert!(
-        scratch_dirs_of(&scratch_base, std::process::id()) > 0,
+        common::scratch_dirs_of(&scratch_base, std::process::id()) > 0,
         "sweep must spare the live driver's scratch dir"
     );
     live.shutdown()
@@ -976,18 +956,7 @@ fn two_concurrent_sandboxes_run_under_distinct_jail_uids() {
         );
         return;
     }
-    // `Uid:` is real/effective/saved/fs; the jailer's `setuid` sets all four, so the first answers it.
-    let vmm_uid = |pid: u32| -> u32 {
-        std::fs::read_to_string(format!("/proc/{pid}/status"))
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("Uid:"))
-                    .and_then(|v| v.split_whitespace().next())
-                    .and_then(|u| u.parse::<u32>().ok())
-            })
-            .expect("read and parse the VMM's uid")
-    };
+    let vmm_uid = |pid: u32| common::vmm_uid(pid).expect("read and parse the VMM's uid");
     let span = bsx_engine::JailIds::span(20_000, 4).expect("a valid span");
     let booted: Vec<bsx_engine::RunningVm> = (0..2)
         .map(|_| {

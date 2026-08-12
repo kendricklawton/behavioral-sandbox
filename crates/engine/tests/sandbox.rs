@@ -18,17 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{TmpDir, guest_rootfs_config, have_jailer_privileges};
 
-/// The uid the process behind `pid` runs as (the real uid from `/proc/<pid>/status`), as text.
-fn vmm_uid(pid: u32) -> Option<String> {
-    std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1).map(str::to_string))
-        })
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn sandbox_opens_jailed_by_default() {
@@ -46,8 +35,8 @@ fn sandbox_opens_jailed_by_default() {
     );
     let mut sandbox = Sandbox::open(cfg).expect("the sandbox should open jailed");
     assert_eq!(
-        vmm_uid(sandbox.vmm_pid()).as_deref(),
-        Some(DEFAULT_JAIL_UID.to_string().as_str()),
+        common::vmm_uid(sandbox.vmm_pid()),
+        Some(DEFAULT_JAIL_UID),
         "the VMM must run as the dropped jail uid without being asked to"
     );
     let out = sandbox

@@ -412,21 +412,12 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     cfg.jail = Some(Jail::default());
 
     // The VMM behind `pid` runs as the dropped jail uid, the confinement actually holding.
-    let vmm_uid = |pid: u32| {
-        std::fs::read_to_string(format!("/proc/{pid}/status"))
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("Uid:"))
-                    .and_then(|v| v.split_whitespace().next().map(str::to_string))
-            })
-    };
 
     // Direct jailed restore: confined, exec-ready, and actually functional.
     let mut clone = Vm::restore(&snap, &cfg).expect("jailed prewarmed restore should resume");
     assert_eq!(
-        vmm_uid(clone.vmm_pid()).as_deref(),
-        Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
+        common::vmm_uid(clone.vmm_pid()),
+        Some(DEFAULT_JAIL_UID),
         "the restored VMM should run as the dropped jail uid"
     );
     let out = clone
@@ -447,8 +438,8 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     assert_eq!(pool.ready(), 2, "both confined clones should be pooled");
     for pid in pool.vmm_pids() {
         assert_eq!(
-            vmm_uid(pid).as_deref(),
-            Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
+            common::vmm_uid(pid),
+            Some(DEFAULT_JAIL_UID),
             "every pooled VMM should run as the dropped jail uid"
         );
     }
@@ -481,17 +472,7 @@ fn pooled_clones_do_not_share_a_jail_uid() {
     jail.ids = Some(bsx_engine::JailIds::span(21_000, 4).expect("a valid span"));
     cfg.jail = Some(jail);
 
-    let uid_of = |pid: u32| -> u32 {
-        std::fs::read_to_string(format!("/proc/{pid}/status"))
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("Uid:"))
-                    .and_then(|v| v.split_whitespace().next())
-                    .and_then(|u| u.parse::<u32>().ok())
-            })
-            .expect("parse a pooled VMM's uid")
-    };
+    let uid_of = |pid: u32| common::vmm_uid(pid).expect("parse a pooled VMM's uid");
 
     let mut pool = Pool::new(snap, cfg, 3).expect("a spanned pool should prefill");
     assert_eq!(pool.ready(), 3);
