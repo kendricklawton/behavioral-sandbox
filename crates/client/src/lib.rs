@@ -47,9 +47,53 @@ impl std::fmt::Display for ClientError {
             ClientError::AtCapacity { retry_after_ms } => {
                 write!(f, "daemon at capacity (retry after {retry_after_ms}ms)")
             }
-            ClientError::Unexpected(resp) => write!(f, "unexpected reply from daemon: {resp:?}"),
+            ClientError::Unexpected(resp) => {
+                write!(f, "unexpected reply from daemon: {}", describe(resp))
+            }
             ClientError::Closed => write!(f, "daemon closed the connection without replying"),
         }
+    }
+}
+
+/// A **bounded** rendering of a reply: its wire tag, and sizes rather than contents.
+///
+/// A mismatched reply is carried whole in [`ClientError::Unexpected`] so a caller can inspect it, but
+/// the `Display` a caller prints must not grow with it. `Result` and `Got` carry payloads bounded only
+/// by the daemon's `output_cap` and `MAX_RESPONSE_BYTES` (33 MiB), and `{:?}` escapes a `String`, so a
+/// payload dense in control bytes renders about **5x** its own size (measured 2026-08-11). Sizes are
+/// in bytes of UTF-8, which is what the wire cap counts.
+///
+/// The wildcard arm is the safe default on purpose: [`Response`] is `#[non_exhaustive]`, so a variant
+/// a newer daemon adds renders as a name here rather than falling back to dumping itself.
+fn describe(resp: &Response) -> String {
+    match resp {
+        Response::Opened {
+            boot_ms, pooled, ..
+        } => {
+            format!("opened (boot {boot_ms}ms, pooled={pooled})")
+        }
+        Response::Result {
+            exit_code,
+            stdout,
+            stderr,
+            ..
+        } => format!(
+            "result (exit {exit_code}, {}B stdout, {}B stderr)",
+            stdout.len(),
+            stderr.len()
+        ),
+        Response::Put { .. } => "put".to_string(),
+        Response::Got {
+            content, present, ..
+        } => format!("got ({}B, present={present})", content.len()),
+        Response::Snapshotted { .. } => "snapshotted".to_string(),
+        Response::Trace { .. } => "trace".to_string(),
+        Response::TraceSummary { .. } => "trace_summary".to_string(),
+        Response::Closed => "closed".to_string(),
+        Response::Cancelled => "cancelled".to_string(),
+        Response::Error { kind, fatal, .. } => format!("error ({kind:?}, fatal={fatal})"),
+        Response::AtCapacity { .. } => "at_capacity".to_string(),
+        _ => "unrecognised reply".to_string(),
     }
 }
 
@@ -257,4 +301,71 @@ impl Client {
 
 fn unexpected(resp: Response) -> ClientError {
     ClientError::Unexpected(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mismatched reply renders its **shape**, never its payload.
+    ///
+    /// `Unexpected` keeps the whole `Response` so a caller can still inspect it, but the `Display` a
+    /// caller prints must not scale with it. `Result` and `Got` carry up to the wire's 33 MiB, and
+    /// `{:?}` escapes a `String`, so a control-byte payload renders at about 5x its own size: the
+    /// rendering, on an error path, would be the largest allocation in the process.
+    #[test]
+    fn an_unexpected_reply_renders_its_shape_not_its_payload() {
+        const MIB: usize = 1024 * 1024;
+        // `\u{1}` is one UTF-8 byte and the worst case for `{:?}`, which escapes it to six.
+        let worst = "\u{1}".repeat(MIB);
+        let reply = Response::result(3, worst.clone(), worst, 42);
+        let rendered = ClientError::Unexpected(reply.clone()).to_string();
+
+        assert!(
+            rendered.len() < 200,
+            "the message must not carry the payload, got {} bytes",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("result") && rendered.contains("exit 3"),
+            "it still names the shape that was wrong: {rendered}"
+        );
+        assert!(
+            rendered.contains(&MIB.to_string()),
+            "and the size, which is the useful half of the payload: {rendered}"
+        );
+
+        // The value itself is untouched: bounding the rendering must not cost a caller the reply.
+        assert!(matches!(
+            ClientError::Unexpected(reply),
+            ClientError::Unexpected(Response::Result { stdout, .. }) if stdout.len() == MIB
+        ));
+    }
+
+    /// Every variant renders small, including the other payload-carrying one and the unknown case.
+    #[test]
+    fn every_reply_shape_renders_within_a_line() {
+        const MIB: usize = 1024 * 1024;
+        let big = "\u{1}".repeat(MIB);
+        for reply in [
+            Response::opened(12, true),
+            Response::result(0, big.clone(), big.clone(), 1),
+            Response::put("p".into()),
+            Response::got("p".into(), big, true, true),
+            Response::snapshotted("d".into()),
+            Response::trace(serde_json::Value::Null),
+            Response::trace_summary(serde_json::Value::Null),
+            Response::error("m".into(), true, FaultKind::Protocol),
+            Response::at_capacity(5),
+            Response::Closed,
+            Response::Cancelled,
+        ] {
+            let rendered = ClientError::Unexpected(reply).to_string();
+            assert!(
+                rendered.len() < 200,
+                "every shape renders within a line, got {} bytes: {rendered:.80}",
+                rendered.len()
+            );
+        }
+    }
 }
