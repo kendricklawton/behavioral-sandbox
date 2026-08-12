@@ -19,11 +19,11 @@
 // deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
 
+mod common;
+
 use std::io::Write;
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use bsx_client::{Client, OpenParams};
 use bsx_test_support::{vm_skip_reason, workspace_root};
@@ -73,21 +73,6 @@ fn cases() -> Vec<(Vec<String>, String, RunOutcome)> {
     ]
 }
 
-/// A spawned `bsx serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
-/// session VM is then reaped by the lifetime sentinel; the socket file is cleared on the next bind).
-struct Daemon {
-    child: Child,
-    dir: PathBuf,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
@@ -101,38 +86,6 @@ fn shared_env(cmd: &mut Command, root: &std::path::Path) {
     if std::env::var_os("BSX_KERNEL").is_none() {
         cmd.env("BSX_KERNEL", root.join("artifacts/vmlinux"));
     }
-}
-
-/// Launch `bsx serve --unjailed` on a private socket, returning once the socket is connectable.
-fn launch_daemon() -> (Daemon, PathBuf) {
-    let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("bsx-golden-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        panic!("create the daemon's socket dir: {e}");
-    }
-    let socket = dir.join("bsx.sock");
-
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    cmd.arg("serve")
-        .arg("--unjailed")
-        .arg("--socket")
-        .arg(&socket);
-    shared_env(&mut cmd, &root);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn bsx: {e}"));
-    let daemon = Daemon { child, dir };
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if UnixStream::connect(&socket).is_ok() {
-            return (daemon, socket);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("bsx never began accepting on {}", socket.display());
 }
 
 /// Run one command through the **CLI** face: `bsx run --unjailed --json -- <argv>`, feeding
@@ -235,7 +188,7 @@ fn the_cli_and_the_daemon_render_a_run_identically() {
     // One daemon session drives every case (the commands are stateless; a fresh CLI process boots per
     // case, since that is how the CLI is used). Both open with the default profile, so both boot the
     // same conservative `Limits::default()`, no divergence hides in a differing knob.
-    let (_daemon, socket) = launch_daemon();
+    let (_daemon, socket) = common::launch_daemon(None, None);
     let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {
         panic!("set read timeout: {e}");

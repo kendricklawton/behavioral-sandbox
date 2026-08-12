@@ -23,30 +23,16 @@
 // deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bsx_client::{Client, ClientError, OpenParams};
-use bsx_test_support::{vm_skip_reason, workspace_root};
-
-/// A spawned `bsx serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
-/// session VMs are then reaped by the lifetime sentinel; the socket file it leaves is cleared on the
-/// next bind).
-struct Daemon {
-    child: Child,
-    dir: PathBuf,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
+use bsx_test_support::vm_skip_reason;
+use common::{launch_daemon, launch_daemon_opts};
 
 /// A free loopback port for the daemon's metrics endpoint: bind an ephemeral listener, note its
 /// port, release it. (A small bind race with another process is possible but fine for a test.)
@@ -76,75 +62,6 @@ fn scrape_metrics(port: u16) -> String {
         .unwrap_or_else(|e| panic!("read the scrape: {e}"));
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     response
-}
-
-/// Launch `bsx serve` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
-/// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
-/// Returns once the socket is connectable.
-fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
-    launch_daemon_opts(prewarm, metrics_port, false, &[])
-}
-
-fn launch_daemon_opts(
-    prewarm: Option<usize>,
-    metrics_port: Option<u16>,
-    jailed: bool,
-    extra_args: &[&str],
-) -> (Daemon, PathBuf) {
-    let root = workspace_root();
-    // A per-call sequence number, because the process id alone cannot distinguish two tests in
-    // this one binary: two launches with the same knobs (`agent_serves…` and `cancel_reclaims…`
-    // both pass `(None, None)`) would otherwise share a dir, and each `remove_dir_all` below then
-    // deletes the *other* test's live socket, a flake that only fires when the scheduler overlaps
-    // them.
-    static LAUNCH_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let seq = LAUNCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("bsx-e2e-{}-{seq}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        panic!("create the daemon's socket dir: {e}");
-    }
-    let socket = dir.join("bsx.sock");
-
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    cmd.arg("serve");
-    if !jailed {
-        cmd.arg("--unjailed");
-    }
-    cmd.arg("--socket").arg(&socket);
-    if let Some(n) = prewarm {
-        cmd.arg("--prewarm").arg(n.to_string());
-    }
-    if let Some(port) = metrics_port {
-        cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
-    }
-    cmd.args(extra_args);
-    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
-        // Keep the daemon's generated record-signing key inside the test's socket dir.
-        .env("BSX_SIGNING_KEY", dir.join("signing.key"))
-        .env("BSX_LOG", "warn")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
-    if std::env::var_os("BSX_KERNEL").is_none() {
-        cmd.env("BSX_KERNEL", root.join("artifacts/vmlinux"));
-    }
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn bsx: {e}"));
-    let daemon = Daemon { child, dir };
-
-    // Wait for the daemon to bind and start accepting. A prewarmed daemon boots a source + clones
-    // first, so allow it longer.
-    let budget = if prewarm.is_some() { 40 } else { 10 };
-    let deadline = Instant::now() + Duration::from_secs(budget);
-    while Instant::now() < deadline {
-        if UnixStream::connect(&socket).is_ok() {
-            return (daemon, socket);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("bsx never began accepting on {}", socket.display());
 }
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
