@@ -310,18 +310,10 @@ fn netns_add(name: &str) -> Result<(), VmmError> {
 }
 
 /// The raw `ip netns add <name>` command, mapping a spawn failure or nonzero exit to a typed error.
-/// Split from [`netns_add`] so the reclaim-and-retry policy lives in one place.
+/// Split from [`netns_add`] so the reclaim-and-retry policy lives in one place, and named so both
+/// attempts spell the arguments once.
 fn ip_netns_add(name: &str) -> Result<(), VmmError> {
-    let mut cmd = Command::new("ip");
-    cmd.args(["netns", "add", name]);
-    let (status, stderr) = crate::proc::output_bounded(cmd, crate::proc::IP_TIMEOUT, "ip")?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(VmmError::Vmm(format!(
-        "ip netns add {name}: {}",
-        crate::proc::failure_detail(status, &stderr)
-    )))
+    run_ip(&["netns", "add", name])
 }
 
 /// `ip netns del <name>`, best-effort: every teardown and half-configured-boot cleanup routes through
