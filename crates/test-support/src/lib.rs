@@ -464,19 +464,26 @@ impl SmallFs {
             Err(e) => panic!("create the filler in {}: {e}", self.path().display()),
         };
         let chunk = vec![0u8; 64 * 1024];
-        let mut written: u64 = 0;
         loop {
             match file.write_all(&chunk) {
-                Ok(()) => written += chunk.len() as u64,
+                Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::StorageFull => break,
                 Err(e) => panic!("fill {}: {e}", path.display()),
             }
         }
+        // What the filesystem took, not what the loop counted: `write_all` can fail having
+        // delivered part of its chunk, and those bytes reach the file without reaching any
+        // caller-side tally. Truncating to an undercount would hand back space this method
+        // promises is gone.
+        let taken = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => panic!("measure the filler {}: {e}", path.display()),
+        };
         assert!(
-            written > 0,
+            taken > 0,
             "the fixture was already full before the filler was written"
         );
-        if let Err(e) = file.set_len(written.saturating_sub(headroom)) {
+        if let Err(e) = file.set_len(taken.saturating_sub(headroom)) {
             panic!("shrink the filler to leave {headroom} bytes: {e}");
         }
     }
