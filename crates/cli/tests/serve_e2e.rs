@@ -87,6 +87,14 @@ impl RawClient {
         }
     }
 
+    /// A second handle onto the same connection, for a test that writes from another thread or
+    /// while a read is outstanding (`cancel` is the whole reason the wire allows it).
+    fn writer(&self) -> UnixStream {
+        self.writer
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone the connection: {e}"))
+    }
+
     /// Send one request `body` (the JSON without its schema), stamped with `"schema":1`. The body
     /// keeps its own closing brace (only its leading `{` is dropped to splice `schema` in first), so
     /// the template must not add one.
@@ -100,15 +108,28 @@ impl RawClient {
         }
     }
 
-    fn recv(&mut self) -> serde_json::Value {
+    /// One response line, verbatim. For the assertions that read the wire as text rather than as a
+    /// parsed object, and what [`recv`](Self::recv) parses.
+    fn recv_line(&mut self) -> String {
         let mut line = String::new();
         let n = self
             .reader
             .read_line(&mut line)
             .unwrap_or_else(|e| panic!("read a response line: {e}"));
         assert!(n > 0, "the daemon closed the connection unexpectedly");
+        line
+    }
+
+    fn recv(&mut self) -> serde_json::Value {
+        let line = self.recv_line();
         serde_json::from_str(line.trim())
             .unwrap_or_else(|e| panic!("a response is one JSON object ({e}): {line:?}"))
+    }
+
+    /// Send one request and read its reply, for the run of straight-line round trips.
+    fn roundtrip(&mut self, body: &str) -> String {
+        self.send(body);
+        self.recv_line()
     }
 }
 
@@ -645,33 +666,16 @@ fn a_cancel_after_the_idle_deadline_still_gets_its_ack() {
     }
     let (_daemon, socket) = launch_daemon_opts(None, None, false, &["--idle-timeout", "2"]);
 
-    let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
-    let mut canceller = stream
-        .try_clone()
-        .unwrap_or_else(|e| panic!("clone the connection: {e}"));
+    let mut client = RawClient::connect(&socket);
+    let mut canceller = client.writer();
 
     // A wall budget far past the idle timeout, so the exec is what outlives the deadline.
-    writeln!(stream, r#"{{"schema":1,"op":"open","wall_secs":120}}"#)
-        .unwrap_or_else(|e| panic!("send open: {e}"));
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .unwrap_or_else(|e| panic!("clone for reading: {e}")),
-    );
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .unwrap_or_else(|e| panic!("read the open reply: {e}"));
+    let line = client.roundtrip(r#"{"op":"open","wall_secs":120}"#);
     assert!(
         line.contains(r#""reply":"opened""#),
         "expected an opened reply, got {line}"
     );
-
-    writeln!(
-        stream,
-        r#"{{"schema":1,"op":"exec","argv":["sleep","60"]}}"#
-    )
-    .unwrap_or_else(|e| panic!("send exec: {e}"));
+    client.send(r#"{"op":"exec","argv":["sleep","60"]}"#);
 
     // Sit out the 2s idle budget (armed at the exec request) plus slack, so the deadline has
     // provably lapsed before the cancel goes out.
@@ -679,10 +683,7 @@ fn a_cancel_after_the_idle_deadline_still_gets_its_ack() {
     writeln!(canceller, r#"{{"schema":1,"op":"cancel"}}"#)
         .unwrap_or_else(|e| panic!("send cancel: {e}"));
 
-    line.clear();
-    reader
-        .read_line(&mut line)
-        .unwrap_or_else(|e| panic!("read the cancel reply: {e}"));
+    let line = client.recv_line();
     assert!(
         line.contains(r#""reply":"cancelled""#),
         "a cancel sent after the idle deadline lapsed must still be acknowledged, got {line:?} \
@@ -693,17 +694,7 @@ fn a_cancel_after_the_idle_deadline_still_gets_its_ack() {
 /// Open the daemon at `socket` with `open_body` (the raw JSON after the schema stamp) and return
 /// the one reply line.
 fn open_reply(socket: &PathBuf, open_body: &str) -> String {
-    let mut stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect: {e}"));
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap_or_else(|e| panic!("set read timeout: {e}"));
-    writeln!(stream, r#"{{"schema":1,{open_body}}}"#).unwrap_or_else(|e| panic!("send open: {e}"));
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .unwrap_or_else(|e| panic!("read the open reply: {e}"));
-    line
+    RawClient::connect(socket).roundtrip(&format!("{{{open_body}}}"))
 }
 
 // NOT `#[ignore]`d, alone in this file: a refused `open` is answered before any VM exists, so this
@@ -759,42 +750,24 @@ fn a_binary_get_is_flagged_lossy_and_a_text_get_is_not() {
     }
     let (_daemon, socket) = launch_daemon(None, None);
 
-    let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
-    stream
-        .set_read_timeout(Some(Duration::from_secs(45)))
-        .unwrap_or_else(|e| panic!("set read timeout: {e}"));
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .unwrap_or_else(|e| panic!("clone for reading: {e}")),
-    );
-    let mut line = String::new();
-    let mut roundtrip = |req: &str| -> String {
-        writeln!(stream, "{req}").unwrap_or_else(|e| panic!("send: {e}"));
-        line.clear();
-        reader
-            .read_line(&mut line)
-            .unwrap_or_else(|e| panic!("read reply: {e}"));
-        line.clone()
-    };
-
-    let opened = roundtrip(r#"{"schema":1,"op":"open"}"#);
+    let mut client = RawClient::connect(&socket);
+    let opened = client.roundtrip(r#"{"op":"open"}"#);
     assert!(opened.contains(r#""reply":"opened""#), "{opened}");
 
     // One file of raw non-UTF-8 bytes, one of plain text, written inside the guest.
-    let wrote = roundtrip(
-        r#"{"schema":1,"op":"exec","argv":["sh","-c","printf '\\377\\376\\375' > bin.dat && printf 'hello' > text.txt"]}"#,
+    let wrote = client.roundtrip(
+        r#"{"op":"exec","argv":["sh","-c","printf '\\377\\376\\375' > bin.dat && printf 'hello' > text.txt"]}"#,
     );
     assert!(wrote.contains(r#""exit_code":0"#), "{wrote}");
 
-    let got = roundtrip(r#"{"schema":1,"op":"get","path":"bin.dat"}"#);
+    let got = client.roundtrip(r#"{"op":"get","path":"bin.dat"}"#);
     assert!(got.contains(r#""present":true"#), "{got}");
     assert!(
         got.contains(r#""lossy":true"#),
         "non-UTF-8 bytes must be flagged, not silently substituted: {got}"
     );
 
-    let got = roundtrip(r#"{"schema":1,"op":"get","path":"text.txt"}"#);
+    let got = client.roundtrip(r#"{"op":"get","path":"text.txt"}"#);
     assert!(got.contains(r#""content":"hello""#), "{got}");
     assert!(
         got.contains(r#""lossy":false"#),
