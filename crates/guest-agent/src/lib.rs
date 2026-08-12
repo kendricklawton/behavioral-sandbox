@@ -454,6 +454,16 @@ fn resolve_program(
     }
 }
 
+/// A `bsx-<what>-<pid>-<n>` name, unique within this agent process: the pid separates two agents
+/// sharing a guest, `seq` separates two names from one agent.
+fn unique_name(what: &str, seq: &AtomicU64) -> String {
+    format!(
+        "bsx-{what}-{}-{}",
+        std::process::id(),
+        seq.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Names the next per-exec cgroup uniquely within this agent process.
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -478,11 +488,7 @@ impl ExecCgroup {
     /// Creates a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a writable cgroup v2
     /// mount, warning once per agent process on the way so the degradation is not silent.
     fn create() -> Option<Self> {
-        let path = PathBuf::from(CGROUP_ROOT).join(format!(
-            "bsx-exec-{}-{}",
-            std::process::id(),
-            CGROUP_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = PathBuf::from(CGROUP_ROOT).join(unique_name("exec", &CGROUP_SEQ));
         match std::fs::create_dir(&path) {
             Ok(()) => Some(Self { path }),
             Err(e) => {
@@ -539,11 +545,7 @@ struct RunDir {
 impl RunDir {
     /// A fresh, uniquely-named per-run dir under `/tmp`, removed on drop.
     fn fresh() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "bsx-run-{}-{}",
-            std::process::id(),
-            RUN_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = std::env::temp_dir().join(unique_name("run", &RUN_SEQ));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path, keep: false })
     }
@@ -693,7 +695,9 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_EXEC_TIMEOUT, budget_from, effective_path, resolve_program};
+    use super::{
+        AtomicU64, MAX_EXEC_TIMEOUT, budget_from, effective_path, resolve_program, unique_name,
+    };
     use bsx_test_support::ScratchDir;
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
@@ -782,6 +786,29 @@ mod tests {
             budget_from(Some(nz(u32::MAX))),
             MAX_EXEC_TIMEOUT,
             "an over-ceiling ask is clamped"
+        );
+    }
+
+    /// Two names from one process never collide.
+    ///
+    /// Both callers depend on it for correctness, not tidiness: a reused per-run dir hands one
+    /// exec another's working directory, and a reused per-exec cgroup makes one command's kill
+    /// reach another's processes. Nothing else in the suite would report either as anything but
+    /// flakiness.
+    #[test]
+    fn a_unique_name_never_repeats_within_this_process() {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let names: std::collections::BTreeSet<String> =
+            (0..64).map(|_| unique_name("probe", &SEQ)).collect();
+        assert_eq!(
+            names.len(),
+            64,
+            "every call names a different path: {names:?}"
+        );
+        let pid = std::process::id().to_string();
+        assert!(
+            names.iter().all(|n| n.contains(&pid)),
+            "and carries this process's pid, so two agents on one guest cannot collide: {names:?}"
         );
     }
 }
