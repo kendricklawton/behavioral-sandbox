@@ -263,8 +263,10 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
 fn session_state_persists_across_connections() {
     // The stateful-session contract: two connections served with the same session dir see one working
     // directory, so both an injected file and one the first exec writes survive into the second.
-    let dir = std::env::temp_dir().join(format!("bsx-session-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    // A `ScratchDir` rather than a hand-rolled path: its `Drop` reclaims the session dir even when
+    // an assertion below panics.
+    let scratch = bsx_test_support::ScratchDir::new("agent-session");
+    let dir = scratch.path().to_path_buf();
 
     // Exec 1: read the injected file, append to it, and write a new one.
     let (host, guest) = UnixStream::pair().expect("socketpair");
@@ -323,7 +325,6 @@ fn session_state_persists_across_connections() {
         "state written by exec 1 must be visible to exec 2"
     );
     agent.join().expect("agent 2").expect("serve 2");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -331,8 +332,8 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
     // The pre-flight program check must resolve a `/`-bearing relative program against the run's working
     // dir, not the agent's own cwd, or a `./tool` an earlier exec built is falsely rejected as "no such
     // binary".
-    let dir = std::env::temp_dir().join(format!("bsx-relprog-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = bsx_test_support::ScratchDir::new("agent-relprog");
+    let dir = scratch.path().to_path_buf();
 
     // One exec per connection against the shared session dir: build the executable, then run it.
     let run_argv = |argv: Vec<String>| -> (Vec<u8>, Result<i32, String>) {
@@ -378,7 +379,6 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
         "a session-built ./tool must run, not be rejected"
     );
     assert_eq!(out, b"ran-in-workdir\n");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
