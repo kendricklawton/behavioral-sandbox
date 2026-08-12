@@ -5,7 +5,7 @@ use std::time::Duration;
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
-use bsx_probes_common::SyscallEvent;
+use bsx_probes_common::{ARG_SLOT, SyscallEvent, TRACEPOINT_ARGS};
 
 use crate::maps::remove_cgroup_key;
 use crate::meter::TARGET_PRESENT;
@@ -142,6 +142,95 @@ const FILTER_MODE_SLOT: u32 = 0;
 /// [`SyscallTracer::dropped_events`] so best-effort loss is reported, never silent.
 const EVENT_DROPS_MAP: &str = "EVENT_DROPS";
 
+/// Where the kernel publishes each tracepoint's own field layout, in the order aya resolves them for
+/// the attach itself (it reads the `id` file in the same directory), so verifying the layout needs
+/// no access the attach does not already need.
+const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
+
+/// Checks every offset in [`TRACEPOINT_ARGS`] against the kernel's own `format` file for that
+/// event, before a program is loaded.
+///
+/// The tracers read their arguments at fixed byte offsets, and nothing relocates those: BTF
+/// relocates struct-field accesses, and reading the argument area is not one. On a kernel that laid
+/// the record out differently, `read_at` returns whatever `u64` sits at the offset and the probe
+/// follows it as a user pointer, so the event reaches the record with an empty or unrelated path,
+/// nothing errors, and no drop counter moves. This makes that disagreement a typed
+/// [`ProbeError::Unsupported`], which [`crate::SandboxProbes`] records as a coverage gap on the
+/// syscall axis.
+fn check_tracepoint_abi() -> Result<(), ProbeError> {
+    for (_, event) in TRACERS {
+        let format = read_tracepoint_format(event)?;
+        for arg in TRACEPOINT_ARGS.iter().filter(|arg| arg.event == event) {
+            let (offset, size) = field_layout(&format, arg.field).ok_or_else(|| {
+                ProbeError::Unsupported(format!(
+                    "{TP_SYSCALLS}/{event} declares no `{}` field on this kernel, so the offset the \
+                     probe reads its argument at cannot be verified",
+                    arg.field
+                ))
+            })?;
+            if (offset, size) != (arg.offset, ARG_SLOT) {
+                return Err(ProbeError::Unsupported(format!(
+                    "{TP_SYSCALLS}/{event} puts `{}` at offset {offset} size {size} on this kernel, \
+                     but the probe reads an {ARG_SLOT}-byte argument at offset {}: the traced paths \
+                     would be read from the wrong place",
+                    arg.field, arg.offset
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `format` body the kernel publishes for one `syscalls` event, from the first tracefs root that
+/// yields it.
+fn read_tracepoint_format(event: &str) -> Result<String, ProbeError> {
+    TRACEFS_ROOTS
+        .iter()
+        .find_map(|root| {
+            std::fs::read_to_string(format!("{root}/events/{TP_SYSCALLS}/{event}/format")).ok()
+        })
+        .ok_or_else(|| {
+            ProbeError::Unsupported(format!(
+                "no readable {TP_SYSCALLS}/{event}/format under {}: the argument offsets the probes \
+                 read cannot be verified (mount tracefs, and note the attach reads the `id` file in \
+                 the same directory)",
+                TRACEFS_ROOTS.join(" or ")
+            ))
+        })
+}
+
+/// The `(offset, size)` a tracepoint `format` body declares for `field`, or `None` when it declares
+/// no such field. Pure, so the parse is tested without a readable tracefs (the directory is
+/// root-only on a normal host).
+///
+/// Each line is `field:<C declaration>;\toffset:<n>;\tsize:<n>;\tsigned:<0|1>;`. The declaration is
+/// C, so the field name is its last token once pointer stars and any array suffix are stripped.
+fn field_layout(format: &str, field: &str) -> Option<(usize, usize)> {
+    format.lines().find_map(|line| {
+        let mut parts = line.trim().strip_prefix("field:")?.split(';');
+        let name = parts
+            .next()?
+            .trim()
+            .rsplit(|c: char| c.is_whitespace() || c == '*')
+            .next()?
+            .split('[')
+            .next()?;
+        if name != field {
+            return None;
+        }
+        let (mut offset, mut size) = (None, None);
+        for part in parts {
+            let part = part.trim();
+            if let Some(n) = part.strip_prefix("offset:") {
+                offset = n.parse().ok();
+            } else if let Some(n) = part.strip_prefix("size:") {
+                size = n.parse().ok();
+            }
+        }
+        Some((offset?, size?))
+    })
+}
+
 /// A loaded, attached syscall tracer: the `sys_enter_{execve,openat,connect}` tracepoints
 /// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the aya
 /// [`Ebpf`], so dropping it detaches everything and pins nothing,
@@ -170,12 +259,17 @@ impl SyscallTracer {
     /// dropped. Attaches unfiltered; call a `watch_*` before or after to narrow it.
     ///
     /// # Errors
-    /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps, via [`check_support`]);
-    /// [`ProbeError::Object`] if the object can't be read (build it: `cargo xtask build-probes`);
-    /// [`ProbeError::Load`] if the kernel rejects the object/a program; [`ProbeError::Attach`] if a
-    /// tracepoint attach fails.
+    /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps, via [`check_support`]) or
+    /// lays a tracepoint's arguments out differently than the object reads them (naming the field
+    /// they disagree on); [`ProbeError::Object`] if the object can't be read (build it:
+    /// `cargo xtask build-probes`); [`ProbeError::Load`] if the kernel rejects the object/a program;
+    /// [`ProbeError::Attach`] if a tracepoint attach fails.
     pub fn load() -> Result<Self, ProbeError> {
         check_support()?;
+        // Before anything attaches: the offsets the programs read their arguments at are an ABI
+        // assumption no relocation carries, and a wrong one records an empty or unrelated path
+        // rather than failing.
+        check_tracepoint_abi()?;
         let mut ebpf = load_object()?;
 
         for (program, event) in TRACERS {
@@ -421,9 +515,109 @@ fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> 
 
 #[cfg(test)]
 mod tests {
-    // Host-safe: the decode-or-count decision on raw bytes, no aya, no kernel.
-    use super::decode_or_count;
-    use bsx_probes_common::EVENT_SIZE;
+    // Host-safe: the decode-or-count decision on raw bytes and the tracepoint-format parse, no aya,
+    // no kernel (tracefs is root-only on a normal host).
+    use super::{decode_or_count, field_layout};
+    use bsx_probes_common::{ARG_SLOT, EVENT_SIZE, TRACEPOINT_ARGS};
+
+    /// A transcript of `events/syscalls/<event>/format` for the three traced events, as an
+    /// `x86_64` kernel writes it: the four `common_*` header fields, then one 8-byte slot per
+    /// syscall argument. A transcript is not the kernel's word, which is why the check runs against
+    /// the live file at attach; this is here so the parse and the table are exercised host-safe.
+    fn format_body(event: &str) -> String {
+        let header = "name: EVENT\nID: 42\nformat:\n\
+             \tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\
+             \tfield:unsigned char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n\
+             \tfield:unsigned char common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n\
+             \tfield:int common_pid;\toffset:4;\tsize:4;\tsigned:1;\n\n\
+             \tfield:int __syscall_nr;\toffset:8;\tsize:4;\tsigned:1;\n";
+        const ARGS: [(&str, &str); 3] = [
+            (
+                "sys_enter_execve",
+                "\tfield:const char * filename;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:const char *const * argv;\toffset:24;\tsize:8;\tsigned:0;\n\
+                 \tfield:const char *const * envp;\toffset:32;\tsize:8;\tsigned:0;\n",
+            ),
+            (
+                "sys_enter_openat",
+                "\tfield:int dfd;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:const char * filename;\toffset:24;\tsize:8;\tsigned:0;\n\
+                 \tfield:int flags;\toffset:32;\tsize:8;\tsigned:0;\n\
+                 \tfield:umode_t mode;\toffset:40;\tsize:8;\tsigned:0;\n",
+            ),
+            (
+                "sys_enter_connect",
+                "\tfield:int fd;\toffset:16;\tsize:8;\tsigned:0;\n\
+                 \tfield:struct sockaddr * uservaddr;\toffset:24;\tsize:8;\tsigned:0;\n\
+                 \tfield:int addrlen;\toffset:32;\tsize:8;\tsigned:0;\n",
+            ),
+        ];
+        let args = ARGS
+            .iter()
+            .find_map(|(name, args)| (*name == event).then_some(*args))
+            .expect("a transcript for every event the tracer attaches to");
+        format!("{header}{args}\nprint fmt: \"filename: 0x%08lx\", REC->filename\n")
+    }
+
+    #[test]
+    fn every_traced_argument_sits_where_the_declared_layout_puts_it() {
+        for arg in TRACEPOINT_ARGS {
+            assert_eq!(
+                field_layout(&format_body(arg.event), arg.field),
+                Some((arg.offset, ARG_SLOT)),
+                "{}/{} must be read at the offset the kernel declares for it",
+                arg.event,
+                arg.field
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_the_kernel_does_not_declare_has_no_layout() {
+        // The refusal the loader turns into `Unsupported`: a renamed or removed argument must read
+        // as absent, never as a plausible offset from some other line.
+        let body = format_body("sys_enter_execve");
+        assert_eq!(field_layout(&body, "pathname"), None);
+        assert_eq!(field_layout(&body, ""), None);
+        assert_eq!(field_layout("", "filename"), None);
+    }
+
+    #[test]
+    fn the_field_name_is_read_past_the_c_declaration_it_hides_behind() {
+        // A name is the last token of a C declaration, so pointer stars (attached or detached),
+        // qualifiers and an array suffix must not become part of it. Reading `* filename` as the
+        // name would match nothing and refuse a healthy kernel.
+        for decl in [
+            "const char * filename",
+            "char *filename",
+            "const char __user *filename",
+            "char filename[16]",
+        ] {
+            let line = format!("\tfield:{decl};\toffset:16;\tsize:8;\tsigned:0;\n");
+            assert_eq!(
+                field_layout(&line, "filename"),
+                Some((16, 8)),
+                "`{decl}` declares a field named `filename`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_matching_field_without_a_parsable_offset_is_not_a_layout() {
+        // Half a line must not read as a verified offset: the caller refuses on `None`, and a
+        // `Some` here would pass an unchecked offset off as checked.
+        assert_eq!(
+            field_layout("\tfield:char * filename;\tsize:8;\n", "filename"),
+            None
+        );
+        assert_eq!(
+            field_layout(
+                "\tfield:char * filename;\toffset:sixteen;\tsize:8;\n",
+                "filename"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn a_short_ring_record_is_counted_not_silently_dropped() {
