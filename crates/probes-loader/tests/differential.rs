@@ -53,7 +53,12 @@ fn load_classifier(name: &str) -> Ebpf {
 }
 
 /// Run one frame through a loaded classifier and return its verdict.
-fn verdict(ebpf: &mut Ebpf, name: &str, frame: &[u8]) -> u32 {
+///
+/// `what` names the corpus case, and the failure carries it with the frame's length and the
+/// `errno`: `BPF_PROG_TEST_RUN` refusing the *call* is a different failure from the classifier
+/// returning the wrong verdict, and these tests run only under the privileged gate, so a message
+/// that names neither the frame nor the cause costs a whole root run to narrow.
+fn verdict(ebpf: &mut Ebpf, name: &str, what: &str, frame: &[u8]) -> u32 {
     // The kernel copies the (possibly modified) packet back, so the buffer must be able to hold it;
     // a short one is `-ENOSPC` rather than a wrong answer. These programs never write to the packet,
     // so generous slack costs nothing.
@@ -69,8 +74,44 @@ fn verdict(ebpf: &mut Ebpf, name: &str, frame: &[u8]) -> u32 {
         repeat: 1,
         ..Default::default()
     })
-    .unwrap_or_else(|e| panic!("test_run `{name}`: {e}"))
+    .unwrap_or_else(|e| {
+        panic!(
+            "test_run `{name}` on {what:?} ({} byte frame): {}",
+            frame.len(),
+            with_causes(&e)
+        )
+    })
     .return_value
+}
+
+/// An error rendered with its source chain. aya reports a refused syscall as `` `bpf_prog_test_run`
+/// failed `` and carries the `errno` as the source, so `{e}` alone names the call and never the
+/// reason it was refused.
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut rendered = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
+}
+
+/// Whether `BPF_PROG_TEST_RUN` can carry this frame to a classifier at all. The kernel builds a
+/// real skb from `data_in` and rejects a frame whose IPv4/IPv6 ethertype promises a fixed L3
+/// header the bytes cannot hold (`EINVAL`, before the program runs), so such a frame exists in a
+/// corpus for the host twin alone and the kernel loops skip it.
+/// `the_kernel_inexpressible_entries_are_exactly_the_known_ones` holds the skip to the entries
+/// that need it.
+fn test_run_can_express(frame: &[u8]) -> bool {
+    // 20 is sizeof(struct iphdr), the fixed v4 header the kernel's bound checks (ihl options
+    // extend a real header past it, but the refusal is on the fixed part).
+    match ethertype(frame) {
+        Some(ETH_P_IP) => frame.len() >= ETH_HLEN + 20,
+        Some(ETH_P_IPV6) => frame.len() >= ETH_HLEN + IPV6_HLEN,
+        _ => true,
+    }
 }
 
 /// Every `FlowKey` currently in the `FLOWS` map, decoded with the same shared `from_bytes` the
@@ -202,7 +243,7 @@ fn the_kernels_frame_parse_agrees_with_the_host_twin() {
     for (what, frame) in corpus() {
         let before = flow_keys(&ebpf);
         assert_eq!(
-            verdict(&mut ebpf, "tap_egress", &frame),
+            verdict(&mut ebpf, "tap_egress", what, &frame),
             TC_ACT_OK,
             "{what}"
         );
@@ -258,7 +299,7 @@ fn the_kernels_egress_verdict_agrees_with_the_host_twin() {
             None => TC_ACT_SHOT,
         };
         assert_eq!(
-            verdict(&mut ebpf, "tap_ingress", &frame),
+            verdict(&mut ebpf, "tap_ingress", what, &frame),
             expected,
             "{what}: the kernel's verdict must be the host twin's"
         );
@@ -278,7 +319,7 @@ fn observe_only_passes_every_frame_enforcement_would_drop() {
     let mut ebpf = load_classifier("tap_ingress");
     for (what, frame) in corpus() {
         assert_eq!(
-            verdict(&mut ebpf, "tap_ingress", &frame),
+            verdict(&mut ebpf, "tap_ingress", what, &frame),
             TC_ACT_OK,
             "{what}: observe-only must accept every frame"
         );
@@ -417,9 +458,19 @@ fn corpus6() -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("arp", arp_frame()),
         ("a frame that is only an ethernet header", vec![0u8; 14]),
+        // Shorter than the fixed IPv6 header its ethertype promises. `bpf_prog_test_run_skb`
+        // refuses to build such an skb, so this entry reaches the host twin only and the kernel
+        // loops skip it ([`test_run_can_express`]).
         (
             "a v6 frame truncated inside its own header",
             ipv6_frame(guest, host, 40000, 9999, IPPROTO_UDP)[..ETH_HLEN + 30].to_vec(),
+        ),
+        // Cut at the end of the fixed header instead: the ports the parse needs are missing, but
+        // the header the kernel demands is whole, so unlike its sibling above this one runs
+        // in-kernel and keeps a truncation case in the differential proper.
+        (
+            "a v6 frame truncated at its L4 ports",
+            ipv6_frame(guest, host, 40000, 9999, IPPROTO_UDP)[..ETH_HLEN + IPV6_HLEN].to_vec(),
         ),
     ]
 }
@@ -435,9 +486,12 @@ fn the_kernels_v6_frame_parse_agrees_with_the_host_twin() {
     let mut seen: Vec<FlowKey6> = Vec::new();
 
     for (what, frame) in corpus6() {
+        if !test_run_can_express(&frame) {
+            continue; // host-twin-only; see `test_run_can_express`
+        }
         let before = flow_keys6(&ebpf);
         assert_eq!(
-            verdict(&mut ebpf, "tap_egress", &frame),
+            verdict(&mut ebpf, "tap_egress", what, &frame),
             TC_ACT_OK,
             "{what}"
         );
@@ -476,6 +530,9 @@ fn the_kernels_v6_egress_verdict_agrees_with_the_host_twin() {
     arm6(&mut ebpf, &rules);
 
     for (what, frame) in corpus6() {
+        if !test_run_can_express(&frame) {
+            continue; // host-twin-only; see `test_run_can_express`
+        }
         // The host twin of `egress_verdict6`: the on-link ICMPv6 spare is consulted first, exactly
         // as the kernel consults it, then the policy, then deny-by-default.
         let expected = match parse_ipv6_5tuple(&frame) {
@@ -486,7 +543,7 @@ fn the_kernels_v6_egress_verdict_agrees_with_the_host_twin() {
             None => TC_ACT_SHOT,
         };
         assert_eq!(
-            verdict(&mut ebpf, "tap_ingress", &frame),
+            verdict(&mut ebpf, "tap_ingress", what, &frame),
             expected,
             "{what}: the kernel's v6 verdict must be the host twin's"
         );
@@ -541,15 +598,41 @@ fn the_v6_corpus_is_the_shape_the_differentials_assume() {
     let ext = key("an extension header, whose port offsets are not ports");
     assert_eq!((ext.proto, ext.src_port, ext.dst_port), (0, 0, 0));
 
-    // The three that must key nothing at all.
+    // The four that must key nothing at all.
     for what in [
         "arp",
         "a frame that is only an ethernet header",
         "a v6 frame truncated inside its own header",
+        "a v6 frame truncated at its L4 ports",
     ] {
         assert!(
             keyed.iter().any(|(w, k)| *w == what && k.is_none()),
             "{what} must not parse as a v6 flow"
         );
     }
+}
+
+/// Host-safe: exactly which corpus entries `BPF_PROG_TEST_RUN` cannot express. The kernel loops
+/// skip by [`test_run_can_express`], so this is what keeps that skip from quietly widening into
+/// a differential that runs less than it appears to; the empty v4 list is what fails first if a
+/// truncated v4 case is ever added without teaching the v4 loops to skip it.
+#[test]
+fn the_kernel_inexpressible_entries_are_exactly_the_known_ones() {
+    let inexpressible = |entries: Vec<(&'static str, Vec<u8>)>| -> Vec<&'static str> {
+        entries
+            .into_iter()
+            .filter(|(_, f)| !test_run_can_express(f))
+            .map(|(what, _)| what)
+            .collect()
+    };
+    assert_eq!(
+        inexpressible(corpus()),
+        Vec::<&str>::new(),
+        "the v4 kernel loops run every entry, so none may be inexpressible"
+    );
+    assert_eq!(
+        inexpressible(corpus6()),
+        vec!["a v6 frame truncated inside its own header"],
+        "the v6 kernel loops skip exactly one entry, the L3-truncated host-twin-only case"
+    );
 }
