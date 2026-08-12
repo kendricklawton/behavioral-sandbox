@@ -756,11 +756,7 @@ fn read_line_capped(
     out: &mut Vec<u8>,
 ) -> Result<bool, ProtocolError> {
     loop {
-        let available = match reader.fill_buf() {
-            Ok(b) => b,
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ProtocolError::Io(e)),
-        };
+        let available = next_chunk(reader)?;
         if available.is_empty() {
             return Ok(true); // EOF
         }
@@ -795,11 +791,7 @@ fn read_line_capped(
 /// nothing is buffered and it reads only what the peer already sent.
 fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
     loop {
-        let available = match reader.fill_buf() {
-            Ok(b) => b,
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(ProtocolError::Io(e)),
-        };
+        let available = next_chunk(reader)?;
         if available.is_empty() {
             return Ok(()); // EOF: nothing left to resync to
         }
@@ -814,6 +806,24 @@ fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
             }
         }
     }
+}
+
+/// The next buffered chunk from `reader`, retrying `Interrupted` (a signal mid-read must not kill
+/// the session) and mapping a real failure to [`ProtocolError::Io`]; an empty slice is EOF. The
+/// one `fill_buf` story of [`read_line_capped`] and its resync twin [`discard_to_newline`], so the
+/// retry cannot drift between them.
+fn next_chunk(reader: &mut impl BufRead) -> Result<&[u8], ProtocolError> {
+    // Two calls, because a borrow cannot escape the retry loop on stable Rust. The second returns
+    // the buffer the first call filled without another read; only at EOF does it re-read a zero,
+    // which both callers report as the same EOF.
+    loop {
+        match reader.fill_buf() {
+            Ok(_) => break,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ProtocolError::Io(e)),
+        }
+    }
+    reader.fill_buf().map_err(ProtocolError::Io)
 }
 
 /// Write one [`Request`] (a client's side of the wire), bounded by [`MAX_REQUEST_BYTES`].
@@ -911,6 +921,39 @@ mod fuzz_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader whose first `hiccups` reads fail `Interrupted` (the shape of a signal landing
+    /// mid-`read`), then deliver `data`.
+    struct Interruptible {
+        hiccups: usize,
+        inner: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for Interruptible {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.hiccups > 0 {
+                self.hiccups -= 1;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn an_interrupted_read_is_retried_not_fatal() {
+        // A signal mid-read must not kill the session: both the line reader and its over-cap
+        // resync path retry `Interrupted` through the one shared `fill_buf` (`next_chunk`).
+        let mut wire = Vec::new();
+        write_request(&mut wire, &Request::Close).expect("encode");
+        let mut reader = std::io::BufReader::new(Interruptible {
+            hiccups: 2,
+            inner: std::io::Cursor::new(wire),
+        });
+        let got = read_request(&mut reader)
+            .expect("an interrupted read retries rather than failing")
+            .expect("a message, not EOF");
+        assert!(matches!(got, Request::Close));
+    }
 
     /// Encode a request through [`write_request`] and decode it back through [`read_request`], the
     /// exact round trip the daemon and a client make across the socket.
