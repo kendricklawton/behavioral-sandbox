@@ -326,12 +326,7 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
 }
 
 fn gap_to_json(out: &mut String, gap: &AxisGap) {
-    let axis = match gap {
-        AxisGap::HostSyscalls(_) => "host_syscalls",
-        AxisGap::Network(_) => "network",
-        AxisGap::Cpu(_) => "cpu",
-    };
-    let _ = write!(out, "{{\"axis\":\"{axis}\",\"reason\":");
+    let _ = write!(out, "{{\"axis\":\"{}\",\"reason\":", gap.axis());
     json_str(out, gap.reason());
     out.push('}');
 }

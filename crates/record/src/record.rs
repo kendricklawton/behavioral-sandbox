@@ -601,6 +601,17 @@ impl AxisGap {
             Self::HostSyscalls(r) | Self::Network(r) | Self::Cpu(r) => r.as_ref(),
         }
     }
+
+    /// The name of the axis this gap is filed under, which is the spelling that reaches the signed
+    /// record.
+    #[must_use]
+    pub fn axis(&self) -> &'static str {
+        match self {
+            Self::HostSyscalls(_) => "host_syscalls",
+            Self::Network(_) => "network",
+            Self::Cpu(_) => "cpu",
+        }
+    }
 }
 
 #[cfg(test)]
