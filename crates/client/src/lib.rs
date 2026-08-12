@@ -7,12 +7,11 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use bsx_protocol::{
-    ExecParams, FaultKind, GetParams, ProtocolError, PutParams, Request, Response, read_response,
-    write_request,
-};
+use bsx_protocol::{ExecParams, GetParams, PutParams, Request, read_response, write_request};
 
-pub use bsx_protocol::OpenParams;
+/// Re-exported so a caller can name everything this crate's surface carries ([`ClientError`]'s
+/// variants hold the last three) without adding `bsx-protocol` to its own manifest.
+pub use bsx_protocol::{FaultKind, OpenParams, ProtocolError, Response};
 
 /// Everything a client call can fail with, typed and never panics.
 #[derive(Debug)]
