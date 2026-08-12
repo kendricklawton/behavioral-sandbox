@@ -8,7 +8,7 @@ use aya::maps::{HashMap as AyaHashMap, MapData};
 use aya::programs::TracePoint;
 use bsx_record::{CgroupStats, ResourceSummary};
 
-use crate::maps::remove_cgroup_key;
+use crate::maps::{add_cgroup_key, remove_cgroup_key};
 use crate::tracer::per_cpu_sum;
 use crate::{ProbeError, cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object};
 
@@ -28,10 +28,6 @@ const METER_TARGETS_MAP: &str = "METER_TARGETS";
 /// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` meters only the target set,
 /// `1` meters every cgroup, the whole-host escape hatch, not the default.
 const METER_ALL_MAP: &str = "METER_ALL";
-/// The membership value stored for a registered target cgroup in `METER_TARGETS`. The set is a map, so
-/// the value is a present/absent marker the kernel only tests for existence).
-pub(crate) const TARGET_PRESENT: u8 = 1;
-
 /// A loaded, attached **resource meter**: the `sched/sched_switch` tracepoint accumulates each
 /// registered cgroup's on-CPU time into a map, which [`cpu_time`](Self::cpu_time) reads back per cgroup id.
 /// This is the host CPU a sandbox's VMM burns running the guest vCPUs, attributed to the sandbox's own
@@ -95,9 +91,11 @@ impl ResourceMeter {
     /// # Errors
     /// [`ProbeError::Map`] if the target map is missing or the write fails.
     pub fn add_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        self.targets()?
-            .insert(cgroup_id, TARGET_PRESENT, 0)
-            .map_err(|e| ProbeError::Map(format!("register cgroup {cgroup_id} for metering: {e}")))
+        add_cgroup_key(
+            &mut self.targets()?,
+            cgroup_id,
+            &format!("register cgroup {cgroup_id} for metering"),
+        )
     }
 
     /// Unregisters `cgroup_id`, so the tracepoint stops charging its time. The accumulated `CPU_NS` total
