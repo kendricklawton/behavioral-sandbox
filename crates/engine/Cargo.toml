@@ -44,7 +44,7 @@ bsx-guest-agent = { path = "../guest-agent" }
 tracing-subscriber = { workspace = true }
 # Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the loader's
 # privileged tests so they aren't copy-pasted. Dev-only, never shipped.
-bsx-test-support = { path = "../test-support" }
+bsx-test-support = { path = "../test-support", features = ["tracing-capture"] }
 
 [lints]
 workspace = true

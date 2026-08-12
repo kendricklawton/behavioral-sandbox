@@ -468,7 +468,7 @@ mod tests {
     use crate::vm::VSOCK_UDS;
     use bsx_channel::VSOCK_PORT;
     use bsx_guest_agent::serve_session;
-    use bsx_test_support::ScratchDir;
+    use bsx_test_support::{LogSink, ScratchDir};
     use std::path::PathBuf;
 
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
@@ -827,42 +827,6 @@ mod tests {
         );
         assert_eq!(err.kind(), crate::ErrorKind::Guest);
         hostile.join().expect("hostile server thread");
-    }
-
-    /// A `Write` sink appending into a shared buffer, the capture target for the leak test's
-    /// tracing subscribers (`with_default` is thread-local, so each thread installs its own
-    /// subscriber over one shared buffer).
-    #[derive(Clone, Default)]
-    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for LogSink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl LogSink {
-        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-            let sink = self.clone();
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(move || sink.clone())
-                .finish()
-        }
-        fn contents(&self) -> String {
-            String::from_utf8_lossy(
-                &self
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
-            .into_owned()
-        }
     }
 
     #[test]

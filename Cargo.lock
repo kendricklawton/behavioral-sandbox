@@ -301,6 +301,10 @@ dependencies = [
 [[package]]
 name = "bsx-test-support"
 version = "0.0.3"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "bumpalo"

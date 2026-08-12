@@ -29,7 +29,7 @@ vsock = "0.5.4"
 # The shared scratch-dir guard, so the `PATH`-resolution tests stage a real executable without a
 # hand-rolled temp dir. A dev-dep, so the static musl binary baked into the rootfs is unaffected.
 [dev-dependencies]
-bsx-test-support = { path = "../test-support" }
+bsx-test-support = { path = "../test-support", features = ["tracing-capture"] }
 
 [lints]
 workspace = true
