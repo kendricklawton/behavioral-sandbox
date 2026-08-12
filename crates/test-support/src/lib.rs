@@ -658,11 +658,33 @@ pub fn process_threads(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+/// A process's scheduler state letter (`R`, `S`, `Z`, ...) from `/proc/<pid>/stat`, or `None` when
+/// the entry is gone, unreadable, or carries no state field.
+///
+/// The workspace's one process-state read: the engine's reap tests ask whether a killed child is
+/// still a zombie, which `None` (fully reaped) and `Some("Z")` (leaked) answer.
+#[must_use]
+pub fn process_state(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_proc_state(&stat).map(str::to_owned)
+}
+
+/// The state field of one `/proc/<pid>/stat` line, or `None` when nothing follows the comm.
+///
+/// Splits on the **last** `)`, since the comm field is neither quoted nor escaped and can itself
+/// contain `") "`. Pure, so the parse is unit-tested without a live `/proc`, and public because the
+/// per-thread census reads `/proc/self/task/<tid>/stat` rather than a pid.
+#[must_use]
+pub fn parse_proc_state(stat: &str) -> Option<&str> {
+    stat.rsplit_once(')')?.1.split_whitespace().next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CAP_NET_ADMIN, Rng, ScratchDir, leaf_holds_the_limits, mountinfo_escape, names_mount_point,
-        parse_cap_eff, process_threads, serial_requested, workspace_root,
+        parse_cap_eff, parse_proc_state, process_state, process_threads, serial_requested,
+        workspace_root,
     };
     use std::path::Path;
 
@@ -741,6 +763,39 @@ mod tests {
         assert_eq!(
             process_threads(u32::MAX),
             0,
+            "no /proc entry for a pid past pid_max"
+        );
+    }
+
+    /// The comm field decides this parse, and a comm holding `") "` is the case that separates the
+    /// two ways of writing it: a leading split reads a word of the *name* as the state, so a
+    /// zombie-check built on it clears a process that never got reaped.
+    #[test]
+    fn a_process_name_holding_the_field_separator_does_not_become_the_state() {
+        assert_eq!(parse_proc_state("7 (sleep) S 1 7 7 0"), Some("S"));
+        assert_eq!(parse_proc_state("7 (weird) proc) Z 1 7"), Some("Z"));
+        assert_eq!(parse_proc_state("7 (a)b) R 1"), Some("R"));
+
+        // A line the kernel never writes still has to answer, since the callers read whatever the
+        // entry held at the instant the process left.
+        assert_eq!(parse_proc_state("7 (sleep)"), None);
+        assert_eq!(parse_proc_state("7 (sleep) "), None);
+        assert_eq!(parse_proc_state(""), None);
+    }
+
+    /// Both halves of the contract the reap tests are built on. The live letter is left open
+    /// (`R` or `S` depending on which thread the kernel reports for a thread group), because what
+    /// the callers ask is only ever "is this `Z`, and is the entry still there at all".
+    #[test]
+    fn the_process_state_is_live_for_this_pid_and_absent_for_a_gone_one() {
+        let live = process_state(std::process::id());
+        assert!(
+            matches!(live.as_deref(), Some("R" | "S" | "D")),
+            "the process asking has not exited, got {live:?}"
+        );
+        assert_eq!(
+            process_state(u32::MAX),
+            None,
             "no /proc entry for a pid past pid_max"
         );
     }

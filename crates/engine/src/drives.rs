@@ -857,16 +857,9 @@ mod tests {
         );
         // The child was killed and reaped inside `wait_bounded`, so its pid is gone (no zombie: we
         // already `wait`ed it). A second reap here would be the only other claimant.
-        assert!(
-            !Path::new(&format!("/proc/{pid}")).exists()
-                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .ok()
-                    .and_then(|s| s
-                        .split(") ")
-                        .nth(1)
-                        .and_then(|r| r.split(' ').next())
-                        .map(str::to_owned))
-                    != Some("Z".to_string()),
+        assert_ne!(
+            bsx_test_support::process_state(pid).as_deref(),
+            Some("Z"),
             "the killed child must be reaped, not left a zombie"
         );
     }

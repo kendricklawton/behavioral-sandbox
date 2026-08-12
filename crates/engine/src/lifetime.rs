@@ -369,15 +369,11 @@ mod tests {
         // Poll briefly since the kernel removes the entry a hair after `wait()` returns.
         let deadline = Instant::now() + Duration::from_secs(2);
         let reaped = loop {
-            match std::fs::read_to_string(format!("/proc/{sentinel_pid}/stat")) {
-                Err(_) => break true, // gone: fully reaped
-                Ok(stat)
-                    if stat.split(") ").nth(1).and_then(|s| s.split(' ').next()) == Some("Z") =>
-                {
-                    break false; // still a zombie child of ours: leaked
-                }
-                Ok(_) if Instant::now() >= deadline => break false,
-                Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+            match bsx_test_support::process_state(sentinel_pid).as_deref() {
+                None => break true,       // gone: fully reaped
+                Some("Z") => break false, // still a zombie child of ours: leaked
+                Some(_) if Instant::now() >= deadline => break false,
+                Some(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         };
         assert!(reaped, "Drop must reap the sentinel, leaving no zombie");

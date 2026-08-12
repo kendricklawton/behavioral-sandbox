@@ -614,14 +614,8 @@ fn thread_census() -> String {
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "?".into())
         };
-        // `stat`'s third field is the state; the comm field before it can contain spaces, so split
-        // on the last ')' rather than on whitespace.
         let stat = read("stat");
-        let state = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .unwrap_or("?")
-            .to_string();
+        let state = bsx_test_support::parse_proc_state(&stat).unwrap_or("?");
         rows.push(format!(
             "  tid {tid} comm={:?} state={state} wchan={}",
             read("comm"),
