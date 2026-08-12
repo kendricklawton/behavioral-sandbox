@@ -442,20 +442,9 @@ fn missing_cgroup_controllers(subtree: &str) -> Option<String> {
 }
 
 pub(crate) fn effective_uid() -> Result<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
-    parse_effective_uid(&status).context("parse the effective uid from /proc/self/status")
-}
-
-/// The euid (second value of the `Uid:` line) from a `/proc/<pid>/status` body, or `None` if the
-/// format isn't what we expect. Split out pure so the parse is unit-testable: a wrongly-`None`
-/// result turns into a loud gate refusal, never a silent skip, but it should still be correct.
-fn parse_effective_uid(status: &str) -> Option<u32> {
-    status
-        .lines()
-        .find(|l| l.starts_with("Uid:"))?
-        .split_whitespace()
-        .nth(2)
-        .and_then(|f| f.parse().ok())
+    bsx_record::HostIds::current()
+        .map(bsx_record::HostIds::effective)
+        .context("read the effective uid from /proc/self/status")
 }
 
 /// Is `cargo fuzz` installed? (Probed once, cheaply, so a missing tool is a clear message.)
@@ -1735,26 +1724,10 @@ exclude = ["crates/probes", "fuzz"]
     }
 
     #[test]
-    fn effective_uid_parses_the_second_uid_field_and_rejects_drift() {
-        // The privileged gate's root check keys off this parse; the failure direction is a loud
-        // refusal either way, but the euid must come from the right field.
-        let status = "Name:\tcargo\nUid:\t1000\t0\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
-        assert_eq!(
-            parse_effective_uid(status),
-            Some(0),
-            "second field is the euid"
-        );
-        assert_eq!(
-            parse_effective_uid("Name:\tcargo\nUid:\t1000\t1000\t1000\t1000\n"),
-            Some(1000)
-        );
-        assert_eq!(parse_effective_uid("Name:\tcargo\n"), None, "no Uid line");
-        assert_eq!(
-            parse_effective_uid("Uid:\t1000\n"),
-            None,
-            "a truncated Uid line is a parse failure, not a guess"
-        );
-        // And the live read on this host parses (format drift would surface here).
+    fn the_gates_uid_check_reads_through_the_shared_parse() {
+        // The field-index discipline (the setuid-shaped line a live read cannot produce) is
+        // pinned where the parse lives, in bsx-record's ids tests; here only the live read, so
+        // format drift on this host surfaces as a loud gate refusal rather than a silent skip.
         assert!(effective_uid().is_ok());
     }
 
