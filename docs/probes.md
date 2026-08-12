@@ -195,10 +195,19 @@ The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4A
 (`Ipv4Cidr`/`Ipv6Cidr`) and ports, lowered to the `PolicyRule`/`PolicyRule6`s the maps hold. Its **deny-by-default** is the safe default: the empty
 policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
 allowance reaches nothing, the eBPF, host-observed complement to the driver's own deny-by-default
-(no route out of the guest unless one is configured, and no uplink built for it either). `TapMonitor::set_egress_policy` applies a policy to an already-attached
-monitor; `TapMonitor::enforce_in_netns` applies it **at launch**: it populates the policy maps and only then
+(no route out of the guest unless one is configured, and no uplink built for it either).
+`TapMonitor::enforce_in_netns` applies a policy **at launch**: it populates the policy maps and only then
 attaches the classifiers, so the programs go live against maps that already hold the run's rules. Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
-`unsafe` `aya::Pod` binding); `clear_egress_policy` disarms.
+`unsafe` `aya::Pod` binding).
+
+`TapMonitor::set_egress_policy` replaces the policy on an **already-attached** monitor, where the
+classifier is reading the sixteen `POLICY` slots while they are written one at a time. That update
+is ordered to fail **closed**: arm, then zero every slot, then write the grants, so the middle of the
+rewrite denies. The straightforward order (new rules over old, slot by slot) would leave the rule
+being *revoked* live in a not-yet-overwritten slot and admit the traffic the caller just forbade, so
+`an_egress_policy_update_denies_before_it_grants` holds the order. There is deliberately **no way
+back to observe-only** on a live tap: a monitor that has enforced keeps enforcing, and a caller
+wanting no enforcement attaches with `attach_in_netns` and never arms.
 
 Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
 in a `DENIALS`/`DENIALS6` map, which `TapMonitor::denials()`/`denials6()` reads back, the audit trail of which endpoints a
