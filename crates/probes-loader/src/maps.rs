@@ -1,5 +1,5 @@
-//! The shared aya-object plumbing: the map and program opens every surface runs, the toggle
-//! write, and the per-cgroup map removal every teardown path runs, in one place.
+//! The shared aya-object plumbing: the map and program opens every surface runs, the toggle write,
+//! and the per-cgroup target registration and removal every surface runs, in one place.
 //!
 //! - **An absent key is the intended outcome, any other failure is not.** Teardown is idempotent:
 //!   removing a cgroup that was never registered, or that a previous close already removed, must
@@ -60,6 +60,25 @@ where
         .ok_or_else(|| ProbeError::Load(format!("program `{name}` not found in object")))?;
     P::try_from(program)
         .map_err(|e| ProbeError::Load(format!("program `{name}` is not a {kind}: {e}")))
+}
+
+/// The value stored for a registered cgroup in a target set. The set is a map, so the value is a
+/// marker the kernel side only tests for presence.
+const TARGET_PRESENT: u8 = 1;
+
+/// Register `cgroup_id` in a per-cgroup target set. `what` is the whole phrase naming the
+/// registration, matching [`remove_cgroup_key`]'s. Re-registering an already-present cgroup is
+/// harmless.
+///
+/// # Errors
+/// [`ProbeError::Map`] if the write fails.
+pub(crate) fn add_cgroup_key(
+    map: &mut AyaHashMap<&mut MapData, u64, u8>,
+    cgroup_id: u64,
+    what: &str,
+) -> Result<(), ProbeError> {
+    map.insert(cgroup_id, TARGET_PRESENT, 0)
+        .map_err(|e| ProbeError::Map(format!("{what}: {e}")))
 }
 
 /// Remove `cgroup_id` from a per-cgroup map, treating an absent key as success. `what` is the whole

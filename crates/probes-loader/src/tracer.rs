@@ -9,8 +9,7 @@ use bsx_probes_common::{
     ARG_SLOT, FILTER_CGROUP, FILTER_MODE_SLOT, FILTER_TGID, SyscallEvent, TRACEPOINT_ARGS,
 };
 
-use crate::maps::remove_cgroup_key;
-use crate::meter::TARGET_PRESENT;
+use crate::maps::{add_cgroup_key, remove_cgroup_key};
 use crate::{ProbeError, check_support, load_object};
 
 /// The tracepoint program's name (its ELF section symbol, set by `#[tracepoint] fn count_execve`).
@@ -375,9 +374,11 @@ impl SyscallTracer {
     /// [`ProbeError::Map`] if the target/mode map is missing or the write fails.
     pub fn add_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
         self.set_mode(true)?;
-        self.trace_targets()?
-            .insert(cgroup_id, TARGET_PRESENT, 0)
-            .map_err(|e| ProbeError::Map(format!("register cgroup {cgroup_id} for tracing: {e}")))
+        add_cgroup_key(
+            &mut self.trace_targets()?,
+            cgroup_id,
+            &format!("register cgroup {cgroup_id} for tracing"),
+        )
     }
 
     /// Unregisters `cgroup_id`, so the tracepoints stop emitting its events. Removing a cgroup that was never
