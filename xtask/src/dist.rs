@@ -1638,8 +1638,9 @@ mod tests {
     ///
     /// The copies cannot share a function. `crates/cli` reaching `bsx-engine`'s adapter would put a
     /// CLI-shaped convenience type on that crate's pinned public API, which `docs/embedding-scope.md`
-    /// draws out of scope. So the invariant is pinned instead. A site names the method that arms the
-    /// sockopt and, where the budget is computed in a helper rather than inline, that helper too.
+    /// draws out of scope, and `bsx-client` reaching either would void its wire-only dependency
+    /// proof. So the invariant is pinned instead. A site names the method that arms the sockopt
+    /// and, where the budget is computed in a helper rather than inline, that helper too.
     #[test]
     fn every_deadline_bounded_socket_refuses_a_spent_budget() {
         /// One bounded direction of one adapter.
@@ -1689,6 +1690,20 @@ mod tests {
                 method: "write",
                 sockopt: "set_write_timeout",
                 budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
+            },
+            Site {
+                file: "crates/client/src/deadline.rs",
+                imp: "impl Read for DeadlineStream",
+                method: "read",
+                sockopt: "set_read_timeout",
+                budget: Some(("impl DeadlineStream {", "remaining")),
+            },
+            Site {
+                file: "crates/client/src/deadline.rs",
+                imp: "impl Write for DeadlineStream",
+                method: "write",
+                sockopt: "set_write_timeout",
+                budget: Some(("impl DeadlineStream {", "remaining")),
             },
         ];
         for Site {

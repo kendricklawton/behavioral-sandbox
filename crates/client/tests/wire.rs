@@ -46,6 +46,12 @@ enum Answer {
     After(Duration, String),
     /// Read a request and answer nothing, leaving the caller blocked awaiting its reply.
     Swallow,
+    /// Read a request, then answer one byte at a time: the slow drip a bare socket timeout never
+    /// bounds. Ends early once the client gives up and hangs up.
+    Drip(Duration, String),
+    /// Read nothing and answer nothing, holding the connection open: the never-draining peer a
+    /// bounded send must time out against.
+    Hold(Duration),
     /// Read a request, then hang up without answering.
     HangUp,
 }
@@ -70,6 +76,10 @@ fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>)
         let mut writer = stream;
         let mut requests = Vec::new();
         for answer in script {
+            if let Answer::Hold(delay) = answer {
+                std::thread::sleep(delay);
+                break;
+            }
             let mut line = String::new();
             reader
                 .read_line(&mut line)
@@ -81,7 +91,23 @@ fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>)
                     std::thread::sleep(delay);
                     reply
                 }
+                Answer::Drip(interval, reply) => {
+                    let mut gone = false;
+                    for b in reply.as_bytes().iter().chain(b"\n") {
+                        std::thread::sleep(interval);
+                        if writer.write_all(std::slice::from_ref(b)).is_err() {
+                            gone = true;
+                            break;
+                        }
+                    }
+                    if gone {
+                        break;
+                    }
+                    continue;
+                }
                 Answer::Swallow => continue,
+                // Intercepted before the read at the top of the loop; kept for exhaustiveness.
+                Answer::Hold(_) => break,
                 Answer::HangUp => break,
             };
             writer
@@ -452,7 +478,9 @@ fn a_cancel_that_loses_the_race_still_ends_the_session() {
     let outcome = c.exec(&argv, "").expect("the result won the race");
     assert_eq!(outcome.exit_code, 3);
 
-    canceller.cancel().expect("the cancel is written either way");
+    canceller
+        .cancel()
+        .expect("the cancel is written either way");
     let err = c.exec(&argv, "").expect_err("the session was cancelled");
     assert!(
         matches!(err, ClientError::Desynced { .. }),
@@ -461,5 +489,96 @@ fn a_cancel_that_loses_the_race_still_ends_the_session() {
 
     daemon.join().expect("the fake daemon's thread");
     drop(c);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The finding's measurement restaged: a ~90-byte reply dripped at 60 ms/byte ran 5.2 s past a
+/// 100 ms "bound", because `SO_RCVTIMEO` re-arms on every byte. The absolute budget makes the
+/// documented bound real.
+#[test]
+fn a_dripped_reply_is_bounded_by_the_absolute_budget() {
+    let script = vec![Answer::Drip(
+        Duration::from_millis(60),
+        fixture("response", "result"),
+    )];
+    let (path, daemon) = daemon("drip-reply", script);
+    let mut c = connect(&path);
+    c.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set the budget");
+
+    let argv = ["true".to_string()];
+    let started = std::time::Instant::now();
+    let err = c
+        .exec(&argv, "")
+        .expect_err("the drip must not stretch the call");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(&err, ClientError::Protocol(ProtocolError::Io(e))
+            if e.kind() == std::io::ErrorKind::TimedOut),
+        "a lapsed budget is TimedOut, got {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the call must end near its 100 ms budget, took {elapsed:?}"
+    );
+
+    drop(c);
+    daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Disabling the budget must clear the sockopt the last bounded call armed (one file description,
+/// shared by every clone), or a later unbounded call inherits it and times out spuriously.
+#[test]
+fn disabling_the_budget_clears_the_armed_timeout() {
+    let script = vec![
+        Answer::Reply(fixture("response", "opened")),
+        Answer::After(Duration::from_millis(600), fixture("response", "result")),
+    ];
+    let (path, daemon) = daemon("budget-off", script);
+    let mut c = connect(&path);
+
+    c.set_read_timeout(Some(Duration::from_millis(300)))
+        .expect("set the budget");
+    c.open(OpenParams::default())
+        .expect("a quick reply inside the budget");
+
+    c.set_read_timeout(None).expect("disable the budget");
+    let argv = ["true".to_string()];
+    c.exec(&argv, "")
+        .expect("an unbounded call outwaits a reply slower than the old budget");
+
+    drop(c);
+    daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The write twin: a daemon that never drains cannot hold a bounded send past its budget. The
+/// chunked write is what makes the deadline check reachable at all; unchunked, a multi-MiB
+/// request is one syscall whose in-kernel waits each reset the sockopt.
+#[test]
+fn a_never_draining_daemon_cannot_hold_a_bounded_send() {
+    let script = vec![Answer::Hold(Duration::from_secs(1))];
+    let (path, daemon) = daemon("held-send", script);
+    let mut c = connect(&path);
+    c.set_write_timeout(Some(Duration::from_millis(300)))
+        .expect("set the budget");
+
+    let big = "x".repeat(2 * 1024 * 1024);
+    let started = std::time::Instant::now();
+    let err = c.put("in.txt", &big).expect_err("nobody drains the socket");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(&err, ClientError::Protocol(ProtocolError::Io(e))
+            if e.kind() == std::io::ErrorKind::TimedOut),
+        "a lapsed write budget is TimedOut, got {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the send must end near its 300 ms budget, took {elapsed:?}"
+    );
+
+    drop(c);
+    daemon.join().expect("the fake daemon's thread");
     let _ = std::fs::remove_file(&path);
 }

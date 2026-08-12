@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use bsx_protocol::{ExecParams, GetParams, PutParams, Request, read_response, write_request};
 
+mod deadline;
+use deadline::DeadlineStream;
+
 /// Re-exported so a caller can name everything this crate's surface carries ([`ClientError`]'s
 /// variants hold the last three) without adding `bsx-protocol` to its own manifest.
 pub use bsx_protocol::{FaultKind, OpenParams, ProtocolError, Response};
@@ -179,8 +182,8 @@ pub struct ExecOutcome {
 pub struct Client {
     /// Behind a lock shared with every [`Canceller`], so a cancel line can never land inside
     /// another request's frame.
-    writer: Arc<Mutex<UnixStream>>,
-    reader: BufReader<UnixStream>,
+    writer: Arc<Mutex<DeadlineStream>>,
+    reader: BufReader<DeadlineStream>,
     /// The first cause that broke the session, shared so every handle refuses together.
     poisoned: Arc<OnceLock<&'static str>>,
 }
@@ -189,23 +192,32 @@ impl Client {
     /// Connect to the daemon listening at `socket`.
     pub fn connect(socket: impl AsRef<Path>) -> std::io::Result<Self> {
         let stream = UnixStream::connect(socket)?;
-        let writer = Arc::new(Mutex::new(stream.try_clone()?));
+        let writer = Arc::new(Mutex::new(DeadlineStream::new(
+            stream.try_clone()?,
+            "the request outran the call's write budget",
+        )));
         Ok(Self {
             writer,
-            reader: BufReader::new(stream),
+            reader: BufReader::new(DeadlineStream::new(
+                stream,
+                "the reply outran the call's read budget",
+            )),
             poisoned: Arc::new(OnceLock::new()),
         })
     }
 
-    /// Bound each read while a call waits for a reply. A timeout that fires leaves that reply owed,
-    /// so the call errs and every later call is refused as [`ClientError::Desynced`]; reconnect.
+    /// Bound each call by one **absolute** read budget: the whole reply must arrive within it, so
+    /// a daemon dribbling a byte at a time inside the interval cannot stretch a call past the
+    /// bound. A budget that lapses surfaces as a `TimedOut` io error, costs that reply, and
+    /// poisons the session ([`ClientError::Desynced`] from then on); reconnect.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
-        self.reader.get_ref().set_read_timeout(timeout)
+        self.reader.get_mut().set_budget(timeout)
     }
 
-    /// Bound how long a call blocks writing a request.
+    /// The write-side twin of [`set_read_timeout`](Self::set_read_timeout): one absolute budget
+    /// per request, so a daemon draining one byte at a time cannot stretch a send past it.
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
-        lock(&self.writer).set_write_timeout(timeout)
+        lock(&self.writer).set_budget(timeout)
     }
 
     /// A handle that can cancel this session while a call is in flight; see [`Canceller`].
@@ -327,7 +339,9 @@ impl Client {
         if let Some(cause) = self.poisoned.get() {
             return Err(ClientError::Desynced { cause });
         }
-        write_request(&mut *lock(&self.writer), req).map_err(|e| {
+        let mut writer = lock(&self.writer);
+        writer.rearm();
+        write_request(&mut *writer, req).map_err(|e| {
             // Only an io failure can leave part of the frame on the wire; everything else
             // (`TooLarge`, an encode refusal) errs before any byte moves and the stream stays
             // clean, so poisoning there would cost a healthy session.
@@ -343,6 +357,7 @@ impl Client {
     }
 
     fn recv(&mut self) -> Result<Response, ClientError> {
+        self.reader.get_mut().rearm();
         // `Remote` and `AtCapacity` are real replies: the pairing is intact and the session stays
         // usable. Everything below the early returns lost a reply, and poisons.
         let err = match read_response(&mut self.reader) {
@@ -391,7 +406,7 @@ impl Client {
 
 /// The shared writer, with a poisoned lock recovered: the stream has no invariant a panicked
 /// holder could have broken that the session poison does not already cover.
-fn lock(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
+fn lock(writer: &Mutex<DeadlineStream>) -> std::sync::MutexGuard<'_, DeadlineStream> {
     writer.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -408,7 +423,7 @@ fn lock(writer: &Mutex<UnixStream>) -> std::sync::MutexGuard<'_, UnixStream> {
 ///   request's frame; a cancel during a blocked `send` waits for that write's own timeout.
 #[derive(Debug)]
 pub struct Canceller {
-    writer: Arc<Mutex<UnixStream>>,
+    writer: Arc<Mutex<DeadlineStream>>,
     poisoned: Arc<OnceLock<&'static str>>,
 }
 
@@ -418,7 +433,10 @@ impl Canceller {
         // Poisoned before the line is written: the session is over from this point whether the
         // cancel or the in-flight call's reply wins the race to the daemon.
         let _ = self.poisoned.set("the session was cancelled");
-        write_request(&mut *lock(&self.writer), &Request::Cancel).map_err(ClientError::Protocol)
+        let mut writer = lock(&self.writer);
+        // Its own call, so its own budget clock: the cancel must not inherit a spent deadline.
+        writer.rearm();
+        write_request(&mut *writer, &Request::Cancel).map_err(ClientError::Protocol)
     }
 }
 
