@@ -12,7 +12,9 @@ session.
 
 The project uses stable Rust in one workspace. `rust-toolchain.toml` pins the version. It runs on
 Linux and `x86_64` only, because it needs KVM. The host path is `#![forbid(unsafe_code)]`.
-`crates/probes` is the one exception, and it builds for its own target.
+`crates/probes` is the one exception: it builds for its own target on its own pinned nightly, and it
+takes one unstable feature (`core_intrinsics`, for the BPF atomic add that `core::sync::atomic`
+cannot express on a target rustc marks `atomic-cas: false`).
 
 **Voice: claim nothing the project cannot back.** The project is pre-release and unaudited. It has
 one maintainer and no external review. Describe mechanisms that a diff can disprove. State each
