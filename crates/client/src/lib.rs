@@ -347,9 +347,9 @@ impl Client {
             // clean, so poisoning there would cost a healthy session.
             if let ProtocolError::Io(io) = &e {
                 self.poison(if io.kind() == std::io::ErrorKind::BrokenPipe {
-                    "the daemon closed the connection"
+                    cause::CLOSED
                 } else {
-                    "a request may be half-written"
+                    cause::HALF_WRITTEN
                 });
             }
             ClientError::Protocol(e)
@@ -384,9 +384,9 @@ impl Client {
             Err(e) => ClientError::Protocol(e),
         };
         self.poison(match err {
-            ClientError::Closed => "the daemon closed the connection",
-            ClientError::Cancelled => "the session was cancelled",
-            _ => "a read failed with a reply outstanding",
+            ClientError::Closed => cause::CLOSED,
+            ClientError::Cancelled => cause::CANCELLED,
+            _ => cause::READ_FAILED,
         });
         Err(err)
     }
@@ -399,9 +399,28 @@ impl Client {
     /// A well-formed reply that is not the shape this call sent for: proof the pairing is already
     /// off, so it poisons as well as erring.
     fn unexpected(&self, resp: Response) -> ClientError {
-        self.poison("a reply arrived for a different request");
+        self.poison(cause::MISPAIRED);
         ClientError::Unexpected(resp)
     }
+}
+
+/// Why a session is poisoned, in the words the caller reads back from every later call.
+///
+/// Two of these are set from more than one place, which is what a literal at each site gets wrong:
+/// the hang-up by whichever of the read and write halves noticed it, and the cancel by both the
+/// canceller and the reply that reports it. The rest sit here so the whole set of reasons a session
+/// can die is one place rather than five literals down the file.
+mod cause {
+    /// The peer hung up: the daemon is gone, whichever half saw it first.
+    pub const CLOSED: &str = "the daemon closed the connection";
+    /// An io failure mid-write, so part of a frame may already be on the wire.
+    pub const HALF_WRITTEN: &str = "a request may be half-written";
+    /// The session was cancelled, by this caller or by the daemon reporting it.
+    pub const CANCELLED: &str = "the session was cancelled";
+    /// A read failed while a reply was owed, so the stream position is no longer known.
+    pub const READ_FAILED: &str = "a read failed with a reply outstanding";
+    /// A well-formed reply that does not answer the request sent: the pairing is already off.
+    pub const MISPAIRED: &str = "a reply arrived for a different request";
 }
 
 /// The shared writer, with a poisoned lock recovered: the stream has no invariant a panicked
@@ -432,7 +451,7 @@ impl Canceller {
     pub fn cancel(&mut self) -> Result<(), ClientError> {
         // Poisoned before the line is written: the session is over from this point whether the
         // cancel or the in-flight call's reply wins the race to the daemon.
-        let _ = self.poisoned.set("the session was cancelled");
+        let _ = self.poisoned.set(cause::CANCELLED);
         let mut writer = lock(&self.writer);
         // Its own call, so its own budget clock: the cancel must not inherit a spent deadline.
         writer.rearm();
