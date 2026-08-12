@@ -17,8 +17,16 @@ use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bsx_engine::Limits;
+use bsx_engine::{Limits, MAX_VCPUS};
 use bsx_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
+
+/// The refusal for a vCPU count the pinned VMM will not boot, in one wording for every surface that
+/// refuses one. `subject` names what was asked: the CLI says `vCPUs`, the wire and the config file
+/// say the field or key, since only the thing being refused differs, never the rule.
+#[must_use]
+pub fn unsupported_vcpus(subject: &str, got: impl fmt::Display) -> String {
+    format!("{subject} must be 1 or an even number in 1..={MAX_VCPUS}, got {got}")
+}
 /// The isolation mode of a sandbox: confined under Firecracker's jailer ([`IsolationMode::Jailed`]),
 /// or running Firecracker directly ([`IsolationMode::Unjailed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

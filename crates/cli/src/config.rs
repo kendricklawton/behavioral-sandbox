@@ -21,7 +21,7 @@ use std::net::Ipv4Addr;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
-use bsx_engine::{MAX_VCPUS, vcpus_supported};
+use bsx_engine::vcpus_supported;
 use bsx_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
@@ -116,8 +116,8 @@ where
     if let Some(v) = parsed
         && !vcpus_supported(v.get())
     {
-        return Err(serde::de::Error::custom(format!(
-            "{key} must be 1 or an even number in 1..={MAX_VCPUS}, got {v}"
+        return Err(serde::de::Error::custom(crate::policy::unsupported_vcpus(
+            key, v,
         )));
     }
     Ok(parsed)
@@ -1063,14 +1063,15 @@ mod tests {
         // The file keys apply the rule `--vcpus` applies, not just `NonZeroU8`'s rejection of `0`: an
         // odd count above 1 must be refused here, naming the file and the key that set it, rather than
         // at `Vm::boot`, which can name only Firecracker's rule.
-        for bad in ["vcpus = 7\n", "vcpus = 33\n", "max_vcpus = 3\n"] {
-            let (_dir, leaf) = tree("cfg-vcpus-bad", &[("a", bad)]);
+        for (key, count) in [("vcpus", 7), ("vcpus", 33), ("max_vcpus", 3)] {
+            let (_dir, leaf) = tree("cfg-vcpus-bad", &[("a", &format!("{key} = {count}\n"))]);
             let msg = Sources::discover_with(&leaf, None)
-                .expect_err(&format!("{bad:?} names a count no VM can boot"))
+                .expect_err("the file names a count no VM can boot")
                 .to_string();
-            let key = bad.split_whitespace().next().expect("the key");
+            // Against the shared refusal, not a copy of its wording: the flag, the wire and this
+            // file state one rule, and a test spelling it out again is a fourth place to drift.
             assert!(
-                msg.contains(key) && msg.contains("1 or an even number"),
+                msg.contains(&crate::policy::unsupported_vcpus(key, count)),
                 "the refusal names the key and states the rule: {msg}"
             );
         }

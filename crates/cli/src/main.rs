@@ -911,9 +911,7 @@ fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
         .parse()
         .map_err(|_| format!("expected a whole number of vCPUs in 1..={MAX_VCPUS}, got {s:?}"))?;
     if !vcpus_supported(vcpus.get()) {
-        return Err(format!(
-            "vCPUs must be 1 or an even number in 1..={MAX_VCPUS}, got {vcpus}"
-        ));
+        return Err(policy::unsupported_vcpus("vCPUs", vcpus));
     }
     Ok(vcpus)
 }
@@ -1159,6 +1157,18 @@ mod tests {
         std::fs::create_dir(dead(1)).expect("stage another");
         sweep_vm_residue(scratch.path(), None);
         assert!(!dead(1).exists(), "no registry must not mean no sweep");
+    }
+
+    /// The `--vcpus` refusal is the shared rule, named for the flag. Anchored to the helper rather
+    /// than to a copy of the sentence, so the wire's and the config file's refusals cannot drift
+    /// away from this one.
+    #[test]
+    fn the_flag_refuses_an_unbootable_count_with_the_shared_rule() {
+        assert_eq!(
+            parse_vcpus("3").expect_err("an odd count above 1 cannot boot"),
+            crate::policy::unsupported_vcpus("vCPUs", 3)
+        );
+        assert!(parse_vcpus("2").is_ok() && parse_vcpus("1").is_ok());
     }
 
     /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
