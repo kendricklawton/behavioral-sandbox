@@ -8,16 +8,17 @@
 //!
 //! Three questions, one line format, and one place that knows it. The mount point is **decoded**
 //! here ([`unescape_octal`]), because the kernel writes space, tab, newline and backslash as octal
-//! escapes and a raw comparison silently fails to match a path containing one. Each caller keeps
-//! its own selection rule (deepest-first, longest-ancestor, the overmount tie-break); only the
-//! parse is shared.
+//! escapes and a raw comparison silently fails to match a path containing one. The "which mount
+//! holds this path" selection is also answered once, by [`covering`], so `jail` and `doctor` judge
+//! the same mount; `sweep` keeps its own walk because it asks a different question (every mount
+//! under a dir, deepest first).
 //!
 //! Pure and `/proc`-free: the callers read the file, this reads the text, so every selection rule is
 //! unit-tested against a fixture.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One mountinfo line, reduced to the fields the driver asks about.
 ///
@@ -40,6 +41,32 @@ pub(crate) struct Mount<'a> {
 /// means.
 pub(crate) fn mounts(mountinfo: &str) -> impl Iterator<Item = Mount<'_>> {
     mountinfo.lines().filter_map(parse_line)
+}
+
+/// The mount that holds `target`: the deepest mount point that is a path-prefix of it. `None` when
+/// no line covers `target` (an absolute path is always covered by `/`, so only on malformed input).
+pub(crate) fn covering<'a>(mountinfo: &'a str, target: &Path) -> Option<Mount<'a>> {
+    let mut best: Option<(usize, Mount<'a>)> = None;
+    for mount in mounts(mountinfo) {
+        if !target.starts_with(&mount.point) {
+            continue;
+        }
+        let depth = mount.point.components().count();
+        // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the
+        // topmost, the **last** mountinfo line, is the visible filesystem. It decides both what a
+        // later mount there inherits and the flags a file there feels, so the first-seen line
+        // would answer for a mount the path no longer touches.
+        if best.as_ref().is_none_or(|(d, _)| depth >= *d) {
+            best = Some((depth, mount));
+        }
+    }
+    best.map(|(_, mount)| mount)
+}
+
+/// This process's own mount table, or `None` when `/proc/self/mountinfo` is unreadable, so each
+/// caller's default (copy rather than bind, assume fine, detach nothing) decides what that means.
+pub(crate) fn self_text() -> Option<String> {
+    std::fs::read_to_string("/proc/self/mountinfo").ok()
 }
 
 fn parse_line(line: &str) -> Option<Mount<'_>> {
@@ -113,6 +140,40 @@ mod tests {
 
         // `master:` receives propagation; it does not send it.
         assert!(!all[3].shared, "master: is not shared:");
+    }
+
+    #[test]
+    fn the_covering_mount_is_the_deepest_and_on_a_tie_the_last_line() {
+        // `/scratch` is overmounted: the fs at 0:25 is the visible one. Under it, `/scratch/deep`
+        // is a strictly deeper point that beats both same-point lines.
+        let mi = "\
+21 1 0:20 / / rw shared:1 - ext4 /dev/root rw
+30 21 0:24 / /scratch rw,nodev shared:128 - tmpfs a rw
+31 21 0:25 / /scratch rw - tmpfs b rw
+32 31 0:26 / /scratch/deep rw,noexec shared:9 - tmpfs c rw
+";
+        let top = covering(mi, Path::new("/scratch/x")).expect("`/` always covers");
+        assert!(!top.shared, "the last same-point line wins the tie");
+        assert!(!top.options.contains("nodev"), "and its options answer");
+        // The reverse order must flip the answer, or the tie-break is dead code.
+        let flipped = mi.replace("0:24 / /scratch rw,nodev shared:128", "0:24 / /scratch rw");
+        let flipped = flipped.replace("0:25 / /scratch rw ", "0:25 / /scratch rw shared:128 ");
+        assert!(
+            covering(&flipped, Path::new("/scratch/x"))
+                .expect("`/` always covers")
+                .shared,
+            "shared-last reads shared"
+        );
+        let deep = covering(mi, Path::new("/scratch/deep/file")).expect("`/` always covers");
+        assert!(
+            deep.shared,
+            "a strictly deeper point beats the overmount pair"
+        );
+        assert!(deep.options.contains("noexec"));
+        assert!(
+            covering("", Path::new("/anything")).is_none(),
+            "no line, no mount"
+        );
     }
 
     #[test]
