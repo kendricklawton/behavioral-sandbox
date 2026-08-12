@@ -13,15 +13,18 @@
 //! the built object are the whole requirement. `#[ignore]`d because those still mean real root.
 #![allow(clippy::panic)]
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use aya::maps::{Array, HashMap as AyaHashMap};
 use aya::programs::tc::SchedClassifier;
 use aya::programs::{TestRun, TestRunOptions};
 use aya::{Ebpf, EbpfLoader};
 use bsx_probes_common::{
-    ETH_HLEN, ETH_P_ARP, ETH_P_IP, FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FlowKey, IPPROTO_TCP,
-    IPPROTO_UDP, MAX_POLICY_RULES, POLICY_RULE_SIZE, PolicyRule, egress_allowed, parse_ipv4_5tuple,
+    ETH_HLEN, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FLOW_KEY6_SIZE,
+    FlowKey, FlowKey6, GUEST_LINK6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV6_DST_OFFSET,
+    IPV6_HLEN, IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES, POLICY_RULE_SIZE,
+    POLICY_RULE6_SIZE, PolicyRule, PolicyRule6, egress_allowed, egress_allowed6, icmp6_dst_on_link,
+    parse_ipv4_5tuple, parse_ipv6_5tuple,
 };
 use bsx_probes_loader::{EgressPolicy, Protocol, object_path};
 
@@ -150,10 +153,11 @@ fn arp_frame() -> Vec<u8> {
     f
 }
 
-/// The corpus both differential tests run. **IPv4, ARP and junk only, deliberately:** a v6 frame
+/// The corpus both v4 differential tests run. **IPv4, ARP and junk only, deliberately:** a v6 frame
 /// takes the kernel's `parse6`/`egress_verdict6` path (its own policy map, plus the on-link ICMPv6
 /// spare), which [`parse_ipv4_5tuple`] and [`egress_allowed`] cannot model, so including one would
-/// make the oracle agree for the wrong reason. The v6 twin of this file is its own work.
+/// make the oracle agree for the wrong reason. [`corpus6`] is its v6 counterpart, split for the
+/// same reason in reverse.
 fn corpus() -> Vec<(&'static str, Vec<u8>)> {
     let guest = Ipv4Addr::new(10, 200, 0, 2);
     let host = Ipv4Addr::new(10, 200, 0, 1);
@@ -285,4 +289,267 @@ fn observe_only_passes_every_frame_enforcement_would_drop() {
 fn ethertype(frame: &[u8]) -> Option<u16> {
     let b = frame.get(12..14)?;
     Some(u16::from_be_bytes([b[0], b[1]]))
+}
+
+// ---------------------------------------------------------------------------
+// The IPv6 half.
+//
+// `parse6`/`egress_verdict6` are mirrored from `parse_ipv6_5tuple`/`egress_allowed6` exactly as the
+// v4 pair is, and until now nothing held them together: the host halves had unit tests and no
+// caller, so a drift in either direction was invisible. The v6 corpus is kept separate from the v4
+// one because the two take different kernel paths (their own policy map, plus the on-link ICMPv6
+// spare), so a shared corpus would make each oracle agree for the wrong reason.
+
+/// Every `FlowKey6` currently in `FLOWS6`, decoded with the shared `from_bytes` the loader uses.
+fn flow_keys6(ebpf: &Ebpf) -> Vec<FlowKey6> {
+    let map = ebpf
+        .map("FLOWS6")
+        .unwrap_or_else(|| panic!("map `FLOWS6` not found"));
+    let flows: AyaHashMap<_, [u8; FLOW_KEY6_SIZE], [u8; FLOW_COUNTS_SIZE]> =
+        AyaHashMap::try_from(map).unwrap_or_else(|e| panic!("open `FLOWS6` as a hash map: {e}"));
+    flows
+        .keys()
+        .map(|k| {
+            let raw = k.unwrap_or_else(|e| panic!("iterate `FLOWS6`: {e}"));
+            FlowKey6::from_bytes(&raw)
+                .unwrap_or_else(|| panic!("decode a `FLOWS6` key: {} bytes", raw.len()))
+        })
+        .collect()
+}
+
+/// Write `rules` into `POLICY6` and arm `ENFORCE`, the v6 twin of [`arm`].
+fn arm6(ebpf: &mut Ebpf, rules: &[PolicyRule6]) {
+    {
+        let map = ebpf
+            .map_mut("POLICY6")
+            .unwrap_or_else(|| panic!("map `POLICY6` not found"));
+        let mut policy: Array<_, [u8; POLICY_RULE6_SIZE]> =
+            Array::try_from(map).unwrap_or_else(|e| panic!("open `POLICY6` as an array: {e}"));
+        for i in 0..MAX_POLICY_RULES {
+            let bytes = rules
+                .get(i)
+                .map_or([0u8; POLICY_RULE6_SIZE], PolicyRule6::to_bytes);
+            policy
+                .set(i as u32, bytes, 0)
+                .unwrap_or_else(|e| panic!("write `POLICY6`[{i}]: {e}"));
+        }
+    }
+    let map = ebpf
+        .map_mut("ENFORCE")
+        .unwrap_or_else(|| panic!("map `ENFORCE` not found"));
+    let mut enforce: Array<_, u32> =
+        Array::try_from(map).unwrap_or_else(|e| panic!("open `ENFORCE` as an array: {e}"));
+    enforce
+        .set(0, 1, 0)
+        .unwrap_or_else(|e| panic!("arm `ENFORCE`: {e}"));
+}
+
+/// An Ethernet + IPv6 frame with a 4-byte L4 header. `next_header` doubles as the protocol, which is
+/// what both halves key on; an extension-header value therefore yields ports of zero on both sides.
+fn ipv6_frame(src: Ipv6Addr, dst: Ipv6Addr, sport: u16, dport: u16, next_header: u8) -> Vec<u8> {
+    let mut f = vec![0u8; 60];
+    f[0..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst MAC
+    f[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src MAC
+    f[12..14].copy_from_slice(&ETH_P_IPV6.to_be_bytes());
+    f[ETH_HLEN] = 0x60; // version 6, traffic class 0
+    f[ETH_HLEN + 4..ETH_HLEN + 6].copy_from_slice(&4u16.to_be_bytes()); // payload length
+    f[ETH_HLEN + IPV6_NEXT_HEADER_OFFSET] = next_header;
+    f[ETH_HLEN + 7] = 64; // hop limit
+    f[ETH_HLEN + IPV6_SRC_OFFSET..ETH_HLEN + IPV6_DST_OFFSET].copy_from_slice(&src.octets());
+    f[ETH_HLEN + IPV6_DST_OFFSET..ETH_HLEN + IPV6_HLEN].copy_from_slice(&dst.octets());
+    let l4 = ETH_HLEN + IPV6_HLEN;
+    f[l4..l4 + 2].copy_from_slice(&sport.to_be_bytes());
+    f[l4 + 2..l4 + 4].copy_from_slice(&dport.to_be_bytes());
+    f
+}
+
+/// The guest's own `/64`, from the single-sourced [`GUEST_LINK6`] rather than a literal, so a change
+/// to the link moves this corpus with it.
+fn on_guest_link(last: u16) -> Ipv6Addr {
+    let (net, _) = GUEST_LINK6;
+    let mut o = net;
+    o[14..16].copy_from_slice(&last.to_be_bytes());
+    Ipv6Addr::from(o)
+}
+
+/// The v6 corpus. **IPv6, ARP and junk only**, for the reason [`corpus`] states in reverse: a v4
+/// frame takes the kernel's `parse`/`egress_verdict` path, which the v6 oracles cannot model.
+fn corpus6() -> Vec<(&'static str, Vec<u8>)> {
+    let guest = on_guest_link(2);
+    let host = on_guest_link(1);
+    let world = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    let link_mcast = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+    vec![
+        (
+            "udp to the allowed host endpoint",
+            ipv6_frame(guest, host, 40000, 9999, IPPROTO_UDP),
+        ),
+        (
+            "udp to a denied port on the allowed host",
+            ipv6_frame(guest, host, 40000, 8888, IPPROTO_UDP),
+        ),
+        (
+            "tcp to a denied global destination",
+            ipv6_frame(guest, world, 40000, 443, IPPROTO_TCP),
+        ),
+        (
+            "icmpv6 to a link-local destination (neighbor discovery)",
+            ipv6_frame(guest, link_local, 0, 0, IPPROTO_ICMPV6),
+        ),
+        (
+            "icmpv6 to link-scoped multicast (MLD)",
+            ipv6_frame(guest, link_mcast, 0, 0, IPPROTO_ICMPV6),
+        ),
+        (
+            "icmpv6 on the guest's own link",
+            ipv6_frame(guest, host, 0, 0, IPPROTO_ICMPV6),
+        ),
+        // The one that matters most: a routable ICMPv6 Echo must fall through to POLICY6 rather than
+        // ride the on-link spare, or the spare is an unpoliced egress channel.
+        (
+            "icmpv6 to a global destination, which the spare must not cover",
+            ipv6_frame(guest, world, 0, 0, IPPROTO_ICMPV6),
+        ),
+        (
+            "an extension header, whose port offsets are not ports",
+            ipv6_frame(guest, host, 40000, 9999, 0),
+        ),
+        ("arp", arp_frame()),
+        ("a frame that is only an ethernet header", vec![0u8; 14]),
+        (
+            "a v6 frame truncated inside its own header",
+            ipv6_frame(guest, host, 40000, 9999, IPPROTO_UDP)[..ETH_HLEN + 30].to_vec(),
+        ),
+    ]
+}
+
+#[test]
+#[ignore = "loads an eBPF program; needs real root + BTF (run via `cargo xtask ci-privileged`)"]
+fn the_kernels_v6_frame_parse_agrees_with_the_host_twin() {
+    if let Some(why) = probe_skip_reason() {
+        eprintln!("skipping the_kernels_v6_frame_parse_agrees_with_the_host_twin: {why}");
+        return;
+    }
+    let mut ebpf = load_classifier("tap_egress");
+    let mut seen: Vec<FlowKey6> = Vec::new();
+
+    for (what, frame) in corpus6() {
+        let before = flow_keys6(&ebpf);
+        assert_eq!(
+            verdict(&mut ebpf, "tap_egress", &frame),
+            TC_ACT_OK,
+            "{what}"
+        );
+        let after = flow_keys6(&ebpf);
+        let fresh: Vec<FlowKey6> = after.into_iter().filter(|k| !before.contains(k)).collect();
+
+        match parse_ipv6_5tuple(&frame) {
+            Some(expected) if !seen.contains(&expected) => {
+                assert_eq!(
+                    fresh,
+                    vec![expected],
+                    "{what}: the kernel's `parse6` must produce exactly what the host twin does"
+                );
+                seen.push(expected);
+            }
+            Some(_) => assert!(fresh.is_empty(), "{what}: an existing flow must not re-key"),
+            None => assert!(
+                fresh.is_empty(),
+                "{what}: the host twin keys nothing, so the kernel must not either, got {fresh:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+#[ignore = "loads an eBPF program; needs real root + BTF (run via `cargo xtask ci-privileged`)"]
+fn the_kernels_v6_egress_verdict_agrees_with_the_host_twin() {
+    if let Some(why) = probe_skip_reason() {
+        eprintln!("skipping the_kernels_v6_egress_verdict_agrees_with_the_host_twin: {why}");
+        return;
+    }
+    let policy =
+        EgressPolicy::deny_all().allow_host6(on_guest_link(1), Some(9999), Some(Protocol::Udp));
+    let rules = policy.rules6().to_vec();
+    let mut ebpf = load_classifier("tap_ingress");
+    arm6(&mut ebpf, &rules);
+
+    for (what, frame) in corpus6() {
+        // The host twin of `egress_verdict6`: the on-link ICMPv6 spare is consulted first, exactly
+        // as the kernel consults it, then the policy, then deny-by-default.
+        let expected = match parse_ipv6_5tuple(&frame) {
+            Some(k) if k.proto == IPPROTO_ICMPV6 && icmp6_dst_on_link(k.dst_addr) => TC_ACT_OK,
+            Some(k) if egress_allowed6(&rules, k.dst_addr, k.dst_port, k.proto) => TC_ACT_OK,
+            Some(_) => TC_ACT_SHOT,
+            None if ethertype(&frame) == Some(ETH_P_ARP) => TC_ACT_OK,
+            None => TC_ACT_SHOT,
+        };
+        assert_eq!(
+            verdict(&mut ebpf, "tap_ingress", &frame),
+            expected,
+            "{what}: the kernel's v6 verdict must be the host twin's"
+        );
+    }
+}
+
+/// Host-safe, so it runs in the everyday gate: the corpus is what the differentials above believe
+/// it is. Without this a mis-built frame would make both `#[ignore]`d tests agree on a case neither
+/// intended, and the mistake would only surface as a confusing privileged failure.
+#[test]
+fn the_v6_corpus_is_the_shape_the_differentials_assume() {
+    let host = on_guest_link(1);
+    let world = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let keyed: Vec<(&str, Option<FlowKey6>)> = corpus6()
+        .into_iter()
+        .map(|(what, f)| (what, parse_ipv6_5tuple(&f)))
+        .collect();
+
+    let key = |what: &str| -> FlowKey6 {
+        keyed
+            .iter()
+            .find(|(w, _)| *w == what)
+            .unwrap_or_else(|| panic!("no corpus entry {what:?}"))
+            .1
+            .unwrap_or_else(|| panic!("{what} must parse"))
+    };
+
+    let udp = key("udp to the allowed host endpoint");
+    assert_eq!((udp.dst_port, udp.proto), (9999, IPPROTO_UDP));
+    assert_eq!(udp.dst_addr, host.octets());
+    assert_eq!(key("tcp to a denied global destination").proto, IPPROTO_TCP);
+
+    // The three spared scopes and the one that must not be spared.
+    for what in [
+        "icmpv6 to a link-local destination (neighbor discovery)",
+        "icmpv6 to link-scoped multicast (MLD)",
+        "icmpv6 on the guest's own link",
+    ] {
+        let k = key(what);
+        assert_eq!(k.proto, IPPROTO_ICMPV6, "{what}");
+        assert!(icmp6_dst_on_link(k.dst_addr), "{what} must be on-link");
+    }
+    let routable = key("icmpv6 to a global destination, which the spare must not cover");
+    assert_eq!(routable.proto, IPPROTO_ICMPV6);
+    assert_eq!(routable.dst_addr, world.octets());
+    assert!(
+        !icmp6_dst_on_link(routable.dst_addr),
+        "a global destination must fall through to POLICY6, or the spare is an egress channel"
+    );
+
+    // An extension header is not a protocol with ports: both halves must read zeros there.
+    let ext = key("an extension header, whose port offsets are not ports");
+    assert_eq!((ext.proto, ext.src_port, ext.dst_port), (0, 0, 0));
+
+    // The three that must key nothing at all.
+    for what in [
+        "arp",
+        "a frame that is only an ethernet header",
+        "a v6 frame truncated inside its own header",
+    ] {
+        assert!(
+            keyed.iter().any(|(w, k)| *w == what && k.is_none()),
+            "{what} must not parse as a v6 flow"
+        );
+    }
 }
