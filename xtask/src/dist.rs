@@ -1182,6 +1182,70 @@ mod tests {
         );
     }
 
+    /// `WaitBackoff` (the guest agent's child-exit poll) and `PollBackoff` (the engine's
+    /// readiness poll) are deliberate twins: the agent is the static musl guest binary and takes
+    /// no `bsx` dependency, so the two cannot share a type. Their constants and the
+    /// double-toward-the-cap progression must stay equal by hand; a cap widened on one side
+    /// re-quantizes the latency the other was tuned against.
+    #[test]
+    fn the_backoff_twins_share_their_constants_and_progression() {
+        let repo = workspace_root();
+        let agent = std::fs::read_to_string(repo.join("crates/guest-agent/src/lib.rs"))
+            .expect("crates/guest-agent/src/lib.rs");
+        let engine = std::fs::read_to_string(repo.join("crates/engine/src/spawn.rs"))
+            .expect("crates/engine/src/spawn.rs");
+        // Each file declares exactly one backoff, so the bare const names find it.
+        for name in ["const INITIAL", "const CAP"] {
+            assert_eq!(
+                const_value(&agent, name),
+                const_value(&engine, name),
+                "`{name}` differs between WaitBackoff and PollBackoff"
+            );
+        }
+        for (file, src) in [("WaitBackoff", &agent), ("PollBackoff", &engine)] {
+            assert!(
+                src.contains("(self.next * 2).min(Self::CAP)"),
+                "`{file}` must keep the double-toward-the-cap progression"
+            );
+        }
+    }
+
+    /// The `Uid:` parse exists twice by decision (`bsx-record`'s `uids`, the engine's `euid_in`;
+    /// the two crates share no dependency edge), each documenting the other. Both must consume
+    /// the token with `strip_prefix`, the convention whose violation (a `starts_with` split
+    /// leaving `Uid:` as field 0 and shifting every index) both docs name as the trap. And the
+    /// pair stays a pair: the workspace's tooling reads its uid through `bsx_record::HostIds`
+    /// rather than growing a third spelling.
+    #[test]
+    fn the_uid_parse_twins_share_the_field_convention_and_stay_two() {
+        let repo = workspace_root();
+        let ids = std::fs::read_to_string(repo.join("crates/record/src/ids.rs"))
+            .expect("crates/record/src/ids.rs");
+        let sweep = std::fs::read_to_string(repo.join("crates/engine/src/sweep.rs"))
+            .expect("crates/engine/src/sweep.rs");
+        for (name, src) in [("uids", &ids), ("euid_in", &sweep)] {
+            let body = fn_body(src, name);
+            assert!(
+                body.contains(r#"strip_prefix("Uid:")"#),
+                "`{name}` must consume the `Uid:` token with strip_prefix"
+            );
+            assert!(
+                !body.contains("starts_with"),
+                "`{name}` must not switch to the starts_with split its doc names as the trap"
+            );
+        }
+        assert!(
+            fn_body(&sweep, "euid_in").contains("nth(1)"),
+            "the effective uid is the second field after the consumed token"
+        );
+        let xtask_main =
+            std::fs::read_to_string(repo.join("xtask/src/main.rs")).expect("xtask/src/main.rs");
+        assert!(
+            !xtask_main.contains(r#"("Uid:")"#),
+            "xtask reads its uid through bsx_record::HostIds; a third parse spelling drifts"
+        );
+    }
+
     /// The scalar initializer of a `const`, the [`const_list`] shape for a value that is not a
     /// list: the text between its `=` and the closing `;`, trimmed.
     fn const_value(src: &str, decl: &str) -> String {
