@@ -52,7 +52,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         .current_dir(&root)
         .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", "GUEST-READY")
+        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         // Keep the generated host signing key inside the scratch dir, not the real default path.
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
@@ -236,7 +236,7 @@ print('p14-9b-egress')
         .current_dir(&root)
         .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", "GUEST-READY")
+        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([
             "run",
             "--unjailed",
@@ -441,7 +441,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
         .current_dir(&root)
         .env("HOME", root.join("target"))
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", "GUEST-READY")
+        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([
             "run",
             "--unjailed",
