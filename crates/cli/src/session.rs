@@ -341,7 +341,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 server.metrics.request(Verb::Snapshot);
                 // Always non-fatal: a jailed refusal never touches the VM, and a genuine mid-snapshot
                 // failure surfaces on the next exec (the fault taxonomy handles it there).
-                let resp = match do_snapshot(server, &vm) {
+                let resp = match do_snapshot(server, &mut vm) {
                     Ok(dir) => Response::snapshotted(dir),
                     Err(e) => {
                         server.metrics.request_failed(true);
@@ -622,7 +622,7 @@ fn snapshot_fits(held: usize, max: usize) -> bool {
 /// The ceiling is checked **before** the VM is paused: a bundle is guest RAM plus a copy of the root
 /// disk and nothing on the wire reclaims one, so an unbounded `snapshot` loop is what fills the
 /// scratch filesystem.
-fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, SnapshotRefusal> {
+fn do_snapshot(server: &Server, vm: &mut RunningVm) -> Result<String, SnapshotRefusal> {
     let held = server
         .snapshot_bundles()
         .map_err(SnapshotRefusal::Unverifiable)?;

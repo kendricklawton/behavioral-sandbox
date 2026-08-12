@@ -978,7 +978,7 @@ fn build_pool_from(
     //    the jailed clones (step 3), which is where untrusted code actually runs.
     let mut source_config = base.clone().with_limits(pool_clone_limits());
     source_config.require_limits = false;
-    let source = Sandbox::open_unjailed(source_config)?;
+    let mut source = Sandbox::open_unjailed(source_config)?;
 
     // 2. Snapshot it into the per-daemon bundle dir the caller prepared.
     let snapshot = source.snapshot(snap_dir)?;

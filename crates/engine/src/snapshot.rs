@@ -120,7 +120,7 @@ impl RunningVm {
     /// **resume** failure (the VMM went unresponsive after a good create) is the exception: it may
     /// leave the guest paused and returns the error, drop the VM in that case (its teardown reaps it)
     /// rather than reusing the handle.
-    pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
+    pub fn snapshot(&mut self, dir: &Path) -> Result<Snapshot, VmmError> {
         // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
         // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
         if self.restored {
@@ -225,14 +225,25 @@ impl RunningVm {
             loop {
                 match self.probe_agent() {
                     Ok(()) => break,
-                    Err(e) if std::time::Instant::now() >= deadline => {
-                        return Err(VmmError::Timeout(format!(
-                            "guest agent not reachable after snapshot resume (the bundle at {} is \
-                             complete; this session VM is wedged): {e}",
-                            dir.display()
-                        )));
+                    Err(e) => {
+                        // Liveness before the clock, as `await_guest_ready` does: a VMM that died
+                        // under the pause is a dead session now, not a wedged one in ten seconds.
+                        if let Some(status) = self.child.try_wait().ok().flatten() {
+                            return Err(VmmError::Vmm(format!(
+                                "firecracker exited during the snapshot resume ({status}); the \
+                                 bundle at {} is complete, but this session VM is gone",
+                                dir.display()
+                            )));
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return Err(VmmError::Timeout(format!(
+                                "guest agent not reachable after snapshot resume (the bundle at {} \
+                                 is complete; this session VM is wedged): {e}",
+                                dir.display()
+                            )));
+                        }
+                        backoff.sleep();
                     }
-                    Err(_) => backoff.sleep(),
                 }
             }
         }

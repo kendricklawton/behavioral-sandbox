@@ -586,7 +586,7 @@ impl Sandbox {
     ///
     /// # Errors
     /// As [`RunningVm::snapshot`].
-    pub fn snapshot(&self, dir: &std::path::Path) -> Result<Snapshot, VmmError> {
+    pub fn snapshot(&mut self, dir: &std::path::Path) -> Result<Snapshot, VmmError> {
         self.vm.snapshot(dir)
     }
 
