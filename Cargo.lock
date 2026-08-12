@@ -2630,6 +2630,7 @@ dependencies = [
  "bsx-engine",
  "bsx-probes-loader",
  "bsx-record",
+ "bsx-test-support",
  "clap",
 ]
 
