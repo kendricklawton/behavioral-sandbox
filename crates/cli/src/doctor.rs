@@ -235,19 +235,21 @@ fn tally(checks: &[Check], paint: Paint) -> String {
 /// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
 /// (recording a coverage gap) and only `--allow` *enforcement* refuses.
 fn ebpf_check() -> Check {
-    match bsx_probes_loader::check_support() {
-        Ok(()) => Check {
-            label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
-            status: CheckStatus::Ok,
-            note: None,
-        },
-        Err(e) => Check {
-            label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
-            status: CheckStatus::Warn,
-            note: Some(format!(
+    let (status, note) = match bsx_probes_loader::check_support() {
+        Ok(()) => (CheckStatus::Ok, None),
+        Err(e) => (
+            CheckStatus::Warn,
+            Some(format!(
                 "--trace/--watch degrade to a coverage gap and --allow enforcement refuses: {e}"
             )),
-        },
+        ),
+    };
+    Check {
+        // One label for both outcomes: an operator greps a `--json` row by name, and a row that
+        // renamed itself on failure is one their filter stops matching exactly when it fires.
+        label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
+        status,
+        note,
     }
 }
 
