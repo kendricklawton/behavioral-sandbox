@@ -1253,6 +1253,47 @@ mod tests {
         );
     }
 
+    /// An egress-policy update denies before it grants.
+    ///
+    /// `POLICY` is sixteen slots written one at a time while the classifier reads them, so the
+    /// middle of an update is a posture a guest can hit. Writing the new rules straight over the old
+    /// ones leaves the rule being *revoked* live in a not-yet-overwritten slot, and a packet to the
+    /// revoked endpoint is admitted for the length of the rewrite: fail-open, on a revocation the
+    /// operator just asked for. Arming first and zeroing every slot before writing the grants makes
+    /// that window deny instead.
+    ///
+    /// The order is the whole property and it is three ordinary-looking lines, so a later tidy-up
+    /// that "removes a redundant write" restores the hazard silently. Only a live tap and a packet
+    /// timed inside the rewrite would notice, which is neither gate.
+    #[test]
+    fn an_egress_policy_update_denies_before_it_grants() {
+        let repo = workspace_root();
+        let file = "crates/probes-loader/src/tap.rs";
+        let src = std::fs::read_to_string(repo.join(file)).expect(file);
+        let body = fn_body(&src, "apply_policy");
+        let at = |needle: &str| {
+            let found = body.find(needle);
+            assert!(
+                found.is_some(),
+                "{file}'s `apply_policy` must contain {needle}"
+            );
+            found.expect("asserted present just above")
+        };
+        let armed = at("set_enforce(ebpf, true)");
+        let denied = at("write_policy(ebpf, &[])");
+        let granted = at("write_policy(ebpf, rules)");
+        assert!(
+            armed < denied,
+            "{file}'s `apply_policy` must arm before it clears, or the clear runs observe-only and \
+             the window admits everything"
+        );
+        assert!(
+            denied < granted,
+            "{file}'s `apply_policy` must zero every slot before writing the grants, or a revoked \
+             rule stays live in a higher slot for the length of the rewrite"
+        );
+    }
+
     /// The tc teardown reads the link kind the attach reported, never a kernel version.
     ///
     /// A TCX `bpf_link` owns an fd and detaches netns-independently on drop; the classic netlink

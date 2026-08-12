@@ -30,11 +30,12 @@
 //!
 //! **Egress enforcement, deny-by-default.** [`EgressPolicy`] is the userspace schema, built from
 //! validated [`Ipv4Cidr`]s with a typed [`Protocol`] and optional port, whose empty value allows
-//! nothing. [`set_egress_policy`](TapMonitor::set_egress_policy) installs it and arms the classifier,
-//! and [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc programs go
-//! live, so there is no window where the tap is up but un-policed. Opt-in: until set, a monitor stays
-//! observe-only. Every drop is recorded per destination, read back by
-//! [`denials`](TapMonitor::denials).
+//! nothing. [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc
+//! programs go live, so there is no window where the tap is up but un-policed, and
+//! [`set_egress_policy`](TapMonitor::set_egress_policy) replaces it on a live tap in an order that
+//! denies mid-update rather than admitting. Opt-in in one direction only: until a policy is set a
+//! monitor stays observe-only, and once armed it stays armed. Every drop is recorded per
+//! destination, read back by [`denials`](TapMonitor::denials).
 //!
 //! **CO-RE, and the one thing it does not carry.** The object is built against BTF, so aya relocates
 //! it against the running kernel at load. No program reads a kernel struct field, so that covers the

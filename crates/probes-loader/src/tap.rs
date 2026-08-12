@@ -298,29 +298,27 @@ impl TapMonitor {
         Ok(out)
     }
 
-    /// Install an [`EgressPolicy`] on this **already-attached** monitor: write its rules
-    /// into the `POLICY` map (zeroing the unused slots so no stale rule lingers) and arm the `ENFORCE`
-    /// toggle. From here the tap's ingress hook drops any guest-sent IPv4 packet whose destination matches
-    /// no rule, and accepts those that do, per VM, since each monitor owns its own maps. Idempotent: call
-    /// again to replace the policy. To arm a policy **at launch** with no un-enforced window, prefer
-    /// [`enforce_in_netns`](Self::enforce_in_netns), which policies the maps *before* the tc programs go
-    /// live on the tap.
+    /// Replace this **already-attached** monitor's [`EgressPolicy`]: arm `ENFORCE`, then write the
+    /// rules into `POLICY`/`POLICY6` with every unused slot zeroed. From here the tap's ingress hook
+    /// drops any guest-sent packet whose destination matches no rule, and accepts those that do, per
+    /// VM, since each monitor owns its own maps. Idempotent.
+    ///
+    /// **The replacement is fail-closed**: it arms, zeroes every slot, and only then writes the
+    /// grants, so mid-update the tap denies rather than admits and revoking an allowance takes
+    /// effect at the first write rather
+    /// than lingering until the last. There is **no way back to observe-only** on a live tap: a
+    /// monitor that has enforced keeps enforcing, and a caller that wants no enforcement attaches
+    /// with [`attach_in_netns`](Self::attach_in_netns) and never arms.
+    ///
+    /// To arm at launch with no un-enforced window at all, prefer
+    /// [`enforce_in_netns`](Self::enforce_in_netns), which policies the maps *before* the tc
+    /// programs go live on the tap.
     ///
     /// # Errors
     /// [`ProbeError::Policy`] if the policy exceeds [`MAX_POLICY_RULES`], or [`ProbeError::Map`] if a
     /// policy/enforce map is missing or a write fails.
     pub fn set_egress_policy(&mut self, policy: &EgressPolicy) -> Result<(), ProbeError> {
         apply_policy(&mut self.ebpf, policy)
-    }
-
-    /// Turn egress enforcement off again, back to observe-only (accept every packet).
-    /// Leaves the `POLICY` rules in place (harmless while `ENFORCE` is 0), so re-enforcing is a
-    /// single [`set_egress_policy`](Self::set_egress_policy) away.
-    ///
-    /// # Errors
-    /// [`ProbeError::Map`] if the enforce map is missing or the write fails.
-    pub fn clear_egress_policy(&mut self) -> Result<(), ProbeError> {
-        set_enforce(&mut self.ebpf, false)
     }
 }
 
@@ -448,9 +446,22 @@ fn read_policy6(ebpf: &Ebpf) -> Result<Vec<PolicyRule6>, ProbeError> {
     Ok(out)
 }
 
-/// Write `policy` into an [`Ebpf`]'s `POLICY` map and arm `ENFORCE`. Works on a loaded object whether or
-/// not its programs are attached yet, so it serves both the post-attach [`TapMonitor::set_egress_policy`]
-/// and the pre-attach [`TapMonitor::enforce_in_netns`] (arm-before-attach, no un-enforced window).
+/// Write `policy` into an [`Ebpf`]'s `POLICY`/`POLICY6` maps and arm `ENFORCE`. Works on a loaded
+/// object whether or not its programs are attached yet, so it serves both the post-attach
+/// [`TapMonitor::set_egress_policy`] and the pre-attach [`TapMonitor::enforce_in_netns`]
+/// (arm-before-attach, no un-enforced window).
+///
+/// **The order is the fail-closed property**, and it is why this is one function rather than a write
+/// and an arm at each call site. Arm, then zero every slot, then write the grants. On an
+/// already-attached tap the classifier is reading `POLICY` throughout, so the middle of the update
+/// is a posture the guest can hit: here it denies. Writing the new rules straight over the old ones
+/// slot by slot would instead leave the rule being *revoked* live in a not-yet-overwritten slot, so
+/// a packet to the revoked endpoint is admitted for the length of the rewrite, which is fail-open in
+/// exactly the direction a revocation must not be.
+///
+/// What this does not make atomic is a **single slot**: an array-map value is copied without a lock,
+/// so a classifier can read one rule mid-write. The transition is now allow -> zero -> new, so a
+/// torn read is of a rule that is arriving rather than one the caller just took away.
 fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError> {
     let rules = policy.rules();
     let rules6 = policy.rules6();
@@ -468,9 +479,13 @@ fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError
         }
         .into());
     }
+    set_enforce(ebpf, true)?;
+    // Deny everything before granting anything: an empty rule list zeroes every slot, and a zeroed
+    // slot is `active == 0`.
+    write_policy(ebpf, &[])?;
+    write_policy6(ebpf, &[])?;
     write_policy(ebpf, rules)?;
-    write_policy6(ebpf, rules6)?;
-    set_enforce(ebpf, true)
+    write_policy6(ebpf, rules6)
 }
 
 /// Write every `POLICY` slot: the first `rules.len()` from `rules`, the rest zeroed (an all-zero slot is
