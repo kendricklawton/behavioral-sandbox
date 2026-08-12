@@ -56,7 +56,7 @@ is a runtime plus a clean driver API you self-host, and the model driving an age
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
 - **[Using the `bsx serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
-  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
+  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`cancel`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client for it.
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource

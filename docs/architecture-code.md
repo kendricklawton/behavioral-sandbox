@@ -46,8 +46,8 @@ Note the first line: `bsx-channel`'s wire types are re-exported through `bsx-eng
 reaches them without adding a second dependency, and they are part of the surface
 [the stability boundary](./embedding-scope.md#semver--api-stability) names.
 
-Everything else (`console`, `drives`, `exec`, `firecracker`, `jail`'s internals, `paths`, `proc`,
-`snapshot`, `spawn`, `sweep`'s internals) is a private module. `doctor` is public because the CLI and
+Every other module in `crates/engine/src` is private, so the `pub use` block above plus `doctor` is
+the whole reachable surface. `doctor` is public because the CLI and
 `xtask setup` both render its checks, and it is documented as a diagnostic helper rather than part of
 the pinned surface.
 

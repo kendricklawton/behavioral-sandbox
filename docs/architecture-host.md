@@ -52,8 +52,14 @@ only path out. By default that path leads nowhere (deny-by-default); with `--net
 host-side eBPF `tc` programs inspect every packet at the tap and enforce the destination
 allow-list.
 
+The link is **dual-stack**: a fixed `10.200.0.1/30` on the tap against `10.200.0.2` on the guest,
+plus an IPv6 ULA (`fd00:200::1/64` against `fd00:200::2`) assigned best-effort, so an IPv6-disabled
+host yields a v4-only sandbox and `RunningVm::ipv6` reports which it got. Deny-by-default does not
+rest on the prefix length in either family: it rests on the absent default route, and the tap policy
+is armed for both (`--allow` writes v4 rules only, and an empty v6 rule table denies).
+
 The namespace holds exactly `lo` and the tap, so a guest with no `--gateway` reaches only the host
-end of its /30 and an off-link destination fails at its own routing table before a packet is
+ends of its own link and an off-link destination fails at its own routing table before a packet is
 emitted. `--gateway` fills the field the kernel `ip=` parameter otherwise leaves empty, which lets
 the guest emit those packets so the classifier can judge them; it builds nothing. Attaching an
 uplink to the namespace and allocating the addresses that takes is the hoster's, per
@@ -65,10 +71,12 @@ PER-VM NETWORK NAMESPACE          |  HOST-SIDE ENFORCEMENT
   untrusted guest app             |
         |                         |
         v                         |
-  eth0 (10.200.0.2/30)            |
+  eth0 (10.200.0.2/30,            |
+        fd00:200::2/64)           |
         |                         |
         v                         |
-  fc0 tap (10.200.0.1/30)  ---->  |  tc clsact egress hook
+  fc0 tap (10.200.0.1/30,  ---->  |  tc clsact egress hook
+           fd00:200::1/64)        |
                                   |        |  look up the destination
                                   |        v
                                   |  eBPF hash map
@@ -87,11 +95,12 @@ The guest root comes from one Alpine base image with the static `guest-agent` ba
 of two ways. By default each VM gets its **own read-write copy** of that base in its workdir,
 reclaimed with the workdir at teardown. A `read_only_root` boot instead hands Firecracker the base
 `O_RDONLY` and lets every sandbox share it, with the guest's writable layer supplied by a per-run
-`tmpfs` overlay; that is the mode the snapshot and pool paths use, and it is what makes one base
-image serve many concurrent VMs. Either way nothing a run changes outlives it unless explicitly
-collected. Bulk data rides block devices instead: a read-only ext4 built from
-`input_dir`, and a writable one extracted after teardown for `output_dir`. `read_only_root`,
-`input_dir`, and `output_dir` are all embedding-API fields rather than CLI flags.
+`tmpfs` overlay, which is what makes one base image serve many concurrent VMs. It is an
+embedding-API field: an embedder sets it on the `BootConfig` a snapshot source or a pool boots from,
+and neither the CLI nor the daemon sets it, so their VMs each copy the base. Either way nothing a run
+changes outlives it unless explicitly collected. Bulk data rides block devices instead: a read-only
+ext4 built from `input_dir`, and a writable one extracted after teardown for `output_dir`.
+`read_only_root`, `input_dir`, and `output_dir` are all embedding-API fields rather than CLI flags.
 
 ```text
 SANDBOX STORAGE LAYERING  (a read_only_root boot; the default gives each VM its

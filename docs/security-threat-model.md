@@ -219,10 +219,11 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   proceeds, so a record can cover less than the table above implies. It says so in its own coverage
   section, and a reader must actually check that section rather than read an empty axis as quiet.
   Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
-- **Fuzzing is nightly, not continuous.** Ten libFuzzer targets cover the untrusted-input decoders
-  (the guest channel, the daemon wire, the signed-record envelope, the eBPF-boundary parsers, the
-  egress rule parser, and the `.bsx.toml` config parser) on a nightly schedule, bounded per target
-  at fifteen minutes. There is no OSS-Fuzz or equivalent
+- **Fuzzing is nightly, not continuous.** The libFuzzer targets `FUZZ_TARGETS` in
+  `xtask/src/main.rs` names cover the untrusted-input decoders (the guest channel, the daemon wire,
+  the signed-record envelope, the eBPF-boundary parsers, the egress rule parser, the guest-written
+  output image, and the `.bsx.toml` config parser) on a nightly schedule, bounded per target at
+  fifteen minutes. There is no OSS-Fuzz or equivalent
   continuous tier, and some corpora are thin, so depth on any one target is limited.
 
 ## Out of scope (engine, not platform)

@@ -112,9 +112,10 @@ N_live × FDS_PER_VM + headroom (≈64, process baseline)  ≤  ulimit -n (soft)
 
 `Pool::new` checks this and logs one warning naming the numbers when a target oversubscribes the
 budget, a warning, not a refusal, matching how the engine treats every other best-effort host
-resource. The measured steady state is 2
-fds per VM on every start path, pinned by test; the constant is deliberately above it so growth is
-a visible bump, never drift.
+resource. `fd_footprint_per_vm_stays_within_budget_and_never_leaks` holds every start path (cold, a
+second concurrent VM, networked, a pre-warmed restore) at or under `FDS_PER_VM` and asserts teardown
+returns every fd. It prints the footprint it measured rather than pinning it, so `FDS_PER_VM` is a
+ceiling with headroom above the observed cost, not the cost itself.
 
 ## A minimal reference integration
 
