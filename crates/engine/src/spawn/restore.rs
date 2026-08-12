@@ -427,15 +427,15 @@ pub(crate) fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmE
 /// legitimately meet is a lingering-empty one from a prior restore of the same snapshot (still ours,
 /// still `0700`), and the disk's own `create_new` keeps that case single-flight.
 pub(crate) fn ensure_private_staging_dir(dir: &Path) -> Result<(), VmmError> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
-        Ok(()) => {
-            // mkdir's mode is umask-masked; make 0700 unconditional now that the dir is exclusively
-            // ours (race-free, we just created it fail-if-exists).
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| VmmError::Vmm(format!("chmod staging dir {}: {e}", dir.display())))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+    use super::workdir::{PrivateDirError, create_private_dir};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    match create_private_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(PrivateDirError::Chmod(e)) => Err(VmmError::Vmm(format!(
+            "chmod staging dir {}: {e}",
+            dir.display()
+        ))),
+        Err(PrivateDirError::Create(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let md = std::fs::metadata(dir)
                 .map_err(|e| VmmError::Vmm(format!("stat staging dir {}: {e}", dir.display())))?;
             let me = crate::sweep::own_euid().ok_or_else(|| {
@@ -450,7 +450,7 @@ pub(crate) fn ensure_private_staging_dir(dir: &Path) -> Result<(), VmmError> {
             }
             Ok(())
         }
-        Err(e) => Err(VmmError::Vmm(format!(
+        Err(PrivateDirError::Create(e)) => Err(VmmError::Vmm(format!(
             "create staging dir {}: {e}",
             dir.display()
         ))),

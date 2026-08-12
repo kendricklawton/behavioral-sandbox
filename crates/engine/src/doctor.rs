@@ -58,6 +58,11 @@ enum KernelVerdict {
 /// obscurely at first boot.
 const SUPPORTED_ARCHES: [&str; 1] = ["x86_64"];
 
+/// The consequence line for every firecracker-derived row when the binary itself is missing: one
+/// string, so the rows that depend on the binary point at the same first fix.
+const NOT_CHECKED_NO_FIRECRACKER: &str =
+    "not checked: no firecracker binary found (fix the missing row above first)";
+
 /// The outcome of one host [`Check`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -185,7 +190,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
                 "boots continue with a warning; outside this range request bodies and snapshot \
                  semantics are untested, and below it upstream no longer ships security patches"
             } else {
-                "not checked: no firecracker binary found (fix the missing row above first)"
+                NOT_CHECKED_NO_FIRECRACKER
             },
         ),
         Check::new(
@@ -195,7 +200,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             if fc_present {
                 "custom or unpinned Firecracker binary on host; verify binary provenance out of band"
             } else {
-                "not checked: no firecracker binary found (fix the missing row above first)"
+                NOT_CHECKED_NO_FIRECRACKER
             },
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
