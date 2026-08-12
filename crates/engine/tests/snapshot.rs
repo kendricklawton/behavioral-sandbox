@@ -25,7 +25,7 @@ use common::{
 fn snapshots_a_running_microvm() {
     // Pause a booted VM and take a full snapshot (memory + state) via the API. The bundle is
     // three real files, and the VM is resumed so it stays usable afterward.
-    let vm = Vm::boot(config()).expect("microVM should boot to userspace");
+    let mut vm = Vm::boot(config()).expect("microVM should boot to userspace");
     let bundle = TmpDir::new("snap-p51");
     let snap = vm
         .snapshot(bundle.path())
@@ -111,7 +111,7 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
     // Snapshot a VM, throw it away, then restore from the bundle on a fresh VMM and confirm it
     // resumes. Measures restore latency alongside the source's cold boot for the comparison.
     let cfg = config();
-    let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
+    let mut source = Vm::boot(cfg.clone()).expect("source microVM should boot");
     let cold_boot = source.boot_latency();
 
     let bundle = TmpDir::new("snap-p52");
@@ -311,7 +311,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
     let mut cfg = guest_rootfs_config();
     cfg.enable_network = true;
-    let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
+    let mut source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
     let source_guest_ip = source.ipv4().expect("source ipv4").guest;
     let source_tap = source.tap_name().expect("source tap name").to_string();
     let bundle = TmpDir::new("snap-net-warm");
@@ -524,7 +524,8 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     // test silently drifts onto the shared-base branch the previous test already covers.
     let mut source_cfg = guest_rootfs_config();
     source_cfg.read_only_root = false;
-    let source = bsx_engine::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
+    let mut source =
+        bsx_engine::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
     let snap = source.snapshot(bundle.path()).expect("snapshot the source");
     source.shutdown().expect("source shutdown");
     assert!(
@@ -578,7 +579,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     }
     let mut src_cfg = guest_rootfs_config();
     src_cfg.vcpus = NonZeroU8::new(2).expect("2 is nonzero");
-    let source = Vm::boot(src_cfg).expect("2-vCPU agent microVM should boot");
+    let mut source = Vm::boot(src_cfg).expect("2-vCPU agent microVM should boot");
     let bundle = TmpDir::new("snap-cpu-cap");
     let snap = source
         .snapshot(bundle.path())
@@ -830,7 +831,7 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
     // discarding the whole prewarmed inventory (the pre-fix bug tore down every clone on the first take,
     // then restored a fresh unprobed one, leaving `ready()` at 0). Prove the stock survives a take.
     let cfg = config(); // plain rootfs, no `guest_cid` → the snapshot carries no vsock
-    let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
+    let mut source = Vm::boot(cfg.clone()).expect("source microVM should boot");
     let bundle = TmpDir::new("snap-novsock-pool");
     let snap = source
         .snapshot(bundle.path())

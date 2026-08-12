@@ -73,7 +73,7 @@ fn main() -> Result<(), VmmError> {
     // pre-warmed means exec-ready.
     let mut source_cfg = BootConfig::from_env();
     source_cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    let source_vm = Vm::boot(source_cfg)?;
+    let mut source_vm = Vm::boot(source_cfg)?;
 
     // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is
     // not a dependency of `bsx-engine`, so this stays on `std` rather than sending you to add one.
