@@ -112,9 +112,8 @@ impl ResourceMeter {
     /// # Errors
     /// [`ProbeError::Map`] if the CPU map is missing or the write fails.
     pub fn reset(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        let mut cpu: AyaHashMap<_, u64, u64> =
-            crate::maps::open_mut(&mut self.ebpf, CPU_NS_MAP, "a hash map")?;
-        cpu.insert(cgroup_id, 0, 0)
+        self.cpu_totals_mut()?
+            .insert(cgroup_id, 0, 0)
             .map_err(|e| ProbeError::Map(format!("reset cgroup {cgroup_id} CPU total: {e}")))
     }
 
@@ -130,10 +129,8 @@ impl ResourceMeter {
     /// [`ProbeError::Map`] if the CPU map is missing, or the removal fails for a reason other than
     /// the key being absent.
     pub fn clear(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        let mut cpu: AyaHashMap<_, u64, u64> =
-            crate::maps::open_mut(&mut self.ebpf, CPU_NS_MAP, "a hash map")?;
         remove_cgroup_key(
-            &mut cpu,
+            &mut self.cpu_totals_mut()?,
             cgroup_id,
             &format!("clear cgroup {cgroup_id} CPU total"),
         )
@@ -154,6 +151,17 @@ impl ResourceMeter {
     /// [`remove_target`](Self::remove_target).
     fn targets(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u8>, ProbeError> {
         crate::maps::open_mut(&mut self.ebpf, METER_TARGETS_MAP, "a hash map")
+    }
+
+    /// The read-only `CPU_NS` handle, shared by [`cpu_ns`](Self::cpu_ns) and
+    /// [`for_each_cpu`](Self::for_each_cpu).
+    fn cpu_totals(&self) -> Result<AyaHashMap<&MapData, u64, u64>, ProbeError> {
+        crate::maps::open(&self.ebpf, CPU_NS_MAP, "a hash map")
+    }
+
+    /// The writable `CPU_NS` handle, shared by [`reset`](Self::reset) / [`clear`](Self::clear).
+    fn cpu_totals_mut(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u64>, ProbeError> {
+        crate::maps::open_mut(&mut self.ebpf, CPU_NS_MAP, "a hash map")
     }
 
     /// The accumulated on-CPU time charged to `cgroup_id` since [`load`](Self::load). `Duration::ZERO` if
@@ -181,8 +189,7 @@ impl ResourceMeter {
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or the read fails for a reason other than a missing key.
     pub fn cpu_ns(&self, cgroup_id: u64) -> Result<u64, ProbeError> {
-        let cpu: AyaHashMap<_, u64, u64> = crate::maps::open(&self.ebpf, CPU_NS_MAP, "a hash map")?;
-        match cpu.get(&cgroup_id, 0) {
+        match self.cpu_totals()?.get(&cgroup_id, 0) {
             Ok(ns) => Ok(ns),
             Err(aya::maps::MapError::KeyNotFound) => Ok(0),
             Err(e) => Err(ProbeError::Map(format!(
@@ -222,8 +229,7 @@ impl ResourceMeter {
     /// [`cpu_ns`](Self::cpu_ns) and [`cpu_ns_all`](Self::cpu_ns_all) share. The key and value are plain
     /// `u64`s (aya's built-in `Pod`), so no `unsafe` map-type binding and no byte decode is needed.
     fn for_each_cpu(&self, mut f: impl FnMut(u64, u64)) -> Result<(), ProbeError> {
-        let cpu: AyaHashMap<_, u64, u64> = crate::maps::open(&self.ebpf, CPU_NS_MAP, "a hash map")?;
-        for entry in cpu.iter() {
+        for entry in self.cpu_totals()?.iter() {
             let (id, ns) =
                 entry.map_err(|e| ProbeError::Map(format!("iterate `{CPU_NS_MAP}`: {e}")))?;
             f(id, ns);

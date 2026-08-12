@@ -446,6 +446,13 @@ static POLICY6: Array<PolicyRule6> = Array::with_max_entries(MAX_POLICY_RULES as
 #[map]
 static ENFORCE: Array<u32> = Array::with_max_entries(1, 0);
 
+/// Whether the loader has armed deny-by-default egress ([`ENFORCE`] slot 0). `false` is the
+/// load-time default, so a monitor that has not opted in is observe-only.
+#[inline(always)]
+fn enforcing() -> bool {
+    ENFORCE.get(0).copied().unwrap_or(0) != 0
+}
+
 /// Which way a frame crossed the tap, from the tap's perspective (matching [`FlowCounts`]):
 /// `Ingress` is a frame the guest sent, `Egress` one delivered to the guest.
 #[derive(Clone, Copy)]
@@ -492,7 +499,7 @@ pub fn tap_egress(ctx: TcContext) -> i32 {
 /// is recorded in [`DENIALS`] before the drop.
 #[inline(always)]
 fn egress_verdict(ctx: &TcContext, key: Option<FlowKey>) -> Verdict {
-    if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
+    if !enforcing() {
         return Verdict::Pass;
     }
     // Anything `parse` couldn't key needs the ethertype only to spare ARP: without it the guest
@@ -517,7 +524,7 @@ fn egress_verdict(ctx: &TcContext, key: Option<FlowKey>) -> Verdict {
 /// analogue to spare.
 #[inline(always)]
 fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
-    if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
+    if !enforcing() {
         return Verdict::Pass;
     }
     // ICMPv6 is the v6 twin of ARP, but unlike ARP (its own ethertype) it rides the IPv6 ethertype
