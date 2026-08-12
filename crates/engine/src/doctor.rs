@@ -1,41 +1,28 @@
 //! Host readiness check: does this machine have what the engine needs to boot and confine a sandbox?
 //!
-//! [`checks`] is the **single implementation** behind two entry points, the `bsx doctor` subcommand and
-//! `cargo xtask setup`, so the two ask the host the same questions and get the same per-row
-//! [`CheckStatus`] back. What each does with those rows is its own: only `bsx doctor` renders the three
-//! states apart, calls [`can_boot`], and exits non-zero when a hard requirement is missing. Each also
-//! appends the eBPF row itself, since that check lives in the probe loader rather than here.
+//! - **One implementation, two entry points.** `bsx doctor` and `cargo xtask setup` both render
+//!   [`checks`], so they ask the host the same questions. Each appends the eBPF row itself, since
+//!   that check lives in the probe loader.
+//! - **Three states per [`Check`].** [`Ok`](CheckStatus::Ok) present, [`Warn`](CheckStatus::Warn) a
+//!   degradation that fails open with a named consequence, [`Fail`](CheckStatus::Fail) a hard
+//!   requirement. The isolation boundary, the boot artifacts and the platform floor are never
+//!   degradations.
+//! - **The hardening rows are advisory.** They name a side-channel exposure the layer *beneath* the
+//!   engine carries, not a capability the engine loses, so a single-tenant dev box tripping them is
+//!   fine.
 //!
-//! Each [`Check`] is one prerequisite: [`Ok`](CheckStatus::Ok) present, [`Warn`](CheckStatus::Warn) a
-//! *degradation* where the run still works but something fails open, or [`Fail`](CheckStatus::Fail) a
-//! *hard* requirement. The split mirrors the engine's own error discipline, since the isolation boundary
-//! is never a degradation: `/dev/kvm`, the boot artifacts, and the supported-platform floor are hard,
-//! while the jailer, resource caps, and networking tools fail open with a named consequence.
-//!
-//! The host-hardening rows reuse [`Warn`](CheckStatus::Warn) for a second kind of advice: not a
-//! capability the engine loses, but a side-channel exposure the layer *beneath* the engine carries when
-//! mutually-distrusting tenants share the hardware. Advisory by design, so a single-tenant dev box
-//! tripping them is fine. This module is `unsafe`-free std-only detection; nothing here boots a VM.
+//! `unsafe`-free std-only detection; nothing here boots a VM.
 
 use std::path::{Path, PathBuf};
 
 use crate::BootConfig;
 use crate::spawn::FcProbe;
 
-/// The **version fallback floor** (`major.minor`), used only when the capability probe below cannot
-/// run. Running untrusted code on an unpatched kernel is a threat-model hole, and 5.15 is a
-/// maintained upstream LTS; bump it here to tighten the fallback.
-///
-/// **A version number is a proxy, and on enterprise kernels it is the wrong one.** Red Hat ships
-/// RHEL 9 as `5.14.0-*.el9` and backports security fixes to it for a decade, so a bare
-/// `>= 5.15` test refuses a patched, supported kernel for no safety gain: the same argument
-/// the Firecracker version policy makes for its own floor ("reject *unpatched* VMMs, not old
-/// ones"). So the real requirement is probed directly ([`cgroup_kill_under`]) and this floor is
-/// only the fallback for hosts where the probe cannot run.
-///
-/// What neither the probe nor the floor can establish is whether the kernel is actually *patched*.
-/// That is the operator's to know; [`KernelVerdict`] says which signal it used so the note can be
-/// honest about it.
+/// The version fallback floor (`major.minor`), used only where [`cgroup_kill_under`]'s capability
+/// probe cannot run. A version is the wrong proxy on an enterprise kernel: RHEL 9 ships
+/// `5.14.0-*.el9` with a decade of backports, which a bare `>= 5.15` test refuses for no safety
+/// gain. Neither signal establishes that a kernel is *patched*, so [`KernelVerdict`] names the one
+/// it used.
 const MIN_KERNEL: (u64, u64) = (5, 15);
 
 /// How a host's kernel qualified, so the [`Check`] note can name the signal it used rather than
@@ -51,15 +38,13 @@ enum KernelVerdict {
     Unqualified,
 }
 
-/// The **supported CPU architectures** (narrowed to `x86_64`-only: aarch64 has no
-/// hardware or CI lane to test its privileged path on, and an untested isolation boundary is not
-/// a supported one). The engine builds for no others, so for a shipped binary this is decided at
-/// compile time; the check names an unsupported cross-compile rather than letting it fail
-/// obscurely at first boot.
+/// The supported CPU architectures, `x86_64` only: aarch64 has no hardware or CI lane to test its
+/// privileged path on. The engine builds for no others, so this row names an unsupported
+/// cross-compile rather than letting it fail obscurely at first boot.
 const SUPPORTED_ARCHES: [&str; 1] = ["x86_64"];
 
-/// The consequence line for every firecracker-derived row when the binary itself is missing: one
-/// string, so the rows that depend on the binary point at the same first fix.
+/// The consequence line every firecracker-derived row shares when the binary is missing, so they
+/// all point at the same first fix.
 const NOT_CHECKED_NO_FIRECRACKER: &str =
     "not checked: no firecracker binary found (fix the missing row above first)";
 
@@ -68,10 +53,9 @@ const NOT_CHECKED_NO_FIRECRACKER: &str =
 pub enum CheckStatus {
     /// The prerequisite is present.
     Ok,
-    /// Absent, but the engine **degrades** rather than refusing: the run still works, minus the
-    /// capability the `note` names (a fail-open item).
+    /// Absent, but the engine degrades rather than refusing: the run works minus what `note` names.
     Warn,
-    /// Absent and **hard**: a boot cannot happen without it (the isolation boundary, the artifacts).
+    /// Absent and hard: no boot without it (the isolation boundary, the artifacts).
     Fail,
 }
 
@@ -175,9 +159,8 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
                 supported_range()
             ),
         ),
-        // The two rows below judge the binary the row above found; with no binary they must not
-        // pretend to have judged one ("custom or unpinned" about nothing misleads an operator),
-        // so their note collapses to a deferral instead.
+        // With no binary these two have judged nothing, so their note collapses to a deferral:
+        // "custom or unpinned" about a binary that is absent misleads.
         Check::new(
             &format!("firecracker is a supported release ({})", supported_range()),
             fc_present
@@ -222,10 +205,9 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "jailed VMs run WITHOUT cpu/memory caps: a fail-open DoS mitigation",
         ),
-        // Informational, never a warning: a MAC is the normal posture on Ubuntu (AppArmor) and
-        // RHEL (SELinux), so flagging it would cry wolf on most supported hosts. It earns a row
-        // because a MAC denial surfaces as a bare EPERM with nothing naming the LSM, which reads
-        // as an engine bug; `matrix()` carries the "look in the audit log first" pointer.
+        // Informational, never a warning: a MAC is the normal posture on most supported hosts. It
+        // earns a row because its denials surface as a bare EPERM naming no LSM, which reads as an
+        // engine bug; `matrix()` carries the "check the audit log first" pointer.
         Check::new(
             &match mac_posture(Path::new(SYS_LSM), Path::new(SYS_SELINUX_ENFORCE)) {
                 Some(active) => format!("mandatory access control: {active}"),
@@ -235,11 +217,9 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "",
         ),
-        // The jailer builds its chroot under the scratch dir: it mknods /dev/kvm there (inert on a
-        // `nodev` mount, so an owned-and-readable /dev/kvm still fails to open) and copies + execs
-        // the firecracker binary there (refused on a `noexec` mount). Modern systemd hosts mount
-        // /tmp `nodev`, hardened ones (CIS, RHEL baselines) add `noexec`, so this catches a jailed
-        // boot that would otherwise fail deep in InstanceStart with a misleading error.
+        // The jailer's chroot lives under the scratch dir: it mknods /dev/kvm there (inert on
+        // `nodev`) and execs its firecracker copy there (refused on `noexec`). Systemd hosts mount
+        // /tmp `nodev` by default, so this catches a boot that would fail deep in InstanceStart.
         Check::new(
             "scratch dir is not nodev/noexec (the jailer's chroot /dev/kvm and VMM binary live there)",
             !scratch_mount_flags(&config.scratch_dir).is_some_and(MountFlags::blocks_jail),
@@ -259,9 +239,8 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "bulk `input_dir` and `cargo xtask build-rootfs` fail; per-frame files are unaffected",
         ),
-        // Host hardening, advisory: micro-architectural side channels between
-        // co-resident guests live in the layer beneath the engine, so doctor advises the
-        // multi-tenant baseline (`docs/security-threat-model.md`) and never refuses.
+        // Host hardening, advisory: these side channels live in the layer beneath the engine, so
+        // doctor names the multi-tenant baseline (`docs/security-threat-model.md`) and never refuses.
         Check::new(
             "CPU vulnerability mitigations in effect",
             exposed.is_empty(),
@@ -332,10 +311,9 @@ pub fn can_boot(checks: &[Check]) -> bool {
     checks.iter().all(|c| c.status != CheckStatus::Fail)
 }
 
-/// Whether a **jailed** run (the default) can work on this host as invoked right now:
-/// real root *and* the `jailer` binary. Not a readiness check (an unjailed run is still a valid boot,
-/// which is why the two rows above only warn); it exists so a caller can suggest a first-run command
-/// that actually works here instead of one that fails.
+/// Whether a jailed run (the default) works on this host as invoked right now: real root *and* the
+/// `jailer` binary. Not a readiness check, since an unjailed run is still a valid boot; a caller uses
+/// it to suggest a first-run command that works here.
 #[must_use]
 pub fn jailed_run_available() -> bool {
     crate::sweep::own_euid() == Some(0) && command_on_path("jailer")
@@ -352,12 +330,7 @@ fn kvm_writable() -> bool {
 
 /// `bin` resolves to a file on `PATH` (or is an absolute/relative path that exists).
 fn command_on_path(bin: &str) -> bool {
-    let p = Path::new(bin);
-    if p.components().count() > 1 {
-        return p.is_file();
-    }
-    std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()))
+    resolve_binary_path(bin).is_some()
 }
 
 /// The supported Firecracker range as an operator-facing string (`v1.14..=v1.16`), rendered from
@@ -368,13 +341,9 @@ fn supported_range() -> String {
     format!("v{lo_maj}.{lo_min}..=v{hi_maj}.{hi_min}, tested on v{hi_maj}.{hi_min}")
 }
 
-/// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.16.1`), or `None` if the binary
-/// is missing, wedged, or prints something that does not parse.
-///
-/// This is the driver's own probe rather than a second copy of it, so `doctor` reports the version
-/// the driver validates against and inherits the two defences that probe has: a wall, and a file
-/// instead of a pipe for the child's stdout. Both matter more here than on the boot path, because
-/// `doctor` is the command a failed boot tells the operator to run.
+/// `(major, minor)` of `<fc> --version`, or `None` if the binary is missing, wedged, or prints
+/// something that does not parse. The driver's own probe, not a second copy, so this reports the
+/// version the driver validates against and inherits its wall and its file-not-pipe stdout.
 fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     match crate::spawn::probe_fc_version(Path::new(fc)) {
         FcProbe::Version(v) => Some(v),
@@ -382,13 +351,17 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     }
 }
 
-/// sha256 of the pinned release's `firecracker` binary (not the tarball: the check hashes the
-/// resolved binary on `PATH`). Only supported releases belong here; an older hash left in place
-/// would bless a VMM upstream no longer patches.
+/// sha256 of the pinned release's `firecracker` binary, not the tarball: the check hashes the
+/// resolved binary on `PATH`. Only supported releases belong here, since a stale hash would bless a
+/// VMM upstream no longer patches.
 const PINNED_FIRECRACKER_SHA256: &[&str] = &[
     "2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7", // v1.16.1
 ];
 
+/// Where `bin` resolves: a path with a directory component is judged as that path, a bare name is
+/// searched along `PATH` in order. The one resolution behind both this and [`command_on_path`], so
+/// the row that reports a binary present and the row that hashes it cannot disagree about which
+/// file they mean.
 fn resolve_binary_path(bin: &str) -> Option<PathBuf> {
     let p = Path::new(bin);
     if p.components().count() > 1 {
@@ -429,10 +402,9 @@ fn file_sha256(path: &Path) -> Option<String> {
     }))
 }
 
-/// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
 /// The mandatory-access-control LSMs named in `lsm_list` (the contents of [`SYS_LSM`]), in the
-/// kernel's own order. Filtered to [`MAC_LSMS`] so the advisory row names only modules that can
-/// deny a jailer operation.
+/// kernel's own order. Filtered to [`MAC_LSMS`], so the row names only modules that can deny a
+/// jailer operation.
 fn mac_lsms_in(lsm_list: &str) -> Vec<String> {
     lsm_list
         .trim()
@@ -443,10 +415,9 @@ fn mac_lsms_in(lsm_list: &str) -> Vec<String> {
         .collect()
 }
 
-/// A human phrase for the active MAC posture, or `None` when no MAC LSM is loaded.
-///
-/// SELinux additionally distinguishes enforcing from permissive, which changes whether a denial
-/// blocks or is only logged; AppArmor and the others report presence only.
+/// A human phrase for the active MAC posture, or `None` when no MAC LSM is loaded. SELinux alone
+/// distinguishes enforcing from permissive, which decides whether a denial blocks or is only
+/// logged.
 fn mac_posture(lsm_path: &Path, selinux_enforce_path: &Path) -> Option<String> {
     let list = std::fs::read_to_string(lsm_path).ok()?;
     let active = mac_lsms_in(&list);
@@ -481,6 +452,7 @@ fn parse_osrelease(s: &str) -> Option<(u64, u64)> {
     ))
 }
 
+/// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
 fn kernel_at_least(major: u64, minor: u64) -> bool {
     std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .ok()
@@ -489,11 +461,8 @@ fn kernel_at_least(major: u64, minor: u64) -> bool {
 }
 
 /// Whether any cgroup under `root` exposes `cgroup.kill`, the crash-safe teardown primitive
-/// `lifetime.rs` depends on (kernel 5.14+).
-///
-/// **The root cgroup does not have it**: `cgroup.kill` is a non-root interface file, so probing
-/// `<root>/cgroup.kill` reports absent on a host that has it (measured on 7.0.11). The scan looks
-/// one level down, where a systemd host always has `init.scope` and the mount scopes.
+/// `lifetime.rs` depends on. Scanned one level down because it is a non-root interface file, so
+/// `<root>/cgroup.kill` reports absent on a host that has it.
 fn cgroup_kill_under(root: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(root) else {
         return false;
@@ -515,27 +484,24 @@ fn kernel_verdict(cgroup_root: &Path) -> KernelVerdict {
     }
 }
 
-/// The sysfs facts behind the host-hardening advisory rows: the per-vulnerability
-/// mitigation files, whether SMT is active, and whether KSM is merging.
 /// The cgroup v2 root, scanned one level down for `cgroup.kill` by [`cgroup_kill_under`].
 const SYS_CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-/// The kernel's list of active LSMs, comma-separated (e.g. `capability,landlock,lockdown,yama,bpf`
-/// here; `capability,selinux` on RHEL; an `apparmor` entry on Ubuntu). Asking the kernel which
-/// modules are loaded is the distro-independent form of "is something going to deny the jailer",
-/// and it needs no `/etc/os-release` parsing.
+/// The kernel's list of active LSMs, comma-separated. Asking the kernel which modules are loaded
+/// is the distro-independent form of "will something deny the jailer".
 const SYS_LSM: &str = "/sys/kernel/security/lsm";
 
 /// SELinux's enforcing toggle: `1` blocks and logs, `0` only logs. Absent when SELinux is not the
 /// active LSM.
 const SYS_SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
 
-/// The LSMs that apply **mandatory access control** to the operations the jailer performs (chroot,
-/// `mknod`, bind mounts, uid drop). The rest of the list the kernel reports (`capability`, `yama`,
-/// `lockdown`, `landlock`, `bpf`) do not arbitrate those, so naming them in the report would be
-/// noise.
+/// The LSMs applying mandatory access control to what the jailer does (chroot, `mknod`, bind
+/// mounts, uid drop). The rest of the kernel's list does not arbitrate those, so naming them would
+/// be noise.
 const MAC_LSMS: [&str; 4] = ["selinux", "apparmor", "smack", "tomoyo"];
 
+/// The sysfs facts behind the host-hardening advisory rows: the per-vulnerability mitigation files,
+/// whether SMT is active, whether KSM is merging, and Yama's `ptrace` scope.
 const SYS_CPU_VULNERABILITIES: &str = "/sys/devices/system/cpu/vulnerabilities";
 const SYS_SMT_ACTIVE: &str = "/sys/devices/system/cpu/smt/active";
 const SYS_KSM_RUN: &str = "/sys/kernel/mm/ksm/run";
@@ -581,11 +547,9 @@ fn ptrace_scope_restricts_at(path: &Path) -> bool {
     std::fs::read_to_string(path).is_ok_and(|s| ptrace_scope_restricts(&s))
 }
 
-/// The pure parse behind [`ptrace_scope_restricts_at`]. `0` is the classic behavior where any
-/// same-uid process may attach; `1` (descendants only), `2` (admin only) and `3` (nobody) all deny a
-/// sibling. Anything unreadable or unparseable reads as unrestricted, so an absent fact raises the
-/// advisory rather than silently clearing it (the [`vulnerable_entries`] posture, inverted because
-/// here the safe direction is to warn).
+/// The pure parse behind [`ptrace_scope_restricts_at`]: `0` lets any same-uid process attach, while
+/// `1`, `2` and `3` all deny a sibling. Unparseable reads as unrestricted, so an absent fact raises
+/// the advisory rather than clearing it.
 fn ptrace_scope_restricts(content: &str) -> bool {
     content.trim().parse::<u32>().is_ok_and(|level| level >= 1)
 }
@@ -601,10 +565,9 @@ fn cgroup_controllers_delegated() -> bool {
         .unwrap_or(false)
 }
 
-/// The two mount flags that make a scratch filesystem unusable for a **jailed** boot: `nodev`
-/// makes the `/dev/kvm` node the jailer mknods in its chroot inert, and `noexec` makes the
-/// firecracker copy the jailer places (and execs) there unrunnable. One probe for both, since they
-/// come from the same mountinfo options field and fail the same boot.
+/// The two mount flags that make a scratch filesystem unusable for a jailed boot: `nodev` makes the
+/// jailer's chroot `/dev/kvm` inert, `noexec` makes its firecracker copy unrunnable. One probe for
+/// both, since they share a mountinfo field and fail the same boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MountFlags {
     pub nodev: bool,
@@ -619,10 +582,9 @@ impl MountFlags {
     }
 }
 
-/// The jail-relevant mount flags ([`MountFlags`]) of the filesystem holding `dir`, or `None` when they
-/// can't be determined, so the check reads "unknown" as "assume fine" rather than raising a false alarm.
-/// Public so the guided install can pre-empt the failure by writing a usable `scratch_dir`; a diagnostic
-/// helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
+/// The jail-relevant [`MountFlags`] of the filesystem holding `dir`, or `None` when they can't be
+/// determined, so "unknown" reads as "assume fine" rather than a false alarm. Public for the guided
+/// install; a diagnostic helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
 pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
     // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
@@ -631,10 +593,9 @@ pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     mount_flags_in(&mountinfo, &target)
 }
 
-/// The [`MountFlags`] of the mount holding `target` ([`crate::mountinfo::covering`], the same
-/// selection the jailed boot judges by). Pure, so the parse is unit-tested without a real `/proc`.
-/// `None` if no line covers `target` (an absolute path is always covered by `/`, so this only
-/// happens on malformed input).
+/// The [`MountFlags`] of the mount holding `target`, selected by [`crate::mountinfo::covering`], the
+/// same selection the jailed boot judges by. `None` only on malformed input, since an absolute path
+/// is always covered by `/`.
 fn mount_flags_in(mountinfo: &str, target: &Path) -> Option<MountFlags> {
     let mount = crate::mountinfo::covering(mountinfo, target)?;
     Some(MountFlags {
@@ -838,6 +799,17 @@ mod tests {
         // `sh` is on PATH on any host the test runs on; a nonsense name is not.
         assert!(command_on_path("sh"));
         assert!(!command_on_path("definitely-not-a-real-binary-xyzzy"));
+
+        // The other branch: a name carrying a directory component is judged as a path rather than
+        // searched for. Covered here because `command_on_path` reads its answer off
+        // `resolve_binary_path`, so the presence rows and the sha256 row judge one resolution.
+        let resolved = resolve_binary_path("sh").expect("sh resolves to a path");
+        assert!(
+            resolved.is_absolute(),
+            "PATH entries are absolute: {resolved:?}"
+        );
+        assert!(command_on_path(&resolved.to_string_lossy()));
+        assert!(!command_on_path("./definitely-not-a-real-binary-xyzzy"));
     }
 
     #[test]
