@@ -145,8 +145,11 @@ fn every_verb_round_trips_and_speaks_the_pinned_bytes() {
     assert_eq!(outcome.exec_wall_ms, 5);
 
     c.put("in.txt", "data\n").expect("put");
-    let got = c.get("out.txt").expect("get");
-    assert_eq!(got.as_deref(), Some("data"));
+    let got = c
+        .get("out.txt")
+        .expect("get")
+        .expect("the fixture is present");
+    assert_eq!((got.content.as_str(), got.lossy), ("data", true));
 
     assert_eq!(c.snapshot().expect("snapshot"), "/var/lib/bsx/snap-1");
     assert_eq!(c.trace().expect("trace")["schema"], 1);
@@ -346,6 +349,36 @@ fn an_over_cap_request_leaves_the_session_usable() {
     );
 
     c.close().expect("no byte moved, so the session is intact");
+    drop(c);
+    daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The daemon is the only party that saw the file's bytes; its lossy flag must reach the caller,
+/// and a missing file is `None`, not an error.
+#[test]
+fn get_surfaces_the_lossy_flag_and_maps_absent_to_none() {
+    let absent =
+        r#"{"schema":1,"reply":"got","path":"x","content":"","present":false,"lossy":false}"#;
+    let script = vec![
+        Answer::Reply(fixture("response", "got")),
+        Answer::Reply(absent.to_string()),
+    ];
+    let (path, daemon) = daemon("lossy-get", script);
+    let mut c = connect(&path);
+
+    let got = c.get("out.txt").expect("get").expect("present");
+    assert!(
+        got.lossy,
+        "the daemon flagged a lossy rendering and the client must carry it"
+    );
+    assert_eq!(got.content, "data");
+
+    assert!(
+        c.get("x").expect("get").is_none(),
+        "a missing file is None, not an error"
+    );
+
     drop(c);
     daemon.join().expect("the fake daemon's thread");
     let _ = std::fs::remove_file(&path);

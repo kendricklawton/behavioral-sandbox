@@ -549,17 +549,15 @@ fn the_reference_client_drives_a_full_session() {
         .unwrap_or_else(|e| panic!("put: {e}"));
     let back = client
         .get("data.txt")
-        .unwrap_or_else(|e| panic!("get: {e}"));
-    assert_eq!(
-        back.as_deref(),
-        Some("payload\n"),
-        "get returns what put wrote"
-    );
-    assert_eq!(
+        .unwrap_or_else(|e| panic!("get: {e}"))
+        .unwrap_or_else(|| panic!("data.txt was just put"));
+    assert_eq!(back.content, "payload\n", "get returns what put wrote");
+    assert!(!back.lossy, "UTF-8 text survives intact, so the flag is down");
+    assert!(
         client
             .get("absent.txt")
-            .unwrap_or_else(|e| panic!("get: {e}")),
-        None,
+            .unwrap_or_else(|e| panic!("get: {e}"))
+            .is_none(),
         "a missing file is None, not an error"
     );
 

@@ -133,6 +133,17 @@ pub struct Opened {
     pub pooled: bool,
 }
 
+/// What [`Client::get`] returns for a present file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetched {
+    /// The file's contents as UTF-8.
+    pub content: String,
+    /// `true` when `content` is a lossy rendering: the file's bytes were not valid UTF-8 and the
+    /// originals are not recoverable from this reply. Only the daemon saw the bytes, so this flag
+    /// is what keeps the substitution from being silent.
+    pub lossy: bool,
+}
+
 /// What [`Client::exec`] returns.
 #[derive(Debug, Clone)]
 pub struct ExecOutcome {
@@ -240,13 +251,17 @@ impl Client {
         }
     }
 
-    /// Read a file back from the session's working directory.
-    pub fn get(&mut self, path: &str) -> Result<Option<String>, ClientError> {
+    /// Read a file back from the session's working directory. `None` is a missing file, not an
+    /// error; [`Fetched::lossy`] says whether the contents survived UTF-8 intact.
+    pub fn get(&mut self, path: &str) -> Result<Option<Fetched>, ClientError> {
         self.send(&Request::Get(GetParams::new(path.to_string())))?;
         match self.recv()? {
             Response::Got {
-                content, present, ..
-            } => Ok(present.then_some(content)),
+                content,
+                present,
+                lossy,
+                ..
+            } => Ok(present.then_some(Fetched { content, lossy })),
             other => Err(self.unexpected(other)),
         }
     }
