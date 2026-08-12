@@ -309,7 +309,16 @@ cargo xtask self-host           # obtain the pinned kernel + rootfs, build the g
 It installs the `bsx` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
-KVM box. `--no-run` skips the boot proof (build + install only). Like `install.sh`, it writes a starter
+KVM box. `--no-run` skips the boot proof (build + install only).
+
+Building the eBPF probe object needs the pinned eBPF toolchain (`bpf-linker` and the pinned nightly,
+both listed in `AGENTS.md`). Without it there is no object to install, so `self-host` **refuses**
+rather than reporting success on an engine whose
+observability half is absent: `--trace` and `--watch` would record a gap and `--allow` enforcement
+would refuse. `cargo xtask setup` names what is missing. To stand the engine up without that half
+anyway, say so with `--no-probes`, and the completion line says so too.
+
+Like `install.sh`, it writes a starter
 `~/.bsx.toml` (absolute kernel/rootfs paths, and a `scratch_dir` off `nodev`/`noexec` when your
 `/tmp` carries either flag) unless one already exists; `BSX_NO_TOML=1` skips it.
 

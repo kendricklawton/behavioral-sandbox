@@ -63,6 +63,11 @@ enum Cmd {
         /// Build + install only; skip the sandbox boot proof (it just prints the command).
         #[arg(long)]
         no_run: bool,
+        /// Stand the engine up without its observability half when the pinned eBPF toolchain is
+        /// absent: `--trace`/`--watch` record a gap and `--allow` enforcement refuses. Without this,
+        /// a self-host that cannot build the probe object refuses rather than reporting success.
+        #[arg(long)]
+        no_probes: bool,
     },
     /// Snapshot every sha-pinned upstream input (guest kernel + rootfs, Alpine base, the `.apk`
     /// closure) into a local mirror, so a fresh host builds offline, no Firecracker S3 bucket, no
@@ -249,7 +254,11 @@ fn main() -> Result<()> {
         Cmd::Ci => ci(),
         Cmd::CiPrivileged { repeat } => ci_privileged(repeat),
         Cmd::Setup => setup(),
-        Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
+        Cmd::SelfHost {
+            prefix,
+            no_run,
+            no_probes,
+        } => selfhost::self_host(prefix, no_run, no_probes),
         Cmd::Vendor { dir, verify } => {
             if verify {
                 vendor::verify(&dir.unwrap_or_else(vendor::default_vendor_dir))

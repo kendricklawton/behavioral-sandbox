@@ -18,10 +18,11 @@ use crate::{
 /// The binaries a self-host installs: the CLI and the driver daemon, both from the `bsx` crate.
 const BINARIES: &[&str] = &["bsx"];
 
-/// `cargo xtask self-host [--prefix DIR] [--no-run]`: build the artifacts + binaries and prove one
-/// sandbox boots. `--prefix` is the install dir (default `~/.local/bin`); `--no-run` skips the boot
-/// proof (build + install only).
-pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
+/// `cargo xtask self-host [--prefix DIR] [--no-run] [--no-probes]`: build the artifacts + binaries
+/// and prove one sandbox boots. `--prefix` is the install dir (default `~/.local/bin`); `--no-run`
+/// skips the boot proof (build + install only); `--no-probes` is the named opt-out for standing the
+/// engine up without its observability half.
+pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool, no_probes: bool) -> Result<()> {
     let offline = vendor_dir().is_some();
     println!(
         "self-host: {} build\n",
@@ -47,6 +48,11 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 
     println!("\n== 3/5  build the eBPF probe object (the audit half) ==");
     build_probes()?;
+    // `build_probes` soft-skips without the eBPF toolchain so the everyday gate stays host-safe.
+    // Resolved the way the *installed* engine resolves it, so this answers "will it find an
+    // object", not "did this build write one".
+    let probes_present = bsx_probes_loader::object_path().is_file();
+    probe_object_required(probes_present, no_probes)?;
 
     println!("\n== 4/5  build + install the bsx binary ==");
     cargo(&["build", "--release", "--locked", "-p", "bsx"])?;
@@ -58,12 +64,34 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     println!("\n== 5/5  run a sandbox ==");
     prove(&engine_bin, no_run)?;
 
+    // The qualifier rides on the completion line itself: a reader who sees only the last line must
+    // not read a partial stand-up as a whole one.
+    let half = if probes_present {
+        ""
+    } else {
+        " WITHOUT the observability half (--no-probes): --trace and --watch record a gap, --allow \
+         enforcement refuses"
+    };
     println!(
-        "\n✓ self-host complete. Binary in {}; start the daemon with `bsx serve` (see \
+        "\n✓ self-host complete{half}. Binary in {}; start the daemon with `bsx serve` (see \
          `bsx serve --help`).",
         prefix.display()
     );
     Ok(())
+}
+
+/// Refuses a self-host with no eBPF object unless the operator named the opt-out, so a stand-up
+/// never reports success on an engine whose observability half is absent.
+fn probe_object_required(present: bool, opted_out: bool) -> Result<()> {
+    if present || opted_out {
+        return Ok(());
+    }
+    bail!(
+        "no eBPF probe object (the skip reason is printed above), so this would install an engine \
+         without its observability half: --trace and --watch record a gap and --allow enforcement \
+         refuses. Install the pinned eBPF toolchain (`cargo xtask setup` names what is missing), \
+         or pass --no-probes to stand the engine up without it."
+    );
 }
 
 /// Write `~/.bsx.toml` with **absolute** artifact paths, matching what `install.sh` does for a
@@ -249,4 +277,31 @@ fn set_executable(path: &Path) -> Result<()> {
         .permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(path, perms).with_context(|| format!("chmod +x {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-up that cannot build the probe object refuses, so no self-host reports success on an
+    /// engine whose audit half is absent. The opt-out is the only way past, which makes dropping
+    /// that half the operator's stated choice rather than a skipped step.
+    #[test]
+    fn a_self_host_without_the_probe_object_refuses_unless_the_opt_out_is_named() {
+        assert!(probe_object_required(true, false).is_ok());
+        assert!(probe_object_required(true, true).is_ok());
+        assert!(probe_object_required(false, true).is_ok());
+
+        let refusal = probe_object_required(false, false)
+            .expect_err("a missing probe object refuses")
+            .to_string();
+        assert!(
+            refusal.contains("--no-probes"),
+            "the refusal names the opt-out that gets past it: {refusal}"
+        );
+        assert!(
+            refusal.contains("cargo xtask setup"),
+            "and names what enumerates the missing toolchain: {refusal}"
+        );
+    }
 }
