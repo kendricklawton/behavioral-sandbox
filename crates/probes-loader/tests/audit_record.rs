@@ -24,6 +24,7 @@
 use std::time::Duration;
 
 use bsx_engine::{BootConfig, Vm};
+use bsx_probes_common::IPPROTO_UDP;
 use bsx_probes_loader::{
     AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
     SharedTracer, Timing,
@@ -32,9 +33,6 @@ use bsx_probes_loader::{
 mod common;
 
 use common::{networked_agent_config, probe_and_vm_skip_reason};
-
-/// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
-const IPPROTO_UDP: u8 = 17;
 
 /// The [`networked_agent_config`] boot without its NIC, for the no-NIC attach path, where the
 /// record's network section must be absent rather than gapped.

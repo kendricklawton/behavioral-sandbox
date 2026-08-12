@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use bsx_engine::Vm;
+use bsx_probes_common::IPPROTO_UDP;
 use bsx_probes_loader::{
     AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
     SharedTracer, Timing,
@@ -29,9 +30,6 @@ mod common;
 
 use common::{networked_agent_config, probe_and_vm_skip_reason};
 
-/// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
-/// a const for.
-const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 /// The one endpoint the hostile guest is permitted to reach on its host end, the allow-listed
 /// exception. Every other destination is denied by the deny-by-default policy.
 const ALLOWED_PORT: u16 = 9999;
