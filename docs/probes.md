@@ -222,7 +222,12 @@ run-scoped totals; a mid-run read is a floor.
 program-per-sandbox would run every attached program on every context switch (O(sandboxes) per switch).
 `ResourceMeter::add_target(id)` registers a sandbox's cgroup, `remove_target` unregisters it, and the hot
 path stays a single hash lookup no matter how many sandboxes are metered; `CPU_NS` holds only the
-registered cgroups. `ResourceMeter::cpu_time(id)` reads the total back, and `cargo xtask bench-meter`
+registered cgroups. That map is fixed-capacity like the others, so a cgroup arriving once it is full
+gets no slot, accumulates nothing, and reads back a `cpu_time` of zero, which is indistinguishable
+from a run that used no CPU. `CPU_DROPS` counts exactly that, `ResourceMeter::dropped_cgroups()`
+reads it, and `SandboxProbes::collect` turns a nonzero delta over a run's window into an
+`AxisGap::Cpu`, the same honest-loss discipline the ring buffer and the flow table follow.
+`ResourceMeter::cpu_time(id)` reads the total back, and `cargo xtask bench-meter`
 measures the honest per-context-switch cost (no meter vs attached-not-metering-us vs
 attached-metering-us). That is the "bounded, sane under many concurrent sandboxes" property, measured.
 

@@ -17,6 +17,8 @@ const PROGRAM: &str = "count_execve";
 const MAP: &str = "EXECVE_COUNT";
 /// The per-PID hash map's name (the `#[map] static EXECVE_BY_PID` symbol).
 const MAP_BY_PID: &str = "EXECVE_BY_PID";
+/// The per-CPU counter of pids a full `EXECVE_BY_PID` dropped (`#[map] static PID_DROPS`).
+const PID_DROPS_MAP: &str = "PID_DROPS";
 /// The `syscalls` tracepoint category every program in this module attaches under.
 const TP_SYSCALLS: &str = "syscalls";
 /// The event the counter program hooks: `syscalls/sys_enter_execve`.
@@ -74,7 +76,8 @@ impl ExecveCounter {
 
     /// The per-PID `execve` counts as `(pid, count)` pairs, read from the `EXECVE_BY_PID` hash
     /// map. Order is unspecified (hash-map iteration); the [`count`](ExecveCounter::count) total is
-    /// authoritative, since the per-PID map is bounded and drops new keys when full.
+    /// authoritative, since the per-PID map is bounded and drops new keys when full, and
+    /// [`dropped_pids`](ExecveCounter::dropped_pids) says how many.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
@@ -92,6 +95,17 @@ impl ExecveCounter {
             out.push((pid, count));
         }
         Ok(out)
+    }
+
+    /// Pids a full `EXECVE_BY_PID` could not admit, summed across CPUs: the loss that makes
+    /// [`counts_by_pid`](ExecveCounter::counts_by_pid) shorter than the host's real set of
+    /// exec'ing processes. Monotonic since [`load`](ExecveCounter::load). Nonzero means the per-pid
+    /// view is partial, while [`count`](ExecveCounter::count) stays exact.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
+    pub fn dropped_pids(&self) -> Result<u64, ProbeError> {
+        per_cpu_sum(&self.ebpf, PID_DROPS_MAP)
     }
 }
 

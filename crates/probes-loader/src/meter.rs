@@ -9,6 +9,7 @@ use aya::programs::TracePoint;
 use bsx_record::{CgroupStats, ResourceSummary};
 
 use crate::maps::remove_cgroup_key;
+use crate::tracer::per_cpu_sum;
 use crate::{ProbeError, cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object};
 
 /// The `account_sched_switch` program's name (its `#[tracepoint] fn` symbol in `crates/probes`).
@@ -18,6 +19,9 @@ const TP_SCHED: &str = "sched";
 const TP_SCHED_SWITCH: &str = "sched_switch";
 /// The per-cgroup on-CPU-nanoseconds map (`#[map] static CPU_NS`), keyed by cgroup id.
 const CPU_NS_MAP: &str = "CPU_NS";
+/// The per-CPU counter of cgroups a full `CPU_NS` dropped (`#[map] static CPU_DROPS`), read by
+/// [`ResourceMeter::dropped_cgroups`] so an unmeasured sandbox is a gap, not a zero.
+const CPU_DROPS_MAP: &str = "CPU_DROPS";
 /// The set of cgroup ids to meter (`#[map] static METER_TARGETS`, `cgroup_id -> 1`); the loader
 /// registers a sandbox's cgroup here so one shared program meters many sandboxes.
 const METER_TARGETS_MAP: &str = "METER_TARGETS";
@@ -231,6 +235,22 @@ impl ResourceMeter {
                 "read `{CPU_NS_MAP}` for cgroup {cgroup_id}: {e}"
             ))),
         }
+    }
+
+    /// Cgroups a full `CPU_NS` map could not admit, summed across CPUs: each one is a cgroup whose
+    /// on-CPU time went unaccounted, so its [`cpu_ns`](Self::cpu_ns) reads back `0` and cannot be
+    /// told from a sandbox that used no CPU. Monotonic since [`load`](Self::load); a caller snapshots
+    /// it around a run and reports a nonzero delta as a coverage gap. The counter is host-global, so
+    /// the attribution is approximate, which is the same trade the ring buffer's drop counter makes.
+    ///
+    /// Reachable when [`meter_all`](Self::meter_all) is on (every cgroup on the host competes for
+    /// `MAX_CGROUPS` slots), or when a long-lived meter's [`clear`](Self::clear) teardown has been
+    /// failing and dead cgroups have filled the map.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
+    pub fn dropped_cgroups(&self) -> Result<u64, ProbeError> {
+        per_cpu_sum(&self.ebpf, CPU_DROPS_MAP)
     }
 
     /// Every metered cgroup's on-CPU nanoseconds as `(cgroup_id, ns)` pairs (order unspecified), the

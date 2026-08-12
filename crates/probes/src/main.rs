@@ -110,12 +110,18 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
     unsafe {
         if let Some(slot) = EXECVE_BY_PID.get_ptr_mut(pid) {
             *slot += 1;
-        } else {
-            let _ = EXECVE_BY_PID.insert(pid, 1, 0);
+        } else if EXECVE_BY_PID.insert(pid, 1, 0).is_err() {
+            count_map_drop(&PID_DROPS);
         }
     }
     0
 }
+
+/// A single-slot **per-CPU** counter of pids a full [`EXECVE_BY_PID`] could not admit, so the
+/// difference between [`EXECVE_COUNT`] and the sum of the per-pid rows has a stated cause rather
+/// than reading as a shorter list of busier processes.
+#[map]
+static PID_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// A single MPSC **ring buffer** of per-event [`SyscallEvent`] records, shared by every CPU and
 /// drained in order by one consumer. 256 KiB (a power-of-two multiple of the page size, as the map
@@ -704,6 +710,13 @@ static CPU_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 /// Cap on the per-cgroup CPU map, a fixed load-time bound.
 const MAX_CGROUPS: u32 = 1024;
 
+/// A single-slot **per-CPU** counter of cgroups a full [`CPU_NS`] could not admit. Without it a
+/// sandbox that arrives after the map fills accumulates no time and reports a `cpu_time` of zero,
+/// which reads as "this run used no CPU" rather than "this was not measured"; the loader turns a
+/// nonzero delta into a coverage gap on the CPU axis instead.
+#[map]
+static CPU_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
 /// This CPU's timestamp at its **last** `sched_switch`, so the slice a task just ran is `now -
 /// LAST_SWITCH[cpu]`. Per-CPU, so no cross-CPU atomic and no key math. Zero-init at load, so the
 /// first switch on a CPU has no prior stamp and is skipped.
@@ -765,8 +778,8 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     unsafe {
         if let Some(acc) = CPU_NS.get_ptr_mut(cgroup) {
             *acc += delta;
-        } else {
-            let _ = CPU_NS.insert(cgroup, delta, 0);
+        } else if CPU_NS.insert(cgroup, delta, 0).is_err() {
+            count_map_drop(&CPU_DROPS);
         }
     }
     0

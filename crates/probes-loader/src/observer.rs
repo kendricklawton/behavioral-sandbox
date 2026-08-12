@@ -47,6 +47,14 @@ impl SharedMeter {
     fn with<R>(&self, f: impl FnOnce(&mut ResourceMeter) -> R) -> Option<R> {
         self.0.lock().ok().map(|mut m| f(&mut m))
     }
+
+    /// The kernel's cumulative count of cgroups a full `CPU_NS` map could not admit, or `None` if it
+    /// can't be read. [`attach`](SandboxProbes::attach) snapshots this and
+    /// [`collect`](SandboxProbes::collect) reports a nonzero delta as a coverage gap: an unmetered
+    /// cgroup reads back a `cpu_time` of zero, which must not pass for a run that used no CPU.
+    fn cpu_drops(&self) -> Option<u64> {
+        self.with(|m| m.dropped_cgroups().ok()).flatten()
+    }
 }
 
 /// A process-shared [`SyscallTracer`]: loaded **once**, switched to set mode, and handed to every
@@ -187,23 +195,22 @@ fn drain_route(inner: &mut TracerInner) -> usize {
         .unwrap_or(0)
 }
 
-/// Fold a monotonic loss counter's attach-to-collect window into a coverage gap: `None` when both
+/// Fold a monotonic loss counter's attach-to-collect window into a gap **reason**: `None` when both
 /// endpoints read and nothing was lost; `lost(delta)` when the counter moved; `unreadable` when
 /// either endpoint is missing, because unknown loss is still loss, never silence. The one delta
-/// rule both of `collect`'s host-syscall loss counters (kernel ring drops, reader-side undecodable
-/// records) go through, so neither can drift into its own laxer reading.
+/// rule every one of `collect`'s loss counters goes through (kernel ring drops, reader-side
+/// undecodable records, cgroups a full CPU map dropped), so none can drift into its own laxer
+/// reading. The caller names the axis, since the rule is the same on all of them.
 fn loss_gap(
     before: Option<u64>,
     after: Option<u64>,
     lost: impl FnOnce(u64) -> String,
     unreadable: &'static str,
-) -> Option<AxisGap> {
+) -> Option<std::borrow::Cow<'static, str>> {
     match (before, after) {
-        (Some(before), Some(after)) if after > before => {
-            Some(AxisGap::HostSyscalls(lost(after - before).into()))
-        }
+        (Some(before), Some(after)) if after > before => Some(lost(after - before).into()),
         (Some(_), Some(_)) => None, // both endpoints read, no increase: exact
-        _ => Some(AxisGap::HostSyscalls(unreadable.into())),
+        _ => Some(unreadable.into()),
     }
 }
 
@@ -277,6 +284,9 @@ pub struct SandboxProbes {
     /// The [`drops_at_attach`](Self::drops_at_attach) twin for the reader-side undecodable-record
     /// counter; a nonzero delta at `collect` is the same class of gap.
     undecodable_at_attach: Option<u64>,
+    /// The [`drops_at_attach`](Self::drops_at_attach) twin on the CPU axis: cgroups a full `CPU_NS`
+    /// map turned away. `None` if unreadable at attach, or if this sandbox was never metered.
+    cpu_drops_at_attach: Option<u64>,
     /// The default route the driver configured, carried through to the record. The tap cannot see
     /// it, so it rides as a plain value rather than being observed.
     gateway: Option<std::net::Ipv4Addr>,
@@ -373,6 +383,7 @@ impl SandboxProbes {
             metered,
             drops_at_attach: if traced { tracer.drops() } else { None },
             undecodable_at_attach: if traced { tracer.undecodable() } else { None },
+            cpu_drops_at_attach: if metered { meter.cpu_drops() } else { None },
             gaps,
             finalized: false,
         }
@@ -409,28 +420,34 @@ impl SandboxProbes {
         // but either endpoint of a delta is *unreadable*, the loss is unknown, still a gap (unknown
         // loss is loss), never silence.
         if had_tracer {
-            self.gaps.extend(loss_gap(
-                self.drops_at_attach,
-                self.tracer.drops(),
-                |n| {
-                    format!(
-                        "ring buffer dropped {n} event(s) during this run's window; the footprint \
-                         may undercount"
-                    )
-                },
-                "ring-buffer event-loss counter unreadable at finalize; possible undercount",
-            ));
-            self.gaps.extend(loss_gap(
-                self.undecodable_at_attach,
-                self.tracer.undecodable(),
-                |n| {
-                    format!(
-                        "{n} ring record(s) did not decode as a SyscallEvent (kernel/userspace \
-                         event-record drift); the footprint may undercount"
-                    )
-                },
-                "undecodable-record counter unreadable at finalize; possible undercount",
-            ));
+            self.gaps.extend(
+                loss_gap(
+                    self.drops_at_attach,
+                    self.tracer.drops(),
+                    |n| {
+                        format!(
+                            "ring buffer dropped {n} event(s) during this run's window; the \
+                             footprint may undercount"
+                        )
+                    },
+                    "ring-buffer event-loss counter unreadable at finalize; possible undercount",
+                )
+                .map(AxisGap::HostSyscalls),
+            );
+            self.gaps.extend(
+                loss_gap(
+                    self.undecodable_at_attach,
+                    self.tracer.undecodable(),
+                    |n| {
+                        format!(
+                            "{n} ring record(s) did not decode as a SyscallEvent (kernel/userspace \
+                             event-record drift); the footprint may undercount"
+                        )
+                    },
+                    "undecodable-record counter unreadable at finalize; possible undercount",
+                )
+                .map(AxisGap::HostSyscalls),
+            );
         }
 
         // Totals are the section's spine, since a section without them misreads as "no traffic", so their
@@ -558,6 +575,26 @@ impl SandboxProbes {
         };
 
         if self.metered {
+            // A cgroup a full `CPU_NS` could not admit accumulates nothing, so its `cpu_time` reads
+            // back zero: the one reading that must never pass for "this run used no CPU". The
+            // counter is host-global like the ring buffer's, so a delta means *some* cgroup went
+            // unmetered in this window, which is enough to stop calling the number exact.
+            self.gaps.extend(
+                loss_gap(
+                    self.cpu_drops_at_attach,
+                    self.meter.cpu_drops(),
+                    |n| {
+                        format!(
+                            "the per-cgroup CPU map was full during this run's window ({n} \
+                             cgroup(s) dropped); a dropped cgroup accumulates no time and reads \
+                             back as zero"
+                        )
+                    },
+                    "per-cgroup CPU-map drop counter unreadable at finalize; the CPU total may be \
+                     unmeasured rather than zero",
+                )
+                .map(AxisGap::Cpu),
+            );
             if let Some(cgid) = self.cgroup_id {
                 // Unregister *and* free the cgroup's `CPU_NS` row (the summary above already read
                 // it), so a long-lived shared meter doesn't accumulate dead cgroups against the
@@ -693,7 +730,7 @@ mod tests {
     fn a_counter_increase_between_attach_and_collect_is_a_gap() {
         let gap = loss_gap(Some(2), Some(5), |n| format!("{n} lost"), "unreadable")
             .expect("an increase is loss");
-        assert_eq!(gap.reason(), "3 lost", "the gap names the window's delta");
+        assert_eq!(gap, "3 lost", "the reason names the window's delta");
     }
 
     #[test]
@@ -708,7 +745,7 @@ mod tests {
         for (before, after) in [(None, Some(5)), (Some(2), None), (None, None)] {
             let gap = loss_gap(before, after, |n| format!("{n} lost"), "counter unreadable")
                 .expect("a missing endpoint is unknown loss");
-            assert_eq!(gap.reason(), "counter unreadable");
+            assert_eq!(gap, "counter unreadable");
         }
     }
 }
