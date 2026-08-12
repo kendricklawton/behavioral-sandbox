@@ -612,3 +612,101 @@ fn a_never_draining_daemon_cannot_hold_a_bounded_send() {
     drop(c);
     daemon.join().expect("the fake daemon's thread");
 }
+
+/// A poisoned session says **which** death it died, and the two cancel paths say the same thing.
+///
+/// Every poison test asserted only that the session was `Desynced`, never what it reported, so a
+/// cause wired to the wrong arm read as healthy to the whole suite. This string is what a caller
+/// reads back from every later call, and the only thing that tells a hang-up from a cancel from a
+/// broken pairing.
+///
+/// The two cancels are here because a cancel is poisoned from two places: `Canceller::cancel`
+/// before the line is written, and the read path when the daemon reports one this client never
+/// asked for. They must agree, or a caller learns a different fact depending on who noticed first.
+///
+/// Asserted by the distinguishing word rather than verbatim, so rewording the prose does not fail
+/// the test while pointing an arm at the wrong cause still does.
+#[test]
+fn a_poisoned_session_names_the_death_it_died() {
+    fn cause_of(err: ClientError) -> String {
+        match err {
+            ClientError::Desynced { cause } => cause.to_string(),
+            other => panic!("expected a poisoned session, got {other}"),
+        }
+    }
+    let argv = ["true".to_string()];
+
+    // The peer hung up.
+    let (path, thread) = daemon("cause-hangup", vec![Answer::HangUp]);
+    let mut c = connect(&path);
+    let _ = c.exec(&argv, "").expect_err("the daemon hung up");
+    let closed = cause_of(c.exec(&argv, "").expect_err("the session is over"));
+    thread.join().expect("the fake daemon's thread");
+
+    // A well-formed reply that answers a different request.
+    let (path, thread) = daemon(
+        "cause-mispaired",
+        vec![Answer::Reply(fixture("response", "closed"))],
+    );
+    let mut c = connect(&path);
+    let _ = c
+        .exec(&argv, "")
+        .expect_err("closed is not an exec's reply");
+    let mispaired = cause_of(c.exec(&argv, "").expect_err("the pairing is off"));
+    drop(c);
+    thread.join().expect("the fake daemon's thread");
+
+    // The **daemon** reports a cancel this client never asked for: the read path poisons.
+    let (path, thread) = daemon(
+        "cause-daemon-cancel",
+        vec![Answer::Reply(fixture("response", "cancelled"))],
+    );
+    let mut c = connect(&path);
+    let err = c
+        .exec(&argv, "")
+        .expect_err("the daemon cancelled the session");
+    assert!(
+        matches!(err, ClientError::Cancelled),
+        "a `cancelled` reply is its own typed error, got {err}"
+    );
+    let by_daemon = cause_of(c.exec(&argv, "").expect_err("the session is over"));
+    drop(c);
+    thread.join().expect("the fake daemon's thread");
+
+    // **This** client cancels: the canceller poisons before the line is written.
+    let script = vec![
+        Answer::Reply(fixture("response", "result")),
+        Answer::Swallow,
+    ];
+    let (path, thread) = daemon("cause-self-cancel", script);
+    let mut c = connect(&path);
+    let mut canceller = c.canceller();
+    c.exec(&argv, "").expect("the result won the race");
+    canceller.cancel().expect("the cancel is written");
+    let by_caller = cause_of(c.exec(&argv, "").expect_err("the session was cancelled"));
+    thread.join().expect("the fake daemon's thread");
+    drop(c);
+
+    assert!(
+        closed.contains("closed"),
+        "a hang-up must say the daemon closed the connection, got {closed:?}"
+    );
+    assert!(
+        mispaired.contains("different request"),
+        "a mismatched reply must say the pairing is off, got {mispaired:?}"
+    );
+    assert_eq!(
+        by_daemon, by_caller,
+        "whoever noticed the cancel, the caller must learn the same thing"
+    );
+    assert!(
+        by_caller.contains("cancelled"),
+        "and it must say so, got {by_caller:?}"
+    );
+    let distinct: std::collections::BTreeSet<&String> = [&closed, &mispaired, &by_caller].into();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "three different deaths must not report one cause: {closed:?} {mispaired:?} {by_caller:?}"
+    );
+}
