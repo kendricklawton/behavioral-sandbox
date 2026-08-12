@@ -167,16 +167,15 @@ pub(crate) fn download_one(a: &Artifact) -> Result<()> {
 
 /// `curl -fSL` a URL to `dest` (fail on HTTP error, follow redirects).
 fn curl_download(url: &str, dest: &Path) -> Result<()> {
-    let status = Command::new("curl")
-        .args(["-fSL", "-o"])
-        .arg(dest)
-        .arg(url)
-        .status()
-        .context("running curl (is it installed?)")?;
-    if !status.success() {
-        bail!("curl failed for {url}");
-    }
-    Ok(())
+    crate::run_tool(
+        "curl",
+        &[
+            std::ffi::OsStr::new("-fSL"),
+            std::ffi::OsStr::new("-o"),
+            dest.as_os_str(),
+            std::ffi::OsStr::new(url),
+        ],
+    )
 }
 
 /// The sha256 of a file, via the `sha256sum` CLI (no hashing crate on the dev-tooling path).

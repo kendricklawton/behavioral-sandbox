@@ -292,17 +292,16 @@ fn deterministic_tar_flags() -> Vec<String> {
 /// environment-dependent value cannot give the property this function claims, because a verifier's shell
 /// is not the release runner's, and an unset variable falls back to wall clock.
 fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
-    let mut cmd = Command::new("tar");
-    cmd.args(deterministic_tar_flags());
-    cmd.arg("-C")
-        .arg(dist_dir)
-        .arg("-czf")
-        .arg(tarball)
-        .arg(name);
-    let status = cmd.status().context("running tar (is it installed?)")?;
-    if !status.success() {
-        bail!("tar failed for {}", tarball.display());
-    }
+    let flags = deterministic_tar_flags();
+    let mut args: Vec<&std::ffi::OsStr> = flags.iter().map(std::ffi::OsStr::new).collect();
+    args.extend([
+        std::ffi::OsStr::new("-C"),
+        dist_dir.as_os_str(),
+        std::ffi::OsStr::new("-czf"),
+        tarball.as_os_str(),
+        std::ffi::OsStr::new(name),
+    ]);
+    crate::run_tool("tar", &args)?;
     println!("  packed {}", tarball.display());
     Ok(())
 }
@@ -450,25 +449,17 @@ mod tests {
         }
     }
 
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn detached_manifest_signature_round_trips_and_binds_the_exact_bytes() {
-        let path = std::env::temp_dir().join(format!("dist_sign_test_{}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
-        let _guard = TempDir(path.clone());
+        let dir = bsx_test_support::ScratchDir::created("dist-sign-test");
+        let path = dir.path();
 
         let sample_manifest =
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  test.tar.gz\n";
         std::fs::write(path.join("SHA256SUMS"), sample_manifest).unwrap();
 
         let key = bsx_probes_loader::HostKey::from_seed([7u8; 32]);
-        sign_manifest_bytes(&path, &key).unwrap();
+        sign_manifest_bytes(path, &key).unwrap();
 
         let sig = std::fs::read(path.join("SHA256SUMS.sig")).unwrap();
         let sig: [u8; 64] = sig
@@ -885,30 +876,8 @@ mod tests {
              channel means CI builds with whatever shipped that morning"
         );
 
-        // **Every** workflow, discovered by reading the directory rather than a hardcoded list: a
-        // list silently exempts whatever it omits, which reads as coverage and is not. (The first
-        // version of this test listed four files and missed both fuzz workflows, each of which
-        // installed a floating nightly.) A new workflow is covered the moment it is added.
-        let dir = repo.join(".github/workflows");
         let mut checked = 0usize;
-        let mut entries: Vec<_> = std::fs::read_dir(&dir)
-            .expect(".github/workflows")
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "yml" || e == "yaml"))
-            .collect();
-        entries.sort();
-        assert!(
-            !entries.is_empty(),
-            "no workflows found in {}",
-            dir.display()
-        );
-        for path in &entries {
-            let wf = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let text = std::fs::read_to_string(path).expect("read workflow");
+        for (wf, text) in workflow_texts(repo) {
             for line in text.lines() {
                 let line = line.trim();
                 if line.starts_with('#') {
@@ -937,9 +906,9 @@ mod tests {
         // assertion above vacuous while the test still passed: no matches, no failures, green.
         assert!(
             checked > 0,
-            "no pinned toolchain/tool installs matched in {}: the patterns this test greps for have \
-             drifted from what the workflows actually run, so it is asserting nothing",
-            dir.display()
+            "no pinned toolchain/tool installs matched in .github/workflows: the patterns this \
+             test greps for have drifted from what the workflows actually run, so it is asserting \
+             nothing"
         );
 
         // The build instructions hand out the same commands; a reader who follows them must land on
@@ -979,21 +948,9 @@ mod tests {
     #[test]
     fn workflow_repo_paths_exist() {
         let repo = workspace_root();
-        let dir = repo.join(".github/workflows");
         let mut checked = 0usize;
         let mut missing: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
-            let path = entry.expect("workflow dir entry").path();
-            // Both spellings: a `.yaml` file GitHub runs but this scan skipped would be a
-            // silent hole in exactly the coverage the test claims.
-            if !matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("yml" | "yaml")
-            ) {
-                continue;
-            }
-            let wf = path.file_name().unwrap().to_string_lossy().to_string();
-            let text = std::fs::read_to_string(&path).expect("read workflow");
+        for (wf, text) in workflow_texts(repo) {
             for (idx, line) in text.lines().enumerate() {
                 for token in line.split(|c: char| c.is_ascii_whitespace() || "\"'`(),".contains(c))
                 {
@@ -1017,9 +974,8 @@ mod tests {
         // to prevent.
         assert!(
             checked > 0,
-            "no crates/ or xtask/ path reference matched in {}: the workflows no longer name repo \
-             files the way this scan looks for, so it is asserting nothing",
-            dir.display()
+            "no crates/ or xtask/ path reference matched in .github/workflows: the workflows no \
+             longer name repo files the way this scan looks for, so it is asserting nothing"
         );
         assert!(
             missing.is_empty(),
@@ -1036,21 +992,9 @@ mod tests {
     #[test]
     fn workflow_source_parsers_still_match() {
         let repo = workspace_root();
-        let dir = repo.join(".github/workflows");
         let mut checked = 0usize;
         let mut unreadable: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
-            let path = entry.expect("workflow dir entry").path();
-            // Both spellings: a `.yaml` file GitHub runs but this scan skipped would be a
-            // silent hole in exactly the coverage the test claims.
-            if !matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("yml" | "yaml")
-            ) {
-                continue;
-            }
-            let wf = path.file_name().unwrap().to_string_lossy().to_string();
-            let text = std::fs::read_to_string(&path).expect("read workflow");
+        for (wf, text) in workflow_texts(repo) {
             let lines: Vec<&str> = text.lines().collect();
             for (idx, line) in lines.iter().enumerate() {
                 let Some(after) = line.split_once("grep -oE ").map(|(_, r)| r) else {
@@ -1094,10 +1038,37 @@ mod tests {
         );
         assert!(
             checked > 0,
-            "no source-file grep matched in {}: the workflows no longer parse constants this way, \
-             so this test is asserting nothing",
-            dir.display()
+            "no source-file grep matched in .github/workflows: the workflows no longer parse \
+             constants this way, so this test is asserting nothing"
         );
+    }
+
+    /// Every workflow file with its text, in name order: discovered by reading the directory
+    /// rather than a hardcoded list, because a list silently exempts whatever it omits. Both
+    /// GitHub spellings, since a `.yaml` file GitHub runs but a scan skipped would be a silent
+    /// hole in exactly the coverage the callers claim; an empty directory fails here rather than
+    /// leaving every caller's scan vacuously green.
+    fn workflow_texts(repo: &Path) -> Vec<(String, String)> {
+        let dir = repo.join(".github/workflows");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect(".github/workflows")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yml" | "yaml")))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no workflows found in {}", dir.display());
+        paths
+            .into_iter()
+            .map(|p| {
+                let wf = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let text = std::fs::read_to_string(&p).expect("read workflow");
+                (wf, text)
+            })
+            .collect()
     }
 
     /// The two pins can never drift: the PEM `install.sh` embeds (what installers trust) must be

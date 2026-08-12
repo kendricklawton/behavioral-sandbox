@@ -24,5 +24,9 @@ bsx-record = { path = "../crates/record" }
 # needs CAP_BPF/CAP_PERFMON).
 bsx-probes-loader = { path = "../crates/probes-loader" }
 
+[dev-dependencies]
+# The shared scratch-dir guard for the tests, instead of a hand-rolled TempDir per test module.
+bsx-test-support = { path = "../crates/test-support" }
+
 [lints]
 workspace = true

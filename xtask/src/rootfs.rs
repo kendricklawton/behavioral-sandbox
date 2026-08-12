@@ -663,19 +663,10 @@ fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bo
     if update_lock {
         args.push("--update-lock");
     }
-    println!(
-        "$ fakeroot {} {}  (guest rootfs must be uid 0)",
-        exe.display(),
-        args.join(" ")
-    );
-    let status = std::process::Command::new("fakeroot")
-        .arg(exe)
-        .args(&args)
-        .status()
-        .context("running fakeroot")?;
-    if !status.success() {
-        bail!("the fakeroot build failed");
-    }
+    println!("  (re-exec under fakeroot: the guest rootfs must be uid 0)");
+    let mut cmd_args: Vec<&std::ffi::OsStr> = vec![exe.as_os_str()];
+    cmd_args.extend(args.iter().map(std::ffi::OsStr::new));
+    crate::run_tool("fakeroot", &cmd_args).context("the fakeroot build failed")?;
     Ok(true)
 }
 
@@ -1065,7 +1056,7 @@ fn set_mode_0755(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::{
         GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
@@ -1073,19 +1064,9 @@ mod tests {
         net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
     };
 
-    /// A scratch dir removed on drop, so a failing assertion can't leave one behind. Per-test name
-    /// plus pid, so concurrent tests (libtest runs them in parallel) don't share a tree.
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn temp_dir(name: &str) -> TempDir {
-        let path = std::env::temp_dir().join(format!("bsx_contract_{name}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).expect("create temp staging");
-        TempDir(path)
+    /// A per-test scratch tree, removed on drop so a failing assertion can't leave one behind.
+    fn temp_dir(name: &str) -> bsx_test_support::ScratchDir {
+        bsx_test_support::ScratchDir::created(&format!("contract-{name}"))
     }
 
     /// A staging tree that satisfies the contract: the four executables at 0755, the three
@@ -1119,16 +1100,16 @@ mod tests {
     #[test]
     fn a_complete_staging_tree_satisfies_the_contract() {
         let tmp = temp_dir("ok");
-        good_staging(&tmp.0);
-        verify_guest_contract(&tmp.0).expect("a fully staged tree satisfies the contract");
+        good_staging(tmp.path());
+        verify_guest_contract(tmp.path()).expect("a fully staged tree satisfies the contract");
     }
 
     #[test]
     fn a_missing_executable_names_itself_and_its_consequence() {
         let tmp = temp_dir("missing");
-        good_staging(&tmp.0);
-        std::fs::remove_file(in_staging(&tmp.0, NET_UP_PATH)).unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        good_staging(tmp.path());
+        std::fs::remove_file(in_staging(tmp.path(), NET_UP_PATH)).unwrap();
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a missing net-up must fail the build")
             .to_string();
         assert!(err.contains(NET_UP_PATH), "{err}");
@@ -1138,14 +1119,14 @@ mod tests {
     #[test]
     fn an_unexecutable_helper_is_caught_before_it_ships() {
         let tmp = temp_dir("mode");
-        good_staging(&tmp.0);
+        good_staging(tmp.path());
         // The exact fault a forgotten `set_mode_0755` produces: the file is there, so an
         // existence-only check would pass it, and the guest would fail at exec time instead.
-        let staged = in_staging(&tmp.0, MOUNT_DRIVES_PATH);
+        let staged = in_staging(tmp.path(), MOUNT_DRIVES_PATH);
         let mut perms = std::fs::metadata(&staged).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&staged, perms).unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a non-executable helper must fail the build")
             .to_string();
         assert!(err.contains("0644"), "{err}");
@@ -1155,9 +1136,9 @@ mod tests {
     #[test]
     fn a_missing_mountpoint_is_caught() {
         let tmp = temp_dir("mountpoint");
-        good_staging(&tmp.0);
-        std::fs::remove_dir_all(in_staging(&tmp.0, OVERLAY_DIR)).unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        good_staging(tmp.path());
+        std::fs::remove_dir_all(in_staging(tmp.path(), OVERLAY_DIR)).unwrap();
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a missing overlay mountpoint must fail the build")
             .to_string();
         assert!(err.contains(OVERLAY_DIR), "{err}");
@@ -1167,15 +1148,15 @@ mod tests {
     #[test]
     fn an_inittab_that_never_starts_the_agent_is_caught() {
         let tmp = temp_dir("inittab");
-        good_staging(&tmp.0);
+        good_staging(tmp.path());
         // Syntactically fine, and it would boot. It just never spawns the agent, which is the
         // failure that looks healthy until a run hangs waiting for the readiness marker.
         std::fs::write(
-            in_staging(&tmp.0, INITTAB_PATH),
+            in_staging(tmp.path(), INITTAB_PATH),
             "::sysinit:/bin/mount -t proc proc /proc\n",
         )
         .unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        let err = verify_guest_contract(tmp.path())
             .expect_err("an inittab that never starts the agent must fail the build")
             .to_string();
         assert!(err.contains(GUEST_AGENT_PATH), "{err}");
@@ -1184,9 +1165,9 @@ mod tests {
     #[test]
     fn a_missing_resolver_link_is_caught() {
         let tmp = temp_dir("resolv_missing");
-        good_staging(&tmp.0);
-        std::fs::remove_file(in_staging(&tmp.0, RESOLV_CONF_PATH)).unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        good_staging(tmp.path());
+        std::fs::remove_file(in_staging(tmp.path(), RESOLV_CONF_PATH)).unwrap();
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a missing resolver link must fail the build")
             .to_string();
         assert!(err.contains(RESOLV_CONF_PATH), "{err}");
@@ -1196,14 +1177,14 @@ mod tests {
     #[test]
     fn a_baked_resolver_file_is_caught_where_a_link_belongs() {
         let tmp = temp_dir("resolv_file");
-        good_staging(&tmp.0);
+        good_staging(tmp.path());
         // The fault an "obvious" cleanup produces: a real file with sensible-looking contents. It
         // exists and it parses, so an existence-only check passes it, and every guest then resolves
         // against a frozen address regardless of what the driver put on its command line.
-        let staged = in_staging(&tmp.0, RESOLV_CONF_PATH);
+        let staged = in_staging(tmp.path(), RESOLV_CONF_PATH);
         std::fs::remove_file(&staged).unwrap();
         std::fs::write(&staged, "nameserver 1.1.1.1\n").unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a baked resolver file must fail the build")
             .to_string();
         assert!(err.contains("not a symlink"), "{err}");
@@ -1212,12 +1193,12 @@ mod tests {
     #[test]
     fn a_resolver_link_aimed_elsewhere_is_caught() {
         let tmp = temp_dir("resolv_target");
-        good_staging(&tmp.0);
+        good_staging(tmp.path());
         // A link, so the symlink check passes; it just points somewhere the kernel never writes.
-        let staged = in_staging(&tmp.0, RESOLV_CONF_PATH);
+        let staged = in_staging(tmp.path(), RESOLV_CONF_PATH);
         std::fs::remove_file(&staged).unwrap();
         std::os::unix::fs::symlink("/etc/resolv.conf.static", &staged).unwrap();
-        let err = verify_guest_contract(&tmp.0)
+        let err = verify_guest_contract(tmp.path())
             .expect_err("a resolver link aimed elsewhere must fail the build")
             .to_string();
         assert!(err.contains(KERNEL_PNP_PATH), "{err}");
