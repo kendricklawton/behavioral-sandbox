@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use bsx_client::{Client, ClientError, FaultKind, OpenParams};
+use bsx_client::{Client, ClientError, FaultKind, OpenParams, ProtocolError};
 
 const CORPUS: &str = include_str!("../../protocol/tests/fixtures/wire-messages.jsonl");
 
@@ -302,6 +302,50 @@ fn a_mismatched_reply_poisons_the_session() {
         "a mismatched reply must poison, got {err}"
     );
 
+    drop(c);
+    daemon.join().expect("the fake daemon's thread");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A write that fails partway can leave a torn frame on the wire, so it poisons like a lost reply.
+#[test]
+fn a_failed_write_poisons_the_session() {
+    let (path, daemon) = daemon("dead-peer", vec![]);
+    let mut c = connect(&path);
+    // Joined first: the daemon is gone and its socket closed, so the big write must fail.
+    daemon.join().expect("the fake daemon's thread");
+
+    let big = "x".repeat(2 * 1024 * 1024);
+    let err = c.put("in.txt", &big).expect_err("the peer is closed");
+    assert!(
+        matches!(err, ClientError::Protocol(ProtocolError::Io(_))),
+        "the failed write surfaces as an io error, got {err}"
+    );
+
+    let argv = ["true".to_string()];
+    let err = c.exec(&argv, "").expect_err("the frame may be torn");
+    assert!(
+        matches!(err, ClientError::Desynced { .. }),
+        "a failed write must poison, got {err}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// An over-cap request is refused before any byte moves, so it must not cost the session.
+#[test]
+fn an_over_cap_request_leaves_the_session_usable() {
+    let script = vec![Answer::Reply(fixture("response", "closed"))];
+    let (path, daemon) = daemon("over-cap", script);
+    let mut c = connect(&path);
+
+    let big = "x".repeat(5 * 1024 * 1024);
+    let err = c.put("in.txt", &big).expect_err("over the request cap");
+    assert!(
+        matches!(err, ClientError::Protocol(ProtocolError::TooLarge { .. })),
+        "an over-cap request is a typed refusal, got {err}"
+    );
+
+    c.close().expect("no byte moved, so the session is intact");
     drop(c);
     daemon.join().expect("the fake daemon's thread");
     let _ = std::fs::remove_file(&path);
