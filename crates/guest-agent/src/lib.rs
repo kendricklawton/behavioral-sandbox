@@ -146,6 +146,17 @@ where
 /// command's cwd, and where artifacts are read back from, and the two entry points differ only in how
 /// it was made. Taken as a `Result` so a creation failure is still reported to the host over the
 /// accepted connection.
+/// Reports a spawn failure to the host and returns it as the typed error. The local `Spawn` error
+/// is the salient one either way, so a failed report is dropped.
+fn refuse_spawn<S: Read + Write>(
+    conn: &mut ServerConnection<S>,
+    program: &str,
+    e: std::io::Error,
+) -> AgentError {
+    let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
+    AgentError::Spawn(e)
+}
+
 fn serve_with<S>(stream: S, workdir: std::io::Result<RunDir>) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
@@ -210,8 +221,7 @@ where
     // with the trampoline, the real `execvp` happens inside the child, where a failure can only
     // surface as a shell-style 127 on stderr.
     if let Err(e) = resolve_program(program, workdir.path(), effective_path(&env).as_deref()) {
-        let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
-        return Err(AgentError::Spawn(e));
+        return Err(refuse_spawn(&mut conn, program, e));
     }
 
     // Spawn through the cgroup **trampoline**: a tiny `sh` leg that enrolls *itself* in the per-exec
@@ -251,11 +261,7 @@ where
         .spawn()
     {
         Ok(child) => child,
-        Err(e) => {
-            // The local `Spawn` error is the salient one either way, so a failed report is dropped.
-            let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
-            return Err(AgentError::Spawn(e));
-        }
+        Err(e) => return Err(refuse_spawn(&mut conn, program, e)),
     };
 
     let child_stdin = child.stdin.take();

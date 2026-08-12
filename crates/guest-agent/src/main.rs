@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -80,20 +80,10 @@ fn run_vsock(port: u32) -> Result<(), String> {
     tracing::info!(transport = "vsock", port, "guest agent listening");
     announce_ready(port);
 
-    for conn in listener.incoming() {
-        match conn {
-            // Refuse a connection that can't be bounded: `serve`'s no-hang property rests on the
-            // deadline being set.
-            Ok(stream) => match stream
-                .set_read_timeout(Some(IO_TIMEOUT))
-                .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
-            {
-                Ok(()) => serve_one(stream),
-                Err(e) => tracing::warn!("skipping connection: cannot set deadlines: {e}"),
-            },
-            Err(e) => tracing::warn!("accept failed: {e}"),
-        }
-    }
+    serve_incoming(listener.incoming(), |s| {
+        s.set_read_timeout(Some(IO_TIMEOUT))?;
+        s.set_write_timeout(Some(IO_TIMEOUT))
+    });
     Ok(())
 }
 
@@ -106,16 +96,32 @@ fn run_unix(path: &str) -> Result<(), String> {
     let listener = UnixListener::bind(path).map_err(|e| format!("bind {path}: {e}"))?;
     tracing::info!(transport = "unix", %path, "guest agent listening");
 
-    for conn in listener.incoming() {
+    serve_incoming(listener.incoming(), |s| {
+        s.set_read_timeout(Some(IO_TIMEOUT))?;
+        s.set_write_timeout(Some(IO_TIMEOUT))
+    });
+    Ok(())
+}
+
+/// The one accept loop for both transports: serves each accepted connection, refusing any whose
+/// read/write deadline cannot be set, because `serve`'s no-hang property rests on that deadline.
+/// The deadline setter comes from the caller, since the two stream types share no trait.
+fn serve_incoming<S, E>(
+    incoming: impl Iterator<Item = Result<S, E>>,
+    set_deadlines: impl Fn(&S) -> std::io::Result<()>,
+) where
+    S: std::io::Read + std::io::Write + Send + 'static,
+    E: std::fmt::Display,
+{
+    for conn in incoming {
         match conn {
-            Ok(stream) => match set_unix_deadlines(&stream) {
+            Ok(stream) => match set_deadlines(&stream) {
                 Ok(()) => serve_one(stream),
                 Err(e) => tracing::warn!("skipping connection: cannot set deadlines: {e}"),
             },
             Err(e) => tracing::warn!("accept failed: {e}"),
         }
     }
-    Ok(())
 }
 
 /// The one working directory every connection this process serves runs in, which is what makes a
@@ -162,13 +168,6 @@ fn announce_ready(port: u32) {
         bsx_channel::GUEST_READY_MARKER
     );
     let _ = out.flush();
-}
-
-/// Sets the read/write deadline on a freshly accepted unix connection.
-fn set_unix_deadlines(stream: &UnixStream) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    Ok(())
 }
 
 /// Parses a `vsock:<port>` or `unix:<path>` listen spec. Pure, so it is unit-testable without binding
