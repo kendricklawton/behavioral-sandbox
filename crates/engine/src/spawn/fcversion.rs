@@ -100,6 +100,7 @@ pub(super) fn probe_fc_version_within(firecracker: &Path, wall: Duration) -> FcP
                 deadline,
                 "firecracker --version",
                 Duration::from_millis(5),
+                crate::drives::HELPER_REAP_GRACE,
             )
             .is_err()
             {

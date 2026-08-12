@@ -49,7 +49,7 @@ const READBACK_CHUNK: usize = 64 * 1024;
 /// How long a killed helper is given to be reaped before it is detached (see
 /// [`kill_and_reap_briefly`]). Short: a killable child dies at once, and anything slower is the
 /// D-state case, where waiting longer only lengthens the hang.
-const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
+pub(crate) const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
 /// directory its tree is extracted into on [`RunningVm::collect_outputs`].
 #[derive(Debug, Clone)]
@@ -632,26 +632,28 @@ impl<'a> Walk<'a> {
 /// ([`kill_and_reap_briefly`]: an unkillable D-state child is detached, never waited on) before
 /// returning a typed error; the `what` label names the tool in the timeout/wait messages.
 ///
-/// `poll` is the tick, and the caller owns the trade: it bounds the added latency for a fast helper
-/// (a teardown helper tolerates a lazy tick, a boot-path `mount` finishing in ~1ms does not).
+/// `poll` is the tick and `grace` the post-kill reap wall, both the caller's: a boot-path `mount`
+/// finishing in ~1ms wants a fine tick and a short grace, while a sentinel with its own bounded
+/// retry loop needs a grace longer than that loop or it is detached just before it would exit.
 pub(crate) fn wait_bounded(
     child: &mut Child,
     deadline: Instant,
     what: &str,
     poll: Duration,
+    grace: Duration,
 ) -> Result<ExitStatus, VmmError> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
+                    kill_and_reap_briefly(child, what, grace);
                     return Err(VmmError::Timeout(format!("{what} exceeded its deadline")));
                 }
                 std::thread::sleep(poll);
             }
             Err(e) => {
-                kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
+                kill_and_reap_briefly(child, what, grace);
                 return Err(VmmError::Vmm(format!("wait on {what}: {e}")));
             }
         }
@@ -845,6 +847,7 @@ mod tests {
             started + Duration::from_millis(100),
             "sleep",
             Duration::from_millis(10),
+            HELPER_REAP_GRACE,
         )
         .expect_err("a 30s sleep must not finish before a 100ms deadline");
         assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
@@ -965,6 +968,7 @@ mod tests {
             Instant::now() + Duration::from_secs(5),
             "true",
             Duration::from_millis(10),
+            HELPER_REAP_GRACE,
         )
         .expect("a fast child returns its status");
         assert!(status.success(), "`true` exits 0");

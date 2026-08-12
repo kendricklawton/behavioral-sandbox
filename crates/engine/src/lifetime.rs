@@ -227,24 +227,18 @@ impl VmLifetime {
         }
         if let Some(mut sentinel) = self.sentinel.take() {
             drop(sentinel.stdin.take());
-            let deadline = Instant::now() + SENTINEL_REAP_TIMEOUT;
-            loop {
-                match sentinel.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    // Timed out or unwaitable: the reap after the kill is bounded too, since a bare
-                    // `wait` here would be the hang this arm exists to avoid, moved one line down.
-                    _ => {
-                        crate::drives::kill_and_reap_briefly(
-                            &mut sentinel,
-                            "lifetime sentinel",
-                            SENTINEL_REAP_TIMEOUT,
-                        );
-                        break;
-                    }
-                }
+            // The grace matches the wall, not `HELPER_REAP_GRACE`: the sentinel's own rmdir retry
+            // loop runs ~2s, and a 200ms grace would detach one that was about to exit cleanly.
+            if let Err(e) = crate::drives::wait_bounded(
+                &mut sentinel,
+                Instant::now() + SENTINEL_REAP_TIMEOUT,
+                "lifetime sentinel",
+                Duration::from_millis(10),
+                SENTINEL_REAP_TIMEOUT,
+            ) {
+                // Nothing to act on here (the kill already landed and teardown cannot fail), but the
+                // typed error separates a wedged sentinel from a `try_wait` that could not answer.
+                tracing::debug!(error = %e, "the lifetime sentinel did not exit cleanly");
             }
         }
     }
