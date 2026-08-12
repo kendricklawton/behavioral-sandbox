@@ -1379,10 +1379,13 @@ mod tests {
         reencode: Option<String>,
     }
 
-    /// Builds the `put_content_pad` fill: a `put` padded so its line content is exactly `line_len`
-    /// bytes. Encoded through the larger bound because the over-cap entry is a line the request
-    /// writer is *supposed* to refuse, and this only needs its bytes.
-    fn put_content_pad(line_len: usize) -> String {
+    /// A `put` whose encoded **line content** is exactly `line_len` bytes, the newline excluded.
+    ///
+    /// The per-message overhead is measured by encoding an empty-content `put` and dropping the
+    /// terminator, never counted by hand: that `-1` is the same one `contract.json` publishes as
+    /// `cap_counts_terminator`, so a probe that re-derived it could disagree with the writer it
+    /// exists to measure.
+    fn put_with_line_len(line_len: usize) -> Request {
         let mut probe = Vec::new();
         write_request(
             &mut probe,
@@ -1392,11 +1395,18 @@ mod tests {
             }),
         )
         .expect("the empty-content probe encodes");
-        let overhead = probe.len() - 1; // everything but the newline
-        let padded = Request::Put(PutParams {
+        let overhead = probe.len() - 1; // the line's content: everything but the newline
+        Request::Put(PutParams {
             path: "p".into(),
             content: "x".repeat(line_len - overhead),
-        });
+        })
+    }
+
+    /// Builds the `put_content_pad` fill: a `put` padded so its line content is exactly `line_len`
+    /// bytes. Encoded through the larger bound because the over-cap entry is a line the request
+    /// writer is *supposed* to refuse, and this only needs its bytes.
+    fn put_content_pad(line_len: usize) -> String {
+        let padded = put_with_line_len(line_len);
         let mut wire = Vec::new();
         write_message(&mut wire, &padded, MAX_RESPONSE_BYTES).expect("the padded line encodes");
         wire.truncate(wire.len() - 1); // the corpus stores content, not the terminator
@@ -1560,19 +1570,7 @@ mod tests {
         // Derived rather than declared: build a line whose content is exactly the cap and ask the
         // writer. One that counted the terminator would refuse a line its own peer accepts, so the
         // flag reports what this crate does instead of what the file says it does.
-        let mut probe = Vec::new();
-        write_request(
-            &mut probe,
-            &Request::Put(PutParams {
-                path: "p".into(),
-                content: String::new(),
-            }),
-        )
-        .expect("the empty-content probe encodes");
-        let at_cap = Request::Put(PutParams {
-            path: "p".into(),
-            content: "x".repeat(MAX_REQUEST_BYTES - (probe.len() - 1)),
-        });
+        let at_cap = put_with_line_len(MAX_REQUEST_BYTES);
         let mut wire = Vec::new();
         let counts_terminator = write_request(&mut wire, &at_cap).is_err();
         assert_eq!(
@@ -1763,22 +1761,7 @@ mod tests {
         // line is exactly [`MAX_REQUEST_BYTES`] encodes and decodes, one more byte is refused by
         // the writer before any byte moves. Pinned so the writer cannot start counting the
         // newline too and refuse an at-cap line its own peer accepts.
-        let overhead = {
-            let mut w = Vec::new();
-            write_request(
-                &mut w,
-                &Request::Put(PutParams {
-                    path: "p".into(),
-                    content: String::new(),
-                }),
-            )
-            .expect("encode");
-            w.len() - 1 // the line's content: everything but the newline
-        };
-        let at_cap = Request::Put(PutParams {
-            path: "p".into(),
-            content: "x".repeat(MAX_REQUEST_BYTES - overhead),
-        });
+        let at_cap = put_with_line_len(MAX_REQUEST_BYTES);
         let mut wire = Vec::new();
         write_request(&mut wire, &at_cap).expect("an at-cap line encodes");
         assert_eq!(
@@ -1791,10 +1774,7 @@ mod tests {
             .expect("a message");
         assert_eq!(back, at_cap);
 
-        let over = Request::Put(PutParams {
-            path: "p".into(),
-            content: "x".repeat(MAX_REQUEST_BYTES - overhead + 1),
-        });
+        let over = put_with_line_len(MAX_REQUEST_BYTES + 1);
         let mut wire = Vec::new();
         assert!(matches!(
             write_request(&mut wire, &over),
