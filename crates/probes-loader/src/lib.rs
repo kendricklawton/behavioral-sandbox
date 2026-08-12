@@ -1,52 +1,32 @@
 //! `bsx-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
 //! `crates/probes`, read their maps, and stream events into the audit log.
 //!
-//! Synchronous by design, since aya's load/attach/read path takes no async runtime, matching the
-//! driver's no-background-threads posture. Nothing is **pinned** into `/sys/fs/bpf`, so a crashed
-//! loader leaves no dangling attachment: each type owns its aya [`Ebpf`], whose `Drop` detaches the
-//! program and frees the map.
+//! Synchronous by design (aya's path takes no async runtime), and nothing is **pinned** into
+//! `/sys/fs/bpf`: each type owns its aya [`Ebpf`], whose `Drop` detaches, so a crashed loader
+//! leaves no dangling attachment.
 //!
-//! **The four probes, and what each answers:**
-//! - **[`ExecveCounter`]** counts the host's `execve` footprint from a per-CPU map. "How many."
-//! - **[`SyscallTracer`]** streams whole [`SyscallEvent`]s (pid, tid, cgroup id, `comm`, and the path
-//!   or sockaddr bytes) through a ring buffer, drained by [`drain`](SyscallTracer::drain) or followed
-//!   live by [`stream`](SyscallTracer::stream). "Which, by whom, on what."
-//! - **[`TapMonitor`]** attaches the two `tc`/clsact classifiers to a VM's tap and reads its per-flow
-//!   counters ([`flows`](TapMonitor::flows)) or per-VM rollup ([`totals`](TapMonitor::totals)). This is
-//!   the guest's *own* traffic, the strong cross-boundary signal syscalls can't be.
-//! - **[`ResourceMeter`]** attaches `sched/sched_switch` **once** and meters a *set* of cgroups, so one
-//!   program stays cheap under many sandboxes. Memory and IO come from the kernel's own cgroup v2
-//!   counters via [`CgroupStats::read`]; [`summary_for_pid`](ResourceMeter::summary_for_pid) rolls all
-//!   three axes into a [`ResourceSummary`]. The engine measures, the hoster bills.
-//!
-//! **Host, not guest.** Every syscall figure here is the VMM's own footprint, since a microVM services
-//! its guest's syscalls in-guest and they never trap on the host.
-//!
-//! **Scoping to one sandbox.** [`cgroup_id_of_pid`] and [`cgroup_dir_of_pid`] bridge a VMM pid to the
-//! cgroup id the meter and tracer filter on and the dir the stats read, so a probe records one
-//! sandbox's footprint rather than the whole machine's.
-//! [`attach_in_netns`](TapMonitor::attach_in_netns) does the same for a tap by entering that sandbox's
-//! netns.
-//!
-//! **Egress enforcement, deny-by-default.** [`EgressPolicy`] is the userspace schema, built from
-//! validated [`Ipv4Cidr`]s with a typed [`Protocol`] and optional port, whose empty value allows
-//! nothing. [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc
-//! programs go live, so there is no window where the tap is up but un-policed, and
-//! [`set_egress_policy`](TapMonitor::set_egress_policy) replaces it on a live tap in an order that
-//! denies mid-update rather than admitting. Opt-in in one direction only: until a policy is set a
-//! monitor stays observe-only, and once armed it stays armed. Every drop is recorded per
-//! destination, read back by [`denials`](TapMonitor::denials).
-//!
-//! **CO-RE, and the one thing it does not carry.** The object is built against BTF, so aya relocates
-//! it against the running kernel at load. No program reads a kernel struct field, so that covers the
-//! map typing and the load path rather than field offsets; the syscall tracers read their arguments
-//! at fixed offsets into the tracepoint record, which `SyscallTracer::load` compares against the
-//! kernel's own `format` file before it attaches rather than assuming.
-//!
-//! **Caps and a legible support probe.** Loading needs `CAP_BPF` and `CAP_PERFMON` rather than full
-//! root, and [`check_support`] names a missing prerequisite up front as a typed
-//! [`ProbeError::Unsupported`], so a host that can't run the probes says so plainly instead of failing
-//! with a cryptic verifier reject or `EPERM`.
+//! - **The four probes:** [`ExecveCounter`] counts the host's `execve` footprint;
+//!   [`SyscallTracer`] streams whole [`SyscallEvent`]s through a ring buffer; [`TapMonitor`]
+//!   attaches the tc classifiers to a VM's tap for per-flow counters (the guest's *own* traffic,
+//!   the cross-boundary signal syscalls can't be); [`ResourceMeter`] attaches
+//!   `sched/sched_switch` **once** and meters a *set* of cgroups, so one program stays cheap
+//!   under many sandboxes.
+//! - **Host, not guest:** every syscall figure is the VMM's own footprint; a microVM services its
+//!   guest's syscalls in-guest.
+//! - **Scoping:** [`cgroup_id_of_pid`] / [`cgroup_dir_of_pid`] bridge a VMM pid to the cgroup the
+//!   meter and tracer filter on; [`attach_in_netns`](TapMonitor::attach_in_netns) does the same
+//!   for a tap.
+//! - **Egress enforcement, deny-by-default:** an empty [`EgressPolicy`] allows nothing.
+//!   [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc programs
+//!   go live, and [`set_egress_policy`](TapMonitor::set_egress_policy) replaces one in an order
+//!   that denies mid-update. Until a policy is set a monitor is observe-only; once armed it stays
+//!   armed. Drops are recorded per destination ([`denials`](TapMonitor::denials)).
+//! - **CO-RE covers the load path, not the tracepoint offsets:** no program reads a kernel struct
+//!   field; the tracers read fixed offsets that `SyscallTracer::load` compares against the
+//!   kernel's own `format` file before attaching.
+//! - **Support is a typed refusal:** loading needs `CAP_BPF` + `CAP_PERFMON` rather than full
+//!   root, and [`check_support`] names a missing prerequisite as [`ProbeError::Unsupported`]
+//!   instead of a verifier reject or `EPERM` deep in the load.
 #![forbid(unsafe_code)]
 
 use std::os::unix::fs::MetadataExt;
@@ -102,11 +82,9 @@ pub use bsx_record::{
 /// output (see [`object_path`]).
 const OBJECT_ENV: &str = "BSX_PROBES_OBJECT";
 
-/// A typed failure from loading, attaching, or reading the probes, the loader's analogue of the driver's
-/// `VmmError`. Every failure class is a typed `Err` rather than a panic.
-///
-/// `#[non_exhaustive]`, so a new probe or attach mode adds a variant without breaking a downstream
-/// `match`.
+/// A typed failure from loading, attaching, or reading the probes; every failure class is an
+/// `Err`, never a panic. `#[non_exhaustive]`, so a new probe adds a variant without breaking a
+/// downstream `match`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProbeError {
@@ -166,13 +144,9 @@ impl std::error::Error for ProbeError {
 }
 
 /// Where the compiled BPF object lives, in precedence order: the `BSX_PROBES_OBJECT` override, the
-/// `cargo xtask build-probes` output under the source tree, then the installed copy under the per-host
-/// data dir. The object is a *build artifact* like the guest kernel and rootfs, built separately and
-/// loaded at runtime rather than linked into this crate.
-///
-/// The data-dir fallback is what makes a packaged install work with no configuration, and the
-/// source-tree path is baked at compile time so it does not exist on an operator's host. A developer
-/// working in the tree still wins, since their built object is checked first.
+/// `cargo xtask build-probes` output under the source tree (so a developer's fresh build wins over
+/// a stale installed copy), then the installed copy under the per-host data dir, which is what
+/// makes a packaged install work unconfigured.
 #[must_use]
 pub fn object_path() -> PathBuf {
     let built = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,10 +175,9 @@ fn pick_object_path(
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
-/// Reads the compiled BPF object and loads it into the kernel, parsing the ELF and creating the maps.
-/// Each probe pulls its typed program handle out of the returned `Ebpf`, which owns everything and tears
-/// it down on drop. Shared by every probe's `load`, so the read and load errors read the same
-/// everywhere.
+/// Reads the compiled BPF object and loads it into the kernel. Shared by every probe's `load`, so
+/// the read and load errors read the same everywhere; the returned `Ebpf` owns everything and
+/// tears it down on drop.
 fn load_object() -> Result<Ebpf, ProbeError> {
     let path = object_path();
     let bytes = std::fs::read(&path).map_err(|e| {
@@ -216,12 +189,10 @@ fn load_object() -> Result<Ebpf, ProbeError> {
     Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))
 }
 
-/// The cgroup v2 id of process `pid`, the same `u64` `bpf_get_current_cgroup_id` reports, so it is what
-/// [`SyscallTracer::watch_cgroup`] filters on. The **attribution bridge**: resolve a sandbox's VMM pid to
-/// its cgroup id and watch that, so the trace covers the whole cgroup rather than one tgid.
-///
-/// Reads the process's unified cgroup path from `/proc/<pid>/cgroup`, then returns the inode number of
-/// the cgroup dir, which for cgroup v2 *is* the kernel's cgroup id. Pure `std` fs.
+/// The cgroup v2 id of process `pid` (the cgroup dir's inode number), the same `u64`
+/// `bpf_get_current_cgroup_id` reports: the **attribution bridge** that resolves a sandbox's VMM
+/// pid to the id [`SyscallTracer::watch_cgroup`] filters on, so the trace covers the whole cgroup
+/// rather than one tgid.
 ///
 /// # Errors
 /// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
@@ -230,16 +201,13 @@ pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
     cgroup_id_of_dir(&cgroup_dir_of_pid(pid)?)
 }
 
-/// The **cgroup dir** of process `pid`, `/sys/fs/cgroup/<path>`, where `<path>` is the unified (`0::`)
-/// line of `/proc/<pid>/cgroup`. The path half of the bridge: [`cgroup_id_of_pid`] resolves the id
-/// for the eBPF CPU meter, this resolves the dir [`CgroupStats::read`] reads the native memory/IO
-/// counters from. Given a sandbox's VMM pid (the Firecracker track's `vmm_pid`), the two together scope
-/// all three resource axes to that one sandbox's cgroup. Pure `std` fs, no `unsafe`.
+/// The **cgroup dir** of process `pid`, the path half of the bridge: [`cgroup_id_of_pid`]
+/// resolves the id for the eBPF meter, this resolves the dir [`CgroupStats::read`] reads the
+/// native memory/IO counters from.
 ///
 /// # Errors
 /// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
-/// cgroup-v1-only host), or names the **root** cgroup, which is not a sandbox: registering it would
-/// fold every process in it into this sandbox's record.
+/// cgroup-v1-only host), or names the **root** cgroup, which is not a sandbox.
 pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
     let proc_path = format!("/proc/{pid}/cgroup");
     let text = std::fs::read_to_string(&proc_path)
@@ -250,14 +218,11 @@ pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
 /// The cgroup dir a `/proc/<pid>/cgroup` body names, split from the read so both refusals are
 /// unit-testable without a live `/proc`.
 ///
-/// The **root cgroup is refused.** A registered cgroup matches every process whose
-/// `bpf_get_current_cgroup_id` equals it, so registering the root folds the whole host's syscall
-/// paths and CPU time into one sandbox's signed record, and two sandboxes that both resolve to it
-/// collide in the shared bookkeeping. A process reads `0::/` when it is in the root cgroup, and so
-/// does every process in a container with the default private cgroup namespace. Refusing here makes
-/// the axis a recorded [`AxisGap`] instead. `read_cgroup_dir` in `crates/engine/src/jail.rs` refuses
-/// the same input for its own reason, and `the_cgroup_resolution_refuses_the_root_cgroup_everywhere`
-/// in `xtask` holds the two together.
+/// The **root cgroup is refused**: registering it folds the whole host's footprint into one
+/// sandbox's signed record, and a process in a container's default private cgroup namespace reads
+/// `0::/` too. Refusing makes the axis a recorded [`AxisGap`] instead. `read_cgroup_dir` in
+/// `crates/engine/src/jail.rs` refuses the same input, and
+/// `the_cgroup_resolution_refuses_the_root_cgroup_everywhere` in `xtask` holds the two together.
 fn cgroup_dir_in(text: &str, proc_path: &str) -> Result<PathBuf, ProbeError> {
     // The cgroup v2 unified controller is the `0::<path>` line, rooted at the cgroup mount.
     let rel = text
@@ -307,12 +272,9 @@ pub fn ebpf_supported() -> bool {
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
 
-/// Parses the low 64 bits of the effective-capability mask from `/proc/<pid>/status` text, or `None` when
-/// the `CapEff:` line is absent or unparseable. Pure, so the bit logic is unit-testable without a live
-/// `/proc`.
-///
-/// Only the trailing 16 hex digits are read: both caps the probes need live there, so a wider future
-/// field can't overflow the parse into a false "no caps".
+/// Parses the low 64 bits of the effective-capability mask from `/proc/<pid>/status` text, or
+/// `None` when the `CapEff:` line is absent or unparseable. Only the trailing 16 hex digits are
+/// read, so a wider future field can't overflow the parse into a false "no caps".
 fn parse_cap_eff(status: &str) -> Option<u64> {
     let hex = status
         .lines()
@@ -325,17 +287,15 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
     u64::from_str_radix(low64, 16).ok()
 }
 
-/// Whether an effective-capability `mask` holds both caps the probes need. Root's mask has every bit, so
-/// this is `true` for root and for a `setcap cap_bpf,cap_perfmon+ep` binary alike; the point is that the
-/// second, unprivileged path works.
+/// Whether an effective-capability `mask` holds both caps the probes need: `true` for root and
+/// for a `setcap cap_bpf,cap_perfmon+ep` binary alike.
 fn mask_has_load_caps(mask: u64) -> bool {
     (mask >> CAP_BPF) & 1 == 1 && (mask >> CAP_PERFMON) & 1 == 1
 }
 
 /// Whether this process holds the capabilities the probes need, read from `CapEff:` in
-/// `/proc/self/status` with no `libc` and no `unsafe`. A host with only `CAP_BPF` and a permissive
-/// `kernel.perf_event_paranoid` may also manage the tracepoint attach, so this is a conservative
-/// advisory naming the standard path rather than the kernel's final say.
+/// `/proc/self/status`. A conservative advisory, not the kernel's final say: a host with only
+/// `CAP_BPF` and a permissive `kernel.perf_event_paranoid` may still manage the attach.
 fn have_load_caps() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -343,20 +303,14 @@ fn have_load_caps() -> bool {
         .is_some_and(mask_has_load_caps)
 }
 
-/// Checks the host can load the probes and, if not, returns a **typed error naming the requirement**, so
-/// a BTF-less kernel or missing capability is caught here rather than as a verifier reject or `EPERM` deep
-/// in the load.
-///
-/// The BTF check is an engine *baseline* rather than one program's need: the shipped object is built
-/// CO-RE, so a BTF-enabled kernel is required uniformly. A kernel lacking it that could still load the
-/// relocation-free counter program is refused on purpose, so the support story stays one line rather than
-/// a per-probe matrix.
+/// Checks the host can load the probes and, if not, returns a **typed error naming the
+/// requirement**, so a BTF-less kernel or a missing capability is caught here rather than as a
+/// verifier reject or `EPERM` deep in the load. BTF is required uniformly (the shipped object is
+/// CO-RE), so the support story stays one line rather than a per-probe matrix.
 ///
 /// # Errors
 /// [`ProbeError::Unsupported`] naming the first missing prerequisite (BTF, then capabilities).
 pub fn check_support() -> Result<(), ProbeError> {
-    // The baseline: vmlinux BTF is required uniformly for the CO-RE object, even though the
-    // relocation-free counter program would load without it.
     if !ebpf_supported() {
         return Err(ProbeError::Unsupported(
             "kernel BTF (/sys/kernel/btf/vmlinux) is absent — CO-RE eBPF needs a BTF-enabled kernel \

@@ -1,20 +1,17 @@
 //! The attach bundle: binds the host-side probes to one sandbox, rolls their output into a
 //! [`RunRecord`], and detaches on close.
 //!
-//! - **Plain values, not a `Sandbox`.** `bsx` stays independent of this crate, so [`AttachParams`]
-//!   carries the VMM pid (for the tracer and meter cgroup) and the [`Nic`] names (for the network
-//!   monitor). Composing them is the caller's job.
-//! - **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter and the three
-//!   `sys_enter_*` tracepoints are global, so a fresh copy per sandbox would run *N* programs on every
-//!   context switch. Each is loaded once for the host ([`SharedMeter`], [`SharedTracer`]) and every
-//!   sandbox registers its cgroup as a *target*, keeping the per-event cost a single hash lookup. The
-//!   tap monitor is legitimately per-VM and owned by the bundle.
-//! - **One post-boot attach.** A sandbox only registers its cgroup, which exists once the jailer
-//!   creates it during boot, so [`SandboxProbes::attach`] runs once after `open`. The syscall tracer
-//!   therefore observes the VMM's host footprint from registration onward rather than the pre-boot
-//!   window, the trade the bounded-overhead shared model asks for; the record's core is unaffected.
-//! - **Fail-open.** Every axis degrades independently to a recorded [`AxisGap`], so a host missing
-//!   caps, BTF, or the object still runs the sandbox and produces a thinner, annotated record.
+//! - **Plain values, not a `Sandbox`:** [`AttachParams`] carries the VMM pid and the [`Nic`]
+//!   names, so `bsx` stays independent of this crate.
+//! - **The host-wide probes are shared, not per-VM:** the `sched_switch` meter and the
+//!   `sys_enter_*` tracepoints are global, so each is loaded once ([`SharedMeter`],
+//!   [`SharedTracer`]) and a sandbox registers its cgroup as a *target*, keeping the per-event
+//!   cost one hash lookup. The tap monitor is legitimately per-VM.
+//! - **One post-boot attach:** the cgroup exists once the jailer creates it, so
+//!   [`SandboxProbes::attach`] runs once after `open` and the tracer observes from registration
+//!   onward, the trade the bounded-overhead shared model asks for.
+//! - **Fail-open:** every axis degrades independently to a recorded [`AxisGap`], so a host
+//!   missing caps, BTF, or the object still runs the sandbox with a thinner, annotated record.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -48,20 +45,18 @@ impl SharedMeter {
         self.0.lock().ok().map(|mut m| f(&mut m))
     }
 
-    /// The kernel's cumulative count of cgroups a full `CPU_NS` map could not admit, or `None` if it
-    /// can't be read. [`attach`](SandboxProbes::attach) snapshots this and
-    /// [`collect`](SandboxProbes::collect) reports a nonzero delta as a coverage gap: an unmetered
-    /// cgroup reads back a `cpu_time` of zero, which must not pass for a run that used no CPU.
+    /// The kernel's cumulative count of cgroups a full `CPU_NS` map could not admit, or `None` if
+    /// unreadable; `attach` snapshots it and `collect` gaps a nonzero delta, because an unmetered
+    /// cgroup reads back zero CPU.
     fn cpu_drops(&self) -> Option<u64> {
         self.with(|m| m.dropped_cgroups().ok()).flatten()
     }
 }
 
 /// A process-shared [`SyscallTracer`]: loaded **once**, switched to set mode, and handed to every
-/// sandbox's [`attach`](SandboxProbes::attach). One shared tracer serves every sandbox: each registers its
-/// cgroup as a target and gets a private [`SyscallFold`], and a single drain routes each event to the
-/// matching fold, so concurrent sandboxes stay independent (a sandbox reads only its own cgroup's
-/// footprint, and unregistering one leaves the others untouched). Cheap, thread-safe clone.
+/// sandbox's [`attach`](SandboxProbes::attach). Each sandbox registers its cgroup and gets a
+/// private [`SyscallFold`]; one drain routes each event to the matching fold, so concurrent
+/// sandboxes stay independent. Cheap, thread-safe clone.
 #[derive(Clone)]
 pub struct SharedTracer(Arc<Mutex<TracerInner>>);
 
@@ -92,21 +87,17 @@ impl SharedTracer {
         }))))
     }
 
-    /// Drains the shared ring buffer now, routing pending events to every registered sandbox's fold, and
-    /// returns how many were delivered.
-    ///
-    /// The buffer is drained automatically at each [`attach`](SandboxProbes::attach) and
-    /// [`collect`](SandboxProbes::collect), so a long-lived host process calls this periodically between
-    /// them to keep a busy VMM from filling it. A drop is counted by the kernel and surfaces as a coverage
-    /// gap, but polling is what prevents it.
+    /// Drains the shared ring buffer now, routing pending events to every registered sandbox's
+    /// fold, and returns how many were delivered. Draining also happens at each `attach` and
+    /// `collect`; a long-lived host calls this between them to keep a busy VMM from filling the
+    /// buffer (a drop is counted and surfaces as a gap, but polling is what prevents it).
     pub fn poll(&self) -> usize {
         self.with(drain_route).unwrap_or(0)
     }
 
-    /// Registers one sandbox's cgroup: routes pending events to their current owners, adds the cgroup to the
-    /// kernel target set, and opens a **fresh** fold, replacing rather than reusing any stale one a failed
-    /// teardown left behind. Cgroup ids are inode numbers and can recycle, so inheriting a dead run's fold
-    /// would misattribute its events onto the new run.
+    /// Registers one sandbox's cgroup: routes pending events, adds the cgroup to the kernel target
+    /// set, and opens a **fresh** fold rather than reusing a stale one, because cgroup ids are
+    /// inode numbers that recycle and a dead run's fold would misattribute its events.
     ///
     /// # Errors
     /// [`ProbeError::Poisoned`] if the lock is poisoned, or the target write's error (the caller
@@ -122,26 +113,23 @@ impl SharedTracer {
         Ok(())
     }
 
-    /// Finalizes one sandbox: drains every pending event, routing all cgroups' to their folds so no sandbox
-    /// loses events to another's collect, then removes and finishes this cgroup's fold and unregisters it
-    /// from the kernel set. `None` if the lock is poisoned or the fold is gone, which the caller records as a
-    /// coverage gap rather than passing off an empty footprint as a quiet run.
+    /// Finalizes one sandbox: drains pending events to every fold, then removes and finishes this
+    /// cgroup's fold and unregisters it. `None` if the lock is poisoned or the fold is gone, which
+    /// the caller records as a gap rather than passing off an empty footprint as a quiet run.
     fn finalize(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
-            // Best-effort unregister: this footprint is already drained, so a failure here can't
-            // undercount *this* run. Its only downstream effect, the departed cgroup keeping the
-            // host-global ring buffer under pressure, is not silent: those extra drops surface as
-            // `AxisGap::HostSyscalls` ring-drop gaps in the *later* sandboxes' records (see `collect`).
+            // Best-effort unregister: this footprint is already drained, and a failure's only
+            // effect, extra ring-buffer pressure, surfaces as ring-drop gaps in later records.
             let _ = inner.tracer.remove_target(cgroup_id);
             inner.folds.remove(&cgroup_id).map(SyscallFold::finish)
         })
         .flatten()
     }
 
-    /// A live, non-destructive read of one sandbox's footprint so far: drains pending events to every fold,
-    /// then finishes a **clone** of this cgroup's fold, so the original keeps accumulating. `None` if
-    /// the lock is poisoned or the fold is gone.
+    /// A live, non-destructive read of one sandbox's footprint so far: finishes a **clone** of
+    /// this cgroup's fold, so the original keeps accumulating. `None` if the lock is poisoned or
+    /// the fold is gone.
     fn snapshot_fold(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
@@ -150,8 +138,8 @@ impl SharedTracer {
         .flatten()
     }
 
-    /// Detaches one sandbox without producing a footprint, the abandoned path: unregisters its cgroup and
-    /// drop its fold. Best-effort; a poisoned lock is a no-op (the fold goes with the process).
+    /// Detaches one sandbox without producing a footprint, the abandoned path. Best-effort; a
+    /// poisoned lock is a no-op (the fold goes with the process).
     fn detach(&self, cgroup_id: u64) {
         let _ = self.with(|inner| {
             let _ = inner.tracer.remove_target(cgroup_id);
@@ -159,10 +147,9 @@ impl SharedTracer {
         });
     }
 
-    /// The kernel's cumulative dropped-event count, or `None` if it can't be read.
-    /// [`attach`](SandboxProbes::attach) snapshots this and [`collect`](SandboxProbes::collect) reports a
-    /// nonzero delta as a coverage gap. The drops are host-global, so the attribution is approximate, but
-    /// a footprint that *may* undercount says so instead of looking exact.
+    /// The kernel's cumulative dropped-event count, or `None` if unreadable; `attach` snapshots it
+    /// and `collect` gaps a nonzero delta. Host-global, so approximate, but a footprint that may
+    /// undercount says so.
     fn drops(&self) -> Option<u64> {
         self.with(|inner| inner.tracer.dropped_events().ok())
             .flatten()
@@ -195,12 +182,10 @@ fn drain_route(inner: &mut TracerInner) -> usize {
         .unwrap_or(0)
 }
 
-/// Fold a monotonic loss counter's attach-to-collect window into a gap **reason**: `None` when both
-/// endpoints read and nothing was lost; `lost(delta)` when the counter moved; `unreadable` when
-/// either endpoint is missing, because unknown loss is still loss, never silence. The one delta
-/// rule every one of `collect`'s loss counters goes through (kernel ring drops, reader-side
-/// undecodable records, cgroups a full CPU map dropped), so none can drift into its own laxer
-/// reading. The caller names the axis, since the rule is the same on all of them.
+/// Folds a monotonic loss counter's attach-to-collect window into a gap **reason**: `None` when
+/// both endpoints read and nothing was lost, `lost(delta)` when the counter moved, `unreadable`
+/// when an endpoint is missing, because unknown loss is still loss. The one delta rule for every
+/// loss counter in `collect`, so none drifts into a laxer reading; the caller names the axis.
 fn loss_gap(
     before: Option<u64>,
     after: Option<u64>,
@@ -215,12 +200,11 @@ fn loss_gap(
 }
 
 /// One sandbox's NIC as the driver names it: the netns and the tap device inside it, **both or
-/// neither**, so the mixed state a bare pair of `Option<&str>`s admits (which would read as
-/// "no NIC", with no gap recorded) is unrepresentable.
+/// neither**, so the mixed state a bare pair of `Option<&str>`s admits is unrepresentable.
 ///
-/// Deliberately exhaustive, no `#[non_exhaustive]` (the one exception to the crate's rule, on
-/// purpose): foreign named-field literal construction is the anti-swap mechanism for two
-/// same-typed strings, and a constructor would reintroduce that positional pair.
+/// Deliberately not `#[non_exhaustive]` (the crate's one exception): named-field literal
+/// construction is the anti-swap mechanism for two same-typed strings, and a constructor would
+/// reintroduce the positional pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Nic<'a> {
     /// The sandbox's network namespace name (the driver's `netns()`).
@@ -229,10 +213,9 @@ pub struct Nic<'a> {
     pub tap: &'a str,
 }
 
-/// The per-run inputs to [`SandboxProbes::attach`]. [`new`](Self::new) takes the one required
-/// value; the optional fields start at the sealed posture (no NIC, no policy, no route) and are
-/// set on the value, so a new knob lands additively (`#[non_exhaustive]`) rather than as the silent
-/// every-caller break a positional parameter spliced mid-list would be.
+/// The per-run inputs to [`SandboxProbes::attach`]: [`new`](Self::new) starts at the sealed
+/// posture (no NIC, no policy, no route) and the optional fields are set on the value, so a new
+/// knob lands additively (`#[non_exhaustive]`) rather than as a positional-parameter break.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct AttachParams<'a> {
@@ -296,15 +279,11 @@ pub struct SandboxProbes {
 }
 
 impl SandboxProbes {
-    /// Post-boot: bind every available probe to this one VM by the plain values in `params` (the
-    /// loader stays independent of `bsx`, so they are pids and names, never a `Sandbox`):
-    /// - resolve the VMM's cgroup id and register it on the shared syscall tracer (its host-syscall
-    ///   footprint accrues from here);
-    /// - if a [`Nic`] is given, attach a per-VM tap monitor, enforcing `params.egress` (armed
-    ///   before the tc programs go live) when given, else observe-only;
-    /// - register the cgroup as a target on the shared meter.
-    ///
-    /// Each sub-attach degrades to a recorded [`AxisGap`]; the returned bundle is always valid.
+    /// Post-boot: bind every available probe to this one VM by the plain values in `params`:
+    /// resolve the VMM's cgroup and register it on the shared tracer and meter, and attach a
+    /// per-VM tap monitor when a [`Nic`] is given, enforcing `params.egress` (armed before the tc
+    /// programs go live) when set. Each sub-attach degrades to a recorded [`AxisGap`]; the
+    /// returned bundle is always valid.
     pub fn attach(
         params: AttachParams<'_>,
         tracer: &SharedTracer,
@@ -395,8 +374,7 @@ impl SandboxProbes {
     /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `bsx`.
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, subject: RecordSubject, timing: Timing) -> RunRecord {
-        // Drain and finish this cgroup's fold on the shared tracer, which also unregisters it. A lost fold
-        // or poisoned lock is a *recorded gap*, never an empty footprint passed off as a
+        // A lost fold or poisoned lock is a recorded gap, never an empty footprint passed off as a
         // quiet run.
         let had_tracer = matches!((self.traced, self.cgroup_id), (true, Some(_)));
         let host_syscalls = match (self.traced, self.cgroup_id) {
@@ -414,11 +392,8 @@ impl SandboxProbes {
         };
         self.traced = false;
 
-        // The shared ring buffer is host-global; if either loss counter moved during this run's
-        // window (the kernel's full-buffer drops, or the reader's undecodable records), the
-        // footprint may undercount, say so instead of looking exact. And if the tracer was attached
-        // but either endpoint of a delta is *unreadable*, the loss is unknown, still a gap (unknown
-        // loss is loss), never silence.
+        // The ring buffer is host-global: a moved loss counter means the footprint may undercount,
+        // and an unreadable endpoint is unknown loss, still a gap.
         if had_tracer {
             self.gaps.extend(
                 loss_gap(
@@ -450,9 +425,8 @@ impl SandboxProbes {
             );
         }
 
-        // Totals are the section's spine, since a section without them misreads as "no traffic", so their
-        // failure gaps the whole axis. A failed
-        // flow/denial read keeps the rest and records exactly which read was lost.
+        // Totals are the section's spine (a section without them misreads as "no traffic"), so
+        // their failure gaps the whole axis; a failed flow/denial read keeps the rest.
         let network = match self.tap.as_ref() {
             Some(monitor) => match monitor.totals() {
                 Err(e) => {
@@ -472,10 +446,8 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap denials: {e}").into()));
                         Vec::new()
                     });
-                    // The kernel's full-map drop counters: nonzero means the flow table / denial
-                    // rows saturated and this section undercounts, the loss must ride the record
-                    // (a truncated section + a coverage gap), never read as a complete account.
-                    // A failed *read* of a counter is its own gap, unknown loss is still loss.
+                    // Full-map drop counters: nonzero means this section undercounts and the loss
+                    // must ride the record; a failed read of a counter is its own gap.
                     let dropped_flows = monitor.dropped_flows().unwrap_or_else(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read tap flow drops: {e}").into()));
@@ -505,9 +477,8 @@ impl SandboxProbes {
                             .into(),
                         ));
                     }
-                    // Frames the flow view can't represent: not a flow, but their
-                    // presence means the section is IPv4-only, not the whole picture, so gap it. A
-                    // failed read of the counter is itself a gap (unknown coverage is a gap).
+                    // Frames the flow view can't represent mean the section is not the whole tap
+                    // traffic, so gap them; a failed read of the counter is itself a gap.
                     match monitor.unparsed_l3() {
                         Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(
                             format!(
@@ -521,8 +492,8 @@ impl SandboxProbes {
                             format!("read tap unparsed-L3 counter: {e}").into(),
                         )),
                     }
-                    // The IPv6 half (dual-stack): folded into the same section, an unreadable
-                    // v6 map is its own gap so v6 traffic is never silently absent.
+                    // The IPv6 half: an unreadable v6 map is its own gap, so v6 traffic is never
+                    // silently absent.
                     let flows6 = monitor.flows6().unwrap_or_else(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read tap v6 flows: {e}").into()));
@@ -533,10 +504,8 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap v6 denials: {e}").into()));
                         Vec::new()
                     });
-                    // What the classifier was actually enforcing, read back from its own maps. A
-                    // failed read is a gap rather than an empty posture: "no rules" and "could not
-                    // tell" are the two readings a record must never conflate, since one of them
-                    // says the run was unrestricted.
+                    // The posture is read back from the classifier's own maps; a failed read is a
+                    // gap, because "no rules" and "could not tell" must never conflate.
                     let posture = monitor.posture(self.gateway).map_err(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read egress posture: {e}").into()));
@@ -558,9 +527,8 @@ impl SandboxProbes {
             None => None,
         };
 
-        // Read the shared meter's CPU and the cgroup's native memory and IO *before* unregistering, since
-        // the cgroup dir must still be live. Every failure is a recorded gap, since a record showing zero
-        // CPU must mean "the sandbox used none", never "the read silently failed".
+        // Read the resources *before* unregistering, while the cgroup dir is still live; a failure
+        // is a recorded gap, so zero CPU never means "the read silently failed".
         let resources = match self.meter.with(|m| m.summary_for_pid(self.vmm_pid)) {
             Some(Ok(summary)) => summary,
             Some(Err(e)) => {
@@ -575,10 +543,9 @@ impl SandboxProbes {
         };
 
         if self.metered {
-            // A cgroup a full `CPU_NS` could not admit accumulates nothing, so its `cpu_time` reads
-            // back zero: the one reading that must never pass for "this run used no CPU". The
-            // counter is host-global like the ring buffer's, so a delta means *some* cgroup went
-            // unmetered in this window, which is enough to stop calling the number exact.
+            // A cgroup a full `CPU_NS` could not admit reads back zero CPU, which must never pass
+            // for "this run used none"; the counter is host-global, so any delta stops the number
+            // being called exact.
             self.gaps.extend(
                 loss_gap(
                     self.cpu_drops_at_attach,
@@ -596,9 +563,8 @@ impl SandboxProbes {
                 .map(AxisGap::Cpu),
             );
             if let Some(cgid) = self.cgroup_id {
-                // Unregister *and* free the cgroup's `CPU_NS` row (the summary above already read
-                // it), so a long-lived shared meter doesn't accumulate dead cgroups against the
-                // map's fixed `MAX_CGROUPS` capacity. Both are best-effort teardown.
+                // Unregister and free the `CPU_NS` row (already read above), so a long-lived
+                // meter doesn't accumulate dead cgroups against `MAX_CGROUPS`. Best-effort.
                 let _ = self.meter.with(|m| {
                     let _ = m.remove_target(cgid);
                     m.clear(cgid)
@@ -618,12 +584,9 @@ impl SandboxProbes {
         )
     }
 
-    /// A **live, non-destructive** read of this sandbox's probes so far, the watcher's poll (a live
-    /// view redraws from these mid-run). Each axis is a point-in-time reading: the syscall footprint
-    /// accrued so far (a finished *clone*; the underlying fold keeps accumulating), the tap's
-    /// flows/totals/denials now, and the meter's resource summary now. A transiently unreadable axis is
-    /// `None`, the watcher keeps its last good view; the *authoritative*, gap-recording read is
-    /// [`collect`](Self::collect), which this never disturbs.
+    /// A **live, non-destructive** read of this sandbox's probes so far, the watcher's poll. A
+    /// transiently unreadable axis is `None` (the watcher keeps its last good view); the
+    /// authoritative, gap-recording read is [`collect`](Self::collect), which this never disturbs.
     #[must_use]
     pub fn snapshot(&self) -> LiveSnapshot {
         let host_syscalls = match (self.traced, self.cgroup_id) {
@@ -667,10 +630,9 @@ impl SandboxProbes {
 }
 
 /// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`], what a
-/// live view (the CLI's `--watch` TUI, a daemon's stream) redraws from between attach and collect.
-/// Pure data (no aya), so consumers that transform it (timeline diffing, rendering) stay host-safe
-/// testable. An axis that couldn't be read *right now* is `None`; honesty about *why* an axis is
-/// missing belongs to the final [`RunRecord`](crate::RunRecord)'s coverage, not here.
+/// live view redraws from between attach and collect. Pure data (no aya), so consumers stay
+/// host-safe testable. An unreadable axis is `None`; *why* an axis is missing belongs to the final
+/// [`RunRecord`](crate::RunRecord)'s coverage, not here.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LiveSnapshot {
