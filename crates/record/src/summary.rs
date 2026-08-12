@@ -21,7 +21,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use crate::Syscall;
-use crate::json::{clamped_ns, field, field_opt_u64, json_str, proto_name, syscall_name};
+use crate::json::{
+    clamped_ns, field, field_opt_u64, json_str, proto_name, rule_port, rule_proto, syscall_name,
+};
 use crate::record::{AxisGap, NetSection, NotableSyscall, RunRecord};
 
 /// The version of the record-summary JSON schema. Versioned independently of the full record's
@@ -231,19 +233,19 @@ fn net_summary(out: &mut String, net: &NetSection) {
     out.push('}');
 }
 
-/// The `port/proto` tail of a summary allow-rule, closing the string. A `0` is the kernel record's
-/// "any", rendered `*` so it reads as a wildcard rather than as port zero / protocol zero.
+/// The `port/proto` tail of a summary allow-rule, closing the string. A wildcard renders as `*` so
+/// it reads as one rather than as port zero / protocol zero.
 fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
-    if port == 0 {
-        out.push('*');
-    } else {
-        let _ = write!(out, "{port}");
+    match rule_port(port) {
+        Some(p) => {
+            let _ = write!(out, "{p}");
+        }
+        None => out.push('*'),
     }
     out.push('/');
-    if proto == 0 {
-        out.push('*');
-    } else {
-        proto_name(out, proto);
+    match rule_proto(proto) {
+        Some(p) => proto_name(out, p),
+        None => out.push('*'),
     }
     out.push('"');
 }
