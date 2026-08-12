@@ -5,28 +5,25 @@
 // `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use bsx_probes_loader::{HostKey, record_hash};
+use bsx_test_support::ScratchDir;
 
-/// A scratch dir for the chain file, removed on drop; also the spawn cwd and the spawned process's
-/// `$HOME`, so neither a `.bsx.toml` higher up the tree nor the developer's own user config can leak
-/// configuration (a `trusted_keys` entry above all) into the run.
-struct ChainDir(PathBuf);
+/// A scratch dir for the chain file ([`ScratchDir`]'s collision-proof naming, removed on drop);
+/// also the spawn cwd and the spawned process's `$HOME`, so neither a `.bsx.toml` higher up the
+/// tree nor the developer's own user config can leak configuration (a `trusted_keys` entry above
+/// all) into the run.
+struct ChainDir(ScratchDir);
 
 impl ChainDir {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("bsx-chain-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-        Self(dir)
+        Self(ScratchDir::created(&format!("chain-{name}")))
     }
-}
 
-impl Drop for ChainDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+    fn path(&self) -> &Path {
+        self.0.path()
     }
 }
 
@@ -50,8 +47,8 @@ fn verify_in(dir: &ChainDir, file: &Path, key_hex: &str) -> (Option<i32>, String
         .arg("verify")
         .arg(file)
         .args(["--key", key_hex])
-        .current_dir(&dir.0)
-        .env("HOME", &dir.0)
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx verify: {e}"));
     (
@@ -69,7 +66,7 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
     let [e0, e1, e2] = chain_of_three(&key);
 
     // The intact sequence, one envelope per line, verifies as a chain.
-    let good = dir.0.join("session.jsonl");
+    let good = dir.path().join("session.jsonl");
     std::fs::write(&good, format!("{e0}\n{e1}\n{e2}\n")).unwrap_or_else(|e| panic!("write: {e}"));
     let (code, stdout, stderr) = verify_in(&dir, &good, &hex);
     assert_eq!(code, Some(0), "an intact chain verifies: {stderr}");
@@ -80,7 +77,7 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
 
     // Reordered: the same three valid envelopes out of order must fail, which is the whole point
     // of the chain (each record alone still carries a valid signature).
-    let reordered = dir.0.join("reordered.jsonl");
+    let reordered = dir.path().join("reordered.jsonl");
     std::fs::write(&reordered, format!("{e0}\n{e2}\n{e1}\n"))
         .unwrap_or_else(|e| panic!("write: {e}"));
     let (code, _, stderr) = verify_in(&dir, &reordered, &hex);
@@ -96,7 +93,7 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
     // let this case pass by verifying an untouched chain.
     let tampered_line = e1.replace("\\\"n\\\":2", "\\\"n\\\":9");
     assert_ne!(tampered_line, e1, "the tamper must actually change bytes");
-    let tampered = dir.0.join("tampered.jsonl");
+    let tampered = dir.path().join("tampered.jsonl");
     std::fs::write(&tampered, format!("{e0}\n{tampered_line}\n{e2}\n"))
         .unwrap_or_else(|e| panic!("write: {e}"));
     let (code, _, stderr) = verify_in(&dir, &tampered, &hex);
@@ -104,7 +101,7 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
     assert!(stderr.contains("FAILED"), "{stderr}");
 
     // A dropped record: e1 missing, so e2's prev no longer matches its predecessor.
-    let dropped = dir.0.join("dropped.jsonl");
+    let dropped = dir.path().join("dropped.jsonl");
     std::fs::write(&dropped, format!("{e0}\n{e2}\n")).unwrap_or_else(|e| panic!("write: {e}"));
     let (code, _, stderr) = verify_in(&dir, &dropped, &hex);
     assert_eq!(
@@ -120,7 +117,7 @@ fn a_single_envelope_file_still_verifies_as_before() {
     // file takes.
     let key = HostKey::from_seed([7u8; 32]);
     let dir = ChainDir::new("single");
-    let one = dir.0.join("run.json");
+    let one = dir.path().join("run.json");
     std::fs::write(&one, key.sign_canonical(r#"{"schema":1,"n":1}"#) + "\n")
         .unwrap_or_else(|e| panic!("write: {e}"));
     let (code, stdout, stderr) = verify_in(&dir, &one, &key.key_id());

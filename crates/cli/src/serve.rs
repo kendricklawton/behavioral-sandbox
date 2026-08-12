@@ -1441,9 +1441,8 @@ mod tests {
         // The daemon reclaims a stale socket by removing it, and it often runs as root, so a
         // `--socket` naming a real file (a config, a database) would have been a deletion of
         // whatever root can write. What matters here is not the error, it is the survival.
-        let dir = std::env::temp_dir().join(format!("bsx-bind-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let victim = dir.join("precious.toml");
+        let dir = bsx_test_support::ScratchDir::created("bind");
+        let victim = dir.path().join("precious.toml");
         std::fs::write(&victim, b"do not delete me").expect("write the victim");
 
         let err = bind(&victim).expect_err("a non-socket path must be refused");
@@ -1453,7 +1452,6 @@ mod tests {
             b"do not delete me",
             "refusing must never remove the file it refused"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1678,8 +1676,8 @@ mod tests {
         // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
         // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
         // the disarm: a published path must survive the guard's drop.
-        let base = std::env::temp_dir().join(format!("bsx-staged-{}", std::process::id()));
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let scratch = bsx_test_support::ScratchDir::created("staged");
+        let base = scratch.path();
 
         let file = base.join("sock.tmp");
         std::fs::write(&file, b"x").expect("stage file");
@@ -1699,8 +1697,6 @@ mod tests {
         std::fs::write(&kept, b"x").expect("stage");
         StagedPath::new(kept.clone()).published();
         assert!(kept.exists(), "a published path must survive the guard");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

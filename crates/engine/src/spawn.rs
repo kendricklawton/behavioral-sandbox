@@ -1699,8 +1699,8 @@ mod tests {
         // The leak the guard closes: a panic mid-staging (rootfs copy, an image build) must not
         // strand the scratch dir. And the disarm half: a dir handed off to the netns-aware path
         // must survive the guard's drop.
-        let base = std::env::temp_dir().join(format!("bsx-workdir-unwind-{}", std::process::id()));
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let scratch = ScratchDir::created("workdir-unwind");
+        let base = scratch.path();
 
         let doomed = base.join("staging");
         std::fs::create_dir(&doomed).expect("stage dir");
@@ -1721,8 +1721,6 @@ mod tests {
         let handed = WorkdirGuard::new(kept.clone()).disarm();
         assert_eq!(handed, kept, "disarm hands the same path back");
         assert!(kept.exists(), "a disarmed workdir must survive the guard");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1731,8 +1729,8 @@ mod tests {
         // `StagedDisk`'s rustdoc promises the panic-unwind cover for the out-of-workdir staged
         // restore disk; pin it: an armed guard dropped by an unwind unstages the file (and its
         // staging marker + now-empty parent), a `take`n one leaves the disk alone.
-        let base = std::env::temp_dir().join(format!("bsx-disk-unwind-{}", std::process::id()));
-        let staging = base.join("stage");
+        let scratch = ScratchDir::created("disk-unwind");
+        let staging = scratch.path().join("stage");
         std::fs::create_dir_all(&staging).expect("mkdir");
         let disk = staging.join("rootfs.ext4");
         std::fs::write(&disk, b"x").expect("stage disk");
@@ -1753,8 +1751,6 @@ mod tests {
         assert_eq!(guard.take(), Some(disk.clone()));
         drop(guard);
         assert!(disk.exists(), "a taken disk must survive the guard");
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

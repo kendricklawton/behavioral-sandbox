@@ -16,6 +16,38 @@ use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Jail, Vm};
 /// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).
 pub use bsx_test_support::ScratchDir as TmpDir;
 
+/// The uid the process behind `pid` runs as: the **real** uid from `/proc/<pid>/status`. `Uid:` is
+/// real/effective/saved/fs, and the jailer's `setuid` sets all four, so the first answers it.
+pub fn vmm_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|u| u.parse().ok())
+}
+
+/// Whether `pid` is still a live `firecracker` process. A reaped child leaves `/proc` entirely, so a
+/// `firecracker` still present at a VMM pid we booted means teardown failed to kill+reap it. Keyed on
+/// the *specific* pid (via `comm`), not a scan, so it can't be confused by other parallel tests' VMMs
+/// (they have different pids); a reaped-then-recycled pid running something else reads as gone.
+pub fn is_firecracker(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.trim() == "firecracker")
+        .unwrap_or(false)
+}
+
+/// How many per-VM scratch dirs (`bsx-<pid>-*`) under `base` belong to driver `pid`. An unreadable
+/// `base` is a panic, not zero: a leak scan that read nothing must not report "no leaks".
+pub fn scratch_dirs_of(base: &std::path::Path, pid: u32) -> usize {
+    let prefix = format!("bsx-{pid}-");
+    std::fs::read_dir(base)
+        .unwrap_or_else(|e| panic!("scan {} for leaks: {e}", base.display()))
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .count()
+}
+
 /// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
 /// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
 /// panics rather than `expect`, which the workspace lints only re-allow inside test functions.

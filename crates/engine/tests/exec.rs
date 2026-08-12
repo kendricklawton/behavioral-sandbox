@@ -56,17 +56,9 @@ fn jailed_exec_runs_a_command() {
     let mut vm = Vm::boot(jailed_agent_config())
         .expect("jailed agent microVM should boot and announce readiness");
     // The VMM really is jailed (not a plain boot that happens to exec): it runs as the dropped uid.
-    let pid = vm.vmm_pid();
-    let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("Uid:"))
-                .and_then(|v| v.split_whitespace().next().map(str::to_string))
-        });
     assert_eq!(
-        uid.as_deref(),
-        Some(bsx_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        common::vmm_uid(vm.vmm_pid()),
+        Some(bsx_engine::DEFAULT_JAIL_UID),
         "the exec'ing VMM should be the dropped jail uid, proving it is confined"
     );
     let out = vm
@@ -109,17 +101,10 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
     let mut vm = Vm::boot(cfg).expect("jailed microVM with bulk I/O should boot to readiness");
 
     // Still actually confined with the devices attached: the VMM runs as the dropped uid.
-    let pid = vm.vmm_pid();
-    let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("Uid:"))
-                .and_then(|v| v.split_whitespace().next().map(str::to_string))
-        });
+    let uid = common::vmm_uid(vm.vmm_pid());
     assert_eq!(
-        uid.as_deref(),
-        Some(bsx_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        uid,
+        Some(bsx_engine::DEFAULT_JAIL_UID),
         "the bulk-I/O VMM should be the dropped jail uid, proving the jail held"
     );
 

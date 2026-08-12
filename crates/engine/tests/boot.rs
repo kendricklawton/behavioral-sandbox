@@ -219,13 +219,8 @@ fn boots_under_the_jailer() {
     // `bsx-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
     // via `from_env`, so `BSX_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
-    let prefix = format!("bsx-{}-", std::process::id());
     let scratch_root = bsx_engine::BootConfig::from_env().scratch_dir;
-    let scratch_leaks = std::fs::read_dir(&scratch_root)
-        .expect("scan the scratch root for leaks")
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-        .count();
+    let scratch_leaks = common::scratch_dirs_of(&scratch_root, std::process::id());
     assert_eq!(
         scratch_leaks, 0,
         "jailed boot leaked a scratch dir / chroot"
@@ -424,16 +419,6 @@ fn agent_netns() -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// Whether `pid` is still a live `firecracker` process. A reaped child leaves `/proc` entirely, so a
-/// `firecracker` still present at a VMM pid we booted means teardown failed to kill+reap it. Keyed on
-/// the *specific* pid (via `comm`), not a scan, so it can't be confused by other parallel tests' VMMs
-/// (they have different pids); a reaped-then-recycled pid running something else reads as gone.
-fn is_firecracker(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|c| c.trim() == "firecracker")
-        .unwrap_or(false)
-}
-
 /// One full soak cycle: boot the agent rootfs (networked when `net`), run one guest command, and
 /// tear down. Returns the VMM pid for the orphan scan.
 fn boot_exec_shutdown(net: bool) -> u32 {
@@ -481,7 +466,6 @@ fn repeated_boots_leave_no_leaks() {
     // without the capability, networking is off and the soak still covers the other axes.
     let net = have_net_admin();
     let cycles = soak_cycles();
-    let prefix = format!("bsx-{}-", std::process::id());
     let scratch_root = bsx_engine::BootConfig::from_env().scratch_dir;
     let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
@@ -505,16 +489,6 @@ fn repeated_boots_leave_no_leaks() {
         "at least this thread; /proc read failed?"
     );
 
-    // This process's per-VM scratch dirs (`bsx-<pid>-<n>` under the configured scratch root);
-    // an unreadable root is a failure, not zero leaks.
-    let scratch_leftovers = |scratch_root: &Path, prefix: &str| -> usize {
-        std::fs::read_dir(scratch_root)
-            .expect("scan the scratch root for leaks")
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
-            .count()
-    };
-
     for i in 1..=cycles {
         if i % CHURN_EVERY == 0 {
             // A churn burst: 3 concurrent full cycles, joined before any measurement so the
@@ -529,14 +503,14 @@ fn repeated_boots_leave_no_leaks() {
             // as a mush at the end. (If the exact fd/thread equalities ever prove flaky mid-run,
             // demote just those two to the final assertions; the on-host axes stay.)
             assert_eq!(
-                scratch_leftovers(&scratch_root, &prefix),
+                common::scratch_dirs_of(&scratch_root, std::process::id()),
                 0,
                 "scratch dirs leaked by cycle {i}"
             );
             let orphans: Vec<_> = vmm_pids
                 .iter()
                 .copied()
-                .filter(|&p| is_firecracker(p))
+                .filter(|&p| common::is_firecracker(p))
                 .collect();
             assert!(
                 orphans.is_empty(),
@@ -576,7 +550,7 @@ fn repeated_boots_leave_no_leaks() {
     let vms = vmm_pids.len();
     let fds_after = open_fds();
     let threads_after = bsx_test_support::process_threads(std::process::id());
-    let leftovers = scratch_leftovers(&scratch_root, &prefix);
+    let leftovers = common::scratch_dirs_of(&scratch_root, std::process::id());
     let netns_left = agent_netns().difference(&netns_before).count();
     eprintln!(
         "soak: {vms} VMs over {cycles} cycles: fd rate {:+.4}/VM ({fds_before} -> {fds_after}), \
@@ -592,7 +566,7 @@ fn repeated_boots_leave_no_leaks() {
     let orphans: Vec<_> = vmm_pids
         .iter()
         .copied()
-        .filter(|&p| is_firecracker(p))
+        .filter(|&p| common::is_firecracker(p))
         .collect();
     assert!(orphans.is_empty(), "orphaned firecracker VMMs: {orphans:?}");
 

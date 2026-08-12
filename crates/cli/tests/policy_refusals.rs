@@ -7,35 +7,34 @@
 // `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use bsx_test_support::ScratchDir;
 
 /// A scratch cwd holding the test's project `.bsx.toml`, plus an empty `$HOME` for the spawned
 /// process, removed on drop. Its own `.bsx.toml` is the nearest one, and the pinned `HOME` has none,
 /// so neither layer of discovery reaches a stray file (including the developer's real
 /// `~/.bsx.toml`, which would otherwise supply artifact paths to every one of these runs).
-struct PolicyDir(PathBuf);
+struct PolicyDir(ScratchDir);
 
 impl PolicyDir {
     fn with_toml(name: &str, toml: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("bsx-policy-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-        std::fs::create_dir_all(dir.join("home")).unwrap_or_else(|e| panic!("create home: {e}"));
-        std::fs::write(dir.join(".bsx.toml"), toml)
+        let dir = ScratchDir::created(&format!("policy-{name}"));
+        std::fs::create_dir_all(dir.path().join("home"))
+            .unwrap_or_else(|e| panic!("create home: {e}"));
+        std::fs::write(dir.path().join(".bsx.toml"), toml)
             .unwrap_or_else(|e| panic!("write .bsx.toml: {e}"));
         Self(dir)
     }
 
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+
     /// The empty `$HOME` handed to the spawned `bsx`.
     fn home(&self) -> PathBuf {
-        self.0.join("home")
-    }
-}
-
-impl Drop for PolicyDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        self.path().join("home")
     }
 }
 
@@ -48,10 +47,10 @@ fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
         .arg("--unjailed") // never ask for root; the run must die before the VMM either way
         .arg("--")
         .arg("true")
-        .current_dir(&dir.0)
+        .current_dir(dir.path())
         .env("HOME", dir.home())
         .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
-        .env("BSX_SIGNING_KEY", dir.0.join("signing.key"))
+        .env("BSX_SIGNING_KEY", dir.path().join("signing.key"))
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx: {e}"));
     (
@@ -106,7 +105,7 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
     // The CLI: refused before anything else happens.
     let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .args(["--log", "bsx=notalevel", "run", "--unjailed", "--", "true"])
-        .current_dir(&dir.0)
+        .current_dir(dir.path())
         .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx run: {e}"));
@@ -121,8 +120,8 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
     // operator did not choose).
     let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .args(["serve", "--log", "bsx=notalevel", "--socket"])
-        .arg(dir.0.join("never-bound.sock"))
-        .current_dir(&dir.0)
+        .arg(dir.path().join("never-bound.sock"))
+        .current_dir(dir.path())
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx serve: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -136,7 +135,7 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
         "the daemon's refusal names the filter too: {stderr}"
     );
     assert!(
-        !dir.0.join("never-bound.sock").exists(),
+        !dir.path().join("never-bound.sock").exists(),
         "a daemon refused at startup must not have bound its socket"
     );
 }

@@ -1010,8 +1010,8 @@ mod tests {
         // **succeed**, and the leak assertion below would fire on a mount the test itself made, so
         // root gets a destination that does not exist (ENOENT for everyone). Either way the branch
         // under test is "mount returned non-zero", and either way nothing may be left mounted.
-        let dir = std::env::temp_dir().join(format!("bsx-bindro-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let scratch = bsx_test_support::ScratchDir::created("bindro");
+        let dir = scratch.path();
         let src = dir.join("src");
         std::fs::write(&src, b"base").expect("write src");
         let dst = if bsx_test_support::have_real_root() {
@@ -1041,7 +1041,6 @@ mod tests {
             !leaked,
             "a bind that did not fully succeed must leave nothing mounted at {dst:?}"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
