@@ -120,31 +120,52 @@ fn measure_tree(dir: &Path) -> Result<(u64, u64), VmmError> {
     const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB bulk-input ceiling
     let mut bytes = 0u64;
     let mut files = 0u64;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let entries = std::fs::read_dir(&d)
-            .map_err(|e| VmmError::Artifact(format!("read input dir {}: {e}", d.display())))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| VmmError::Artifact(format!("read input entry: {e}")))?;
-            let ft = entry
-                .file_type()
-                .map_err(|e| VmmError::Artifact(format!("stat input entry: {e}")))?;
-            if ft.is_dir() {
-                stack.push(entry.path());
-            } else {
-                files += 1;
-                if let Ok(meta) = entry.metadata() {
-                    bytes = bytes.saturating_add(meta.len());
-                }
-            }
+    for_each_leaf(dir, "input", VmmError::Artifact, |entry, _| {
+        files += 1;
+        if let Ok(meta) = entry.metadata() {
+            bytes = bytes.saturating_add(meta.len());
         }
         if bytes > MAX_INPUT_BYTES {
             return Err(VmmError::Artifact(format!(
                 "input directory exceeds the {MAX_INPUT_BYTES}-byte bulk-input ceiling"
             )));
         }
-    }
+        Ok(())
+    })?;
     Ok((bytes, files))
+}
+
+/// Walk `root` depth-first, calling `visit` for every entry that is **not** a directory;
+/// directories are descended, never visited.
+///
+/// An explicit stack rather than recursion, so a deep guest-authored tree cannot exhaust the host
+/// stack. `file_type` is `lstat`-like, so a symlink is a leaf and the walk can never be redirected
+/// out of the tree by following one. `err` and `what` name the caller's error, since the input side
+/// reports a caller's directory ([`VmmError::Artifact`]) and the output side the driver's own
+/// scratch ([`VmmError::Vmm`]).
+fn for_each_leaf(
+    root: &Path,
+    what: &str,
+    err: fn(String) -> VmmError,
+    mut visit: impl FnMut(&std::fs::DirEntry, &std::fs::FileType) -> Result<(), VmmError>,
+) -> Result<(), VmmError> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .map_err(|e| err(format!("read {what} dir {}: {e}", d.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| err(format!("read {what} entry: {e}")))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| err(format!("stat {what} entry: {e}")))?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else {
+                visit(&entry, &ft)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Like [`require_file`] but for a directory.
@@ -726,72 +747,52 @@ fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
     let root = dest
         .canonicalize()
         .map_err(|e| VmmError::Vmm(format!("canonicalize output dir {}: {e}", dest.display())))?;
-    let mut stack = vec![dest.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let entries = std::fs::read_dir(&d)
-            .map_err(|e| VmmError::Vmm(format!("scan output dir {}: {e}", d.display())))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| VmmError::Vmm(format!("read output entry: {e}")))?;
-            let ft = entry
-                .file_type()
-                .map_err(|e| VmmError::Vmm(format!("stat output entry: {e}")))?;
-            let path = entry.path();
-            if ft.is_symlink() {
-                // Follow the link (and any intermediate links) to a real path; keep only if it
-                // stays within the canonical destination.
-                let contained = path
-                    .canonicalize()
-                    .map(|real| real.starts_with(&root))
-                    .unwrap_or(false);
-                if !contained {
-                    let target = std::fs::read_link(&path).unwrap_or_default();
-                    std::fs::remove_file(&path).map_err(|e| {
-                        VmmError::Vmm(format!("drop escaping symlink {}: {e}", path.display()))
-                    })?;
-                    tracing::warn!(
-                        link = %path.display(),
-                        target = %target.display(),
-                        "dropped output symlink escaping the destination"
-                    );
-                }
-            } else if ft.is_dir() {
-                stack.push(path);
-            }
+    for_each_leaf(dest, "output", VmmError::Vmm, |entry, ft| {
+        if !ft.is_symlink() {
+            return Ok(());
         }
-    }
-    Ok(())
+        let path = entry.path();
+        // Follow the link (and any intermediate links) to a real path; keep only if it stays
+        // within the canonical destination.
+        let contained = path
+            .canonicalize()
+            .map(|real| real.starts_with(&root))
+            .unwrap_or(false);
+        if !contained {
+            let target = std::fs::read_link(&path).unwrap_or_default();
+            std::fs::remove_file(&path).map_err(|e| {
+                VmmError::Vmm(format!("drop escaping symlink {}: {e}", path.display()))
+            })?;
+            tracing::warn!(
+                link = %path.display(),
+                target = %target.display(),
+                "dropped output symlink escaping the destination"
+            );
+        }
+        Ok(())
+    })
 }
 
 /// The captured tree as relative-path strings (files and surviving symlinks, directories descended),
 /// sorted for a deterministic result. Purely a manifest of what `collect_outputs` produced.
 fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
     let mut out = Vec::new();
-    let mut stack = vec![dest.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let entries = std::fs::read_dir(&d)
-            .map_err(|e| VmmError::Vmm(format!("list output dir {}: {e}", d.display())))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| VmmError::Vmm(format!("read output entry: {e}")))?;
-            let ft = entry
-                .file_type()
-                .map_err(|e| VmmError::Vmm(format!("stat output entry: {e}")))?;
-            let path = entry.path();
-            if ft.is_dir() {
-                stack.push(path);
-            } else if let Ok(rel) = path.strip_prefix(dest) {
-                // A non-UTF-8 name has no lossless `String`, and a `to_string_lossy` U+FFFD form
-                // names no file on disk (an embedder resolving it gets ENOENT), so drop it with a
-                // warning rather than hand back a broken manifest entry (the sanitizer's posture).
-                match rel.to_str() {
-                    Some(s) => out.push(s.to_owned()),
-                    None => tracing::warn!(
-                        path = %rel.display(),
-                        "output artifact has a non-UTF-8 name; omitted from the manifest"
-                    ),
-                }
+    for_each_leaf(dest, "output", VmmError::Vmm, |entry, _| {
+        let path = entry.path();
+        if let Ok(rel) = path.strip_prefix(dest) {
+            // A non-UTF-8 name has no lossless `String`, and a `to_string_lossy` U+FFFD form names
+            // no file on disk (an embedder resolving it gets ENOENT), so drop it with a warning
+            // rather than hand back a broken manifest entry (the sanitizer's posture).
+            match rel.to_str() {
+                Some(s) => out.push(s.to_owned()),
+                None => tracing::warn!(
+                    path = %rel.display(),
+                    "output artifact has a non-UTF-8 name; omitted from the manifest"
+                ),
             }
         }
-    }
+        Ok(())
+    })?;
     out.sort();
     Ok(out)
 }
