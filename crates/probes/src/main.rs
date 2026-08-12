@@ -539,15 +539,7 @@ fn record_denial(key: &FlowKey) {
     // port would spread one blocked endpoint across a row per port, filling the map far faster and
     // diluting the "which endpoint was blocked" trail. It is also the shape the loader aggregates to.
     let dst = FlowKey::new(0, key.dst_addr, 0, key.dst_port, key.proto);
-    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
-    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
-    unsafe {
-        if let Some(count) = DENIALS.get_ptr_mut(dst) {
-            add_shared(count, 1);
-        } else if DENIALS.insert(dst, 1, 0).is_err() {
-            count_map_drop(&DENIAL_DROPS);
-        }
-    }
+    record_denial_in(&DENIALS, &dst);
 }
 
 /// The IPv6 twin of [`record_denial`], keyed by destination only for the same per-endpoint
@@ -555,12 +547,21 @@ fn record_denial(key: &FlowKey) {
 #[inline(always)]
 fn record_denial6(key: &FlowKey6) {
     let dst = FlowKey6::new([0u8; 16], key.dst_addr, 0, key.dst_port, key.proto);
+    record_denial_in(&DENIALS6, &dst);
+}
+
+/// The shared body of [`record_denial`] and [`record_denial6`]: bump `dst`'s denial count in
+/// `denials`, inserting the first sighting; a refused insert (full map) is counted in
+/// [`DENIAL_DROPS`]. `#[inline(always)]` monomorphizes into each caller, so the program stays
+/// self-contained (no BPF-to-BPF call) and the verifier's bounds are unmoved.
+#[inline(always)]
+fn record_denial_in<K>(denials: &HashMap<K, u64>, dst: &K) {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(count) = DENIALS6.get_ptr_mut(dst) {
+        if let Some(count) = denials.get_ptr_mut(dst) {
             add_shared(count, 1);
-        } else if DENIALS6.insert(dst, 1, 0).is_err() {
+        } else if denials.insert(dst, &1, 0).is_err() {
             count_map_drop(&DENIAL_DROPS);
         }
     }
@@ -572,23 +573,28 @@ fn record_denial6(key: &FlowKey6) {
 /// parser.
 #[inline(always)]
 fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
-    for i in 0..MAX_POLICY_RULES as u32 {
-        if let Some(rule) = POLICY.get(i)
-            && rule_matches(rule, dst_addr, dst_port, proto)
-        {
-            return true;
-        }
-    }
-    false
+    policy_admits(&POLICY, |rule| {
+        rule_matches(rule, dst_addr, dst_port, proto)
+    })
 }
 
 /// The IPv6 twin of [`policy_allows`], scanning [`POLICY6`] in the same bounded loop. Per-rule test
 /// is [`rule_matches6`] (byte-wise, no `u128`).
 #[inline(always)]
 fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
+    policy_admits(&POLICY6, |rule| {
+        rule_matches6(rule, dst_addr, dst_port, proto)
+    })
+}
+
+/// The shared scan of [`policy_allows`] and [`policy_allows6`]: the fixed rule array in a bounded
+/// loop (the compile-time cap the verifier needs), accepting on the first rule `admits`.
+/// Deny-by-default. `#[inline(always)]` monomorphizes the closure away into each caller.
+#[inline(always)]
+fn policy_admits<R>(policy: &Array<R>, admits: impl Fn(&R) -> bool) -> bool {
     for i in 0..MAX_POLICY_RULES as u32 {
-        if let Some(rule) = POLICY6.get(i)
-            && rule_matches6(rule, dst_addr, dst_port, proto)
+        if let Some(rule) = policy.get(i)
+            && admits(rule)
         {
             return true;
         }
@@ -613,51 +619,29 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
         }
         return;
     };
-    // `skb->len` is the full frame length, counting a GSO super-frame's real bytes, which `data_end -
-    // data` (only the linear head) would undercount.
-    let bytes = u64::from(ctx.skb.len());
-    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
-    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
-    unsafe {
-        if let Some(counts) = FLOWS.get_ptr_mut(key) {
-            match dir {
-                Direction::Ingress => {
-                    add_shared(&raw mut (*counts).ingress_packets, 1);
-                    add_shared(&raw mut (*counts).ingress_bytes, bytes);
-                }
-                Direction::Egress => {
-                    add_shared(&raw mut (*counts).egress_packets, 1);
-                    add_shared(&raw mut (*counts).egress_bytes, bytes);
-                }
-            }
-        } else {
-            let mut init = FlowCounts::default();
-            match dir {
-                Direction::Ingress => {
-                    init.ingress_packets = 1;
-                    init.ingress_bytes = bytes;
-                }
-                Direction::Egress => {
-                    init.egress_packets = 1;
-                    init.egress_bytes = bytes;
-                }
-            }
-            if FLOWS.insert(key, init, 0).is_err() {
-                count_map_drop(&FLOW_DROPS);
-            }
-        }
-    }
+    count_in(&FLOWS, ctx, dir, &key);
 }
 
 /// The IPv6 twin of [`count`]. Takes the key by reference, since a [`FlowKey6`] is 40 bytes rather
 /// than `Copy`-cheap; the non-IP and unparsed accounting stays in [`count`].
 #[inline(always)]
 fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
+    count_in(&FLOWS6, ctx, dir, key);
+}
+
+/// The shared body of [`count`] and [`count6`]: bump `key`'s per-direction counters in `flows`,
+/// inserting the first sighting; a refused insert (full map) is counted in [`FLOW_DROPS`].
+/// `#[inline(always)]` monomorphizes into each caller, so the program stays self-contained (no
+/// BPF-to-BPF call) and the verifier's bounds are unmoved.
+#[inline(always)]
+fn count_in<K>(flows: &HashMap<K, FlowCounts>, ctx: &TcContext, dir: Direction, key: &K) {
+    // `skb->len` is the full frame length, counting a GSO super-frame's real bytes, which `data_end -
+    // data` (only the linear head) would undercount.
     let bytes = u64::from(ctx.skb.len());
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(counts) = FLOWS6.get_ptr_mut(key) {
+        if let Some(counts) = flows.get_ptr_mut(key) {
             match dir {
                 Direction::Ingress => {
                     add_shared(&raw mut (*counts).ingress_packets, 1);
@@ -680,7 +664,7 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
                     init.egress_bytes = bytes;
                 }
             }
-            if FLOWS6.insert(key, init, 0).is_err() {
+            if flows.insert(key, &init, 0).is_err() {
                 count_map_drop(&FLOW_DROPS);
             }
         }
