@@ -75,6 +75,56 @@ fn serial_requested(args: &[String], env: Option<&str>) -> bool {
     env.map(str::trim) == Some("1")
 }
 
+/// A `Write` sink that appends into a shared buffer, for a test asserting on what was **logged**.
+///
+/// `tracing::subscriber::with_default` is thread-local, so a subscriber has to be installed inside
+/// each thread whose output matters while the buffer stays shared: [`subscriber`](Self::subscriber)
+/// hands out one per thread over the same [`LogSink`], and [`contents`](Self::contents) reads them
+/// all back. Behind the `tracing-capture` feature, so the crates that borrow only the pure-std
+/// helpers keep an empty dependency list.
+#[cfg(feature = "tracing-capture")]
+#[derive(Clone, Default)]
+pub struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(feature = "tracing-capture")]
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "tracing-capture")]
+impl LogSink {
+    /// A subscriber writing every level into this sink, to install on one thread.
+    #[must_use]
+    pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
+        let sink = self.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || sink.clone())
+            .finish()
+    }
+
+    /// Everything captured so far, lossily decoded.
+    #[must_use]
+    pub fn contents(&self) -> String {
+        String::from_utf8_lossy(
+            &self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned()
+    }
+}
+
 /// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only has to
 /// spray varied bytes at a decoder reproducibly.
 ///

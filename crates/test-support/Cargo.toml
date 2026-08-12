@@ -9,7 +9,17 @@ publish = false
 description = "Test-only helpers shared across crates (cgroup caps, host-capability probes, the fuzz generator). Never shipped."
 
 # No dependencies by design: pure-std helpers (`/proc`, `/sys`, `std::fs`), so this stays a leaf both
-# the driver and the loader test suites can borrow without coupling to either.
+# the driver and the loader test suites can borrow without coupling to either. The one exception is
+# **optional and off by default**, so a crate that borrows only the pure-std half still sees an empty
+# dependency list: `tracing-capture` carries the log-capturing sink the suites that assert on what a
+# log line *says* need. Both crates that enable it already depend on these two directly, so it adds
+# no crate to any tree.
+[dependencies]
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+tracing-capture = ["dep:tracing", "dep:tracing-subscriber"]
 
 [lints]
 workspace = true

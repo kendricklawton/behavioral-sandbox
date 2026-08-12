@@ -9,44 +9,7 @@ use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 
 use bsx_channel::{ClientConnection, Request, Response};
-
-/// A `Write` sink appending into a shared buffer, so the agent thread's subscriber can be read from
-/// the test thread (`with_default` is thread-local, so the subscriber must be installed *inside* the
-/// spawned agent).
-#[derive(Clone, Default)]
-struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl LogSink {
-    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
-        let sink = self.clone();
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || sink.clone())
-            .finish()
-    }
-    fn contents(&self) -> String {
-        String::from_utf8_lossy(
-            &self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-        .into_owned()
-    }
-}
+use bsx_test_support::LogSink;
 
 /// Whether this host lets the agent make a per-exec cgroup, answered by doing it rather than by
 /// guessing from a uid: the privileged gate runs as real root with a writable cgroup v2 mount, an

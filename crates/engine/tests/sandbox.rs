@@ -12,6 +12,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use bsx_engine::{DEFAULT_JAIL_UID, Limits, Sandbox, Vm, VmmError};
+use bsx_test_support::LogSink;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -375,29 +376,9 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
     let mut sandbox = Sandbox::open_unjailed(guest_rootfs_config()).expect("open");
 
     // Capture the host-side tracing this thread emits during the execs.
-    use std::sync::{Arc, Mutex, PoisonError};
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let sink = Sink::default();
-    let writer_sink = sink.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(move || writer_sink.clone())
-        .finish();
+    let sink = LogSink::default();
 
-    let (received, err) = tracing::subscriber::with_default(subscriber, || {
+    let (received, err) = tracing::subscriber::with_default(sink.subscriber(), || {
         let received = sandbox
             .exec_with_files(
                 &[
@@ -468,8 +449,7 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
         !console.contains(SENTINEL),
         "sentinel leaked into the serial console:\n{console}"
     );
-    let logs = String::from_utf8_lossy(&sink.0.lock().unwrap_or_else(PoisonError::into_inner))
-        .into_owned();
+    let logs = sink.contents();
     assert!(
         logs.contains("exec"),
         "expected captured host spans, got {logs:?}"
