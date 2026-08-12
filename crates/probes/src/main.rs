@@ -561,7 +561,7 @@ fn record_denial_in<K>(denials: &HashMap<K, u64>, dst: &K) {
     unsafe {
         if let Some(count) = denials.get_ptr_mut(dst) {
             add_shared(count, 1);
-        } else if denials.insert(dst, &1, 0).is_err() {
+        } else if denials.insert(dst, 1, 0).is_err() {
             count_map_drop(&DENIAL_DROPS);
         }
     }
@@ -664,7 +664,7 @@ fn count_in<K>(flows: &HashMap<K, FlowCounts>, ctx: &TcContext, dir: Direction, 
                     init.egress_bytes = bytes;
                 }
             }
-            if flows.insert(key, &init, 0).is_err() {
+            if flows.insert(key, init, 0).is_err() {
                 count_map_drop(&FLOW_DROPS);
             }
         }
