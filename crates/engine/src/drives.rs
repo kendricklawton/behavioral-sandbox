@@ -75,32 +75,16 @@ pub(crate) fn build_input_image(
     let inodes = files + 256;
 
     let image = workdir.join("input.ext4");
-    run_host_tool(
-        "truncate",
+    allocate_image(&image, size_mib, deadline)?;
+    let inodes = inodes.to_string();
+    mkfs_ext4(
+        &image,
+        INPUT_LABEL,
         &[
-            OsStr::new("-s"),
-            OsStr::new(&format!("{size_mib}M")),
-            image.as_os_str(),
-        ],
-        deadline,
-    )?;
-    run_host_tool(
-        "mke2fs",
-        &[
-            OsStr::new("-F"),
-            OsStr::new("-q"),
-            OsStr::new("-t"),
-            OsStr::new("ext4"),
-            OsStr::new("-m"),
-            OsStr::new("0"),
             OsStr::new("-N"),
-            OsStr::new(&inodes.to_string()),
-            // Label so the guest mounts by label, not `/dev/vdX` order (see `INPUT_LABEL`).
-            OsStr::new("-L"),
-            OsStr::new(INPUT_LABEL),
+            OsStr::new(&inodes),
             OsStr::new("-d"),
             src_dir.as_os_str(),
-            image.as_os_str(),
         ],
         deadline,
     )?;
@@ -115,29 +99,13 @@ pub(crate) fn build_input_image(
 /// teardown); [`RunningVm::collect_outputs`] reads it back after the VMM exits.
 pub(crate) fn build_output_image(workdir: &Path, deadline: Instant) -> Result<PathBuf, VmmError> {
     let image = workdir.join("output.ext4");
-    run_host_tool(
-        "truncate",
+    allocate_image(&image, u64::from(OUTPUT_IMAGE_MIB), deadline)?;
+    mkfs_ext4(
+        &image,
+        OUTPUT_LABEL,
         &[
-            OsStr::new("-s"),
-            OsStr::new(&format!("{OUTPUT_IMAGE_MIB}M")),
-            image.as_os_str(),
-        ],
-        deadline,
-    )?;
-    run_host_tool(
-        "mke2fs",
-        &[
-            OsStr::new("-F"),
-            OsStr::new("-q"),
-            OsStr::new("-t"),
-            OsStr::new("ext4"),
-            OsStr::new("-m"),
-            OsStr::new("0"),
-            OsStr::new("-L"),
-            OsStr::new(OUTPUT_LABEL),
             OsStr::new("-E"),
             OsStr::new("lazy_itable_init=0,lazy_journal_init=0"),
-            image.as_os_str(),
         ],
         deadline,
     )?;
@@ -189,6 +157,47 @@ fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
             path.display()
         )))
     }
+}
+
+/// Create `image` as a sparse file of `size_mib` MiB, the backing store both block-device builds
+/// format. Sparse, so the host pays for the blocks the guest actually writes, not the geometry.
+fn allocate_image(image: &Path, size_mib: u64, deadline: Instant) -> Result<(), VmmError> {
+    run_host_tool(
+        "truncate",
+        &[
+            OsStr::new("-s"),
+            OsStr::new(&format!("{size_mib}M")),
+            image.as_os_str(),
+        ],
+        deadline,
+    )
+}
+
+/// Format `image` as ext4 with `label` and whatever `extra` the caller's device needs. Rootless
+/// (no loopback, no `sudo`): `-F` formats a plain file, `-m 0` leaves no reserved blocks, since a
+/// device with no root user has nothing to reserve them for.
+///
+/// The label is required rather than an `extra`, because the guest mounts both devices **by label**:
+/// an unlabelled image would leave it mounting by `/dev/vdX` probe order.
+fn mkfs_ext4(
+    image: &Path,
+    label: &str,
+    extra: &[&OsStr],
+    deadline: Instant,
+) -> Result<(), VmmError> {
+    let mut args = vec![
+        OsStr::new("-F"),
+        OsStr::new("-q"),
+        OsStr::new("-t"),
+        OsStr::new("ext4"),
+        OsStr::new("-m"),
+        OsStr::new("0"),
+        OsStr::new("-L"),
+        OsStr::new(label),
+    ];
+    args.extend_from_slice(extra);
+    args.push(image.as_os_str());
+    run_host_tool("mke2fs", &args, deadline)
 }
 
 /// Run a host build tool (`truncate`/`mke2fs`) for a data block device. A missing tool is a typed
@@ -979,6 +988,41 @@ mod tests {
         let dest = dir.join("out");
         let paths = collect_output_image(&image, &dest).expect("read the image back");
         Some((dest, paths))
+    }
+
+    /// The guest mounts both block devices **by label**, and both labels now come from one `mke2fs`
+    /// seam, so a dropped or crossed `-L` leaves it mounting by `/dev/vdX` probe order instead.
+    /// Nothing else reads a label back, and the boot that would notice is the privileged gate's.
+    #[test]
+    fn both_block_device_images_carry_the_label_the_guest_mounts_by() {
+        /// `s_volume_name`, 16 bytes into the superblock, NUL-padded.
+        const SB_VOLUME_NAME: usize = 0x78;
+        fn label_of(image: &Path) -> String {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            // Seek and read the superblock rather than the file: the output image is 256 MiB.
+            let mut f = std::fs::File::open(image).expect("open the image");
+            f.seek(SeekFrom::Start(SUPERBLOCK_OFFSET))
+                .expect("seek to the superblock");
+            let mut sb = [0u8; SUPERBLOCK_LEN];
+            f.read_exact(&mut sb).expect("read the superblock");
+            let name = &sb[SB_VOLUME_NAME..SB_VOLUME_NAME + 16];
+            let end = name.iter().position(|b| *b == 0).unwrap_or(name.len());
+            String::from_utf8_lossy(&name[..end]).into_owned()
+        }
+
+        let dir = ScratchDir::created("image-labels");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed the input tree");
+        std::fs::write(tree.join("f"), b"seed").expect("seed a file");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(input) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping both_block_device_images_carry_the_label: no working mke2fs");
+            return;
+        };
+        let output = build_output_image(dir.path(), deadline).expect("build the output image");
+
+        assert_eq!(label_of(&input), INPUT_LABEL);
+        assert_eq!(label_of(&output), OUTPUT_LABEL);
     }
 
     /// Overwrite the superblock's geometry and repair its checksum, which is what a guest with write

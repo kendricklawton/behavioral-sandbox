@@ -471,6 +471,26 @@ mod tests {
     use bsx_test_support::{LogSink, ScratchDir};
     use std::path::PathBuf;
 
+    /// Consume one `CONNECT <port>\n` request line, a byte at a time: the client's channel handshake
+    /// follows on the same stream, so a buffered read would swallow it. Returns the read error
+    /// rather than panicking, for the peers whose subject is closing mid-line.
+    fn read_connect_line(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        let mut b = [0u8; 1];
+        loop {
+            stream.read_exact(&mut b)?;
+            if b[0] == b'\n' {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Answer one `CONNECT` handshake as Firecracker does: consume the request line, then write the
+    /// `OK <host_port>` ack every fake peer here answers with.
+    fn answer_connect(stream: &mut std::os::unix::net::UnixStream) {
+        read_connect_line(stream).expect("read CONNECT");
+        stream.write_all(b"OK 10000\n").expect("write ack");
+    }
+
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
     /// hand the same stream to the *real* guest agent. Lets us exercise the entire host exec path
     /// (vsock connect + `CONNECT` ack + channel handshake + exec round trip) with no VM.
@@ -481,15 +501,7 @@ mod tests {
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            // Read `CONNECT <port>\n` one byte at a time, mustn't over-read the client handshake.
-            let mut b = [0u8; 1];
-            loop {
-                stream.read_exact(&mut b).expect("read CONNECT");
-                if b[0] == b'\n' {
-                    break;
-                }
-            }
-            stream.write_all(b"OK 10000\n").expect("write ack");
+            answer_connect(&mut stream);
             let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
         });
         (dir, uds, handle)
@@ -520,26 +532,12 @@ mod tests {
             for _ in 0..drops {
                 let (mut stream, _) = listener.accept().expect("accept doomed dial");
                 if matches!(phase, DropPhase::AfterAck) {
-                    let mut b = [0u8; 1];
-                    loop {
-                        stream.read_exact(&mut b).expect("read CONNECT");
-                        if b[0] == b'\n' {
-                            break;
-                        }
-                    }
-                    stream.write_all(b"OK 10000\n").expect("write ack");
+                    answer_connect(&mut stream);
                 }
                 drop(stream); // the peer-close under test
             }
             let (mut stream, _) = listener.accept().expect("accept the surviving dial");
-            let mut b = [0u8; 1];
-            loop {
-                stream.read_exact(&mut b).expect("read CONNECT");
-                if b[0] == b'\n' {
-                    break;
-                }
-            }
-            stream.write_all(b"OK 10000\n").expect("write ack");
+            answer_connect(&mut stream);
             let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
         });
         (dir, uds, handle)
@@ -854,14 +852,7 @@ mod tests {
             tracing::subscriber::with_default(agent_sink.subscriber(), || {
                 for _ in 0..2 {
                     let (mut stream, _) = listener.accept().expect("accept");
-                    let mut b = [0u8; 1];
-                    loop {
-                        stream.read_exact(&mut b).expect("read CONNECT");
-                        if b[0] == b'\n' {
-                            break;
-                        }
-                    }
-                    stream.write_all(b"OK 10000\n").expect("write ack");
+                    answer_connect(&mut stream);
                     let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
                 }
             });
@@ -996,14 +987,7 @@ mod tests {
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut b = [0u8; 1];
-            loop {
-                stream.read_exact(&mut b).expect("read CONNECT");
-                if b[0] == b'\n' {
-                    break;
-                }
-            }
-            stream.write_all(b"OK 10000\n").expect("write ack");
+            answer_connect(&mut stream);
             let conn = bsx_channel::ServerConnection::accept(stream).expect("server handshake");
             handler(conn);
         });
@@ -1026,14 +1010,7 @@ mod tests {
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut b = [0u8; 1];
-            loop {
-                stream.read_exact(&mut b).expect("read CONNECT");
-                if b[0] == b'\n' {
-                    break;
-                }
-            }
-            stream.write_all(b"OK 10000\n").expect("write ack");
+            answer_connect(&mut stream);
             // The channel handshake by hand (its encoders are private to `bsx-channel`): magic, then
             // the version, then the peer's own six bytes.
             let mut hello = [0u8; 6];
@@ -1323,12 +1300,7 @@ mod tests {
         let listener = UnixListener::bind(&uds).expect("bind");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut b = [0u8; 1];
-            loop {
-                if stream.read_exact(&mut b).is_err() || b[0] == b'\n' {
-                    break;
-                }
-            }
+            let _ = read_connect_line(&mut stream); // closing mid-line is a subject here
             handler(stream);
         });
         (dir, uds, handle)
