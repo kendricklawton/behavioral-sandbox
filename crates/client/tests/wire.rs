@@ -16,7 +16,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -70,11 +71,10 @@ enum Answer {
 /// A one-connection fake daemon: binds a fresh socket, accepts once, follows the script, then
 /// closes (which the client sees as EOF). Yields every request line it read, terminators stripped,
 /// for the byte-pinning assertions.
-fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>) {
-    let path = std::env::temp_dir().join(format!("bsx-client-{}-{test}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let listener =
-        UnixListener::bind(&path).unwrap_or_else(|e| panic!("bind the fake daemon's socket: {e}"));
+fn daemon(test: &str, script: Vec<Answer>) -> (SocketPath, JoinHandle<Vec<String>>) {
+    let path = SocketPath::reserve(test);
+    let listener = UnixListener::bind(path.as_path())
+        .unwrap_or_else(|e| panic!("bind the fake daemon's socket: {e}"));
     let handle = std::thread::spawn(move || {
         let (stream, _) = listener
             .accept()
@@ -133,8 +133,40 @@ fn daemon(test: &str, script: Vec<Answer>) -> (PathBuf, JoinHandle<Vec<String>>)
     (path, handle)
 }
 
-fn connect(path: &PathBuf) -> Client {
-    Client::connect(path).unwrap_or_else(|e| panic!("connect to the fake daemon: {e}"))
+fn connect(path: &SocketPath) -> Client {
+    Client::connect(path.as_path()).unwrap_or_else(|e| panic!("connect to the fake daemon: {e}"))
+}
+
+/// The fake daemon's socket path, unlinked when this is dropped.
+///
+/// Every test used to repeat the unlink as its own last line, after the assertions, so a failing
+/// one left the socket in `/tmp`. `bsx-client` carries no `[dev-dependencies]` by decision (the
+/// point of the reference client is that a caller needs nothing but the wire contract), so this is
+/// a local guard rather than the `test-support` edge.
+struct SocketPath(PathBuf);
+
+impl SocketPath {
+    /// Reserves a path unique to this process **and** this call, so two runs of the suite cannot
+    /// collide on one pid-named socket.
+    fn reserve(test: &str) -> Self {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "bsx-client-{}-{}-{test}.sock",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        Self(path)
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SocketPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// The params of the `open_all_knobs` corpus line, spelled field by field because `OpenParams` is
@@ -213,7 +245,6 @@ fn every_verb_round_trips_and_speaks_the_pinned_bytes() {
         requests, pinned,
         "the client encodes each request exactly as the corpus pins it"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -261,7 +292,6 @@ fn an_error_reply_is_typed_with_the_wire_fault_kind() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -282,7 +312,6 @@ fn a_hang_up_without_a_reply_is_closed_not_a_decode_error() {
     );
 
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The finding's exact transcript: a timeout fires, the daemon's late reply is still coming, and
@@ -318,7 +347,6 @@ fn a_fired_timeout_poisons_the_session_instead_of_desyncing_it() {
     // Joined before the drop: the daemon's late write still has a peer, which is the scenario.
     daemon.join().expect("the fake daemon's thread");
     drop(c);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A well-formed reply of the wrong shape is proof the pairing is already off, so it poisons too.
@@ -344,7 +372,6 @@ fn a_mismatched_reply_poisons_the_session() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A write that fails partway can leave a torn frame on the wire, so it poisons like a lost reply.
@@ -368,7 +395,6 @@ fn a_failed_write_poisons_the_session() {
         matches!(err, ClientError::Desynced { .. }),
         "a failed write must poison, got {err}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// An over-cap request is refused before any byte moves, so it must not cost the session.
@@ -388,7 +414,6 @@ fn an_over_cap_request_leaves_the_session_usable() {
     c.close().expect("no byte moved, so the session is intact");
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The daemon is the only party that saw the file's bytes; its lossy flag must reach the caller,
@@ -418,7 +443,6 @@ fn get_surfaces_the_lossy_flag_and_maps_absent_to_none() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The one verb legal while a request is in flight, through the shape built for it: the call
@@ -469,7 +493,6 @@ fn a_canceller_reaches_a_session_blocked_in_a_call() {
         "the canceller speaks the pinned cancel bytes"
     );
     drop(c);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The race the cancel contract covers: the exec's result reaches the wire before the cancel line
@@ -500,7 +523,6 @@ fn a_cancel_that_loses_the_race_still_ends_the_session() {
 
     daemon.join().expect("the fake daemon's thread");
     drop(c);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The finding's measurement restaged: a ~90-byte reply dripped at 60 ms/byte ran 5.2 s past a
@@ -535,7 +557,6 @@ fn a_dripped_reply_is_bounded_by_the_absolute_budget() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Disabling the budget must clear the sockopt the last bounded call armed (one file description,
@@ -561,7 +582,6 @@ fn disabling_the_budget_clears_the_armed_timeout() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The write twin: a daemon that never drains cannot hold a bounded send past its budget. The
@@ -591,5 +611,4 @@ fn a_never_draining_daemon_cannot_hold_a_bounded_send() {
 
     drop(c);
     daemon.join().expect("the fake daemon's thread");
-    let _ = std::fs::remove_file(&path);
 }
