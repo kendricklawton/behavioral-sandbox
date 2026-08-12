@@ -35,7 +35,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::audit::Observability;
 use crate::policy::Policy;
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError, sweep_orphans};
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError};
 
 use crate::metrics::Metrics;
 
@@ -445,7 +445,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     });
 
     // The per-VM residue (scratch dirs, netns) a crashed *driver* left, reclaimed before sessions.
-    sweep_orphaned_vms(&server.base.scratch_dir, Some(&server.metrics));
+    // The complement of `sweep_stale_agent_bundles`, which takes only this daemon's bundle dirs.
+    crate::sweep_vm_residue(&server.base.scratch_dir, Some(&server.metrics));
 
     if let Some(metrics_listener) = metrics_listener {
         spawn_metrics(metrics_listener, &server);
@@ -705,27 +706,6 @@ fn prewarm_dir(scratch: &Path) -> PathBuf {
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
     scratch.join(format!("bsx-snapshots-{}", std::process::id()))
-}
-
-/// Reclaims the per-VM scratch dirs and network namespaces a crashed driver left behind
-/// ([`bsx_engine::sweep_orphans`]), the complement of [`sweep_stale_agent_bundles`]. Best-effort: a
-/// read failure on the scratch base is logged, never fatal.
-fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
-    match sweep_orphans(scratch) {
-        Ok(r) => {
-            if let Some(m) = metrics {
-                m.record_sweep(&r);
-            }
-            if r.dirs_reclaimed + r.netns_reclaimed > 0 {
-                tracing::info!(
-                    dirs = r.dirs_reclaimed,
-                    netns = r.netns_reclaimed,
-                    "swept crashed-driver VM residue at startup"
-                );
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "orphan sweep failed at startup"),
-    }
 }
 
 /// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead**
