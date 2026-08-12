@@ -68,11 +68,12 @@ use aya_ebpf::{
 };
 use bsx_probes_common::{
     CONNECT_ADDRLEN_ARG, CONNECT_USERVADDR_ARG, DETAIL_CAP, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP,
-    ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET, EXECVE_FILENAME_ARG, FlowCounts, FlowKey, FlowKey6,
-    IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET, IPV4_FRAG_OFFSET, IPV4_MIN_IHL,
-    IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN, IPV6_NEXT_HEADER_OFFSET,
-    IPV6_SRC_OFFSET, MAX_POLICY_RULES, OPENAT_FILENAME_ARG, PolicyRule, PolicyRule6, SOCKADDR_SNAP,
-    SOCKADDR_SNAP_V4, Syscall, SyscallEvent, icmp6_dst_on_link, rule_matches, rule_matches6,
+    ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET, EXECVE_FILENAME_ARG, FILTER_CGROUP, FILTER_MODE_SLOT,
+    FILTER_TGID, FlowCounts, FlowKey, FlowKey6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP,
+    IPV4_DST_OFFSET, IPV4_FRAG_OFFSET, IPV4_MIN_IHL, IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET,
+    IPV6_DST_OFFSET, IPV6_HLEN, IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES,
+    OPENAT_FILENAME_ARG, PolicyRule, PolicyRule6, SOCKADDR_SNAP, SOCKADDR_SNAP_V4, Syscall,
+    SyscallEvent, icmp6_dst_on_link, rule_matches, rule_matches6,
 };
 
 /// The object's kernel `license` section. Declaring `GPL` makes the programs GPL-compatible
@@ -142,14 +143,10 @@ static PID_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
-/// The target filter the loader writes: slot 0 a target **tgid**, slot 1 a target **cgroup id**. A
-/// zero slot means "don't filter on this axis". Zero-initialized at load, so the default is
-/// observe-all.
+/// The target filter the loader writes, indexed by [`FILTER_TGID`]/[`FILTER_CGROUP`].
+/// Zero-initialized at load, so the default is observe-all.
 #[map]
 static FILTER: Array<u64> = Array::with_max_entries(2, 0);
-
-const FILTER_TGID: u32 = 0;
-const FILTER_CGROUP: u32 = 1;
 
 /// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`].
 /// Consulted only when [`TRACE_SET`] is on; empty plus off is the load-time single-[`FILTER`]
@@ -157,12 +154,11 @@ const FILTER_CGROUP: u32 = 1;
 #[map]
 static TRACE_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
-/// Selects which filter governs the tracepoints: `0` (the load-time default) uses the single-target
-/// [`FILTER`], `1` uses the [`TRACE_TARGETS`] set. One toggle, so the two modes never interfere.
+/// Selects which filter governs the tracepoints, read at [`FILTER_MODE_SLOT`]: `0` (the load-time
+/// default) uses the single-target [`FILTER`], `1` uses the [`TRACE_TARGETS`] set. One toggle, so
+/// the two modes never interfere.
 #[map]
 static TRACE_SET: Array<u32> = Array::with_max_entries(1, 0);
-
-const FILTER_MODE_SLOT: u32 = 0;
 
 /// A single-slot **per-CPU** counter of events a full [`EVENTS`] rejected. The loader surfaces a
 /// nonzero delta as a coverage gap on the run's record, so best-effort loss is visible rather than a

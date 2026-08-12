@@ -5,7 +5,9 @@ use std::time::Duration;
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
-use bsx_probes_common::{ARG_SLOT, SyscallEvent, TRACEPOINT_ARGS};
+use bsx_probes_common::{
+    ARG_SLOT, FILTER_CGROUP, FILTER_MODE_SLOT, FILTER_TGID, SyscallEvent, TRACEPOINT_ARGS,
+};
 
 use crate::maps::remove_cgroup_key;
 use crate::meter::TARGET_PRESENT;
@@ -127,17 +129,15 @@ const TRACERS: [(&str, &str); 3] = [
 ];
 /// The ring buffer the programs stream [`SyscallEvent`]s into (`#[map] static EVENTS`).
 const EVENTS_MAP: &str = "EVENTS";
-/// The target filter the programs consult (`#[map] static FILTER`): slot 0 tgid, slot 1 cgroup id.
+/// The target filter the programs consult (`#[map] static FILTER`), indexed by the shared
+/// [`FILTER_TGID`]/[`FILTER_CGROUP`] slots.
 const FILTER_MAP: &str = "FILTER";
-const FILTER_TGID: u32 = 0;
-const FILTER_CGROUP: u32 = 1;
 /// The shared tracer's cgroup target *set* (`#[map] static TRACE_TARGETS`), the analogue of
 /// [`METER_TARGETS_MAP`].
 const TRACE_TARGETS_MAP: &str = "TRACE_TARGETS";
-/// The filter-mode toggle (`#[map] static TRACE_SET`, slot 0): `0` = single [`FILTER_MAP`], `1` = the
-/// [`TRACE_TARGETS_MAP`] set.
+/// The filter-mode toggle (`#[map] static TRACE_SET`, at the shared [`FILTER_MODE_SLOT`]):
+/// `0` = single [`FILTER_MAP`], `1` = the [`TRACE_TARGETS_MAP`] set.
 const TRACE_SET_MAP: &str = "TRACE_SET";
-const FILTER_MODE_SLOT: u32 = 0;
 /// The per-CPU counter of events a full ring buffer dropped (`#[map] static EVENT_DROPS`), read by
 /// [`SyscallTracer::dropped_events`] so best-effort loss is reported, never silent.
 const EVENT_DROPS_MAP: &str = "EVENT_DROPS";
