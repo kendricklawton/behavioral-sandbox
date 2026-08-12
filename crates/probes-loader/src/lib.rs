@@ -36,7 +36,7 @@ use aya::Ebpf;
 
 pub use bsx_probes_common::{
     COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, FlowKey6, MAX_POLICY_RULES, PolicyRule, PolicyRule6,
-    Protocol, Syscall, SyscallEvent,
+    ProtoName, Protocol, Syscall, SyscallEvent,
 };
 
 /// The egress policy and its address types: what an `--allow` string parses into, before any map

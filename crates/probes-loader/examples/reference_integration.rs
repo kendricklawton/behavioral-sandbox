@@ -114,6 +114,10 @@ fn workload_from_args() -> Vec<String> {
 
 /// Wall-clock now, nanoseconds since the Unix epoch; `0` if the host clock is unreadable, which a
 /// record carries as "unstamped" rather than refusing the run.
+///
+/// Deliberately a second copy of `crates/cli/src/audit.rs`'s: an example compiles as a foreign
+/// crate and cannot see a binary's private helper, the same reason the record bench keeps its own
+/// event builder.
 fn unix_nanos_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

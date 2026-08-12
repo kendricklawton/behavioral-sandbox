@@ -336,14 +336,10 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
     out.push('}');
 }
 
+/// The shared [`bsx_probes_common::ProtoName`] rendering, written into `out`: the record names a
+/// protocol exactly as the flow keys and the CLI's trail do.
 pub(crate) fn proto_name(out: &mut String, proto: u8) {
-    match proto {
-        bsx_probes_common::IPPROTO_TCP => out.push_str("tcp"),
-        bsx_probes_common::IPPROTO_UDP => out.push_str("udp"),
-        p => {
-            let _ = write!(out, "proto {p}");
-        }
-    }
+    let _ = write!(out, "{}", bsx_probes_common::ProtoName(proto));
 }
 
 pub(crate) fn syscall_name(out: &mut String, kind: Syscall) {
