@@ -133,28 +133,8 @@ impl TapMonitor {
     /// neither has to build a `Vec` the other would too: `flows` collects, `totals` folds in place. A
     /// key or value whose size can't decode is a **hard** [`ProbeError::Map`] (the kernel record drifted
     /// from [`FlowKey`]/[`FlowCounts`]), never a silent skip that would undercount the rollup.
-    fn for_each_flow(&self, mut f: impl FnMut(FlowKey, FlowCounts)) -> Result<(), ProbeError> {
-        let map = self
-            .ebpf
-            .map(FLOWS_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{FLOWS_MAP}` not found")))?;
-        let flows: AyaHashMap<_, [u8; FLOW_KEY_SIZE], [u8; FLOW_COUNTS_SIZE]> =
-            AyaHashMap::try_from(map)
-                .map_err(|e| ProbeError::Map(format!("open `{FLOWS_MAP}` as a hash map: {e}")))?;
-        for entry in flows.iter() {
-            let (k, v) =
-                entry.map_err(|e| ProbeError::Map(format!("iterate `{FLOWS_MAP}`: {e}")))?;
-            let (Some(key), Some(counts)) = (FlowKey::from_bytes(&k), FlowCounts::from_bytes(&v))
-            else {
-                return Err(ProbeError::Map(format!(
-                    "decode a `{FLOWS_MAP}` entry: {}-byte key / {}-byte value don't match the shared record",
-                    k.len(),
-                    v.len()
-                )));
-            };
-            f(key, counts);
-        }
-        Ok(())
+    fn for_each_flow(&self, f: impl FnMut(FlowKey, FlowCounts)) -> Result<(), ProbeError> {
+        for_each_flow_in::<FLOW_KEY_SIZE, FlowKey>(&self.ebpf, FLOWS_MAP, f)
     }
 
     /// The per-VM network **totals**: every [`flows`](Self::flows) entry summed into one
@@ -219,25 +199,7 @@ impl TapMonitor {
     /// # Errors
     /// [`ProbeError::Map`] if the `DENIALS` map is missing or a read fails mid-iteration.
     pub fn denials(&self) -> Result<Vec<(FlowKey, u64)>, ProbeError> {
-        let map = self
-            .ebpf
-            .map(DENIALS_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{DENIALS_MAP}` not found")))?;
-        let denials: AyaHashMap<_, [u8; FLOW_KEY_SIZE], u64> = AyaHashMap::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{DENIALS_MAP}` as a hash map: {e}")))?;
-        let mut out = Vec::new();
-        for entry in denials.iter() {
-            let (k, count) =
-                entry.map_err(|e| ProbeError::Map(format!("iterate `{DENIALS_MAP}`: {e}")))?;
-            let Some(key) = FlowKey::from_bytes(&k) else {
-                return Err(ProbeError::Map(format!(
-                    "decode a `{DENIALS_MAP}` key: {}-byte key doesn't match the shared record",
-                    k.len()
-                )));
-            };
-            out.push((key, count));
-        }
-        Ok(out)
+        denial_counts::<FLOW_KEY_SIZE, FlowKey>(&self.ebpf, DENIALS_MAP)
     }
 
     /// The IPv6 per-flow counters as `(FlowKey6, FlowCounts)` pairs, read from the `FLOWS6` map, the v6
@@ -247,27 +209,10 @@ impl TapMonitor {
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
     pub fn flows6(&self) -> Result<Vec<(FlowKey6, FlowCounts)>, ProbeError> {
-        let map = self
-            .ebpf
-            .map(FLOWS6_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{FLOWS6_MAP}` not found")))?;
-        let flows: AyaHashMap<_, [u8; FLOW_KEY6_SIZE], [u8; FLOW_COUNTS_SIZE]> =
-            AyaHashMap::try_from(map)
-                .map_err(|e| ProbeError::Map(format!("open `{FLOWS6_MAP}` as a hash map: {e}")))?;
         let mut out = Vec::new();
-        for entry in flows.iter() {
-            let (k, v) =
-                entry.map_err(|e| ProbeError::Map(format!("iterate `{FLOWS6_MAP}`: {e}")))?;
-            let (Some(key), Some(counts)) = (FlowKey6::from_bytes(&k), FlowCounts::from_bytes(&v))
-            else {
-                return Err(ProbeError::Map(format!(
-                    "decode a `{FLOWS6_MAP}` entry: {}-byte key / {}-byte value don't match the shared record",
-                    k.len(),
-                    v.len()
-                )));
-            };
+        for_each_flow_in::<FLOW_KEY6_SIZE, FlowKey6>(&self.ebpf, FLOWS6_MAP, |key, counts| {
             out.push((key, counts));
-        }
+        })?;
         Ok(out)
     }
 
@@ -277,25 +222,7 @@ impl TapMonitor {
     /// # Errors
     /// [`ProbeError::Map`] if the `DENIALS6` map is missing or a read fails mid-iteration.
     pub fn denials6(&self) -> Result<Vec<(FlowKey6, u64)>, ProbeError> {
-        let map = self
-            .ebpf
-            .map(DENIALS6_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{DENIALS6_MAP}` not found")))?;
-        let denials: AyaHashMap<_, [u8; FLOW_KEY6_SIZE], u64> = AyaHashMap::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{DENIALS6_MAP}` as a hash map: {e}")))?;
-        let mut out = Vec::new();
-        for entry in denials.iter() {
-            let (k, count) =
-                entry.map_err(|e| ProbeError::Map(format!("iterate `{DENIALS6_MAP}`: {e}")))?;
-            let Some(key) = FlowKey6::from_bytes(&k) else {
-                return Err(ProbeError::Map(format!(
-                    "decode a `{DENIALS6_MAP}` key: {}-byte key doesn't match the shared record",
-                    k.len()
-                )));
-            };
-            out.push((key, count));
-        }
-        Ok(out)
+        denial_counts::<FLOW_KEY6_SIZE, FlowKey6>(&self.ebpf, DENIALS6_MAP)
     }
 
     /// Replace this **already-attached** monitor's [`EgressPolicy`]: arm `ENFORCE`, then write the
@@ -393,52 +320,12 @@ impl TapMonitor {
 /// reason [`TapMonitor::flows`] treats an undecodable entry that way: a record that quietly omits a
 /// rule would understate the policy in force.
 fn read_policy(ebpf: &Ebpf) -> Result<Vec<PolicyRule>, ProbeError> {
-    let map = ebpf
-        .map(POLICY_MAP)
-        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY_MAP}` not found")))?;
-    let policy: Array<_, [u8; POLICY_RULE_SIZE]> = Array::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{POLICY_MAP}` as an array: {e}")))?;
-    let mut out = Vec::new();
-    for i in 0..MAX_POLICY_RULES {
-        let bytes = policy
-            .get(&(i as u32), 0)
-            .map_err(|e| ProbeError::Map(format!("read `{POLICY_MAP}`[{i}]: {e}")))?;
-        let rule = PolicyRule::from_bytes(&bytes).ok_or_else(|| {
-            ProbeError::Map(format!(
-                "decode `{POLICY_MAP}`[{i}]: {} bytes don't match the shared record",
-                bytes.len()
-            ))
-        })?;
-        if rule.active != 0 {
-            out.push(rule);
-        }
-    }
-    Ok(out)
+    read_rules::<POLICY_RULE_SIZE, PolicyRule>(ebpf, POLICY_MAP)
 }
 
 /// The IPv6 twin of [`read_policy`], over `POLICY6`.
 fn read_policy6(ebpf: &Ebpf) -> Result<Vec<PolicyRule6>, ProbeError> {
-    let map = ebpf
-        .map(POLICY6_MAP)
-        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY6_MAP}` not found")))?;
-    let policy: Array<_, [u8; POLICY_RULE6_SIZE]> = Array::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{POLICY6_MAP}` as an array: {e}")))?;
-    let mut out = Vec::new();
-    for i in 0..MAX_POLICY_RULES {
-        let bytes = policy
-            .get(&(i as u32), 0)
-            .map_err(|e| ProbeError::Map(format!("read `{POLICY6_MAP}`[{i}]: {e}")))?;
-        let rule = PolicyRule6::from_bytes(&bytes).ok_or_else(|| {
-            ProbeError::Map(format!(
-                "decode `{POLICY6_MAP}`[{i}]: {} bytes don't match the shared record",
-                bytes.len()
-            ))
-        })?;
-        if rule.active != 0 {
-            out.push(rule);
-        }
-    }
-    Ok(out)
+    read_rules::<POLICY_RULE6_SIZE, PolicyRule6>(ebpf, POLICY6_MAP)
 }
 
 /// Write `policy` into an [`Ebpf`]'s `POLICY`/`POLICY6` maps and arm `ENFORCE`. Works on a loaded
@@ -488,44 +375,169 @@ fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError
 /// raw native bytes via [`PolicyRule::to_bytes`], so the loader needs no `unsafe` `aya::Pod` binding,
 /// the write-side twin of [`TapMonitor::flows`] reading raw bytes.
 fn write_policy(ebpf: &mut Ebpf, rules: &[PolicyRule]) -> Result<(), ProbeError> {
-    let map = ebpf
-        .map_mut(POLICY_MAP)
-        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY_MAP}` not found")))?;
-    let mut policy: Array<_, [u8; POLICY_RULE_SIZE]> = Array::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{POLICY_MAP}` as an array: {e}")))?;
-    for i in 0..MAX_POLICY_RULES {
-        let bytes = rules
-            .get(i)
-            .map_or([0u8; POLICY_RULE_SIZE], PolicyRule::to_bytes);
-        policy
-            .set(i as u32, bytes, 0)
-            .map_err(|e| ProbeError::Map(format!("write `{POLICY_MAP}`[{i}]: {e}")))?;
-    }
-    Ok(())
+    write_rules::<POLICY_RULE_SIZE, PolicyRule>(ebpf, POLICY_MAP, rules)
 }
 
 /// The IPv6 twin of [`write_policy`]: fill every `POLICY6` slot (the rest zeroed, an all-zero slot is
 /// `active == 0`), rules as raw native bytes via [`PolicyRule6::to_bytes`].
 fn write_policy6(ebpf: &mut Ebpf, rules: &[PolicyRule6]) -> Result<(), ProbeError> {
-    let map = ebpf
-        .map_mut(POLICY6_MAP)
-        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY6_MAP}` not found")))?;
-    let mut policy: Array<_, [u8; POLICY_RULE6_SIZE]> = Array::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{POLICY6_MAP}` as an array: {e}")))?;
-    for i in 0..MAX_POLICY_RULES {
-        let bytes = rules
-            .get(i)
-            .map_or([0u8; POLICY_RULE6_SIZE], PolicyRule6::to_bytes);
-        policy
-            .set(i as u32, bytes, 0)
-            .map_err(|e| ProbeError::Map(format!("write `{POLICY6_MAP}`[{i}]: {e}")))?;
-    }
-    Ok(())
+    write_rules::<POLICY_RULE6_SIZE, PolicyRule6>(ebpf, POLICY6_MAP, rules)
 }
 
 /// Set the `ENFORCE` toggle (slot 0): `true` = deny-by-default egress, `false` = observe-only.
 fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
     crate::maps::set_flag(ebpf, ENFORCE_MAP, 0, on)
+}
+
+/// A fixed-size record of a tap map, tying a key/rule type to its `N`-byte codec so the v4 and v6
+/// halves of each map surface share one generic body ([`read_rules`], [`write_rules`],
+/// [`denial_counts`], [`for_each_flow_in`]). Const-generic rather than an associated const,
+/// because the byte arrays it sizes (`[u8; N]`) cannot take an associated const on stable Rust.
+trait Wire<const N: usize>: Sized {
+    /// Decodes `N` bytes, `None` when the length or layout doesn't match the shared record.
+    fn decode(bytes: &[u8]) -> Option<Self>;
+}
+
+/// The policy-rule half of [`Wire`]: a rule is also written back, and carries an `active` slot flag.
+trait WireRule<const N: usize>: Wire<N> {
+    /// Encodes the rule as the raw native bytes the kernel reads.
+    fn encode(&self) -> [u8; N];
+    /// Whether the slot holds a real rule (`active != 0`), rather than the zeroed empty tail.
+    fn active(&self) -> bool;
+}
+
+impl Wire<FLOW_KEY_SIZE> for FlowKey {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl Wire<FLOW_KEY6_SIZE> for FlowKey6 {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl Wire<POLICY_RULE_SIZE> for PolicyRule {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl WireRule<POLICY_RULE_SIZE> for PolicyRule {
+    fn encode(&self) -> [u8; POLICY_RULE_SIZE] {
+        self.to_bytes()
+    }
+    fn active(&self) -> bool {
+        self.active != 0
+    }
+}
+
+impl Wire<POLICY_RULE6_SIZE> for PolicyRule6 {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl WireRule<POLICY_RULE6_SIZE> for PolicyRule6 {
+    fn encode(&self) -> [u8; POLICY_RULE6_SIZE] {
+        self.to_bytes()
+    }
+    fn active(&self) -> bool {
+        self.active != 0
+    }
+}
+
+/// The shared body of [`read_policy`] and [`read_policy6`]: every slot of a policy array map,
+/// keeping the active rules in slot order. A slot whose bytes don't decode is a hard error rather
+/// than a silent skip, since a record that quietly omits a rule would understate the policy in
+/// force.
+fn read_rules<const N: usize, R: WireRule<N>>(
+    ebpf: &Ebpf,
+    name: &str,
+) -> Result<Vec<R>, ProbeError> {
+    let policy: Array<_, [u8; N]> = crate::maps::open(ebpf, name, "an array")?;
+    let mut out = Vec::new();
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = policy
+            .get(&(i as u32), 0)
+            .map_err(|e| ProbeError::Map(format!("read `{name}`[{i}]: {e}")))?;
+        let rule = R::decode(&bytes).ok_or_else(|| {
+            ProbeError::Map(format!(
+                "decode `{name}`[{i}]: {} bytes don't match the shared record",
+                bytes.len()
+            ))
+        })?;
+        if rule.active() {
+            out.push(rule);
+        }
+    }
+    Ok(out)
+}
+
+/// The shared body of [`write_policy`] and [`write_policy6`]: every slot of a policy array map,
+/// the first `rules.len()` from `rules`, the rest zeroed (an all-zero slot is `active == 0`, so a
+/// shrunk policy can't leave a stale allow-rule behind).
+fn write_rules<const N: usize, R: WireRule<N>>(
+    ebpf: &mut Ebpf,
+    name: &str,
+    rules: &[R],
+) -> Result<(), ProbeError> {
+    let mut policy: Array<_, [u8; N]> = crate::maps::open_mut(ebpf, name, "an array")?;
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = rules.get(i).map_or([0u8; N], R::encode);
+        policy
+            .set(i as u32, bytes, 0)
+            .map_err(|e| ProbeError::Map(format!("write `{name}`[{i}]: {e}")))?;
+    }
+    Ok(())
+}
+
+/// The shared body of [`TapMonitor::for_each_flow`] and [`TapMonitor::flows6`]: iterate a flow
+/// map, decoding each raw key/value, and hand every pair to `f`. A key or value whose size can't
+/// decode is a **hard** [`ProbeError::Map`] (the kernel record drifted from the shared structs),
+/// never a silent skip that would undercount the rollup.
+fn for_each_flow_in<const N: usize, K: Wire<N>>(
+    ebpf: &Ebpf,
+    name: &str,
+    mut f: impl FnMut(K, FlowCounts),
+) -> Result<(), ProbeError> {
+    let flows: AyaHashMap<_, [u8; N], [u8; FLOW_COUNTS_SIZE]> =
+        crate::maps::open(ebpf, name, "a hash map")?;
+    for entry in flows.iter() {
+        let (k, v) = entry.map_err(|e| ProbeError::Map(format!("iterate `{name}`: {e}")))?;
+        let (Some(key), Some(counts)) = (K::decode(&k), FlowCounts::from_bytes(&v)) else {
+            return Err(ProbeError::Map(format!(
+                "decode a `{name}` entry: {}-byte key / {}-byte value don't match the shared record",
+                k.len(),
+                v.len()
+            )));
+        };
+        f(key, counts);
+    }
+    Ok(())
+}
+
+/// The shared body of [`TapMonitor::denials`] and [`TapMonitor::denials6`]: a denial map's
+/// `(key, blocked-packet count)` pairs. An undecodable key is a hard error, as in
+/// [`for_each_flow_in`].
+fn denial_counts<const N: usize, K: Wire<N>>(
+    ebpf: &Ebpf,
+    name: &str,
+) -> Result<Vec<(K, u64)>, ProbeError> {
+    let denials: AyaHashMap<_, [u8; N], u64> = crate::maps::open(ebpf, name, "a hash map")?;
+    let mut out = Vec::new();
+    for entry in denials.iter() {
+        let (k, count) = entry.map_err(|e| ProbeError::Map(format!("iterate `{name}`: {e}")))?;
+        let Some(key) = K::decode(&k) else {
+            return Err(ProbeError::Map(format!(
+                "decode a `{name}` key: {}-byte key doesn't match the shared record",
+                k.len()
+            )));
+        };
+        out.push((key, count));
+    }
+    Ok(out)
 }
 
 /// Read the compiled object and load + verify both `tc` classifier programs (not yet attached to any
@@ -670,4 +682,39 @@ fn with_netns<T: Send>(
             .join()
             .map_err(|_| ProbeError::Attach("netns worker thread panicked".into()))?
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wrong `N` on a `Wire` impl fails the wrapper's bound at compile time; a wrong codec or
+    /// `active` clause fails here, without a loaded eBPF object.
+    #[test]
+    fn the_wire_codecs_round_trip_their_records_at_their_pinned_sizes() {
+        let rule = PolicyRule {
+            active: 1,
+            ..PolicyRule::default()
+        };
+        let got =
+            <PolicyRule as Wire<POLICY_RULE_SIZE>>::decode(&rule.encode()).expect("v4 decodes");
+        assert_eq!(got, rule);
+        assert!(got.active());
+        assert!(!PolicyRule::default().active(), "a zeroed slot is inactive");
+
+        let rule6 = PolicyRule6 {
+            active: 1,
+            ..PolicyRule6::default()
+        };
+        let got6 =
+            <PolicyRule6 as Wire<POLICY_RULE6_SIZE>>::decode(&rule6.encode()).expect("v6 decodes");
+        assert_eq!(got6, rule6);
+
+        // A key decodes from its own record size and refuses a shorter slice (the codec's
+        // contract; a v4-sized buffer is shorter than a v6 key, so the families can't cross).
+        assert!(<FlowKey as Wire<FLOW_KEY_SIZE>>::decode(&[0u8; FLOW_KEY_SIZE]).is_some());
+        assert!(<FlowKey as Wire<FLOW_KEY_SIZE>>::decode(&[0u8; FLOW_KEY_SIZE - 1]).is_none());
+        assert!(<FlowKey6 as Wire<FLOW_KEY6_SIZE>>::decode(&[0u8; FLOW_KEY6_SIZE]).is_some());
+        assert!(<FlowKey6 as Wire<FLOW_KEY6_SIZE>>::decode(&[0u8; FLOW_KEY_SIZE]).is_none());
+    }
 }
