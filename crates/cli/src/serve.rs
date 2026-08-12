@@ -580,23 +580,15 @@ pub(crate) struct ResourceReservation<'a> {
 }
 
 impl<'a> ResourceReservation<'a> {
-    /// Reserve `mem_mib` + `vcpus` against the daemon's aggregate ceilings, or `None` if either would
-    /// be exceeded (a `0` ceiling is unlimited). Both dimensions commit together: a refused vCPU leg
-    /// rolls the memory charge back, so a partial reservation never lingers.
+    /// Reserve `mem_mib` + `vcpus` against the daemon's aggregate ceilings, or `None` if either
+    /// would be exceeded (a `0` ceiling is unlimited); see [`charge_both`].
     pub(crate) fn try_acquire(server: &'a Server, mem_mib: u64, vcpus: u64) -> Option<Self> {
-        if !charge(
-            &server.committed_mem_mib,
-            server.max_committed_mem_mib,
-            mem_mib,
-        ) {
+        if !charge_both(server, mem_mib, vcpus) {
             return None;
         }
-        if !charge(&server.committed_vcpus, server.max_committed_vcpus, vcpus) {
-            server
-                .committed_mem_mib
-                .fetch_sub(mem_mib, Ordering::Relaxed);
-            return None;
-        }
+        // Constructed only after the charge lands. This type releases on `Drop`, so building it
+        // eagerly (a `then_some`) and dropping it on refusal releases a charge never made, which
+        // underflows the counter.
         Some(Self {
             server,
             mem_mib,
@@ -614,6 +606,26 @@ impl Drop for ResourceReservation<'_> {
             .committed_vcpus
             .fetch_sub(self.vcpus, Ordering::Relaxed);
     }
+}
+
+/// Charge one VM's worth of memory *and* vCPUs against the daemon's aggregate ceilings, or neither.
+/// Both dimensions commit together, so a vCPU leg refused after the memory leg succeeded rolls the
+/// memory back: a partial charge would hold host capacity no reservation ever releases.
+fn charge_both(server: &Server, mem_mib: u64, vcpus: u64) -> bool {
+    if !charge(
+        &server.committed_mem_mib,
+        server.max_committed_mem_mib,
+        mem_mib,
+    ) {
+        return false;
+    }
+    if !charge(&server.committed_vcpus, server.max_committed_vcpus, vcpus) {
+        server
+            .committed_mem_mib
+            .fetch_sub(mem_mib, Ordering::Relaxed);
+        return false;
+    }
+    true
 }
 
 /// Add `amount` to `current` while keeping it `<= ceiling`, via a lock-free CAS loop so racing
@@ -664,21 +676,14 @@ pub(crate) fn pool_clone_limits() -> Limits {
     Limits::default()
 }
 
-/// Reserve headroom for up to `want` pool clones (per clone, the roll-back shape of
-/// [`ResourceReservation::try_acquire`]), returning how many were paid for. The refill restores at
-/// most that many, so topping the pool up cannot push past a ceiling live sessions are holding.
+/// Reserve headroom for up to `want` pool clones ([`charge_both`] per clone), returning how many
+/// were paid for. The refill restores at most that many, so topping the pool up cannot push past a
+/// ceiling live sessions are holding.
 pub(crate) fn reserve_pool_clones(server: &Server, want: usize, clone: &Limits) -> usize {
     let mem = u64::from(clone.mem_mib.get());
     let vcpus = u64::from(clone.vcpus.get());
     let mut reserved = 0;
-    while reserved < want {
-        if !charge(&server.committed_mem_mib, server.max_committed_mem_mib, mem) {
-            break;
-        }
-        if !charge(&server.committed_vcpus, server.max_committed_vcpus, vcpus) {
-            server.committed_mem_mib.fetch_sub(mem, Ordering::Relaxed);
-            break;
-        }
+    while reserved < want && charge_both(server, mem, vcpus) {
         reserved += 1;
     }
     reserved
