@@ -317,6 +317,35 @@ fn blob_len(bytes: &[u8]) -> usize {
     4 + bytes.len()
 }
 
+/// The size of a `blob(path) · blob(data)` frame body, refused past [`MAX_PAYLOAD`] with `tag`
+/// named. The shape `PutFile` and `File` share, so the bound is decided once for both.
+fn path_blob_len(tag: Tag, path: &str, data: &[u8]) -> Result<usize, ChannelError> {
+    let cap = blob_len(path.as_bytes()) + blob_len(data);
+    if cap > MAX_PAYLOAD {
+        return Err(ChannelError::PayloadTooLarge {
+            tag: tag.as_u8(),
+            len: cap,
+        });
+    }
+    Ok(cap)
+}
+
+/// Writes a `blob(path) · blob(data)` body into the caller's buffer. The buffer is the caller's
+/// because the `PutFile` side stages a secret and needs a `Zeroizing` one.
+fn put_path_blob(payload: &mut Vec<u8>, path: &str, data: &[u8]) {
+    put_blob(payload, path.as_bytes());
+    put_blob(payload, data);
+}
+
+/// Reads a `blob(path) · blob(data)` body, refusing any trailing byte.
+fn read_path_blob(payload: &[u8]) -> Result<(String, Vec<u8>), ChannelError> {
+    let mut body = Body::new(payload);
+    let path = body.string()?;
+    let data = body.blob()?.to_vec();
+    body.finish()?;
+    Ok((path, data))
+}
+
 pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
     match req {
         Request::PutFile { path, data } => write_put_file(w, path, data),
@@ -339,19 +368,12 @@ pub(crate) fn write_put_file(
     path: &str,
     data: &[u8],
 ) -> Result<(), ChannelError> {
-    let cap = blob_len(path.as_bytes()) + blob_len(data);
-    if cap > MAX_PAYLOAD {
-        return Err(ChannelError::PayloadTooLarge {
-            tag: Tag::PutFile.as_u8(),
-            len: cap,
-        });
-    }
+    let cap = path_blob_len(Tag::PutFile, path, data)?;
     // `Zeroizing`, not a wipe after the send: a caller-supplied `Write` that unwinds would skip an
     // explicit call and drop the staged bytes un-wiped. It scrubs only the buffer it drops, so the
     // exact `cap` above stays load-bearing (`secret_payload_is_exactly_sized_so_one_buffer_holds_it`).
     let mut payload = Zeroizing::new(Vec::with_capacity(cap));
-    put_blob(&mut payload, path.as_bytes());
-    put_blob(&mut payload, data);
+    put_path_blob(&mut payload, path, data);
     write_frame(w, Tag::PutFile.as_u8(), &payload)
 }
 
@@ -441,9 +463,7 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             })
         }
         Some(Tag::PutFile) => {
-            let path = body.string()?;
-            let data = body.blob()?.to_vec();
-            body.finish()?;
+            let (path, data) = read_path_blob(&payload)?;
             Ok(Request::PutFile { path, data })
         }
         _ => Ok(Request::Unknown { tag }),
@@ -455,16 +475,9 @@ pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), 
         Response::Stdout(b) => write_frame(w, Tag::Stdout.as_u8(), b),
         Response::Stderr(b) => write_frame(w, Tag::Stderr.as_u8(), b),
         Response::File { path, data } => {
-            let cap = blob_len(path.as_bytes()) + blob_len(data);
-            if cap > MAX_PAYLOAD {
-                return Err(ChannelError::PayloadTooLarge {
-                    tag: Tag::File.as_u8(),
-                    len: cap,
-                });
-            }
+            let cap = path_blob_len(Tag::File, path, data)?;
             let mut payload = Vec::with_capacity(cap);
-            put_blob(&mut payload, path.as_bytes());
-            put_blob(&mut payload, data);
+            put_path_blob(&mut payload, path, data);
             write_frame(w, Tag::File.as_u8(), &payload)
         }
         Response::Exit { code } => write_frame(w, Tag::Exit.as_u8(), &code.to_le_bytes()),
@@ -481,10 +494,7 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
         Some(Tag::Stdout) => Ok(Response::Stdout(payload)),
         Some(Tag::Stderr) => Ok(Response::Stderr(payload)),
         Some(Tag::File) => {
-            let mut body = Body::new(&payload);
-            let path = body.string()?;
-            let data = body.blob()?.to_vec();
-            body.finish()?;
+            let (path, data) = read_path_blob(&payload)?;
             Ok(Response::File { path, data })
         }
         Some(Tag::Exit) => {
