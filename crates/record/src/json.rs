@@ -72,14 +72,8 @@ impl RunRecord {
         out.push_str(",\"host_syscalls\":");
         syscalls_to_json(&mut out, &self.host_syscalls);
 
-        out.push_str(",\"coverage\":[");
-        for (i, gap) in self.coverage.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            gap_to_json(&mut out, gap);
-        }
-        out.push(']');
+        out.push_str(",\"coverage\":");
+        array(&mut out, &self.coverage, gap_to_json);
 
         out.push('}');
         out
@@ -90,62 +84,23 @@ fn net_to_json(out: &mut String, net: &NetSection) {
     out.push('{');
     out.push_str("\"totals\":");
     net_stats_to_json(out, &net.totals);
-    out.push_str(",\"flows\":[");
-    for (i, flow) in net.flows.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        endpoints(out, &flow.key);
-        counts(out, &flow.counts);
-        out.push('}');
-    }
-    out.push_str("],\"denials\":[");
-    for (i, denial) in net.denials.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        // A denial is per-destination, already aggregated across guest source ports by the builder.
-        let d = denial.dst_addr.to_be_bytes();
-        let _ = write!(out, "\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
-        field(out, "dst_port", denial.dst_port, false);
-        out.push_str(",\"proto\":\"");
-        proto_name(out, denial.proto);
-        out.push('"');
-        field(out, "packets", denial.count, false);
-        out.push('}');
-    }
+    out.push_str(",\"flows\":");
+    array(out, &net.flows, |out, f| {
+        flow_to_json(out, &f.key, &f.counts);
+    });
+    out.push_str(",\"denials\":");
+    array(out, &net.denials, |out, d| {
+        denial_to_json(out, d.dst_addr, d.dst_port, d.proto, d.count);
+    });
     // Additive `flows6`/`denials6` arrays (schema stays 1), addresses as v6 strings.
-    out.push_str("],\"flows6\":[");
-    for (i, flow) in net.flows6.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        endpoints6(out, &flow.key);
-        counts(out, &flow.counts);
-        out.push('}');
-    }
-    out.push_str("],\"denials6\":[");
-    for (i, denial) in net.denials6.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        let _ = write!(
-            out,
-            "\"dst\":\"{}\"",
-            std::net::Ipv6Addr::from(denial.dst_addr)
-        );
-        field(out, "dst_port", denial.dst_port, false);
-        out.push_str(",\"proto\":\"");
-        proto_name(out, denial.proto);
-        out.push('"');
-        field(out, "packets", denial.count, false);
-        out.push('}');
-    }
-    out.push(']');
+    out.push_str(",\"flows6\":");
+    array(out, &net.flows6, |out, f| {
+        flow_to_json(out, &f.key, &f.counts);
+    });
+    out.push_str(",\"denials6\":");
+    array(out, &net.denials6, |out, d| {
+        denial_to_json(out, d.dst_addr, d.dst_port, d.proto, d.count);
+    });
     // The kernel's drop counters plus the flag a consumer checks before trusting the flow list as
     // exhaustive; `0`/`false` is the healthy shape.
     field(out, "dropped_flows", net.dropped_flows, false);
@@ -174,35 +129,122 @@ fn posture_to_json(out: &mut String, p: &EgressPosture) {
         }
         None => out.push_str("null"),
     }
-    out.push_str(",\"allowed\":[");
-    for (i, rule) in p.allowed.iter().enumerate() {
+    out.push_str(",\"allowed\":");
+    array(out, &p.allowed, |out, r| {
+        rule_to_json(out, r.addr, r.prefix_len, r.port, r.proto);
+    });
+    out.push_str(",\"allowed6\":");
+    array(out, &p.allowed6, |out, r| {
+        rule_to_json(out, r.addr, r.prefix_len, r.port, r.proto);
+    });
+    out.push('}');
+}
+
+/// Writes `[<item>,…]`, the comma-separated array shape every list in this record repeats, leaving
+/// `render` to write one element.
+fn array<T>(out: &mut String, items: &[T], mut render: impl FnMut(&mut String, &T)) {
+    out.push('[');
+    for (i, item) in items.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        let a = rule.addr.to_be_bytes();
-        let _ = write!(
-            out,
-            "{{\"dst\":\"{}.{}.{}.{}/{}\"",
-            a[0], a[1], a[2], a[3], rule.prefix_len
-        );
-        // Port and proto are `0` for "any" in the kernel record; render that as null rather than as
-        // port zero, which is a real (and different) thing on the wire.
-        rule_port_proto(out, rule.port, rule.proto);
+        render(out, item);
     }
-    out.push_str("],\"allowed6\":[");
-    for (i, rule) in p.allowed6.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        let _ = write!(
-            out,
-            "{{\"dst\":\"{}/{}\"",
-            std::net::Ipv6Addr::from(rule.addr),
-            rule.prefix_len
-        );
-        rule_port_proto(out, rule.port, rule.proto);
+    out.push(']');
+}
+
+/// The address width a section is keyed by, and the only difference between a section and its v6
+/// twin, so naming it is what lets the two render from one body.
+trait Addr: Copy {
+    /// Writes the address as the record spells it: a dotted quad, or the compressed v6 form.
+    fn write(self, out: &mut String);
+}
+
+impl Addr for u32 {
+    fn write(self, out: &mut String) {
+        let _ = write!(out, "{}", std::net::Ipv4Addr::from(self));
     }
-    out.push_str("]}");
+}
+
+impl Addr for [u8; 16] {
+    fn write(self, out: &mut String) {
+        let _ = write!(out, "{}", std::net::Ipv6Addr::from(self));
+    }
+}
+
+/// A flow's 5-tuple at either address width. The accessor exists so the shared renderer names each
+/// field rather than taking two same-typed addresses and two same-typed ports positionally.
+trait FlowIdent {
+    /// The width its addresses are.
+    type Addr: Addr;
+    /// `(src, src_port, dst, dst_port, proto)`, in the order the record writes them.
+    fn parts(&self) -> (Self::Addr, u16, Self::Addr, u16, u8);
+}
+
+impl FlowIdent for FlowKey {
+    type Addr = u32;
+    fn parts(&self) -> (u32, u16, u32, u16, u8) {
+        (
+            self.src_addr,
+            self.src_port,
+            self.dst_addr,
+            self.dst_port,
+            self.proto,
+        )
+    }
+}
+
+impl FlowIdent for FlowKey6 {
+    type Addr = [u8; 16];
+    fn parts(&self) -> ([u8; 16], u16, [u8; 16], u16, u8) {
+        (
+            self.src_addr,
+            self.src_port,
+            self.dst_addr,
+            self.dst_port,
+            self.proto,
+        )
+    }
+}
+
+/// One `flows`/`flows6` element: a flow's 5-tuple identity, then its per-direction counters.
+fn flow_to_json<K: FlowIdent>(out: &mut String, key: &K, c: &FlowCounts) {
+    let (src, src_port, dst, dst_port, proto) = key.parts();
+    out.push_str("{\"src\":\"");
+    src.write(out);
+    out.push('"');
+    field(out, "src_port", src_port, false);
+    out.push_str(",\"dst\":\"");
+    dst.write(out);
+    out.push('"');
+    field(out, "dst_port", dst_port, false);
+    out.push_str(",\"proto\":\"");
+    proto_name(out, proto);
+    out.push('"');
+    counts(out, c);
+    out.push('}');
+}
+
+/// One `denials`/`denials6` element: a blocked destination and the packets dropped to it, already
+/// aggregated across guest source ports by the builder.
+fn denial_to_json<A: Addr>(out: &mut String, dst: A, dst_port: u16, proto: u8, packets: u64) {
+    out.push_str("{\"dst\":\"");
+    dst.write(out);
+    out.push('"');
+    field(out, "dst_port", dst_port, false);
+    out.push_str(",\"proto\":\"");
+    proto_name(out, proto);
+    out.push('"');
+    field(out, "packets", packets, false);
+    out.push('}');
+}
+
+/// One `allowed`/`allowed6` element: the CIDR a rule matches, then its port and protocol.
+fn rule_to_json<A: Addr>(out: &mut String, dst: A, prefix_len: u8, port: u16, proto: u8) {
+    out.push_str("{\"dst\":\"");
+    dst.write(out);
+    let _ = write!(out, "/{prefix_len}\"");
+    rule_port_proto(out, port, proto);
 }
 
 /// The `port`/`proto` tail shared by both rule renderers, closing the object. A wildcard renders as
@@ -249,40 +291,6 @@ fn net_stats_to_json(out: &mut String, s: &NetStats) {
     out.push('}');
 }
 
-/// The 5-tuple identity fields of a flow (rendered leading, no trailing comma consumed by the caller's
-/// [`counts`]). Addresses render as dotted quads via `to_be_bytes`, matching [`FlowKey`]'s `Display`.
-fn endpoints(out: &mut String, key: &FlowKey) {
-    let s = key.src_addr.to_be_bytes();
-    let d = key.dst_addr.to_be_bytes();
-    let _ = write!(out, "\"src\":\"{}.{}.{}.{}\"", s[0], s[1], s[2], s[3]);
-    field(out, "src_port", key.src_port, false);
-    let _ = write!(out, ",\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
-    field(out, "dst_port", key.dst_port, false);
-    out.push_str(",\"proto\":\"");
-    proto_name(out, key.proto);
-    out.push('"');
-}
-
-/// The v6 5-tuple identity fields of a flow, the twin of [`endpoints`]. Addresses render as v6
-/// strings via [`std::net::Ipv6Addr`], matching [`FlowKey6`]'s `Display`.
-fn endpoints6(out: &mut String, key: &FlowKey6) {
-    let _ = write!(
-        out,
-        "\"src\":\"{}\"",
-        std::net::Ipv6Addr::from(key.src_addr)
-    );
-    field(out, "src_port", key.src_port, false);
-    let _ = write!(
-        out,
-        ",\"dst\":\"{}\"",
-        std::net::Ipv6Addr::from(key.dst_addr)
-    );
-    field(out, "dst_port", key.dst_port, false);
-    out.push_str(",\"proto\":\"");
-    proto_name(out, key.proto);
-    out.push('"');
-}
-
 fn counts(out: &mut String, c: &FlowCounts) {
     field(out, "ingress_packets", c.ingress_packets, false);
     field(out, "ingress_bytes", c.ingress_bytes, false);
@@ -317,11 +325,8 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
     field(out, "connect", s.by_kind.connect, false);
     field(out, "unknown", s.by_kind.unknown, false);
     out.push('}');
-    out.push_str(",\"notable\":[");
-    for (i, n) in s.notable.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
+    out.push_str(",\"notable\":");
+    array(out, &s.notable, |out, n| {
         out.push_str("{\"kind\":\"");
         syscall_name(out, n.kind);
         out.push_str("\",\"detail\":");
@@ -333,8 +338,7 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
         // path, so a consumer treating the two alike states something that never happened.
         let _ = write!(out, ",\"truncated\":{}", n.truncated);
         out.push('}');
-    }
-    out.push(']');
+    });
     let _ = write!(out, ",\"notable_truncated\":{}", s.notable_truncated);
     field(out, "overflow_events", s.overflow_events, false);
     out.push('}');
@@ -631,6 +635,52 @@ mod tests {
             record.to_summary_json().contains("1.1.1.1:0/proto 1"),
             "the summary endpoint uses the same rendering: {}",
             record.to_summary_json()
+        );
+    }
+
+    /// The v6 half of the network section, which no test rendered with anything in it: the byte
+    /// golden carries `"flows6":[],"denials6":[]`, so the v6 row writers reached no assertion at
+    /// all while the v4 ones were pinned to the byte. Both arrays are inside the signed bytes.
+    #[test]
+    fn a_v6_flow_and_denial_render_the_same_keys_as_their_v4_twins() {
+        use crate::json::net_to_json;
+        use bsx_probes_common::{FlowCounts, FlowKey6};
+
+        let ula = |n: u8| {
+            let mut a = [0u8; 16];
+            (a[0], a[15]) = (0xfd, n);
+            a
+        };
+        let counts = FlowCounts {
+            ingress_packets: 2,
+            ingress_bytes: 120,
+            egress_packets: 3,
+            egress_bytes: 200,
+        };
+        let net = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0).with_v6(
+            vec![(
+                FlowKey6::new(ula(2), ula(1), 40000, 53, IPPROTO_UDP),
+                counts,
+            )],
+            vec![(FlowKey6::new(ula(2), ula(7), 40001, 443, IPPROTO_TCP), 4)],
+        );
+        let mut out = String::new();
+        net_to_json(&mut out, &net);
+
+        assert!(
+            out.contains(
+                "\"flows6\":[{\"src\":\"fd00::2\",\"src_port\":40000,\"dst\":\"fd00::1\",\
+                 \"dst_port\":53,\"proto\":\"udp\",\"ingress_packets\":2,\"ingress_bytes\":120,\
+                 \"egress_packets\":3,\"egress_bytes\":200}]"
+            ),
+            "a v6 flow carries the v4 keys in the v4 order, with a v6 address: {out}"
+        );
+        assert!(
+            out.contains(
+                "\"denials6\":[{\"dst\":\"fd00::7\",\"dst_port\":443,\"proto\":\"tcp\",\
+                 \"packets\":4}]"
+            ),
+            "and so does a v6 denial: {out}"
         );
     }
 
