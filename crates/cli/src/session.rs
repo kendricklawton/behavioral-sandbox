@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use crate::audit::RunProbes;
 use crate::deadline::DeadlineStream;
 use crate::policy::{Policy, Requested, parse_allow};
+use bsx_engine::vcpus_supported;
 use bsx_engine::{ErrorKind, Limits, RunningVm, Vm, VmmError};
-use bsx_engine::{MAX_VCPUS, vcpus_supported};
 use bsx_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 use bsx_protocol::{
     ExecParams, FaultKind, GetParams, OpenParams, ProtocolError, PutParams, Request, Response,
@@ -821,8 +821,8 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRef
     let mut requested = Requested::default();
     if let Some(v) = vcpus {
         if !vcpus_supported(*v) {
-            return Err(OpenRefusal::Malformed(format!(
-                "vcpus must be 1 or an even number in 1..={MAX_VCPUS}, got {v}"
+            return Err(OpenRefusal::Malformed(crate::policy::unsupported_vcpus(
+                "vcpus", v,
             )));
         }
         requested.vcpus = NonZeroU8::new(*v);
