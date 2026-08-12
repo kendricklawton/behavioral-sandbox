@@ -274,13 +274,23 @@ impl LimitCgroup {
         // this still needs cpu+memory delegated to the cgroup root (the jailer's prerequisite too).
         std::fs::write(this.parent.join("cgroup.subtree_control"), "+cpu +memory").ok()?;
         std::fs::create_dir(&this.dir).ok()?;
-        let memory_max = (u64::from(mem_mib) + MEMORY_OVERHEAD_MIB) * 1024 * 1024;
-        std::fs::write(this.dir.join("memory.max"), memory_max.to_string()).ok()?;
-        std::fs::write(
-            this.dir.join("cpu.max"),
-            format!("{cpu_quota_us} {CPU_PERIOD_US}"),
-        )
-        .ok()?;
+        let memory_max = ((u64::from(mem_mib) + MEMORY_OVERHEAD_MIB) * 1024 * 1024).to_string();
+        std::fs::write(this.dir.join("memory.max"), &memory_max).ok()?;
+        let cpu_max = format!("{cpu_quota_us} {CPU_PERIOD_US}");
+        std::fs::write(this.dir.join("cpu.max"), &cpu_max).ok()?;
+        // The writes succeeding proves delegation only if these paths are a cgroup at all: a
+        // v1/hybrid host (or any tmpfs shadowing /sys/fs/cgroup) presents ordinary files that
+        // accept every write above. Panic rather than return `None`, [`SmallFs::create`]'s
+        // posture: a fixture that is silently a plain directory greens every enforcement test
+        // without capping anything, and `None` reads as an ordinary skip.
+        if let Err(why) = leaf_holds_the_limits(&this.dir, &memory_max, &cpu_max) {
+            panic!(
+                "{} accepted the limit writes but is not a working cgroup v2 leaf: {why}. The \
+                 enforcement tests need cgroup v2 mounted at /sys/fs/cgroup with cpu+memory \
+                 delegated; a v1/hybrid host presents that path as ordinary files instead",
+                this.dir.display()
+            );
+        }
         Some(this)
     }
 
@@ -338,6 +348,33 @@ impl Drop for LimitCgroup {
         let _ = std::fs::remove_dir(&self.dir);
         let _ = std::fs::remove_dir(&self.parent);
     }
+}
+
+/// Why `dir` is not a cgroup v2 leaf holding exactly these limits, or `Ok(())` when it is. The
+/// kernel's own evidence is required (`cgroup.controllers` is a file cgroupfs creates, never a
+/// writer), then both limits are read back, so "the write succeeded" is never the proof. Takes the
+/// dir as an argument so the check runs against a staged directory in tests.
+fn leaf_holds_the_limits(dir: &Path, memory_max: &str, cpu_max: &str) -> Result<(), String> {
+    if std::fs::read_to_string(dir.join("cgroup.controllers")).is_err() {
+        return Err(
+            "no cgroup.controllers beside the limit files, so this is a plain directory, not a \
+             cgroup"
+                .into(),
+        );
+    }
+    for (file, wrote) in [("memory.max", memory_max), ("cpu.max", cpu_max)] {
+        match std::fs::read_to_string(dir.join(file)) {
+            Ok(back) if back.trim() == wrote => {}
+            Ok(back) => {
+                return Err(format!(
+                    "{file} reads back {:?} where {wrote:?} was written, so the cap did not take",
+                    back.trim()
+                ));
+            }
+            Err(e) => return Err(format!("{file} was written but is unreadable: {e}")),
+        }
+    }
+    Ok(())
 }
 
 /// A size-bounded filesystem a test can fill, the vehicle for the engine's disk-full paths: the
@@ -586,7 +623,8 @@ pub fn process_threads(pid: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAP_NET_ADMIN, Rng, parse_cap_eff, process_threads, serial_requested, workspace_root,
+        CAP_NET_ADMIN, Rng, ScratchDir, leaf_holds_the_limits, parse_cap_eff, process_threads,
+        serial_requested, workspace_root,
     };
 
     /// The generator repeats for a seed and never sticks, the two properties the fuzz suites that
@@ -701,6 +739,38 @@ mod tests {
             &args(&["bin", "--test-threads=8"]),
             Some("1")
         ));
+    }
+
+    /// The reproduced host shape: a tmpfs (or v1 hierarchy) at /sys/fs/cgroup accepts every
+    /// limit write into ordinary files. `cgroup.controllers` is a file only cgroupfs creates, so
+    /// its absence is what unmasks the imposter, staged here byte-for-byte.
+    #[test]
+    fn a_plain_directory_holding_the_limit_files_is_not_a_cgroup() {
+        let dir = ScratchDir::created("not-a-cgroup");
+        std::fs::write(dir.path().join("memory.max"), "671088640").expect("stage");
+        std::fs::write(dir.path().join("cpu.max"), "100000 100000").expect("stage");
+        let why = leaf_holds_the_limits(dir.path(), "671088640", "100000 100000")
+            .expect_err("ordinary files must not pass for a cgroup");
+        assert!(
+            why.contains("cgroup.controllers"),
+            "the refusal names the missing kernel evidence: {why}"
+        );
+    }
+
+    /// On a real leaf the caps must read back as written: an accepted-but-clamped write is a
+    /// fixture that vouches for a limit the kernel is not holding.
+    #[test]
+    fn the_limits_must_read_back_as_written() {
+        let dir = ScratchDir::created("cgroup-shaped");
+        std::fs::write(dir.path().join("cgroup.controllers"), "cpu memory\n").expect("stage");
+        std::fs::write(dir.path().join("memory.max"), "671088640\n").expect("stage");
+        std::fs::write(dir.path().join("cpu.max"), "100000 100000\n").expect("stage");
+        assert!(leaf_holds_the_limits(dir.path(), "671088640", "100000 100000").is_ok());
+
+        std::fs::write(dir.path().join("memory.max"), "9223372036854771712\n").expect("restage");
+        let why = leaf_holds_the_limits(dir.path(), "671088640", "100000 100000")
+            .expect_err("a cap that did not take must be refused");
+        assert!(why.contains("memory.max"), "{why}");
     }
 
     #[test]
