@@ -119,15 +119,7 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
     }
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
-    // SAFETY: the map helpers are the verifier-checked BPF map ops; the returned pointer is only
-    // dereferenced inside the `Some` arm (the mandatory null-check), never held across a helper call.
-    unsafe {
-        if let Some(slot) = EXECVE_BY_PID.get_ptr_mut(pid) {
-            add_shared(slot, 1);
-        } else if EXECVE_BY_PID.insert(pid, 1, 0).is_err() {
-            count_map_drop(&PID_DROPS);
-        }
-    }
+    accumulate(&EXECVE_BY_PID, &pid, 1, &PID_DROPS);
     0
 }
 
@@ -393,6 +385,25 @@ fn count_map_drop(counter: &PerCpuArray<u64>) {
     }
 }
 
+/// Adds `n` to `key`'s `u64` counter in a **shared** hash map, inserting the first sighting; a
+/// refused insert (a full map) is counted in `drops`.
+///
+/// The accumulate step is atomic ([`add_shared`]), so a flood is counted whole; the lookup-or-insert
+/// can still lose one increment per key, when two CPUs both miss the lookup and each insert a fresh
+/// count. Bounded at one per key, and never an over-count. `#[inline(always)]` monomorphizes this
+/// into each caller, so every program stays one self-contained unit (no BPF-to-BPF call) and the
+/// verifier's bounds are unmoved.
+#[inline(always)]
+fn accumulate<K>(totals: &HashMap<K, u64>, key: &K, n: u64, drops: &PerCpuArray<u64>) {
+    if let Some(slot) = totals.get_ptr_mut(key) {
+        // SAFETY: the pointer the lookup just returned, inside the null-check the verifier demands,
+        // to a map value it proved in-bounds; it is not held across a helper call.
+        unsafe { add_shared(slot, n) };
+    } else if totals.insert(key, n, 0).is_err() {
+        count_map_drop(drops);
+    }
+}
+
 /// The Linux `tc` actions a classifier returns to the kernel, named after the kernel ABI constants
 /// so the values are unmistakable. [`Verdict`] is what the program's logic speaks.
 const TC_ACT_OK: i32 = 0;
@@ -525,17 +536,14 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     }
 }
 
-/// Records one denied guest-sent packet against its destination flow in [`DENIALS`]. The count
-/// itself is atomic ([`add_shared`]), so the flood this exists to record is counted whole; the
-/// lookup-or-init below can still lose the very first packet to a concurrent first sighting of the
-/// same destination, once per key.
+/// Records one denied guest-sent packet against its destination flow in [`DENIALS`].
 #[inline(always)]
 fn record_denial(key: &FlowKey) {
     // Key by **destination only** (src addr/port zeroed): keying on the guest's ephemeral source
     // port would spread one blocked endpoint across a row per port, filling the map far faster and
     // diluting the "which endpoint was blocked" trail. It is also the shape the loader aggregates to.
     let dst = FlowKey::new(0, key.dst_addr, 0, key.dst_port, key.proto);
-    record_denial_in(&DENIALS, &dst);
+    accumulate(&DENIALS, &dst, 1, &DENIAL_DROPS);
 }
 
 /// The IPv6 twin of [`record_denial`], keyed by destination only for the same per-endpoint
@@ -543,24 +551,7 @@ fn record_denial(key: &FlowKey) {
 #[inline(always)]
 fn record_denial6(key: &FlowKey6) {
     let dst = FlowKey6::new([0u8; 16], key.dst_addr, 0, key.dst_port, key.proto);
-    record_denial_in(&DENIALS6, &dst);
-}
-
-/// The shared body of [`record_denial`] and [`record_denial6`]: bump `dst`'s denial count in
-/// `denials`, inserting the first sighting; a refused insert (full map) is counted in
-/// [`DENIAL_DROPS`]. `#[inline(always)]` monomorphizes into each caller, so the program stays
-/// self-contained (no BPF-to-BPF call) and the verifier's bounds are unmoved.
-#[inline(always)]
-fn record_denial_in<K>(denials: &HashMap<K, u64>, dst: &K) {
-    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
-    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
-    unsafe {
-        if let Some(count) = denials.get_ptr_mut(dst) {
-            add_shared(count, 1);
-        } else if denials.insert(dst, 1, 0).is_err() {
-            count_map_drop(&DENIAL_DROPS);
-        }
-    }
+    accumulate(&DENIALS6, &dst, 1, &DENIAL_DROPS);
 }
 
 /// Whether [`POLICY`] admits destination `(addr, port, proto)`, scanning the fixed rule array in a
@@ -797,15 +788,7 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
         return 0;
     }
 
-    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
-    // only inside the `Some` arm and never held across a helper call.
-    unsafe {
-        if let Some(acc) = CPU_NS.get_ptr_mut(cgroup) {
-            add_shared(acc, delta);
-        } else if CPU_NS.insert(cgroup, delta, 0).is_err() {
-            count_map_drop(&CPU_DROPS);
-        }
-    }
+    accumulate(&CPU_NS, &cgroup, delta, &CPU_DROPS);
     0
 }
 
