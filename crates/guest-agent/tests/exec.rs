@@ -1,8 +1,8 @@
 //! Integration tests for the guest agent, driving [`bsx_guest_agent::serve`] through the **public**
 //! channel API ([`ClientConnection`]) over a unix socketpair, the same protocol the host will speak
 //! over vsock, but with no VM.
-// This is a test binary; the `run` helper isn't a `#[test]` fn, so the workspace's
-// no-unwrap/expect lints don't auto-exempt it. Panicking on setup failure is correct in a test.
+// This is a test binary; the helpers aren't `#[test]` fns, so the workspace's no-unwrap/expect
+// lints don't auto-exempt them. Panicking on setup failure is correct in a test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::Write;
@@ -11,116 +11,72 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use bsx_channel::{ClientConnection, Request, Response};
+use bsx_channel::{ClientConnection, Request};
 
-/// Plays the host side against `serve`: connects, sends one exec request, then reads responses until a
-/// terminal frame. Returns the collected stdout, stderr, and the final code or error.
-fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
+mod common;
 
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv,
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("send request");
-
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let result = loop {
-        match client.recv_response().expect("read response") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Stderr(b) => err.extend_from_slice(&b),
-            Response::Exit { code } => break Ok(code),
-            Response::Error(msg) => break Err(msg),
-            other => panic!("unexpected response frame: {other:?}"),
-        }
-    };
-    let _ = agent.join();
-    (out, err, result)
-}
+use common::{Agent, Exec, Outcome};
 
 #[test]
 fn echo_reports_stdout_and_exit_zero() {
-    let (out, err, result) = run(&["echo", "hi"]);
-    assert_eq!(out, b"hi\n");
-    assert!(err.is_empty());
-    assert_eq!(result, Ok(0));
+    let run = Agent::run(Exec::new(&["echo", "hi"]));
+    assert_eq!(run.stdout, b"hi\n");
+    assert!(run.stderr.is_empty());
+    assert_eq!(run.outcome, Outcome::Exit(0));
 }
 
 #[test]
 fn captures_stderr_and_nonzero_exit() {
-    let (out, err, result) = run(&["sh", "-c", "echo out; echo err 1>&2; exit 3"]);
-    assert_eq!(out, b"out\n");
-    assert_eq!(err, b"err\n");
-    assert_eq!(result, Ok(3));
+    let run = Agent::run(Exec::new(&["sh", "-c", "echo out; echo err 1>&2; exit 3"]));
+    assert_eq!(run.stdout, b"out\n");
+    assert_eq!(run.stderr, b"err\n");
+    assert_eq!(run.outcome, Outcome::Exit(3));
 }
 
 #[test]
 fn missing_binary_reports_error_not_exit() {
-    let (_, _, result) = run(&["definitely-not-a-real-binary-zzz"]);
+    let run = Agent::run(Exec::new(&["definitely-not-a-real-binary-zzz"]));
     assert!(
-        result.is_err(),
-        "a spawn failure is a terminal Error frame, not an Exit"
+        matches!(run.outcome, Outcome::Error(_)),
+        "a spawn failure is a terminal Error frame, not an Exit: {:?}",
+        run.outcome
     );
 }
 
 #[test]
 fn empty_command_is_rejected() {
-    let (_, _, result) = run(&[]);
-    assert!(result.is_err());
+    let run = Agent::run(Exec::new(&[]));
+    assert!(
+        matches!(run.outcome, Outcome::Error(_)),
+        "got {:?}",
+        run.outcome
+    );
 }
 
 #[test]
 fn large_output_streams_without_deadlock() {
     // Far past a pipe buffer, so the two pumps must drain concurrently: a single-threaded
     // read-then-forward hangs here.
-    let (out, _, result) = run(&["sh", "-c", "seq 1 100000"]);
-    assert_eq!(result, Ok(0));
-    assert!(out.len() > 500_000, "got {} bytes", out.len());
-    assert!(out.starts_with(b"1\n"));
-    assert!(out.ends_with(b"100000\n"));
+    let run = Agent::run(Exec::new(&["sh", "-c", "seq 1 100000"]));
+    assert_eq!(run.outcome, Outcome::Exit(0));
+    assert!(run.stdout.len() > 500_000, "got {} bytes", run.stdout.len());
+    assert!(run.stdout.starts_with(b"1\n"));
+    assert!(run.stdout.ends_with(b"100000\n"));
 }
 
 #[test]
 fn signal_death_maps_to_128_plus_signal() {
     // SIGKILL is 9 → 137 (the shell convention).
-    let (_, _, result) = run(&["sh", "-c", "kill -9 $$"]);
-    assert_eq!(result, Ok(137));
+    let run = Agent::run(Exec::new(&["sh", "-c", "kill -9 $$"]));
+    assert_eq!(run.outcome, Outcome::Exit(137));
 }
 
 #[test]
 fn stdin_is_fed_to_the_command() {
     // `cat` only exits once its stdin is closed, so this pins both the delivery and the EOF.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["cat".into()],
-            stdin: b"piped input\n".to_vec(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("send request");
-
-    let mut out = Vec::new();
-    let code = loop {
-        match client.recv_response().expect("read response") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Exit { code } => break code,
-            other => panic!("unexpected response frame: {other:?}"),
-        }
-    };
-    assert_eq!(out, b"piped input\n");
-    assert_eq!(code, 0);
-    let _ = agent.join();
+    let run = Agent::run(Exec::new(&["cat"]).stdin(b"piped input\n"));
+    assert_eq!(run.stdout, b"piped input\n");
+    assert_eq!(run.outcome, Outcome::Exit(0));
 }
 
 #[test]
@@ -133,33 +89,14 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
         std::env::var_os(key).is_none(),
         "test precondition: {key} must not be set"
     );
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["sh".into(), "-c".into(), format!("printf '%s' \"${key}\"")],
-            stdin: Vec::new(),
-            env: vec![(key.to_string(), "from-the-host".into())],
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("send request");
-
-    let mut out = Vec::new();
-    let code = loop {
-        match client.recv_response().expect("read response") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Exit { code } => break code,
-            other => panic!("unexpected response frame: {other:?}"),
-        }
-    };
-    assert_eq!(code, 0);
+    let run = Agent::run(
+        Exec::new(&["sh", "-c", &format!("printf '%s' \"${key}\"")]).env(key, "from-the-host"),
+    );
+    assert_eq!(run.outcome, Outcome::Exit(0));
     assert_eq!(
-        out, b"from-the-host",
+        run.stdout, b"from-the-host",
         "the command must see the injected env"
     );
-    let _ = agent.join();
     assert!(
         std::env::var_os(key).is_none(),
         "the agent process's own environment must stay untouched"
@@ -184,79 +121,31 @@ fn a_program_on_the_injected_path_runs_rather_than_being_refused() {
 
     let inherited = std::env::var("PATH").unwrap_or_default();
     let injected = format!("{}:{inherited}", bin.display());
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["bsx-probe-tool".into()],
-            stdin: Vec::new(),
-            env: vec![("PATH".to_string(), injected)],
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("send request");
-
-    let mut out = Vec::new();
-    let result = loop {
-        match client.recv_response().expect("read response") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Exit { code } => break Ok(code),
-            Response::Error(msg) => break Err(msg),
-            other => panic!("unexpected response frame: {other:?}"),
-        }
-    };
+    let run = Agent::run(Exec::new(&["bsx-probe-tool"]).env("PATH", &injected));
     assert_eq!(
-        result,
-        Ok(0),
+        run.outcome,
+        Outcome::Exit(0),
         "the command must run, not be refused up front"
     );
-    assert_eq!(out, b"ran-from-injected-PATH");
-    let _ = agent.join();
+    assert_eq!(run.stdout, b"ran-from-injected-PATH");
 }
 
 #[test]
 fn injected_file_is_read_by_the_command_and_artifact_returned() {
     // Put a file in, `cat` it (proving cwd = the working dir), and pull an artifact back.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::PutFile {
-            path: "note.txt".into(),
-            data: b"contents\n".to_vec(),
-        })
-        .expect("put file");
-    client
-        .send_request(&Request::Exec {
-            argv: vec![
-                "sh".into(),
-                "-c".into(),
-                "cat note.txt; cp note.txt copy.txt".into(),
-            ],
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: vec!["copy.txt".into()],
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("exec");
+    let mut agent = Agent::start();
+    agent
+        .put_file("note.txt", b"contents\n")
+        .exec(Exec::new(&["sh", "-c", "cat note.txt; cp note.txt copy.txt"]).artifact("copy.txt"));
+    let run = agent.drain();
+    agent.finish();
 
-    let (mut out, mut files) = (Vec::new(), Vec::new());
-    let code = loop {
-        match client.recv_response().expect("recv") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::File { path, data } => files.push((path, data)),
-            Response::Exit { code } => break code,
-            other => panic!("unexpected frame: {other:?}"),
-        }
-    };
-    assert_eq!(code, 0);
-    assert_eq!(out, b"contents\n");
+    assert_eq!(run.outcome, Outcome::Exit(0));
+    assert_eq!(run.stdout, b"contents\n");
     assert_eq!(
-        files,
+        run.files,
         vec![("copy.txt".to_string(), b"contents\n".to_vec())]
     );
-    let _ = agent.join();
 }
 
 #[test]
@@ -266,65 +155,26 @@ fn session_state_persists_across_connections() {
     // A `ScratchDir` rather than a hand-rolled path: its `Drop` reclaims the session dir even when
     // an assertion below panics.
     let scratch = bsx_test_support::ScratchDir::new("agent-session");
-    let dir = scratch.path().to_path_buf();
 
     // Exec 1: read the injected file, append to it, and write a new one.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let session = dir.clone();
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve_session(guest, &session));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::PutFile {
-            path: "seed.txt".into(),
-            data: b"one\n".to_vec(),
-        })
-        .expect("put file");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["sh".into(), "-c".into(), "echo two >> seed.txt".into()],
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("exec 1");
-    loop {
-        match client.recv_response().expect("recv") {
-            Response::Exit { code } => break assert_eq!(code, 0),
-            Response::Stdout(_) | Response::Stderr(_) => {}
-            other => panic!("unexpected frame: {other:?}"),
-        }
-    }
-    agent.join().expect("agent 1").expect("serve 1");
+    let mut agent = Agent::start_in(scratch.path());
+    agent
+        .put_file("seed.txt", b"one\n")
+        .exec(Exec::new(&["sh", "-c", "echo two >> seed.txt"]));
+    assert_eq!(agent.drain().outcome, Outcome::Exit(0));
+    agent.join().expect("serve 1");
 
     // Exec 2, a fresh connection on the same session dir: the accumulated file is still there.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let session = dir.clone();
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve_session(guest, &session));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["cat".into(), "seed.txt".into()],
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(30_000),
-        })
-        .expect("exec 2");
-    let mut out = Vec::new();
-    loop {
-        match client.recv_response().expect("recv") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Exit { code } => break assert_eq!(code, 0),
-            Response::Stderr(_) => {}
-            other => panic!("unexpected frame: {other:?}"),
-        }
-    }
+    let mut agent = Agent::start_in(scratch.path());
+    agent.exec(Exec::new(&["cat", "seed.txt"]));
+    let run = agent.drain();
+    agent.join().expect("serve 2");
+
+    assert_eq!(run.outcome, Outcome::Exit(0));
     assert_eq!(
-        out, b"one\ntwo\n",
+        run.stdout, b"one\ntwo\n",
         "state written by exec 1 must be visible to exec 2"
     );
-    agent.join().expect("agent 2").expect("serve 2");
 }
 
 #[test]
@@ -333,131 +183,82 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
     // dir, not the agent's own cwd, or a `./tool` an earlier exec built is falsely rejected as "no such
     // binary".
     let scratch = bsx_test_support::ScratchDir::new("agent-relprog");
-    let dir = scratch.path().to_path_buf();
 
     // One exec per connection against the shared session dir: build the executable, then run it.
-    let run_argv = |argv: Vec<String>| -> (Vec<u8>, Result<i32, String>) {
-        let (host, guest) = UnixStream::pair().expect("socketpair");
-        let session = dir.clone();
-        let agent = std::thread::spawn(move || bsx_guest_agent::serve_session(guest, &session));
-        let mut client = ClientConnection::connect(host).expect("client handshake");
-        client
-            .send_request(&Request::Exec {
-                argv,
-                stdin: Vec::new(),
-                env: Vec::new(),
-                artifacts: Vec::new(),
-                timeout_ms: NonZeroU32::new(30_000),
-            })
-            .expect("exec");
-        let mut out = Vec::new();
-        let res = loop {
-            match client.recv_response().expect("recv") {
-                Response::Stdout(b) => out.extend_from_slice(&b),
-                Response::Stderr(_) => {}
-                Response::Exit { code } => break Ok(code),
-                Response::Error(m) => break Err(m),
-                other => panic!("unexpected frame: {other:?}"),
-            }
-        };
-        let _ = agent.join();
-        (out, res)
+    let run_argv = |argv: &[&str]| {
+        let mut agent = Agent::start_in(scratch.path());
+        agent.exec(Exec::new(argv));
+        let run = agent.drain();
+        agent.finish();
+        run
     };
 
     // Build the executable via a shell line (argv[0] = "sh" is PATH-resolved), then invoke it by path.
-    let (_, built) = run_argv(vec![
-        "sh".into(),
-        "-c".into(),
-        "printf '#!/bin/sh\\necho ran-in-workdir\\n' > tool && chmod +x tool".into(),
+    let built = run_argv(&[
+        "sh",
+        "-c",
+        "printf '#!/bin/sh\\necho ran-in-workdir\\n' > tool && chmod +x tool",
     ]);
-    assert_eq!(built, Ok(0), "building ./tool");
+    assert_eq!(built.outcome, Outcome::Exit(0), "building ./tool");
 
-    let (out, result) = run_argv(vec!["./tool".into()]);
+    let run = run_argv(&["./tool"]);
     assert_eq!(
-        result,
-        Ok(0),
+        run.outcome,
+        Outcome::Exit(0),
         "a session-built ./tool must run, not be rejected"
     );
-    assert_eq!(out, b"ran-in-workdir\n");
+    assert_eq!(run.stdout, b"ran-in-workdir\n");
 }
 
 #[test]
 fn hung_command_is_killed_at_its_deadline() {
     // A command that would run far longer than its timeout must be killed and reported as TimedOut,
     // not hang the agent. A short timeout keeps the test fast.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["sleep".into(), "30".into()],
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(300),
-        })
-        .expect("send request");
+    let mut agent = Agent::start();
+    agent.exec(Exec::new(&["sleep", "30"]).timeout_ms(300));
 
     let started = std::time::Instant::now();
-    match client.recv_response().expect("recv") {
-        Response::TimedOut { .. } => {}
-        other => panic!("expected TimedOut, got {other:?}"),
-    }
+    let run = agent.drain();
+    assert!(
+        matches!(run.outcome, Outcome::TimedOut { .. }),
+        "expected TimedOut, got {:?}",
+        run.outcome
+    );
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "the agent must kill the command promptly, not wait it out"
     );
     // The agent's own return signals the SIGKILL convention.
-    assert!(matches!(agent.join().expect("agent thread"), Ok(137)));
+    assert!(matches!(agent.join(), Ok(137)));
 }
 
 #[test]
 fn command_under_its_deadline_is_not_falsely_killed() {
     // A command that finishes well within its budget must exit normally, never TimedOut.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::Exec {
-            argv: vec!["sh".into(), "-c".into(), "sleep 0.1; echo done".into()],
-            stdin: Vec::new(),
-            env: Vec::new(),
-            artifacts: Vec::new(),
-            timeout_ms: NonZeroU32::new(5_000),
-        })
-        .expect("send request");
-
-    let mut out = Vec::new();
-    let code = loop {
-        match client.recv_response().expect("recv") {
-            Response::Stdout(b) => out.extend_from_slice(&b),
-            Response::Exit { code } => break code,
-            other => panic!("unexpected frame (false timeout?): {other:?}"),
-        }
-    };
-    assert_eq!(code, 0);
-    assert_eq!(out, b"done\n");
-    let _ = agent.join();
+    let run = Agent::run(Exec::new(&["sh", "-c", "sleep 0.1; echo done"]).timeout_ms(5_000));
+    assert_eq!(
+        run.outcome,
+        Outcome::Exit(0),
+        "a command inside its budget must not be killed"
+    );
+    assert_eq!(run.stdout, b"done\n");
 }
 
 #[test]
 fn put_file_rejects_path_traversal() {
     // A path that climbs out of the working dir must be rejected with a terminal Error, not written.
-    let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
-    let mut client = ClientConnection::connect(host).expect("client handshake");
-    client
-        .send_request(&Request::PutFile {
-            path: "../escape.txt".into(),
-            data: b"nope".to_vec(),
-        })
-        .expect("put file");
-    match client.recv_response().expect("recv") {
-        Response::Error(_) => {}
-        other => panic!("expected a rejection, got {other:?}"),
-    }
-    let result = agent.join().expect("agent thread");
-    assert!(result.is_err(), "a traversing path must fail the request");
+    let mut agent = Agent::start();
+    agent.put_file("../escape.txt", b"nope");
+    let run = agent.drain();
+    assert!(
+        matches!(run.outcome, Outcome::Error(_)),
+        "expected a rejection, got {:?}",
+        run.outcome
+    );
+    assert!(
+        agent.join().is_err(),
+        "a traversing path must fail the request"
+    );
     // Rejected must mean *not written*, since a reject-after-write bug would pass the error asserts
     // alone.
     assert!(
@@ -466,10 +267,33 @@ fn put_file_rejects_path_traversal() {
     );
 }
 
+/// Every stream the command wrote reaches the caller, and only the artifacts it asked for.
+///
+/// The drain loops this replaced disagreed about which frames were legal: a `Stderr` chunk was a
+/// hard panic in some and ignored in others, so "what a run carries" was a property of whichever
+/// loop a test happened to copy rather than of the agent.
+#[test]
+fn a_run_carries_both_streams_and_only_the_requested_artifacts() {
+    let run = Agent::run(Exec::new(&[
+        "sh",
+        "-c",
+        "echo o; echo e 1>&2; printf 'c' > unasked.txt; exit 7",
+    ]));
+    assert_eq!(run.stdout, b"o\n");
+    assert_eq!(run.stderr, b"e\n", "stderr is collected, never discarded");
+    assert_eq!(run.outcome, Outcome::Exit(7));
+    assert!(
+        run.files.is_empty(),
+        "the artifact list is a request, not a description of the working dir: {:?}",
+        run.files
+    );
+}
+
 #[test]
 fn bad_handshake_is_rejected_not_hung() {
     // Garbage with a wrong magic must make `serve` fail promptly rather than block. No deadline needed:
-    // `read_exact` gets its 6 bytes and the magic check fails.
+    // `read_exact` gets its 6 bytes and the magic check fails. Built by hand rather than through
+    // `Agent`, because the subject is what happens *instead of* the handshake.
     let (mut host, guest) = UnixStream::pair().expect("socketpair");
     let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
     host.write_all(b"XXXXXX not a handshake")
@@ -482,7 +306,8 @@ fn bad_handshake_is_rejected_not_hung() {
 fn stalled_host_does_not_wedge_the_guest() {
     // A host that handshakes and requests, then stops reading, against a command that floods output.
     // With a write deadline on the guest stream, `serve` must return an `Err` in bounded time rather
-    // than hang: the pump's forward times out, drains and discards, and the child exits.
+    // than hang: the pump's forward times out, drains and discards, and the child exits. The guest end
+    // is armed before the spawn, so this builds its own pair rather than taking `Agent`'s.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     guest
         .set_write_timeout(Some(Duration::from_millis(200)))
