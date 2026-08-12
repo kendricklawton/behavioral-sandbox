@@ -46,13 +46,7 @@ impl ExecveCounter {
         check_support()?;
         let mut ebpf = load_object()?;
 
-        let program: &mut TracePoint = ebpf
-            .program_mut(PROGRAM)
-            .ok_or_else(|| ProbeError::Load(format!("program `{PROGRAM}` not found in object")))?
-            .try_into()
-            .map_err(|e| {
-                ProbeError::Load(format!("program `{PROGRAM}` is not a tracepoint: {e}"))
-            })?;
+        let program: &mut TracePoint = crate::maps::program_mut(&mut ebpf, PROGRAM, "tracepoint")?;
         program
             .load()
             .map_err(|e| ProbeError::Load(format!("verify/load `{PROGRAM}`: {e}")))?;
@@ -82,12 +76,8 @@ impl ExecveCounter {
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
     pub fn counts_by_pid(&self) -> Result<Vec<(u32, u64)>, ProbeError> {
-        let map = self
-            .ebpf
-            .map(MAP_BY_PID)
-            .ok_or_else(|| ProbeError::Map(format!("map `{MAP_BY_PID}` not found")))?;
-        let by_pid: AyaHashMap<_, u32, u64> = AyaHashMap::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{MAP_BY_PID}` as a hash map: {e}")))?;
+        let by_pid: AyaHashMap<_, u32, u64> =
+            crate::maps::open(&self.ebpf, MAP_BY_PID, "a hash map")?;
         let mut out = Vec::new();
         for entry in by_pid.iter() {
             let (pid, count) =
@@ -111,15 +101,11 @@ impl ExecveCounter {
 
 /// Read a kernel-side single-slot **per-CPU** `u64` counter (the `EVENT_DROPS` shape) and sum its
 /// slots into one total. Every drop/count surface in this crate reads through here, and the
-/// mechanism is that this holds the crate's only `PerCpuArray::try_from`, so the map-open/read error
+/// mechanism is that this holds the crate's only per-CPU map open, so the map-open/read error
 /// story is one story rather than one per counter. Deliberately not a list of the callers: such a
 /// list is one more copy, and it drifts like every copy.
 pub(crate) fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
-    let map = ebpf
-        .map(name)
-        .ok_or_else(|| ProbeError::Map(format!("map `{name}` not found")))?;
-    let counter: PerCpuArray<_, u64> = PerCpuArray::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{name}` as a per-cpu array: {e}")))?;
+    let counter: PerCpuArray<_, u64> = crate::maps::open(ebpf, name, "a per-cpu array")?;
     let per_cpu = counter
         .get(&0, 0)
         .map_err(|e| ProbeError::Map(format!("read `{name}`[0]: {e}")))?;
@@ -287,15 +273,7 @@ impl SyscallTracer {
         let mut ebpf = load_object()?;
 
         for (program, event) in TRACERS {
-            let tp: &mut TracePoint = ebpf
-                .program_mut(program)
-                .ok_or_else(|| {
-                    ProbeError::Load(format!("program `{program}` not found in object"))
-                })?
-                .try_into()
-                .map_err(|e| {
-                    ProbeError::Load(format!("program `{program}` is not a tracepoint: {e}"))
-                })?;
+            let tp: &mut TracePoint = crate::maps::program_mut(&mut ebpf, program, "tracepoint")?;
             tp.load()
                 .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
             tp.attach(TP_SYSCALLS, event).map_err(|e| {
@@ -420,36 +398,19 @@ impl SyscallTracer {
     /// Write the filter-mode toggle: `true` = the [`TRACE_TARGETS_MAP`] set, `false` = the single
     /// [`FILTER_MAP`].
     fn set_mode(&mut self, set_mode: bool) -> Result<(), ProbeError> {
-        let map = self
-            .ebpf
-            .map_mut(TRACE_SET_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{TRACE_SET_MAP}` not found")))?;
-        let mut toggle: Array<_, u32> = Array::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{TRACE_SET_MAP}` as an array: {e}")))?;
-        toggle
-            .set(FILTER_MODE_SLOT, u32::from(set_mode), 0)
-            .map_err(|e| ProbeError::Map(format!("write `{TRACE_SET_MAP}`: {e}")))
+        crate::maps::set_flag(&mut self.ebpf, TRACE_SET_MAP, FILTER_MODE_SLOT, set_mode)
     }
 
     /// The writable `TRACE_TARGETS` set handle, shared by [`add_target`](Self::add_target) /
     /// [`remove_target`](Self::remove_target).
     fn trace_targets(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u8>, ProbeError> {
-        let map = self
-            .ebpf
-            .map_mut(TRACE_TARGETS_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{TRACE_TARGETS_MAP}` not found")))?;
-        AyaHashMap::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{TRACE_TARGETS_MAP}` as a hash map: {e}")))
+        crate::maps::open_mut(&mut self.ebpf, TRACE_TARGETS_MAP, "a hash map")
     }
 
     /// Write one slot of the `FILTER` array (0 = tgid, 1 = cgroup id; 0 disables that axis).
     fn set_filter(&mut self, slot: u32, value: u64) -> Result<(), ProbeError> {
-        let map = self
-            .ebpf
-            .map_mut(FILTER_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{FILTER_MAP}` not found")))?;
-        let mut filter: Array<_, u64> = Array::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{FILTER_MAP}` as an array: {e}")))?;
+        let mut filter: Array<_, u64> =
+            crate::maps::open_mut(&mut self.ebpf, FILTER_MAP, "an array")?;
         filter
             .set(slot, value, 0)
             .map_err(|e| ProbeError::Map(format!("set `{FILTER_MAP}`[{slot}]: {e}")))

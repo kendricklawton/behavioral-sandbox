@@ -380,12 +380,7 @@ impl TapMonitor {
     /// passes regardless of what `POLICY` holds, which is why the record carries this alongside the
     /// rules rather than letting a reader infer enforcement from a non-empty rule list.
     fn enforcing(&self) -> Result<bool, ProbeError> {
-        let map = self
-            .ebpf
-            .map(ENFORCE_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{ENFORCE_MAP}` not found")))?;
-        let enforce: Array<_, u32> = Array::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{ENFORCE_MAP}` as an array: {e}")))?;
+        let enforce: Array<_, u32> = crate::maps::open(&self.ebpf, ENFORCE_MAP, "an array")?;
         let on = enforce
             .get(&0, 0)
             .map_err(|e| ProbeError::Map(format!("read `{ENFORCE_MAP}`: {e}")))?;
@@ -530,15 +525,7 @@ fn write_policy6(ebpf: &mut Ebpf, rules: &[PolicyRule6]) -> Result<(), ProbeErro
 
 /// Set the `ENFORCE` toggle (slot 0): `true` = deny-by-default egress, `false` = observe-only.
 fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
-    let map = ebpf
-        .map_mut(ENFORCE_MAP)
-        .ok_or_else(|| ProbeError::Map(format!("map `{ENFORCE_MAP}` not found")))?;
-    let mut enforce: Array<_, u32> = Array::try_from(map)
-        .map_err(|e| ProbeError::Map(format!("open `{ENFORCE_MAP}` as an array: {e}")))?;
-    enforce
-        .set(0, u32::from(on), 0)
-        .map_err(|e| ProbeError::Map(format!("write `{ENFORCE_MAP}`: {e}")))?;
-    Ok(())
+    crate::maps::set_flag(ebpf, ENFORCE_MAP, 0, on)
 }
 
 /// Read the compiled object and load + verify both `tc` classifier programs (not yet attached to any
@@ -547,13 +534,7 @@ fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
 fn load_classifiers() -> Result<Ebpf, ProbeError> {
     let mut ebpf = load_object()?;
     for program in [CLS_INGRESS, CLS_EGRESS] {
-        let cls: &mut SchedClassifier = ebpf
-            .program_mut(program)
-            .ok_or_else(|| ProbeError::Load(format!("program `{program}` not found in object")))?
-            .try_into()
-            .map_err(|e| {
-                ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
-            })?;
+        let cls: &mut SchedClassifier = crate::maps::program_mut(&mut ebpf, program, "classifier")?;
         cls.load()
             .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
     }
@@ -640,13 +621,7 @@ fn attach_classifiers(
         (CLS_INGRESS, TcAttachType::Ingress),
         (CLS_EGRESS, TcAttachType::Egress),
     ] {
-        let cls: &mut SchedClassifier = ebpf
-            .program_mut(program)
-            .ok_or_else(|| ProbeError::Load(format!("program `{program}` not found in object")))?
-            .try_into()
-            .map_err(|e| {
-                ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
-            })?;
+        let cls: &mut SchedClassifier = crate::maps::program_mut(ebpf, program, "classifier")?;
         let (link_id, link) = attach_classifier(cls, program, interface, attach_type)?;
         if forget_links && link == TcLink::Netlink {
             // Netns-attached, netlink clsact only: the in-kernel `tc` filter is reclaimed by

@@ -1,4 +1,5 @@
-//! The per-cgroup map removal every teardown path runs, in one place.
+//! The shared aya-object plumbing: the map and program opens every surface runs, the toggle
+//! write, and the per-cgroup map removal every teardown path runs, in one place.
 //!
 //! - **An absent key is the intended outcome, any other failure is not.** Teardown is idempotent:
 //!   removing a cgroup that was never registered, or that a previous close already removed, must
@@ -7,10 +8,59 @@
 //!   believes it is gone, and the probes go on charging and emitting for it. The kernel recycles
 //!   cgroup ids, so the next sandbox handed that id inherits the attribution in its signed record.
 
-use aya::Pod;
-use aya::maps::{HashMap as AyaHashMap, MapData, MapError};
+use aya::maps::{Array, HashMap as AyaHashMap, Map, MapData, MapError};
+use aya::programs::Program;
+use aya::{Ebpf, Pod};
 
 use crate::ProbeError;
+
+/// Open the named map read-only as `M`; `noun` names the expected shape in the error message,
+/// article included ("an array", "a hash map").
+pub(crate) fn open<'a, M>(ebpf: &'a Ebpf, name: &str, noun: &str) -> Result<M, ProbeError>
+where
+    M: TryFrom<&'a Map, Error = MapError>,
+{
+    let map = ebpf
+        .map(name)
+        .ok_or_else(|| ProbeError::Map(format!("map `{name}` not found")))?;
+    M::try_from(map).map_err(|e| ProbeError::Map(format!("open `{name}` as {noun}: {e}")))
+}
+
+/// The writable twin of [`open`].
+pub(crate) fn open_mut<'a, M>(ebpf: &'a mut Ebpf, name: &str, noun: &str) -> Result<M, ProbeError>
+where
+    M: TryFrom<&'a mut Map, Error = MapError>,
+{
+    let map = ebpf
+        .map_mut(name)
+        .ok_or_else(|| ProbeError::Map(format!("map `{name}` not found")))?;
+    M::try_from(map).map_err(|e| ProbeError::Map(format!("open `{name}` as {noun}: {e}")))
+}
+
+/// Write `on` into `slot` of the named single-`u32` toggle array.
+pub(crate) fn set_flag(ebpf: &mut Ebpf, name: &str, slot: u32, on: bool) -> Result<(), ProbeError> {
+    let mut toggle: Array<_, u32> = open_mut(ebpf, name, "an array")?;
+    toggle
+        .set(slot, u32::from(on), 0)
+        .map_err(|e| ProbeError::Map(format!("write `{name}`: {e}")))
+}
+
+/// Fetch the named program as `P`; `kind` names the expected program type in the error message.
+pub(crate) fn program_mut<'a, P>(
+    ebpf: &'a mut Ebpf,
+    name: &str,
+    kind: &str,
+) -> Result<P, ProbeError>
+where
+    P: TryFrom<&'a mut Program>,
+    <P as TryFrom<&'a mut Program>>::Error: std::fmt::Display,
+{
+    let program = ebpf
+        .program_mut(name)
+        .ok_or_else(|| ProbeError::Load(format!("program `{name}` not found in object")))?;
+    P::try_from(program)
+        .map_err(|e| ProbeError::Load(format!("program `{name}` is not a {kind}: {e}")))
+}
 
 /// Remove `cgroup_id` from a per-cgroup map, treating an absent key as success. `what` is the whole
 /// phrase naming the removal, so each caller keeps its own message without this one guessing at it.
