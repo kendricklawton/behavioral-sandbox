@@ -532,12 +532,34 @@ impl SmallFs {
     /// (field 5 is the mount point). The fail-closed half of [`create`](Self::create).
     #[must_use]
     pub fn is_mounted(&self) -> bool {
-        let target = self.path().to_string_lossy().to_string();
-        std::fs::read_to_string("/proc/self/mountinfo")
-            .unwrap_or_default()
-            .lines()
-            .any(|l| l.split(' ').nth(4) == Some(&target))
+        names_mount_point(
+            &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
+            self.path(),
+        )
     }
+}
+
+/// Whether `mountinfo` names `target` as a mount point (field 5). Compared in the kernel's own
+/// spelling: `/proc` octal-escapes space, tab, newline and backslash in path fields, so a raw
+/// `TMPDIR` carrying a space would otherwise read as unmounted and [`SmallFs::create`]'s
+/// fail-closed assertion would accuse a healthy fixture. Pure, so the escape cases are unit-tested
+/// without a live mount.
+fn names_mount_point(mountinfo: &str, target: &Path) -> bool {
+    let target = mountinfo_escape(&target.to_string_lossy());
+    mountinfo
+        .lines()
+        .any(|l| l.split(' ').nth(4) == Some(&*target))
+}
+
+/// A path as `/proc/self/mountinfo` spells it: the four characters the kernel octal-escapes in a
+/// path field, escaped the same way. Backslash first, or the escapes' own backslashes would be
+/// re-escaped. Escaping the one query is equivalent to unescaping every line, and cheaper, because
+/// the kernel escapes exactly these.
+fn mountinfo_escape(path: &str) -> String {
+    path.replace('\\', "\\134")
+        .replace(' ', "\\040")
+        .replace('\t', "\\011")
+        .replace('\n', "\\012")
 }
 
 impl Drop for SmallFs {
@@ -630,9 +652,10 @@ pub fn process_threads(pid: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CAP_NET_ADMIN, Rng, ScratchDir, leaf_holds_the_limits, parse_cap_eff, process_threads,
-        serial_requested, workspace_root,
+        CAP_NET_ADMIN, Rng, ScratchDir, leaf_holds_the_limits, mountinfo_escape, names_mount_point,
+        parse_cap_eff, process_threads, serial_requested, workspace_root,
     };
+    use std::path::Path;
 
     /// The generator repeats for a seed and never sticks, the two properties the fuzz suites that
     /// share it rely on.
@@ -778,6 +801,24 @@ mod tests {
         let why = leaf_holds_the_limits(dir.path(), "671088640", "100000 100000")
             .expect_err("a cap that did not take must be refused");
         assert!(why.contains("memory.max"), "{why}");
+    }
+
+    /// The kernel octal-escapes space/tab/newline/backslash in mountinfo path fields. The mount
+    /// line below is a real capture of a tmpfs mounted on a path with a space; the raw comparison
+    /// read it as "not mounted" and turned `SmallFs::create`'s fail-closed assertion into a false
+    /// accusation of a healthy fixture.
+    #[test]
+    fn a_mount_point_with_a_space_is_recognised_in_mountinfo() {
+        let line = r"2141 2135 0:264 / /tmp/bsx\040sp rw,relatime - tmpfs tmpfs rw,size=1024k";
+        assert!(names_mount_point(line, Path::new("/tmp/bsx sp")));
+        assert!(!names_mount_point(line, Path::new("/tmp/bsx")));
+        assert!(!names_mount_point(line, Path::new("/tmp/bsx sp2")));
+
+        let plain = "1 2 0:1 / /tmp/plain rw - tmpfs tmpfs rw";
+        assert!(names_mount_point(plain, Path::new("/tmp/plain")));
+
+        // Backslash escapes first, or the escapes' own backslashes would be re-escaped.
+        assert_eq!(mountinfo_escape(r"a\b c"), r"a\134b\040c");
     }
 
     #[test]
