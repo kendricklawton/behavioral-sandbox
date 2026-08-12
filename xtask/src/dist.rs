@@ -1253,6 +1253,49 @@ mod tests {
         );
     }
 
+    /// Every bounded map in the probes counts what a full map turned away.
+    ///
+    /// The crate's stated discipline is that best-effort loss is *visible*: the loader reads each
+    /// drop counter and a nonzero delta becomes an `AxisGap`, so a run's record is thin and says so
+    /// rather than looking complete. A discarded `insert` breaks that in the one direction nothing
+    /// else catches, since the map is not full from the reader's side and the value is simply
+    /// absent: a sandbox that never got a `CPU_NS` slot reports zero CPU, which reads as "used
+    /// none" instead of "not measured".
+    ///
+    /// Every map here is fixed-capacity (sized at load), so this holds for every one of them, and
+    /// the next map added inherits it.
+    #[test]
+    fn every_bounded_map_in_the_probes_counts_what_it_could_not_admit() {
+        let repo = workspace_root();
+        let src = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
+            .expect("crates/probes/src/main.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let inserts = lines.iter().filter(|l| l.contains(".insert(")).count();
+        assert!(
+            inserts >= 6,
+            "expected an insert per bounded map, found {inserts}"
+        );
+        for (n, line) in lines.iter().enumerate() {
+            if !line.contains(".insert(") {
+                continue;
+            }
+            assert!(
+                line.contains(".is_err()"),
+                "crates/probes/src/main.rs:{}: a discarded map insert is a silent loss; test it \
+                 and count the drop: {}",
+                n + 1,
+                line.trim()
+            );
+            assert!(
+                lines[n + 1].contains("count_map_drop("),
+                "crates/probes/src/main.rs:{}: a failed insert must bump a drop counter the loader \
+                 reads, or the loss reaches no record: {}",
+                n + 1,
+                line.trim()
+            );
+        }
+    }
+
     /// Every tracepoint argument offset the probes read is on the list the loader checks.
     ///
     /// The offsets are an ABI assumption no relocation carries, so `check_tracepoint_abi` compares
