@@ -130,6 +130,21 @@ struct JailedSpawn {
     lease: JailLease,
 }
 
+/// The common product of an unjailed spawn, everything [`launch`](Spawned::launch) and
+/// [`launch_for_restore`](Spawned::launch_for_restore) build a [`Spawned`] from identically. Each
+/// caller adds only the values the two paths differ in (rootfs, `restored`, the bulk-I/O images,
+/// the vsock path); this carries the rest so [`spawn_unjailed`](Spawned::spawn_unjailed) owns the
+/// skeleton.
+struct UnjailedSpawn {
+    child: Child,
+    console: Console,
+    workdir: PathBuf,
+    /// The API socket path, for [`ApiClient::new`].
+    socket: PathBuf,
+    tap: Option<Tap>,
+    lifetime: VmLifetime,
+}
+
 impl Drop for Spawned {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -214,22 +229,53 @@ impl Spawned {
             }
         };
 
-        // Cleanup ownership passes to the netns-aware path below.
-        let workdir = staged.disarm();
+        // Cleanup ownership passes to the netns-aware path inside `spawn_unjailed`.
+        let s = Self::spawn_unjailed(config, staged.disarm(), config.enable_network)?;
 
-        // Per-VM network namespace + tap for the guest's virtio-net (netns model), when enabled.
-        // Created **before** Firecracker so it can join the netns; named after the scratch dir, so a
-        // crashed driver's netns is reclaimable by the same dir-keyed sweep. A direct boot runs
-        // Firecracker with the driver's own privilege, so the tap needs no per-uid owner. A failed
-        // create reclaims its own half-built netns; we still own the workdir, so reclaim it.
-        let tap = if config.enable_network {
+        // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
+        let vsock_uds = config.guest_cid.map(|_| s.workdir.join(VSOCK_UDS));
+        Ok(Self {
+            child: Some(s.child),
+            console: s.console,
+            workdir: s.workdir,
+            rootfs: rootfs.into_owned(),
+
+            restored: false,
+            api: ApiClient::new(s.socket),
+            vsock_uds,
+            input_image,
+            output,
+            tap: s.tap,
+            chroot: None,
+            lifetime: s.lifetime,
+        })
+    }
+
+    /// The shared skeleton of the two unjailed launch paths ([`launch`](Self::launch) and
+    /// [`launch_for_restore`](Self::launch_for_restore)), from an already-staged `workdir` on: the
+    /// per-VM netns + tap when `networked`, `firecracker --api-sock`, and the cgroup-watching
+    /// lifetime. Owns the inline cleanup, so a failed spawn reclaims the tap and workdir. Each
+    /// caller adds only the values the two paths differ in (rootfs, `restored`, the bulk-I/O
+    /// images, and the vsock path), so a change to unjailed spawning is made once here rather than
+    /// kept in sync across two copies.
+    fn spawn_unjailed(
+        config: &BootConfig,
+        workdir: PathBuf,
+        networked: bool,
+    ) -> Result<UnjailedSpawn, VmmError> {
+        // Per-VM network namespace + tap for the guest's virtio-net, created **before** Firecracker
+        // so it can join the netns; named after the scratch dir, so a crashed driver's netns is
+        // reclaimable by the same dir-keyed sweep. A direct boot runs Firecracker with the driver's
+        // own privilege, so the tap needs no per-uid owner. A failed create reclaims its own
+        // half-built netns; we still own the workdir.
+        let tap = if networked {
             Some(create_tap_or_reclaim(&workdir, None)?)
         } else {
             None
         };
-        // Spawn `firecracker --api-sock`, inside the VM's netns when networked (`ip netns exec`), wiring
-        // its serial console + stderr log (see `spawn_fc`). On any failure the child is already reaped;
-        // delete the netns (best-effort) and reclaim the scratch dir.
+        // Spawn `firecracker --api-sock`, inside the VM's netns when networked (`ip netns exec`),
+        // wiring its serial console + stderr log (see `spawn_fc`). On any failure the child is
+        // already reaped; delete the netns (best-effort) and reclaim the scratch dir.
         let socket = workdir.join("fc.sock");
         let (child, console) = match spawn_fc(
             &config.firecracker,
@@ -249,25 +295,15 @@ impl Spawned {
         };
 
         // Cgroup-owned lifetime: enroll the VMM in a per-VM lifetime cgroup and arm the
-        // sentinel, so from here a SIGKILLed driver's death wakes the sentinel instead. Named by the
-        // scratch dir, so a VM's cgroup and scratch identities match.
+        // sentinel, so from here a SIGKILLed driver's death wakes the sentinel instead. Named by
+        // the scratch dir, so a VM's cgroup and scratch identities match.
         let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
-
-        // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
-        let vsock_uds = config.guest_cid.map(|_| workdir.join(VSOCK_UDS));
-        Ok(Self {
-            child: Some(child),
+        Ok(UnjailedSpawn {
+            child,
             console,
             workdir,
-            rootfs: rootfs.into_owned(),
-
-            restored: false,
-            api: ApiClient::new(socket),
-            vsock_uds,
-            input_image,
-            output,
+            socket,
             tap,
-            chroot: None,
             lifetime,
         })
     }
@@ -1337,6 +1373,31 @@ mod tests {
         assert!(
             !workdir.exists(),
             "abort must reclaim the scratch dir of a VMM that died mid-boot: {} survived",
+            workdir.display()
+        );
+    }
+
+    #[test]
+    fn a_failed_unjailed_spawn_reclaims_the_workdir_for_both_launch_paths() {
+        // `spawn_unjailed` owns the shared failure cleanup of `launch` and `launch_for_restore`:
+        // a spawn that never starts must not strand the scratch dir either caller staged.
+        let dir = ScratchDir::created("bsx-no-fc");
+        let cfg = BootConfig {
+            firecracker: dir.path().join("no-such-firecracker"),
+            scratch_dir: dir.path().to_path_buf(),
+            ..BootConfig::default()
+        };
+        let workdir = create_workdir(&cfg.scratch_dir).expect("stage a workdir");
+        let err = Spawned::spawn_unjailed(&cfg, workdir.clone(), false)
+            .err()
+            .expect("an absent binary cannot spawn");
+        assert!(
+            err.to_string().contains("no-such-firecracker"),
+            "the error names the binary: {err}"
+        );
+        assert!(
+            !workdir.exists(),
+            "a failed spawn must reclaim the workdir: {} survived",
             workdir.display()
         );
     }

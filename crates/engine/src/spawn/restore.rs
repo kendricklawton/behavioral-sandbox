@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::fcversion::{clock_realtime_arg, warn_on_unpinned_firecracker};
 use super::workdir::{create_workdir, workdir_name};
-use super::{Spawned, spawn_fc, still_before};
+use super::{Spawned, still_before};
 use crate::VmmError;
 use crate::firecracker::{
     ApiClient, MemBackend, MemBackendType, SnapshotLoad, snapshot_api_timeout,
@@ -15,9 +15,8 @@ use crate::jail::{
     Chroot, Jail, cgroup_limit_args, give_to_jail, restore_mem_mib, stage_into_chroot,
     stage_ro_base_into_chroot,
 };
-use crate::lifetime::VmLifetime;
 use crate::paths::path_str;
-use crate::vm::{BootConfig, Snapshot, VSOCK_UDS, reclaim_scratch};
+use crate::vm::{BootConfig, Snapshot, VSOCK_UDS};
 
 impl Spawned {
     /// Spawn a bare `firecracker` for a snapshot restore: a fresh scratch dir + process + console,
@@ -38,58 +37,32 @@ impl Spawned {
         let workdir = create_workdir(&config.scratch_dir)?;
         // A networked snapshot baked in its tap's `host_dev_name`, so restore must present a tap with
         // that name (the pin's `network_overrides` could rename it instead; `net.rs` records why the
-        // namespace is the better answer). Trivially satisfied here: recreate the fixed-name tap in a
-        // **fresh per-VM netns** (named after this restore's scratch dir). The clone wakes with the
-        // snapshot's baked-in address/MAC/routes, which are already correct in its own isolated netns,
-        // so no re-addressing is needed and any number of clones coexist. A direct boot runs Firecracker with the
-        // driver's own privilege, so the tap needs no per-uid owner. Created before Firecracker so it
-        // can join the netns; a failed create reclaims its own netns, and we still own the workdir.
-        let tap = if snapshot.tap_name.is_some() {
-            Some(super::create_tap_or_reclaim(&workdir, None)?)
-        } else {
-            None
-        };
-        let socket = workdir.join("fc.sock");
-        let (child, console) = match spawn_fc(
-            &config.firecracker,
-            &workdir,
-            &socket,
-            tap.as_ref().map(|t| t.netns.as_str()),
-        ) {
-            Ok(pair) => pair,
-            Err(e) => {
-                // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
-                // the dir is kept if the netns delete fails: a failed boot must not strand a
-                // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
-                // Unjailed, so no chroot is chowned to a leased pair and there is none to withhold.
-                let _ = reclaim_scratch(&workdir, tap.as_ref());
-                return Err(e);
-            }
-        };
+        // namespace is the better answer). Trivially satisfied by `spawn_unjailed`'s fixed-name tap
+        // in a **fresh per-VM netns**: the clone wakes with the snapshot's baked-in
+        // address/MAC/routes, which are already correct in its own isolated netns, so no
+        // re-addressing is needed and any number of clones coexist.
+        let s = Self::spawn_unjailed(config, workdir, snapshot.tap_name.is_some())?;
         // A prewarmed snapshot carries the vsock exec channel. Its socket path was baked in relative, so
         // Firecracker re-binds it in *this* restore's cwd (its scratch dir): the restored VM reaches
         // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
         // before `workdir` is moved into the struct.
-        let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
-        // Cgroup-owned lifetime: a restored clone (and every prewarmed-pool VM riding restore) is
-        // as leakable as a cold boot, so it gets the same enrollment + sentinel.
-        let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
+        let vsock_uds = snapshot.has_vsock.then(|| s.workdir.join(VSOCK_UDS));
         Ok(Self {
-            child: Some(child),
-            console,
-            workdir,
+            child: Some(s.child),
+            console: s.console,
+            workdir: s.workdir,
             // The restored VM's live disk is an anonymous inode (a private copy is staged at load then
             // unlinked; a shared base is referenced in place). This field holds the bundle path only as
             // a placeholder, it isn't a device this scratch dir owns, and re-snapshotting is refused.
             rootfs: snapshot.root_drive.clone(),
             restored: true,
-            api: ApiClient::new(socket),
+            api: ApiClient::new(s.socket),
             vsock_uds,
             input_image: None,
             output: None,
-            tap,
+            tap: s.tap,
             chroot: None,
-            lifetime,
+            lifetime: s.lifetime,
         })
     }
 
