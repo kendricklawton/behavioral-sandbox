@@ -261,6 +261,24 @@ pub struct TracepointArg {
 /// checks the declared size against this as well as the offset.
 pub const ARG_SLOT: usize = 8;
 
+/// Slot of the target **tgid** in the `FILTER` array, and slot of the target **cgroup id**. A zero
+/// slot means "do not filter on this axis"; the map is zero-initialized, so the load-time default is
+/// observe-all.
+///
+/// Single-sourced because the kernel program reads these positions and the loader writes them: if
+/// the two disagreed, `watch_cgroup` would put a cgroup inode in the tgid slot, `passes_filter`
+/// would compare it against a tgid and never match, and the run would report an empty footprint
+/// with no error and no drop counted.
+pub const FILTER_TGID: u32 = 0;
+/// See [`FILTER_TGID`].
+pub const FILTER_CGROUP: u32 = 1;
+
+/// Slot of the filter-mode toggle in the `TRACE_SET` array: `0` (the load-time default) selects the
+/// single-target `FILTER`, `1` selects the `TRACE_TARGETS` set. Single-sourced for the same reason
+/// as [`FILTER_TGID`]: a loader writing a slot the program does not read leaves the program on its
+/// all-zero `FILTER`, which observes every process on the host.
+pub const FILTER_MODE_SLOT: u32 = 0;
+
 /// `execve`'s `const char *filename` (argument 0), past the 8-byte common header and the
 /// `__syscall_nr` slot.
 pub const EXECVE_FILENAME_ARG: TracepointArg = TracepointArg {
