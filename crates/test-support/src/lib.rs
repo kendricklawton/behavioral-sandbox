@@ -175,6 +175,15 @@ impl Rng {
         let len = self.below(max);
         self.bytes(len)
     }
+
+    /// A string of a random length in `0..max_len` drawn from `alphabet`. The alphabet stays with
+    /// the caller, because what is worth generating is each wire's own question.
+    pub fn string_from(&mut self, alphabet: &[char], max_len: usize) -> String {
+        let n = self.below(max_len);
+        (0..n)
+            .map(|_| alphabet[self.below(alphabet.len())])
+            .collect()
+    }
 }
 
 /// A host scratch dir reclaimed on drop, so a panicking assertion or an early `?` return can't leak

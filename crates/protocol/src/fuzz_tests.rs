@@ -25,13 +25,6 @@ use super::*;
 /// generated strings exercise serde's escaping without being invalid by construction.
 const ALPHABET: &[char] = &['a', ' ', '\n', '"', '\\', '{', '}', '0', '/', 'é', '🦀'];
 
-fn rand_string(rng: &mut Rng) -> String {
-    let n = rng.below(10);
-    (0..n)
-        .map(|_| ALPHABET[rng.below(ALPHABET.len())])
-        .collect()
-}
-
 fn rand_request(rng: &mut Rng) -> Request {
     match rng.below(9) {
         0 => Request::Open(OpenParams {
@@ -45,15 +38,21 @@ fn rand_request(rng: &mut Rng) -> Request {
             },
             net: Some(rng.below(2) == 0),
             allow: if rng.below(2) == 0 {
-                Some((0..rng.below(4)).map(|_| rand_string(rng)).collect())
+                Some(
+                    (0..rng.below(4))
+                        .map(|_| rng.string_from(ALPHABET, 10))
+                        .collect(),
+                )
             } else {
                 None
             },
         }),
         1 => Request::Exec(ExecParams {
-            argv: (0..rng.below(6)).map(|_| rand_string(rng)).collect(),
+            argv: (0..rng.below(6))
+                .map(|_| rng.string_from(ALPHABET, 10))
+                .collect(),
             stdin: if rng.below(2) == 0 {
-                Some(rand_string(rng))
+                Some(rng.string_from(ALPHABET, 10))
             } else {
                 None
             },
@@ -62,7 +61,7 @@ fn rand_request(rng: &mut Rng) -> Request {
             env: if rng.below(2) == 0 {
                 Some(
                     (0..rng.below(4))
-                        .map(|_| (rand_string(rng), rand_string(rng)))
+                        .map(|_| (rng.string_from(ALPHABET, 10), rng.string_from(ALPHABET, 10)))
                         .collect(),
                 )
             } else {
@@ -70,11 +69,11 @@ fn rand_request(rng: &mut Rng) -> Request {
             },
         }),
         2 => Request::Put(PutParams {
-            path: rand_string(rng),
-            content: rand_string(rng),
+            path: rng.string_from(ALPHABET, 10),
+            content: rng.string_from(ALPHABET, 10),
         }),
         3 => Request::Get(GetParams {
-            path: rand_string(rng),
+            path: rng.string_from(ALPHABET, 10),
         }),
         4 => Request::Snapshot,
         5 => Request::Trace,
@@ -98,7 +97,7 @@ fn rand_fault_kind(rng: &mut Rng) -> FaultKind {
         2 => FaultKind::Guest,
         3 => FaultKind::Protocol,
         4 => FaultKind::Refused,
-        _ => FaultKind::Unknown(format!("x-{}", rand_string(rng))),
+        _ => FaultKind::Unknown(format!("x-{}", rng.string_from(ALPHABET, 10))),
     }
 }
 
@@ -107,24 +106,28 @@ fn rand_response(rng: &mut Rng) -> Response {
         0 => Response::opened(rng.next_u64(), rng.below(2) == 0),
         1 => Response::result(
             rng.next_u64() as i32,
-            rand_string(rng),
-            rand_string(rng),
+            rng.string_from(ALPHABET, 10),
+            rng.string_from(ALPHABET, 10),
             rng.next_u64(),
         ),
         2 => Response::got(
-            rand_string(rng),
-            rand_string(rng),
+            rng.string_from(ALPHABET, 10),
+            rng.string_from(ALPHABET, 10),
             rng.below(2) == 0,
             rng.below(2) == 0,
         ),
         3 => Response::trace(json!({"schema": 2, "n": rng.byte()})),
-        4 => Response::snapshotted(rand_string(rng)),
+        4 => Response::snapshotted(rng.string_from(ALPHABET, 10)),
         5 => Response::Closed,
-        6 => Response::error(rand_string(rng), rng.below(2) == 0, rand_fault_kind(rng)),
+        6 => Response::error(
+            rng.string_from(ALPHABET, 10),
+            rng.below(2) == 0,
+            rand_fault_kind(rng),
+        ),
         7 => Response::at_capacity(rng.next_u64()),
         8 => Response::Cancelled,
         9 => Response::trace_summary(json!({"schema": 1, "n": rng.byte()})),
-        _ => Response::put(rand_string(rng)),
+        _ => Response::put(rng.string_from(ALPHABET, 10)),
     }
 }
 
