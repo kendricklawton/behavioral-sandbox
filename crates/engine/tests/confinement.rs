@@ -307,6 +307,14 @@ fn panic_with_boot_outcome(
 /// A marker no guest prints, so the driver waits out its whole boot deadline in `await_userspace`.
 const UNREACHABLE_MARKER: &str = "bsx-marker-that-no-guest-will-ever-print";
 
+/// 100 spinning shells for 6 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`,
+/// so the guest agent stays schedulable and the run is measurable. 6 s, not shorter, so the
+/// half-core quota's expected burn (~3 s) sits clearly under the cap while an unenforced
+/// full-core burn (~6 s) sits clearly over it. The spinners outlive their parent command on
+/// purpose: the agent's tree reaping cleans them up.
+const CPU_STORM: &str = "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; \
+                         sleep 6; echo storm-live";
+
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn a_vmm_killed_while_awaiting_userspace_leaks_nothing() {
@@ -892,18 +900,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     let usage_before = cg.stat("cpu.stat", "usage_usec");
     let started = Instant::now();
 
-    // 100 spinning shells for 6 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`
-    // so the guest agent stays schedulable and the run is measurable (the *unbounded* variant would
-    // starve the agent inside the guest, a guest-availability problem, while this test is about
-    // what the host feels). 6 s, not shorter, so the half-core quota's expected burn (~3 s) sits
-    // clearly under the cap while an unenforced full-core burn (~6 s) sits clearly over it. The
-    // spinners outlive their parent command on purpose: the agent's tree reaping cleans them up.
-    let storm = [
-        "sh",
-        "-c",
-        "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; sleep 6; echo storm-live",
-    ]
-    .map(String::from);
+    let storm = ["sh", "-c", CPU_STORM].map(String::from);
     let out = vm
         .exec(&storm, b"")
         .expect("the fork storm exec must complete");
@@ -1060,15 +1057,10 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
         "victim workload should compute its known result"
     );
 
-    // The attacker storms the CPU (100 spinners for 6 s) in its own thread while the victim reruns its
-    // workload concurrently. The `Vm` moves into the thread (it is `Send`); we get it back to read its
+    // The attacker storms the CPU in its own thread while the victim reruns its workload
+    // concurrently. The `Vm` moves into the thread (it is `Send`); we get it back to read its
     // cgroup and shut it down.
-    let storm = [
-        "sh",
-        "-c",
-        "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; sleep 6; echo storm-live",
-    ]
-    .map(String::from);
+    let storm = ["sh", "-c", CPU_STORM].map(String::from);
     let attack_started = Instant::now();
     let usage_before = attacker_cg.stat("cpu.stat", "usage_usec");
     let storm_thread = std::thread::spawn(move || {

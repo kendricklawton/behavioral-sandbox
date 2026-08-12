@@ -49,7 +49,6 @@ pub(crate) const VM_DIR_PREFIX: &str = "bsx";
 ///   silently adopted, the rootfs copy and socket go here. A collision just advances to the
 ///   next sequence number.
 pub(crate) fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
-    use std::os::unix::fs::DirBuilderExt;
     for _ in 0..1024 {
         let workdir = base.join(format!(
             "{}-{}-{}",
@@ -57,23 +56,18 @@ pub(crate) fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
             std::process::id(),
             VM_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        match std::fs::DirBuilder::new().mode(0o700).create(&workdir) {
-            Ok(()) => {
-                // mkdir's mode is masked by the umask; an explicit chmod after the
-                // fail-if-exists create makes 0700 unconditional (and race-free, the dir is
-                // already exclusively ours).
-                if let Err(e) =
-                    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o700))
-                {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(VmmError::Vmm(format!("chmod {}: {e}", workdir.display())));
-                }
-                return Ok(workdir);
+        match create_private_dir(&workdir) {
+            Ok(()) => return Ok(workdir),
+            Err(PrivateDirError::Chmod(e)) => {
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(VmmError::Vmm(format!("chmod {}: {e}", workdir.display())));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(PrivateDirError::Create(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
             // A missing/unwritable scratch base is the operator's to fix (e.g. `BSX_SCRATCH_DIR`
             // points nowhere): name it in the error rather than failing cryptically deep in boot.
-            Err(e) => {
+            Err(PrivateDirError::Create(e)) => {
                 return Err(VmmError::Vmm(format!(
                     "create scratch dir {} (is {} present and writable?): {e}",
                     workdir.display(),
@@ -87,6 +81,26 @@ pub(crate) fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
         base.display(),
         VM_DIR_PREFIX
     )))
+}
+
+/// Which step of [`create_private_dir`] failed: the caller's branch points differ (an
+/// `AlreadyExists` create is a retry or an ownership check; a chmod failure is a cleanup).
+pub(crate) enum PrivateDirError {
+    Create(std::io::Error),
+    Chmod(std::io::Error),
+}
+
+/// Creates `dir` fail-if-exists and makes it `0700` unconditionally: mkdir's mode is masked by
+/// the umask, so the explicit chmod after the create is what defeats it, race-free because the
+/// dir is already exclusively ours.
+pub(crate) fn create_private_dir(dir: &Path) -> Result<(), PrivateDirError> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(dir)
+        .map_err(PrivateDirError::Create)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(PrivateDirError::Chmod)
 }
 
 /// RAII guard for the boot's scratch dir during the pre-VMM staging window (rootfs copy, bulk-I/O
