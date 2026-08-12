@@ -205,24 +205,39 @@ fn posture_to_json(out: &mut String, p: &EgressPosture) {
     out.push_str("]}");
 }
 
-/// The `port`/`proto` tail shared by both rule renderers, closing the object. `0` means "any" in the
-/// kernel record and renders as `null`, since port 0 and protocol 0 are otherwise real values.
+/// The `port`/`proto` tail shared by both rule renderers, closing the object. A wildcard renders as
+/// `null`, since port 0 and protocol 0 are otherwise real values.
 fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
     out.push_str(",\"dst_port\":");
-    if port == 0 {
-        out.push_str("null");
-    } else {
-        let _ = write!(out, "{port}");
+    match rule_port(port) {
+        Some(p) => {
+            let _ = write!(out, "{p}");
+        }
+        None => out.push_str("null"),
     }
     out.push_str(",\"proto\":");
-    if proto == 0 {
-        out.push_str("null");
-    } else {
-        out.push('"');
-        proto_name(out, proto);
-        out.push('"');
+    match rule_proto(proto) {
+        Some(p) => {
+            out.push('"');
+            proto_name(out, p);
+            out.push('"');
+        }
+        None => out.push_str("null"),
     }
     out.push('}');
+}
+
+/// The port an egress rule matches, or `None` for the `0` the kernel record writes to mean **any
+/// port**. The sentinel is decoded here rather than at each renderer, which spell the wildcard
+/// differently on purpose.
+pub(crate) fn rule_port(port: u16) -> Option<u16> {
+    (port != 0).then_some(port)
+}
+
+/// The protocol an egress rule matches, or `None` for the `0` that means **any protocol**, the
+/// twin of [`rule_port`].
+pub(crate) fn rule_proto(proto: u8) -> Option<u8> {
+    (proto != 0).then_some(proto)
 }
 
 fn net_stats_to_json(out: &mut String, s: &NetStats) {
