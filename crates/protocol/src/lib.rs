@@ -593,6 +593,19 @@ impl<'de> Deserialize<'de> for FaultKind {
     }
 }
 
+/// Renders the **wire spelling** (`guest`, never `Guest`), so the string a caller prints is the one
+/// `contract.json`, the protocol docs, and a non-Rust decoder all name. [`Unknown`](FaultKind::Unknown)
+/// renders what it carries, or `unknown` when the peer omitted the field and it carries nothing.
+impl std::fmt::Display for FaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FaultKind::Unknown(raw) if raw.is_empty() => f.write_str("unknown"),
+            FaultKind::Unknown(raw) => f.write_str(raw),
+            named => f.write_str(named.wire_str().unwrap_or("unknown")),
+        }
+    }
+}
+
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile or
 /// buggy peer is answered or dropped rather than panicking.
 #[derive(Debug)]
@@ -1973,6 +1986,25 @@ mod tests {
         // A serde-shaped variant object from a generic encoder degrades rather than failing.
         let odd: FaultKind = serde_json::from_value(serde_json::json!({ "infra": null })).unwrap();
         assert!(matches!(odd, FaultKind::Unknown(_)));
+    }
+
+    #[test]
+    fn a_fault_kind_displays_as_its_wire_string() {
+        // `Display` and the wire must agree, or every renderer chooses between `Guest` and `guest`
+        // and a reader greps the docs for a spelling the logs never use.
+        for kind in FaultKind::NAMED {
+            assert_eq!(
+                Some(kind.to_string().as_str()),
+                kind.wire_str(),
+                "{kind:?} must display as its wire string"
+            );
+        }
+        assert_eq!(FaultKind::Unknown("weird".into()).to_string(), "weird");
+        assert_eq!(
+            unknown_fault().to_string(),
+            "unknown",
+            "the omitted-field default still renders a word"
+        );
     }
 
     #[test]
