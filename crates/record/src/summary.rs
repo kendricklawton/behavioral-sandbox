@@ -326,12 +326,7 @@ fn notable_sample(notable: &[NotableSyscall], cap: usize) -> Vec<usize> {
 
 /// One coverage gap as `"axis: reason"`, the flat, model-legible form of an [`AxisGap`].
 fn gap_line(gap: &AxisGap) -> String {
-    let axis = match gap {
-        AxisGap::HostSyscalls(_) => "host_syscalls",
-        AxisGap::Network(_) => "network",
-        AxisGap::Cpu(_) => "cpu",
-    };
-    format!("{axis}: {}", gap.reason())
+    format!("{}: {}", gap.axis(), gap.reason())
 }
 
 /// A destination as one compact JSON string, `"1.1.1.1:443/tcp"`, the dotted quad, the L4 port, and
