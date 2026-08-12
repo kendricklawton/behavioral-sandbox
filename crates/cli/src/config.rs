@@ -4,23 +4,17 @@
 //! The env layer lives in [`bsx_engine::BootConfig::from_env`] and the flags layer is the CLI's own
 //! arguments, so this module inserts two files between env and defaults.
 //!
-//! - **Two files, two trust levels.** The **user file** is `$HOME/.bsx.toml` and carries every key.
-//!   The **project file** is the nearest `.bsx.toml` walking up from the cwd, like `.gitignore`, and
-//!   carries only the keys that cannot weaken this host's posture. A file found above the working
-//!   directory can arrive with the code it configures, so the keys that name a host binary, a guest
-//!   image, a key path, a write root, or a jail id are read from the user file, the environment, or a
-//!   flag. [`project_from`] is the enforcer: it destructures every field of [`UserConfig`] with no
-//!   rest pattern, so a new key does not compile until it is classified.
-//! - **Two vocabularies.** The *artifact and scratch* keys mirror their `BSX_*` env names (minus the
-//!   prefix, lowercased), so a value is spelled the same wherever it comes from. The **operator-policy**
-//!   keys deliberately do not: they are the host's posture, and routing them through the precedence
-//!   above would let the caller they bound edit them (see [`UserConfig`]).
-//! - **A misplaced or mistyped key is a typed error**, never a silent no-op: the file is parsed with
-//!   `deny_unknown_fields`, and a project file naming a user-only key is refused rather than dropped.
+//! - **Two files, two trust levels.** The **user file** (`$HOME/.bsx.toml`) carries every key. The
+//!   **project file** (the nearest `.bsx.toml` above the cwd) carries only the keys that cannot
+//!   weaken this host's posture, because it can arrive with the code it configures; [`project_from`]
+//!   is the enforcer.
+//! - **Two vocabularies.** The artifact and scratch keys mirror their `BSX_*` env names; the
+//!   operator-policy keys deliberately do not, or the caller they bound could edit them (see
+//!   [`UserConfig`]).
+//! - **A misplaced or mistyped key is a typed error**, never a silent no-op.
 //! - **The layering** composes a lookup for
-//!   [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with), returning the real env var if
-//!   set and a file's value otherwise, so the engine's env-key logic and defaults are not duplicated.
-//!   The `log` key has no `BootConfig` field, so the CLI reads it from here directly.
+//!   [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with), so the engine's env-key
+//!   logic and defaults are not duplicated. `log` has no `BootConfig` field; the CLI reads it here.
 
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -57,29 +51,23 @@ pub struct UserConfig {
     scratch_dir: Option<PathBuf>,
     /// Mirrors `BSX_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied).
     require_limits: Option<bool>,
-    /// Mirrors `BSX_GATEWAY`: the default route this host hands its guests. A host fact, so it
-    /// belongs in the file rather than on every command line; `--gateway` overrides it.
+    /// Mirrors `BSX_GATEWAY`: the default route this host hands its guests; `--gateway` overrides.
     gateway: Option<Ipv4Addr>,
-    /// Mirrors `BSX_RESOLVER`: the resolver this host's guests are told to use. Read only when a
-    /// gateway resolved, since a resolver the guest cannot route to is inert.
+    /// Mirrors `BSX_RESOLVER`. Read only when a gateway resolved, since an unroutable resolver is
+    /// inert.
     resolver: Option<Ipv4Addr>,
     /// Mirrors `BSX_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
-    /// Mirrors `BSX_SIGNING_KEY` (the host record-signing key path). No `BootConfig`
-    /// field; the CLI reads it to sign `--record`.
+    /// Mirrors `BSX_SIGNING_KEY` (the host record-signing key path). No `BootConfig` field.
     signing_key: Option<PathBuf>,
-    /// Mirrors `BSX_TRUSTED_KEYS`: public keys (`key_id` hex) `bsx verify` trusts *in addition*
-    /// to the current signing key, so rotating the host key doesn't invalidate already-signed records.
-    /// No `BootConfig` field.
+    /// Mirrors `BSX_TRUSTED_KEYS`: extra public keys (`key_id` hex) `bsx verify` trusts, so a key
+    /// rotation doesn't invalidate already-signed records. No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
 
-    // Operator policy. The ceilings and postures here do **not** mirror `BSX_*` env keys: they are
-    // the host's posture, not a per-invocation knob, and they exist precisely to bound what a caller
-    // may ask for, so routing them through the flags > env > file precedence would let the caller
-    // they bound edit them. The two jail ids are the exception, and carry `BSX_JAIL_UID` /
-    // `BSX_JAIL_GID`: an operator sets them per host, so they layer like the artifact keys and are
-    // read from the user file alone. See `crate::policy` for where this binds and where it is only a
-    // guardrail.
+    // Operator policy. These do **not** mirror `BSX_*` env keys: they bound what a caller may ask
+    // for, and the flags > env precedence would let that caller edit them. The jail ids are the
+    // exception (`BSX_JAIL_UID`/`BSX_JAIL_GID`), per-host operator facts read from the user file
+    // alone. See `crate::policy` for where this binds.
     /// House default vCPUs when a caller does not ask.
     #[serde(default, deserialize_with = "vcpus_field")]
     vcpus: Option<NonZeroU8>,
@@ -117,13 +105,9 @@ pub struct UserConfig {
     max_egress_v6: Option<Vec<CidrV6>>,
 }
 
-/// A vCPU count from the file, validated at deserialize time against what the VMM can actually boot.
-/// `NonZeroU8` already refuses `0`; [`vcpus_supported`] is the rest of the rule (1 or an even number
-/// up to [`MAX_VCPUS`]), which the `--vcpus` flag has always applied through `crate::parse_vcpus`.
-///
-/// `key` is passed in because `parse` keeps only the bare message from a TOML error, dropping the
-/// span that would otherwise point at the line; without it a file setting both keys would not say
-/// which one it meant.
+/// A vCPU count from the file, validated at deserialize time against what the VMM can actually
+/// boot: `NonZeroU8` refuses `0`, [`vcpus_supported`] the rest (1 or an even number up to
+/// [`MAX_VCPUS`]). `key` names the offending key in the error, because `parse` keeps no TOML span.
 fn bootable_vcpus<'de, D>(key: &str, deserializer: D) -> Result<Option<NonZeroU8>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -144,9 +128,8 @@ fn vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU
     bootable_vcpus("vcpus", d)
 }
 
-/// [`bootable_vcpus`] for the `max_vcpus` key. The ceiling takes the same check, not for symmetry:
-/// [`Policy::resolve`] clamps a house default *down to* the ceiling, so an odd `max_vcpus` turns a
-/// legal `vcpus` into an illegal boot count, and the refusal then names a number nobody wrote.
+/// [`bootable_vcpus`] for the `max_vcpus` key: [`Policy::resolve`] clamps a house default *down
+/// to* the ceiling, so an odd `max_vcpus` would turn a legal `vcpus` into an illegal boot count.
 fn max_vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU8>, D::Error> {
     bootable_vcpus("max_vcpus", d)
 }
@@ -243,17 +226,14 @@ impl UserConfig {
                 .as_ref()
                 .map(|p| p.as_os_str().to_os_string()),
 
-            // A bool rendered as the canonical token `from_env_with`'s `parse_env_bool` accepts, so
-            // the file slots under the env in the same composed lookup as the string keys.
+            // The non-string keys render back to the exact token `from_env_with` parses, so the
+            // file goes through the env's own validation (which is what refuses a zero jail id)
+            // rather than a second path that could drift.
             "BSX_REQUIRE_LIMITS" => self
                 .require_limits
                 .map(|b| OsString::from(if b { "true" } else { "false" })),
-            // Rendered as decimal text, so the file goes through `from_env_with`'s own id parse
-            // (which is what refuses zero) rather than a second validation path that could drift.
             "BSX_JAIL_UID" => self.jail_uid.map(|u| OsString::from(u.to_string())),
             "BSX_JAIL_GID" => self.jail_gid.map(|g| OsString::from(g.to_string())),
-            // Rendered back to the dotted-quad text `from_env_with` parses, so the file slots under
-            // the env in the same composed lookup rather than needing a second path into the config.
             "BSX_GATEWAY" => self.gateway.map(|a| OsString::from(a.to_string())),
             "BSX_RESOLVER" => self.resolver.map(|a| OsString::from(a.to_string())),
             _ => None,
@@ -368,11 +348,8 @@ fn env_mirror(key: &str) -> Option<&'static str> {
 }
 
 /// Narrow a parsed file to what a project-local one may carry, or name every user-only key it set.
-///
-/// **This function is the enforcer for the two trust levels.** It destructures every field of
-/// [`UserConfig`] with no rest pattern, so a new key does not compile here until someone classifies
-/// it, and a binding that is neither returned nor refused trips the workspace's denied
-/// `unused_variables`.
+/// The enforcer for the two trust levels: it destructures every [`UserConfig`] field with no rest
+/// pattern, so a new key does not compile until it is classified.
 ///
 /// # Errors
 /// The names of the user-only keys the file set, in declaration order.
@@ -460,9 +437,8 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
     })
 }
 
-/// Parse one IPv4 CIDR, `IP` or `IP/PREFIX`. `context` is the whole phrase naming where the operator
-/// wrote it (`max_egress_v4 entry "10.0.0.0/8"`, `--allow "10.0.0.1/24:80"`), so one parser serves
-/// callers whose locus has a different shape and no message names another's spelling.
+/// Parse one IPv4 CIDR, `IP` or `IP/PREFIX`. `context` is the whole phrase naming where the
+/// operator wrote it, so one parser serves callers whose locus has a different shape.
 pub(crate) fn parse_v4_cidr(s: &str, context: &str) -> Result<Ipv4Cidr, String> {
     match s.split_once('/') {
         Some((ip, prefix)) => {
@@ -580,12 +556,9 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// The two config files this process reads: the user's own, and the project-local one.
-///
-/// Threading one of these instead of a bare parsed file is what keeps the trust levels apart at the
-/// call sites: the accessors that reach a host binary, a key, or a jail id read [`Self::user`]
-/// alone, and no lookup can reach a path through the project layer because [`ProjectConfig`] has no
-/// path field to reach.
+/// The two config files this process reads: the user's own, and the project-local one. Threading
+/// this keeps the trust levels apart: the accessors that reach a host binary, a key, or a jail id
+/// read [`Self::user`] alone, and [`ProjectConfig`] has no path field for a lookup to reach.
 #[derive(Debug, Default, Clone)]
 pub struct Sources {
     user: Option<UserConfig>,
@@ -599,14 +572,13 @@ impl Sources {
     ///
     /// # Errors
     /// [`ConfigError`] if either file cannot be read or parsed, or if the project-local one sets a
-    /// user-only key. A config the operator wrote but got wrong must fail loudly, not be skipped.
+    /// user-only key; a config the operator got wrong fails loudly rather than being skipped.
     pub fn discover(cwd: &Path) -> Result<Self, ConfigError> {
         Self::discover_with(cwd, std::env::var_os("HOME").map(PathBuf::from))
     }
 
     /// The pure core of [`discover`](Self::discover), taking `$HOME` rather than reading it, so
-    /// every precedence case is unit-testable without mutating the process environment (`set_var`
-    /// is `unsafe` in edition 2024 and races the parallel test runner).
+    /// the precedence cases are unit-testable without `set_var` (unsafe in edition 2024).
     ///
     /// # Errors
     /// As [`discover`](Self::discover).
@@ -614,10 +586,9 @@ impl Sources {
         // A relative `$HOME` names a different directory depending on where the process started, so
         // it does not identify the user's own file. Same filter `bsx_record`'s data dir applies.
         let user_path = home.filter(|h| h.is_absolute()).map(|h| h.join(FILE_NAME));
-        // The user file is the one that still carries the keys reaching host execution and host
-        // trust, so it is opened through the ownership and mode gate rather than by path. The
-        // project file is not: it can set only knobs and postures, and gating it would refuse every
-        // `0o664` file a developer on `umask 002` creates, for nothing.
+        // Only the user file carries keys reaching host execution and trust, so only it goes
+        // through the ownership/mode gate; gating the knobs-and-postures project file would refuse
+        // every `0o664` file a `umask 002` developer creates, for nothing.
         let user = match user_path.as_deref() {
             Some(p) => match crate::trust::open_trusted(p).map_err(ConfigError::Untrusted)? {
                 Some(file) => Some(UserConfig::parse_open(file, p)?),
@@ -626,8 +597,8 @@ impl Sources {
             None => None,
         };
 
-        // Walking up from a cwd under `$HOME` lands on the user's own file. Classifying it as a
-        // project file would refuse the user their own keys, so identity is resolved first.
+        // A cwd under `$HOME` walks up to the user's own file; classifying it as a project file
+        // would refuse the user their own keys, so identity is resolved first.
         let project_path = UserConfig::nearest(cwd).filter(|n| !same_file(n, user_path.as_deref()));
         let project = match project_path.as_deref() {
             Some(p) => {
@@ -695,13 +666,10 @@ fn same_file(path: &Path, other: Option<&Path>) -> bool {
     }
 }
 
-/// The operator policy for this process: the user file's, tightened by the project file's.
-/// `run` and `shell` both source policy through here, so the two CLI paths agree.
-///
-/// The daemon deliberately does **not**: `serve` builds its [`Policy`] from its own flags, because a
-/// daemon must not read a security control out of whatever directory it happened to be started in.
-/// That divergence is the design, not drift, so this function is the CLI's single source and not the
-/// process's.
+/// The operator policy for this process: the user file's, tightened by the project file's. `run`
+/// and `shell` both source policy here; `serve` deliberately does not (its [`Policy`] comes from
+/// its own flags), because a daemon must not read a security control out of whatever directory it
+/// was started in.
 #[must_use]
 pub fn policy_of(sources: &Sources) -> Policy {
     let user = sources
@@ -715,9 +683,9 @@ pub fn policy_of(sources: &Sources) -> Policy {
     }
 }
 
-/// Resolve the host record-signing key path with `env (BSX_SIGNING_KEY) > file > default`
-/// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
-/// The default is [`bsx_probes_loader::default_key_path`] (a data-dir path, generated on first use).
+/// Resolve the host record-signing key path, `env (BSX_SIGNING_KEY) > file > default`
+/// ([`bsx_probes_loader::default_key_path`], generated on first use). No `BootConfig` field, so
+/// the precedence is mirrored here.
 #[must_use]
 pub fn signing_key_path(sources: &Sources) -> PathBuf {
     std::env::var_os("BSX_SIGNING_KEY")
@@ -732,10 +700,9 @@ pub fn signing_key_path(sources: &Sources) -> PathBuf {
         .unwrap_or_else(bsx_probes_loader::default_key_path)
 }
 
-/// The configured set of extra trusted public keys (`key_id` hex) for `bsx verify`, the **union**
-/// of `BSX_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
-/// override: every configured key stays trusted so a record signed before a key rotation still
-/// verifies. Parsing/validation is the caller's (`TrustedKey::from_hex`).
+/// The extra trusted public keys (`key_id` hex) for `bsx verify`: the **union** of
+/// `BSX_TRUSTED_KEYS` (comma-separated) and the user file's list, so a record signed before a key
+/// rotation still verifies. Parsing is the caller's (`TrustedKey::from_hex`).
 #[must_use]
 pub fn trusted_key_hexes(sources: &Sources) -> Vec<String> {
     let mut out = Vec::new();
@@ -756,9 +723,8 @@ pub fn trusted_key_hexes(sources: &Sources) -> Vec<String> {
     out
 }
 
-/// Resolve the stderr log filter with the full precedence `flag > env (BSX_LOG) > file > default`.
-/// The `BootConfig` layers can't carry `log` (it has no field), so this mirrors that precedence for
-/// the one config value that drives `tracing` instead of the engine.
+/// Resolve the stderr log filter, `flag > env (BSX_LOG) > project > user > default`: the one
+/// config value that drives `tracing` instead of the engine, so its precedence is mirrored here.
 #[must_use]
 pub fn resolve_log(flag: Option<&str>, sources: &Sources) -> Option<String> {
     flag.map(str::to_string)
