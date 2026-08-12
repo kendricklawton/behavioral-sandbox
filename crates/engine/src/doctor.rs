@@ -622,31 +622,20 @@ pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
     // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
     let target = nearest_existing(dir)?.canonicalize().ok()?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let mountinfo = crate::mountinfo::self_text()?;
     mount_flags_in(&mountinfo, &target)
 }
 
-/// The [`MountFlags`] of the longest mount point in `mountinfo` that is an ancestor of `target`
-/// (the filesystem that actually holds it). Pure, so the `/proc/self/mountinfo` parse is
-/// unit-tested without a real `/proc`. `None` if no line covers `target` (an absolute path is
-/// always covered by `/`, so this only happens on malformed input).
+/// The [`MountFlags`] of the mount holding `target` ([`crate::mountinfo::covering`], the same
+/// selection the jailed boot judges by). Pure, so the parse is unit-tested without a real `/proc`.
+/// `None` if no line covers `target` (an absolute path is always covered by `/`, so this only
+/// happens on malformed input).
 fn mount_flags_in(mountinfo: &str, target: &Path) -> Option<MountFlags> {
-    let mut best: Option<(usize, MountFlags)> = None;
-    for mount in crate::mountinfo::mounts(mountinfo) {
-        if target.starts_with(&mount.point) {
-            let len = mount.point.as_os_str().len();
-            if best.is_none_or(|(best_len, _)| len > best_len) {
-                best = Some((
-                    len,
-                    MountFlags {
-                        nodev: mount.options.split(',').any(|opt| opt == "nodev"),
-                        noexec: mount.options.split(',').any(|opt| opt == "noexec"),
-                    },
-                ));
-            }
-        }
-    }
-    best.map(|(_, flags)| flags)
+    let mount = crate::mountinfo::covering(mountinfo, target)?;
+    Some(MountFlags {
+        nodev: mount.options.split(',').any(|opt| opt == "nodev"),
+        noexec: mount.options.split(',').any(|opt| opt == "noexec"),
+    })
 }
 
 /// The nearest existing ancestor of `dir` (possibly `dir` itself), walking up until one exists.
@@ -930,6 +919,34 @@ mod tests {
                 nodev: true,
                 noexec: true
             })
+        );
+    }
+
+    #[test]
+    fn an_overmount_reports_the_topmost_entrys_flags() {
+        // Two mounts at the same point: the visible filesystem is the topmost, the *last*
+        // mountinfo line, and its flags are what a file there feels. Reporting the buried line
+        // lets doctor bless a scratch base the jailed boot then refuses (or the reverse).
+        let restrictive_buried = "\
+21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+30 21 0:24 / /scratch rw,nodev,noexec shared:2 - tmpfs a rw
+31 21 0:25 / /scratch rw,relatime shared:3 - ext4 /dev/sdb rw";
+        assert_eq!(
+            mount_flags_in(restrictive_buried, Path::new("/scratch/bsx-1")),
+            Some(MountFlags {
+                nodev: false,
+                noexec: false
+            }),
+            "the topmost overmount is clear, so the flags read clear"
+        );
+        let clear_buried = "\
+21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+30 21 0:24 / /scratch rw,relatime shared:2 - ext4 /dev/sdb rw
+31 21 0:25 / /scratch rw,nodev,noexec shared:3 - tmpfs a rw";
+        assert!(
+            mount_flags_in(clear_buried, Path::new("/scratch/bsx-1"))
+                .is_some_and(MountFlags::blocks_jail),
+            "the topmost overmount carries the flags, so they read set"
         );
     }
 

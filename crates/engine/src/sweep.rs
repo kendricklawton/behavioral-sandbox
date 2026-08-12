@@ -171,7 +171,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
 /// through [`crate::mountinfo`], so a mount point whose path contains a space matches like any
 /// other. A no-op when `dir` holds no mounts.
 fn detach_mounts_under(dir: &Path) {
-    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+    let Some(info) = crate::mountinfo::self_text() else {
         return;
     };
     for mp in mounts_under(&info, dir) {

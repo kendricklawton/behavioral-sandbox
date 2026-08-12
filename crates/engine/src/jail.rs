@@ -638,34 +638,17 @@ fn scratch_is_shared_mount(path: &Path) -> bool {
     let Ok(target) = absolute(path) else {
         return false;
     };
-    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+    let Some(info) = crate::mountinfo::self_text() else {
         return false;
     };
     mount_is_shared(&info, &target)
 }
 
-/// Whether the longest mount point that is a path-prefix of `target` carries a `shared:N` tag, given
-/// the raw `/proc/self/mountinfo` text. Split from the I/O so the field-walk is unit-testable: a
-/// mountinfo line is `id pid maj:min root MOUNTPOINT opts [optional tags...] - fstype src super`, and
-/// the optional tags (where `shared:N` lives) run from field 6 up to a standalone `-`.
+/// Whether the mount holding `target` ([`crate::mountinfo::covering`]) carries a `shared:N` tag,
+/// given the raw `/proc/self/mountinfo` text. Reading a non-shared point as shared would take the
+/// bind path with no copy fallback and hard-fail the jailed boot (the bind wouldn't propagate).
 fn mount_is_shared(mountinfo: &str, target: &Path) -> bool {
-    let mut best: Option<(usize, bool)> = None;
-    for mount in crate::mountinfo::mounts(mountinfo) {
-        if !target.starts_with(&mount.point) {
-            continue;
-        }
-        let shared = mount.shared;
-        let depth = mount.point.components().count();
-        // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the topmost,
-        // the **last** mountinfo line, governs what a later mount there inherits. Keeping the
-        // first-seen line would read a point listed `shared:` first then private-later as shared, take
-        // the bind path with no copy fallback, and hard-fail the jailed boot (the bind wouldn't
-        // propagate). Later same-depth line wins; a strictly deeper mount point still wins over both.
-        if best.map(|(d, _)| depth >= d).unwrap_or(true) {
-            best = Some((depth, shared));
-        }
-    }
-    best.map(|(_, shared)| shared).unwrap_or(false)
+    crate::mountinfo::covering(mountinfo, target).is_some_and(|m| m.shared)
 }
 
 /// Resolve `firecracker` to an absolute path for `--exec-file`: an absolute path as-is, a path with a
