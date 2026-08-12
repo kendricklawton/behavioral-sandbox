@@ -1470,13 +1470,13 @@ mod tests {
             "expected the shared maps to be found by declaration, got {shared:?}"
         );
 
-        // The merged v4/v6 cores (`count_in`, `record_denial_in`) RMW through their map
-        // *parameter*, so those receivers join the declaration-derived list; renaming either
-        // parameter drops the site count below the floor and fails this pin by name.
+        // The merged cores (`count_in`, `accumulate`) RMW through their map *parameter*, so those
+        // receivers join the declaration-derived list; renaming either parameter drops the site
+        // count below the floor and fails this pin by name.
         let mut receivers: Vec<String> =
             shared.iter().map(|m| format!("{m}.get_ptr_mut(")).collect();
         receivers.push("flows.get_ptr_mut(".to_string());
-        receivers.push("denials.get_ptr_mut(".to_string());
+        receivers.push("totals.get_ptr_mut(".to_string());
 
         let mut checked = 0;
         for (n, line) in lines.iter().enumerate() {
@@ -1504,12 +1504,12 @@ mod tests {
         }
         // Not every shared map is a counter: `TRACE_TARGETS`/`METER_TARGETS` are membership sets
         // read with `get_ptr`, which mutates nothing. This only keeps the pin from passing
-        // vacuously if the sites it checks stop matching. Four sites: `EXECVE_BY_PID`, `CPU_NS`,
-        // and the two merged cores that carry the v4/v6 pairs.
+        // vacuously if the sites it checks stop matching. Two sites, since every `u64` counter map
+        // accumulates through `accumulate` and the flow pair through `count_in`.
         assert!(
-            checked >= 4,
+            checked >= 2,
             "the pin saw {checked} shared-map read-modify-write sites; it is meant to see one per \
-             counter map, the v4/v6 pairs sharing theirs"
+             merged core, and every counter map reaches one of them"
         );
     }
 
@@ -1530,12 +1530,11 @@ mod tests {
         let src = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
             .expect("crates/probes/src/main.rs");
         let lines: Vec<&str> = src.lines().collect();
-        // Four sites: `EXECVE_BY_PID`, `CPU_NS`, and the two merged cores (`count_in`,
-        // `record_denial_in`) that carry the v4/v6 flow and denial pairs.
+        // Two sites: `count_in` for the v4/v6 flow pair, `accumulate` for every `u64` counter map.
         let inserts = lines.iter().filter(|l| l.contains(".insert(")).count();
         assert!(
-            inserts >= 4,
-            "expected an insert per bounded map, found {inserts}"
+            inserts >= 2,
+            "expected an insert per merged core, found {inserts}"
         );
         for (n, line) in lines.iter().enumerate() {
             if !line.contains(".insert(") {
