@@ -9,6 +9,8 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 const IPPROTO_TCP: u8 = 6;
 
+/// A synthetic `SyscallEvent`, deliberately another copy of `src/testutil.rs`'s builder: a bench
+/// compiles as a foreign crate and cannot see `pub(crate)`.
 fn ev(syscall: u32, detail: &[u8]) -> SyscallEvent {
     let mut d = [0u8; DETAIL_CAP];
     let n = detail.len().min(d.len());
