@@ -1,25 +1,20 @@
 //! Plain-old-data shared across the eBPF boundary: the records `crates/probes` writes into its maps
-//! and `crates/probes-loader` reads back.
-//!
-//! Defining each record **once** is what keeps the writer and the reader from drifting, since a field
+//! and `crates/probes-loader` reads back. Each record is defined **once**, because a field
 //! reordered or resized on one side only would be a silent garbage read.
 //!
 //! - **Layout:** every shared type is `#[repr(C)]` and padding-free, with explicit zeroed `_pad`
-//!   where a type is a BPF hash-map key (an uninitialized pad byte would make two identical keys
-//!   hash to different slots).
-//! - **Decoding:** both sides run on the same host, so native byte order is shared and each
-//!   `from_bytes` reads field by field with `from_ne_bytes`, no `unsafe` and no transmute.
-//! - **Offsets come from the struct** (`core::mem::offset_of!`), never written out, because one end
-//!   of every record reads it *as a struct* (the kernel dereferences a map value) while the other
-//!   reads it *as bytes*. A hand-written position that stopped matching the field it names would
-//!   reinterpret the record with nothing erroring. The `*_offsets_are_the_wire_contract` tests then
-//!   pin the layout itself, since the eBPF object is built separately and loaded at runtime: a
-//!   reorder plus a stale object on disk is two artifacts disagreeing, at the same size.
-//! - **Address math is byte-wise.** The eBPF target has no native `u128` (`bpf-linker` would emit
-//!   compiler-rt calls that don't exist there), so the v6 matchers loop bytes and run identically in
-//!   the kernel and in these host tests.
-//! - **`#![no_std]`, zero dependencies**, so it compiles for the BPF target unchanged. The `std`
-//!   feature opts back into `std` for the ergonomic display helpers.
+//!   where a type is a BPF hash-map key (an uninitialized pad byte would split identical keys).
+//! - **Decoding:** both sides run on the same host, so each `from_bytes` reads field by field with
+//!   `from_ne_bytes`, no `unsafe`.
+//! - **Offsets come from the struct** (`core::mem::offset_of!`), never written out: one end reads
+//!   each record as a struct, the other as bytes, so a hand-written position that stopped matching
+//!   its field would reinterpret the record with nothing erroring. The
+//!   `*_offsets_are_the_wire_contract` tests pin the layout itself against the separately-built,
+//!   possibly stale eBPF object on disk.
+//! - **Address math is byte-wise:** the eBPF target has no native `u128`, so the v6 matchers loop
+//!   bytes and run identically in the kernel and in these host tests.
+//! - **`#![no_std]`, zero dependencies**, so it compiles for the BPF target unchanged; the `std`
+//!   feature opts back into the display helpers.
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code)]
 
@@ -43,12 +38,10 @@ pub const SOCKADDR_SNAP: usize = 28;
 /// address.
 pub const SOCKADDR_SNAP_V4: usize = 16;
 
-/// Which syscall a [`SyscallEvent`] records. The wire field is a raw [`u32`]
-/// ([`SyscallEvent::syscall`]), not this enum, so reconstructing an event from arbitrary bytes can
-/// never form an invalid discriminant. `Ord` compares the **explicit discriminants below**, not
-/// source order, so reordering these arms moves nothing and the audit record's `notable` ordering is
-/// tied to the wire numbering (`notable_kinds_are_ordered_by_the_syscall_discriminants` in
-/// `bsx-record` holds it).
+/// Which syscall a [`SyscallEvent`] records. The wire field is a raw [`u32`], not this enum, so
+/// decoding arbitrary bytes can never form an invalid discriminant; `Ord` compares the explicit
+/// discriminants, so the audit record's `notable` ordering is tied to the wire numbering
+/// (`notable_kinds_are_ordered_by_the_syscall_discriminants` in `bsx-record` holds it).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Syscall {
@@ -61,9 +54,7 @@ pub enum Syscall {
 }
 
 impl Syscall {
-    /// The short name a trace line, a summary, or the signed record's JSON renders this as. One
-    /// table, so the three surfaces cannot name the same event differently. `no_std`-friendly (all
-    /// string literals).
+    /// The short name every rendering surface uses, one table so they cannot disagree.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -104,9 +95,8 @@ pub const EVENT_SIZE: usize = core::mem::size_of::<SyscallEvent>();
 
 impl SyscallEvent {
     /// Reconstructs an event from a ring-buffer record's raw bytes, or `None` if the slice is too
-    /// short. The offsets are **derived from the struct itself** (`core::mem::offset_of!`) rather
-    /// than hand-coded, so even a same-size field reorder cannot make the reader and the kernel
-    /// writer disagree; a resize is caught by the [`EVENT_SIZE`] check.
+    /// short. Offsets come from the struct (see the crate docs); a resize is caught by the
+    /// [`EVENT_SIZE`] check.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < EVENT_SIZE {
@@ -158,12 +148,10 @@ impl SyscallEvent {
     }
 
     /// Whether this event's **path** ran past [`DETAIL_CAP`] and was cut, so a consumer never shows
-    /// a prefix as though it were the whole path.
-    ///
-    /// A full buffer is the signal, since `bpf_probe_read_user_str` NUL-terminates within it. The one
-    /// ambiguous case, a path of *exactly* `DETAIL_CAP - 1` bytes, is reported as truncated:
-    /// over-stating doubt about an audit record is safe, understating it is not. Path-like syscalls
-    /// only, since a `connect`'s sockaddr snapshot can never reach the cap.
+    /// a prefix as though it were the whole path. A full buffer is the signal
+    /// (`bpf_probe_read_user_str` NUL-terminates within it), so a path of exactly `DETAIL_CAP - 1`
+    /// bytes also reports truncated: over-stating doubt about an audit record is safe. Path-like
+    /// syscalls only, since a sockaddr snapshot can never reach the cap.
     #[must_use]
     pub fn detail_truncated(&self) -> bool {
         matches!(self.kind(), Some(Syscall::Execve | Syscall::Openat))
@@ -179,18 +167,15 @@ impl SyscallEvent {
         String::from_utf8_lossy(&self.comm[..end])
     }
 
-    /// The short syscall name (`execve`/`openat`/`connect`, or `?` for an unknown discriminant), for a
-    /// trace line. `no_std`-friendly (all string literals).
+    /// The short syscall name, or `?` for an unknown discriminant.
     #[must_use]
     pub fn syscall_name(&self) -> &'static str {
         self.kind().map_or("?", Syscall::name)
     }
 
-    /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
-    /// `connect` address (`std`-only). Centralized so every consumer decodes the same way.
-    ///
-    /// Borrowed for the common case (a valid-UTF-8 path), owned only when rendering must build a
-    /// string, so a per-event fold can probe its dedup map without an allocation per repeat.
+    /// The event's detail blob decoded for display, one decoder for every consumer: the path
+    /// (lossy UTF-8) or the `connect` address. Borrowed for a valid-UTF-8 path, so a per-event
+    /// fold can probe its dedup map without an allocation per repeat.
     #[cfg(any(feature = "std", test))]
     #[must_use]
     pub fn detail_display_cow(&self) -> std::borrow::Cow<'_, str> {
@@ -201,8 +186,7 @@ impl SyscallEvent {
         }
     }
 
-    /// [`detail_display_cow`](Self::detail_display_cow), owned. The two stay one decoder: this is
-    /// just `.into_owned()`.
+    /// [`detail_display_cow`](Self::detail_display_cow), owned.
     #[cfg(any(feature = "std", test))]
     #[must_use]
     pub fn detail_display(&self) -> String {
@@ -254,16 +238,14 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
 // argument the tracers read sits.
 // ---------------------------------------------------------------------------
 
-/// One `sys_enter_*` argument a tracer reads, as a byte offset into the tracepoint record plus the
-/// name the kernel's own `format` file gives it. Shared by the kernel program (which reads at
-/// [`offset`](Self::offset)) and the loader (which compares that offset against the `format` file
-/// before it attaches), so neither side can name a position the other does not check.
+/// One `sys_enter_*` argument a tracer reads: a byte offset into the tracepoint record plus the
+/// name the kernel's own `format` file gives it, shared by the kernel program and the loader's
+/// pre-attach `format` check so neither side can name a position the other does not check.
 ///
-/// The offset is an **ABI assumption, not a relocation**: BTF relocates struct-field accesses, and
-/// reading the argument area is not one. A kernel that laid the record out differently would hand
-/// `read_at` an unrelated `u64`, which the probe would follow as a user pointer and record as an
-/// empty or unrelated path, with nothing erroring and no drop counted. The `format` check is what
-/// makes that a typed refusal instead.
+/// The offset is an **ABI assumption, not a relocation**: BTF does not relocate argument-area
+/// reads, so a kernel that laid the record out differently would hand the probe an unrelated `u64`
+/// to follow as a user pointer, with nothing erroring. The `format` check makes that a typed
+/// refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TracepointArg {
     /// The event under the `syscalls` category whose record this offset is into.
@@ -363,11 +345,9 @@ pub const ETH_P_IPV6: u16 = 0x86dd;
 /// unrepresentable as a flow and counted as unparsed. Not expected on a sandbox's tap, unlike ARP,
 /// which is why ARP is not counted.
 pub const ETH_P_8021Q: u16 = 0x8100;
-/// An L4 protocol an egress rule (or a flow) is matched on, the typed face of the raw IP protocol
-/// number the wire carries, so a caller writes `Protocol::Udp` and never `17`. Only the two protocols
-/// the parser reads ports for; "any protocol" is [`None`], not a variant. The discriminant *is* the
-/// on-wire protocol number, so [`as_u8`](Self::as_u8) is the value the kernel and the map already
-/// use.
+/// An L4 protocol a rule or flow is matched on, the typed face of the raw IP protocol number, so a
+/// caller writes `Protocol::Udp` and never `17`. Only the two protocols the parser reads ports
+/// for; "any protocol" is [`None`], not a variant. The discriminant *is* the on-wire number.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -445,9 +425,8 @@ impl FlowKey {
         }
     }
 
-    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. The
-    /// offsets are **derived from the struct** (`core::mem::offset_of!`), so the kernel, which reads
-    /// this key through its layout, and this reader cannot disagree about where a field sits.
+    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short; offsets
+    /// come from the struct (see the crate docs).
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_KEY_SIZE {
@@ -505,9 +484,8 @@ pub struct FlowCounts {
 pub const FLOW_COUNTS_SIZE: usize = core::mem::size_of::<FlowCounts>();
 
 impl FlowCounts {
-    /// Reconstructs counters from a map value's raw bytes, or `None` if the slice is too short. The
-    /// offsets come from the struct (`core::mem::offset_of!`), which is what the kernel's
-    /// `add_shared(&raw mut (*counts).ingress_bytes, ..)` writes through.
+    /// Reconstructs counters from a map value's raw bytes, or `None` if the slice is too short;
+    /// offsets come from the struct the kernel writes through.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_COUNTS_SIZE {
@@ -531,12 +509,9 @@ impl FlowCounts {
 }
 
 /// Parses the IPv4 5-tuple out of an Ethernet `frame` (addresses and ports in host order), or `None`
-/// if it is not IPv4-over-Ethernet or is truncated. TCP/UDP carry their ports; any other protocol
-/// reports ports 0.
-///
-/// The tc program reads the same offset `const`s, so only the logic around them is mirrored by hand.
-/// The in-kernel reads need a live packet and the verifier, so this pure form is what the host gate
-/// unit-tests and what `crates/probes-loader/tests/differential.rs` runs as the oracle.
+/// if it is not IPv4-over-Ethernet or is truncated; a non-TCP/UDP protocol reports ports 0. The tc
+/// program reads the same offset `const`s, and `crates/probes-loader/tests/differential.rs` runs
+/// this pure form as its oracle.
 #[must_use]
 pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     let ethertype = u16::from_be_bytes([
@@ -616,15 +591,10 @@ impl PolicyRule {
         }
     }
 
-    /// Serializes to the map value's raw native bytes, so the loader can write the policy without an
-    /// `unsafe` [`aya::Pod`](https://docs.rs/aya) binding.
-    ///
-    /// **This is the write half of the wire between two independently-built artifacts.** The loader
-    /// puts these bytes in the `POLICY` map; the tc program reads the slot back as a `&PolicyRule`,
-    /// through the struct layout. So the offsets are taken from the struct
-    /// (`core::mem::offset_of!`): a hand-coded position that stopped matching the field it names
-    /// would reinterpret an operator's rule, turning a `/24 tcp` allowance into some other rule
-    /// entirely, with nothing erroring.
+    /// Serializes to the map value's raw native bytes, so the loader writes the policy without an
+    /// `unsafe` `aya::Pod` binding. The write half of the wire: the tc program reads the slot back
+    /// through the struct layout, so the offsets come from the struct, or a drifted position would
+    /// reinterpret an operator's rule with nothing erroring.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE_SIZE] {
         let mut b = [0u8; POLICY_RULE_SIZE];
@@ -636,9 +606,7 @@ impl PolicyRule {
         b
     }
 
-    /// Where each field sits in the record, from the struct rather than by hand, shared by
-    /// [`to_bytes`](Self::to_bytes) and [`from_bytes`](Self::from_bytes) so the two halves of the
-    /// codec read one source.
+    /// Where each field sits, from the struct, shared by both halves of the codec.
     const ADDR: usize = core::mem::offset_of!(PolicyRule, addr);
     const PORT: usize = core::mem::offset_of!(PolicyRule, port);
     const PREFIX_LEN: usize = core::mem::offset_of!(PolicyRule, prefix_len);
@@ -664,12 +632,10 @@ impl PolicyRule {
 }
 
 /// Whether one [`PolicyRule`] admits the destination `(dst_addr, dst_port, proto)` (all host byte
-/// order): `active`, its CIDR contains `dst_addr`, and its port and protocol match (a `0` port or
-/// proto is a wildcard). Called per rule by the tc program and looped by [`egress_allowed`], so kernel
-/// and host can't disagree on the verdict.
-///
-/// The mask is built so the shift operand is always `< 32`, since an out-of-range shift is UB in the
-/// kernel and rejected by the verifier. An out-of-range `prefix_len` is treated as no match.
+/// order): `active`, its CIDR contains `dst_addr`, and port and protocol match (`0` is a wildcard).
+/// Called per rule by the tc program and looped by [`egress_allowed`], so kernel and host can't
+/// disagree. The mask keeps the shift operand `< 32` (an out-of-range shift is UB in the kernel);
+/// an out-of-range `prefix_len` is no match.
 #[must_use]
 pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     if rule.active == 0 || rule.prefix_len > 32 {
@@ -783,13 +749,10 @@ impl core::fmt::Display for FlowKey6 {
     }
 }
 
-/// Parses the IPv6 5-tuple out of an Ethernet `frame` (addresses network order, ports host order), or
-/// `None` if it is not IPv6-over-Ethernet or is truncated.
-///
-/// **Extension headers are not walked**, so a frame whose next-header is an extension reports ports 0
-/// and `proto` = that next-header value: still a recorded flow rather than a silent drop, mirroring how
-/// the v4 parser leaves fragment ports 0. The tc program reads the same offsets; this pure form is what
-/// the host gate unit-tests.
+/// Parses the IPv6 5-tuple out of an Ethernet `frame` (addresses network order, ports host order),
+/// or `None` if it is not IPv6-over-Ethernet or is truncated. **Extension headers are not walked**:
+/// such a frame reports ports 0 and `proto` = the next-header value, a recorded flow rather than a
+/// silent drop. The tc program reads the same offsets.
 #[must_use]
 pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
     let ethertype = u16::from_be_bytes([
