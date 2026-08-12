@@ -49,7 +49,17 @@ Maps are the shared memory between the kernel program and userspace. Two here:
   the loader reads all per-CPU copies and **sums** them. This is the idiomatic pattern for a hot
   counter.
 - **`HashMap<u32, u64>`** (`EXECVE_BY_PID`), per-PID counts, bounded at 4096 entries (maps are sized
-  at load). A full map drops new keys; the per-CPU total stays authoritative.
+  at load). A full map drops new keys (counted in `PID_DROPS`); the per-CPU total stays
+  authoritative.
+
+A hash-map value is **one copy every CPU writes**, unlike a per-CPU slot, so a plain `*slot += 1`
+there is a load-add-store that loses an increment whenever two CPUs hit the same key at once, and no
+drop counter can see that (the insert succeeded, the map is not full, the value is just lower than
+the truth). Every shared counter in the object therefore goes through `add_shared`, which emits
+BPF's atomic add (`lock *(u64 *)(r0 + n) += r1`). It reaches that instruction through
+`core::intrinsics::atomic_xadd`, the crate's one unstable feature: rustc declares
+`bpfel-unknown-none` as `atomic-cas: false`, since BPF has the atomic add but no compare-and-swap
+below ISA v3, so `core::sync::atomic` exposes only load and store on this target.
 
 Maps are **BTF-defined** (see below), so their key/value types are described in the object's BTF.
 
