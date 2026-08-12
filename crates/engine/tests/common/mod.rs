@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Jail, Vm};
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Jail, RunResult, RunningVm, Vm};
 
 /// The shared scratch-dir guard (removed on drop). `new` reserves the path without creating it, the
 /// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).
@@ -46,6 +46,47 @@ pub fn scratch_dirs_of(base: &std::path::Path, pid: u32) -> usize {
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
         .count()
+}
+
+/// One ICMP echo from inside the guest to `target`, waiting at most a second so an unroutable
+/// address answers on its route rather than at the exec budget. A `:` in `target` adds `-6`, which
+/// busybox `ping` needs to pick the v6 stack.
+pub fn ping(vm: &mut RunningVm, target: &str) -> RunResult {
+    let mut argv: Vec<String> = vec!["ping".into()];
+    if target.contains(':') {
+        argv.push("-6".into());
+    }
+    argv.extend([
+        "-c".into(),
+        "1".into(),
+        "-W".into(),
+        "1".into(),
+        target.into(),
+    ]);
+    match vm.exec(&argv, b"") {
+        Ok(r) => r,
+        Err(e) => panic!("ping {target}: {e}"),
+    }
+}
+
+/// Asserts a guest [`ping`] was refused by the guest's own **routing table**: a non-zero exit *and*
+/// an unreachable error naming it.
+///
+/// The exit code alone does not say deny-by-default. Every address these tests aim at is a
+/// documentation range (RFC 5737, RFC 3849) that the public internet bogon-filters, so a guest
+/// holding a default route and a masquerade fails the ping too, just on a timeout: the regression
+/// this pins would pass on the exit code.
+pub fn assert_no_route(result: &RunResult, what: &str) {
+    assert_ne!(result.exit_code, 0, "deny-by-default: {what}");
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        out.contains("nreachable"),
+        "the block must be no-route, not a timeout ({what}); output: {out}"
+    );
 }
 
 /// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
