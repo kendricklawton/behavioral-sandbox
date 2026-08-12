@@ -28,8 +28,11 @@
 //! single hash lookup.
 //!
 //! **Built against BTF (CO-RE).** The object carries `.BTF` / `.BTF.ext` (emitted by `bpf-linker
-//! --btf`), which aya relocates against the running kernel's BTF at load, so one compiled object is
-//! portable across kernels.
+//! --btf`), which aya relocates against the running kernel's BTF at load. No program here reads a
+//! kernel struct field, so what that relocation carries is the map typing and the load path, not
+//! field offsets. The syscall tracers read their arguments at the fixed offsets in
+//! [`bsx_probes_common::TRACEPOINT_ARGS`], which is an ABI assumption; the loader compares each one
+//! against the kernel's own tracepoint `format` file before it attaches.
 //!
 //! **The verifier's rules, hit on purpose.** Loops are bounded by compile-time constants so
 //! termination is provable, and a map lookup result is dereferenced only after the null-check the
@@ -48,12 +51,12 @@ use aya_ebpf::{
     programs::{TcContext, TracePointContext},
 };
 use bsx_probes_common::{
-    DETAIL_CAP, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET,
-    FlowCounts, FlowKey, FlowKey6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET,
-    IPV4_FRAG_OFFSET, IPV4_MIN_IHL, IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN,
-    IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES, PolicyRule, PolicyRule6,
-    SOCKADDR_SNAP, SOCKADDR_SNAP_V4, Syscall, SyscallEvent, icmp6_dst_on_link, rule_matches,
-    rule_matches6,
+    CONNECT_ADDRLEN_ARG, CONNECT_USERVADDR_ARG, DETAIL_CAP, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP,
+    ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET, EXECVE_FILENAME_ARG, FlowCounts, FlowKey, FlowKey6,
+    IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET, IPV4_FRAG_OFFSET, IPV4_MIN_IHL,
+    IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN, IPV6_NEXT_HEADER_OFFSET,
+    IPV6_SRC_OFFSET, MAX_POLICY_RULES, OPENAT_FILENAME_ARG, PolicyRule, PolicyRule6, SOCKADDR_SNAP,
+    SOCKADDR_SNAP_V4, Syscall, SyscallEvent, icmp6_dst_on_link, rule_matches, rule_matches6,
 };
 
 /// The object's kernel `license` section. Declaring `GPL` makes the programs GPL-compatible
@@ -158,7 +161,9 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
 
 /// Emits one [`SyscallEvent`] for the current syscall into [`EVENTS`], unless the filter rejects it.
 ///
-/// `arg_off` is the byte offset of the syscall's pointer argument in the tracepoint record;
+/// `arg_off` is the byte offset of the syscall's pointer argument in the tracepoint record (a
+/// [`bsx_probes_common::TRACEPOINT_ARGS`] entry, which the loader checks against the kernel's own
+/// `format` file before it attaches);
 /// `path_like` selects reading it as a NUL-terminated user string or as raw leading sockaddr bytes,
 /// and `len_off` (sockaddr only) is the offset of the companion `addrlen` that bounds the copy. A
 /// tracepoint returns 0.
@@ -190,7 +195,8 @@ fn record(
         detail: [0u8; DETAIL_CAP],
     };
 
-    // SAFETY: `read_at` reads the tracepoint's stable, fixed-layout argument area at a constant offset.
+    // SAFETY: `read_at` reads the tracepoint's own argument area at a constant offset, which
+    // `check_tracepoint_abi` compared against this kernel's `format` file before the attach.
     if let Ok(arg) = unsafe { ctx.read_at::<u64>(arg_off) } {
         let src = arg as *const u8;
         if path_like {
@@ -205,7 +211,7 @@ fn record(
             // follows it in the traced process's memory, and publishes those bytes in the event
             // stream as captured sockaddr. Both arms stay constant-size, which keeps the copies
             // simple for the verifier.
-            // SAFETY: reads the tracepoint's stable argument area at a constant offset. Narrowed to
+            // SAFETY: reads the tracepoint's own argument area at a constant offset. Narrowed to
             // `i32` first, because `connect`'s `addrlen` is an `int`: the raw register can carry
             // dirty upper bits or a negative the kernel truncates, and reading it as a full `u64`
             // would let a caller name a huge length and pull the 28-byte arm over a 16-byte buffer.
@@ -262,20 +268,26 @@ fn record(
 /// `tracepoint/syscalls/sys_enter_execve`, recording the program path (arg 0, `const char *filename`).
 #[tracepoint]
 pub fn trace_execve(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Execve, 16, true, 0)
+    record(&ctx, Syscall::Execve, EXECVE_FILENAME_ARG.offset, true, 0)
 }
 
 /// `tracepoint/syscalls/sys_enter_openat`, recording the opened path (arg 1, past the `int dfd`).
 #[tracepoint]
 pub fn trace_openat(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Openat, 24, true, 0)
+    record(&ctx, Syscall::Openat, OPENAT_FILENAME_ARG.offset, true, 0)
 }
 
 /// `tracepoint/syscalls/sys_enter_connect`, recording the leading sockaddr bytes (arg 1, past the
 /// `int fd`).
 #[tracepoint]
 pub fn trace_connect(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Connect, 24, false, 32)
+    record(
+        &ctx,
+        Syscall::Connect,
+        CONNECT_USERVADDR_ARG.offset,
+        false,
+        CONNECT_ADDRLEN_ARG.offset,
+    )
 }
 
 /// Per-flow byte/packet counters keyed by the directional IPv4 [`FlowKey`], bounded at

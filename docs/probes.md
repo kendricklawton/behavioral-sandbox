@@ -83,9 +83,22 @@ the `.BTF` section is present):
 - The object carries BTF only because the profile keeps **`debug = true`** (bpf-linker derives BTF
   from debug info) *and* the target passes **`bpf-linker --btf`** (off by default), via a
   `[target.bpfel-unknown-none]` link-arg.
-- The counter reads no kernel struct fields yet, so it needs no *field-offset* relocations. Those
-  come with the per-event syscall trace (below), which reads kernel structs. Here BTF is the map
-  typing plus the load-time relocation path, the portability mechanism the later sections build on.
+- **No program in the object reads a kernel struct field**, so none of them needs a *field-offset*
+  relocation, the counter and the per-event syscall trace alike. Here BTF is the map typing plus the
+  load-time relocation path.
+
+What carries the syscall trace across kernels is not CO-RE but a checked assumption. The tracers
+read their arguments at fixed byte offsets into the tracepoint record, named once in
+`bsx_probes_common::TRACEPOINT_ARGS`. Nothing relocates those, and a wrong one does not fail loudly:
+`read_at` returns whatever `u64` sits there, the probe follows it as a user pointer, and the event
+lands in the record with an empty or unrelated path, no error and no drop counted. So
+`SyscallTracer::load` calls
+`check_tracepoint_abi` **before it attaches**, comparing each offset and slot width against the
+kernel's own `events/syscalls/<event>/format`, and refuses with `ProbeError::Unsupported` naming the
+field when they disagree. The collector records that refusal as a coverage gap on the syscall axis,
+which is the difference between a thin record that says so and a full one that is wrong. The check
+reads the same tracefs directory the attach already reads for the tracepoint id, so it needs no
+access the attach does not.
 
 ## Lifetime: no pinned residue
 

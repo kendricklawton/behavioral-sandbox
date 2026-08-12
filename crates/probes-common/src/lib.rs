@@ -244,6 +244,75 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Syscall tracepoint arguments: where in the kernel's tracepoint record each
+// argument the tracers read sits.
+// ---------------------------------------------------------------------------
+
+/// One `sys_enter_*` argument a tracer reads, as a byte offset into the tracepoint record plus the
+/// name the kernel's own `format` file gives it. Shared by the kernel program (which reads at
+/// [`offset`](Self::offset)) and the loader (which compares that offset against the `format` file
+/// before it attaches), so neither side can name a position the other does not check.
+///
+/// The offset is an **ABI assumption, not a relocation**: BTF relocates struct-field accesses, and
+/// reading the argument area is not one. A kernel that laid the record out differently would hand
+/// `read_at` an unrelated `u64`, which the probe would follow as a user pointer and record as an
+/// empty or unrelated path, with nothing erroring and no drop counted. The `format` check is what
+/// makes that a typed refusal instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TracepointArg {
+    /// The event under the `syscalls` category whose record this offset is into.
+    pub event: &'static str,
+    /// The field name as `events/syscalls/<event>/format` spells it.
+    pub field: &'static str,
+    /// Byte offset from the start of the tracepoint record.
+    pub offset: usize,
+}
+
+/// The width of one syscall-argument slot in a `sys_enter_*` record, which is what
+/// `read_at::<u64>` assumes. Every argument occupies a full slot whatever its C type, so the loader
+/// checks the declared size against this as well as the offset.
+pub const ARG_SLOT: usize = 8;
+
+/// `execve`'s `const char *filename` (argument 0), past the 8-byte common header and the
+/// `__syscall_nr` slot.
+pub const EXECVE_FILENAME_ARG: TracepointArg = TracepointArg {
+    event: "sys_enter_execve",
+    field: "filename",
+    offset: 16,
+};
+
+/// `openat`'s `const char *filename` (argument 1), one slot past the `int dfd`.
+pub const OPENAT_FILENAME_ARG: TracepointArg = TracepointArg {
+    event: "sys_enter_openat",
+    field: "filename",
+    offset: 24,
+};
+
+/// `connect`'s `struct sockaddr *uservaddr` (argument 1), one slot past the `int fd`.
+pub const CONNECT_USERVADDR_ARG: TracepointArg = TracepointArg {
+    event: "sys_enter_connect",
+    field: "uservaddr",
+    offset: 24,
+};
+
+/// `connect`'s `int addrlen` (argument 2), which bounds the sockaddr copy.
+pub const CONNECT_ADDRLEN_ARG: TracepointArg = TracepointArg {
+    event: "sys_enter_connect",
+    field: "addrlen",
+    offset: 32,
+};
+
+/// Every offset the syscall tracers read, which is the list the loader's pre-attach check walks. A
+/// [`TracepointArg`] declared above but missing here is verified nowhere, so
+/// `every_tracepoint_arg_is_checked_before_the_attach` in `xtask` holds the two together.
+pub const TRACEPOINT_ARGS: [TracepointArg; 4] = [
+    EXECVE_FILENAME_ARG,
+    OPENAT_FILENAME_ARG,
+    CONNECT_USERVADDR_ARG,
+    CONNECT_ADDRLEN_ARG,
+];
+
+// ---------------------------------------------------------------------------
 // Network flows: the per-flow record the tc program on a VM's tap writes.
 // ---------------------------------------------------------------------------
 

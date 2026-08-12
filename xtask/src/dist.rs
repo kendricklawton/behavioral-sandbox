@@ -1253,6 +1253,77 @@ mod tests {
         );
     }
 
+    /// Every tracepoint argument offset the probes read is on the list the loader checks.
+    ///
+    /// The offsets are an ABI assumption no relocation carries, so `check_tracepoint_abi` compares
+    /// each one against the kernel's own `format` file before attaching. That check walks
+    /// `TRACEPOINT_ARGS`, so a `TracepointArg` const that the probe reads but the array leaves out
+    /// is verified nowhere, and the failure it would let through is silent: an event recorded with
+    /// an empty or unrelated path, no error and no drop counted.
+    ///
+    /// A numeric literal passed to `record` is the same hole by a shorter route, so this holds the
+    /// read sites to the named consts too.
+    #[test]
+    fn every_tracepoint_arg_is_checked_before_the_attach() {
+        let repo = workspace_root();
+        let common = std::fs::read_to_string(repo.join("crates/probes-common/src/lib.rs"))
+            .expect("crates/probes-common/src/lib.rs");
+        let probes = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
+            .expect("crates/probes/src/main.rs");
+
+        let declared: Vec<&str> = common
+            .lines()
+            .filter_map(|l| l.strip_prefix("pub const ")?.split(':').next())
+            .filter(|name| name.ends_with("_ARG"))
+            .collect();
+        assert!(
+            declared.len() >= 4,
+            "expected the four traced arguments to be declared, found {declared:?}"
+        );
+        let table = const_list(&common, "pub const TRACEPOINT_ARGS");
+        for name in &declared {
+            assert!(
+                table.contains(name),
+                "`{name}` is declared but missing from TRACEPOINT_ARGS, so the loader never checks \
+                 the offset it reads against the kernel's own layout"
+            );
+        }
+
+        // The tracers are what actually read an offset, so a literal in one is an unchecked offset.
+        // Every argument slot starts at 16, so "no multi-digit literal here" is the grep-able form.
+        for tracer in ["trace_execve", "trace_openat", "trace_connect"] {
+            let body = fn_body(&probes, tracer);
+            assert!(
+                body.contains("_ARG.offset"),
+                "`{tracer}` must read its offset from a TracepointArg const, so the loader checks \
+                 the same number the program reads"
+            );
+            assert!(
+                !body
+                    .as_bytes()
+                    .windows(2)
+                    .any(|w| w[0].is_ascii_digit() && w[1].is_ascii_digit()),
+                "`{tracer}` carries a multi-digit literal, which is an argument offset nothing \
+                 checks against the kernel's layout"
+            );
+        }
+    }
+
+    /// The array literal a `const` is initialized to, the [`fn_body`] shape for a declaration whose
+    /// "body" is a list rather than a block. Anchored on `= [` so the item's own array *type*
+    /// (`: [T; N]`) is not mistaken for its value.
+    fn const_list(src: &str, decl: &str) -> String {
+        let at = src.find(decl);
+        assert!(at.is_some(), "`{decl}` must be declared");
+        let at = at.expect("asserted declared just above");
+        let open = src[at..].find("= [");
+        assert!(open.is_some(), "`{decl}` must be initialized to a list");
+        let open = at + open.expect("asserted initialized just above") + 2;
+        let close = src[open..].find(']');
+        assert!(close.is_some(), "`{decl}`'s list must close");
+        src[open..=open + close.expect("asserted closed just above")].to_string()
+    }
+
     /// Every resolution of a `/proc/<pid>/cgroup` `0::` line must refuse the **root** cgroup.
     ///
     /// A registered cgroup matches every process whose `bpf_get_current_cgroup_id` equals it, so the

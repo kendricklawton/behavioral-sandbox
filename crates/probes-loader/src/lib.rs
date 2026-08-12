@@ -36,8 +36,11 @@
 //! observe-only. Every drop is recorded per destination, read back by
 //! [`denials`](TapMonitor::denials).
 //!
-//! **CO-RE.** The object is built against BTF, so aya relocates it against the running kernel at load
-//! and one compiled object is portable across kernels.
+//! **CO-RE, and the one thing it does not carry.** The object is built against BTF, so aya relocates
+//! it against the running kernel at load. No program reads a kernel struct field, so that covers the
+//! map typing and the load path rather than field offsets; the syscall tracers read their arguments
+//! at fixed offsets into the tracepoint record, which `SyscallTracer::load` compares against the
+//! kernel's own `format` file before it attaches rather than assuming.
 //!
 //! **Caps and a legible support probe.** Loading needs `CAP_BPF` and `CAP_PERFMON` rather than full
 //! root, and [`check_support`] names a missing prerequisite up front as a typed
