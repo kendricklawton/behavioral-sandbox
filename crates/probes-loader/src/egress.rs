@@ -10,16 +10,15 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use bsx_probes_common::{PolicyRule, PolicyRule6, Protocol};
 
 /// A rejected egress-policy input, refused before it can reach the kernel map. An out-of-range
-/// CIDR prefix is caught at construction (`parse, don't validate`: [`Ipv4Cidr::new`] /
-/// [`Ipv6Cidr::new`]); a rule count over the map's capacity is caught when the policy is
-/// installed, before any rule is written ([`EgressPolicy`]'s `allow` builders are infallible).
-/// Distinct from [`crate::ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer
-/// policy vocabulary adds new rejection classes as new variants.
+/// CIDR prefix is caught at construction (`parse, don't validate`: [`Cidr::new`]); a rule count
+/// over the map's capacity is caught when the policy is installed, before any rule is written
+/// ([`EgressPolicy`]'s `allow` builders are infallible). Distinct from [`crate::ProbeError`]'s
+/// eBPF-runtime failures. `#[non_exhaustive]`: a richer policy vocabulary adds new rejection
+/// classes as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PolicyError {
-    /// A CIDR prefix length over its family maximum: rejected by [`Ipv4Cidr::new`] or
-    /// [`Ipv6Cidr::new`].
+    /// A CIDR prefix length over its family maximum: rejected by [`Cidr::new`].
     PrefixTooLong {
         /// The prefix length the caller supplied.
         got: u8,
@@ -66,27 +65,65 @@ pub struct EgressPolicy {
     rules6: Vec<PolicyRule6>,
 }
 
-/// A validated IPv4 **CIDR**, a network address and a prefix length that is guaranteed `0..=32` by
-/// construction. Parse rather than validate: an out-of-range prefix can't exist as an `Ipv4Cidr`, so it
-/// never reaches the kernel policy map. Build one with [`new`](Self::new) or [`host`](Self::host)
-/// (an infallible `/32`).
+/// A validated **CIDR**, a network address and a prefix length that is guaranteed
+/// `0..=A::MAX_PREFIX` by construction. Parse rather than validate: an out-of-range prefix can't
+/// exist as a `Cidr`, so it never reaches a kernel policy map. Build one with [`new`](Self::new)
+/// or [`host`](Self::host) (an infallible single-address CIDR). One body for both address
+/// families, so the mask math cannot drift between them; [`Ipv4Cidr`] and [`Ipv6Cidr`] are its
+/// two names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ipv4Cidr {
-    network: Ipv4Addr,
+pub struct Cidr<A> {
+    network: A,
     prefix_len: u8,
 }
 
-impl Ipv4Cidr {
-    /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] if `prefix_len > 32`. The network is
-    /// taken as given, since the kernel matcher masks it to `prefix_len`.
+/// A validated IPv4 CIDR: prefix length guaranteed `0..=32` by construction.
+pub type Ipv4Cidr = Cidr<Ipv4Addr>;
+
+/// A validated IPv6 CIDR: prefix length guaranteed `0..=128` by construction.
+pub type Ipv6Cidr = Cidr<Ipv6Addr>;
+
+/// The per-family pieces [`Cidr`] needs: the prefix ceiling and the address's integer bits for
+/// the mask comparison. Sealed to [`Ipv4Addr`] and [`Ipv6Addr`], the two families the kernel
+/// maps hold.
+pub trait CidrAddr: Copy + Eq + std::fmt::Display + sealed::Sealed {
+    /// The family's maximum prefix length (32 or 128).
+    const MAX_PREFIX: u8;
+    /// The address as integer bits (zero-extended for IPv4), for the mask comparison.
+    fn bits(self) -> u128;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for std::net::Ipv4Addr {}
+    impl Sealed for std::net::Ipv6Addr {}
+}
+
+impl CidrAddr for Ipv4Addr {
+    const MAX_PREFIX: u8 = 32;
+    fn bits(self) -> u128 {
+        u128::from(u32::from(self))
+    }
+}
+
+impl CidrAddr for Ipv6Addr {
+    const MAX_PREFIX: u8 = 128;
+    fn bits(self) -> u128 {
+        u128::from(self)
+    }
+}
+
+impl<A: CidrAddr> Cidr<A> {
+    /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] past the family maximum. The
+    /// network is taken as given, since the kernel matcher masks it to `prefix_len`.
     ///
     /// # Errors
-    /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 32.
-    pub fn new(network: Ipv4Addr, prefix_len: u8) -> Result<Self, PolicyError> {
-        if prefix_len > 32 {
+    /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds `A::MAX_PREFIX`.
+    pub fn new(network: A, prefix_len: u8) -> Result<Self, PolicyError> {
+        if prefix_len > A::MAX_PREFIX {
             return Err(PolicyError::PrefixTooLong {
                 got: prefix_len,
-                max: 32,
+                max: A::MAX_PREFIX,
             });
         }
         Ok(Self {
@@ -95,22 +132,22 @@ impl Ipv4Cidr {
         })
     }
 
-    /// The `/32` CIDR of a single host, infallible, since `32` is always in range.
+    /// The single-address CIDR (`/32` or `/128`), infallible, since the maximum is always in range.
     #[must_use]
-    pub fn host(addr: Ipv4Addr) -> Self {
+    pub fn host(addr: A) -> Self {
         Self {
             network: addr,
-            prefix_len: 32,
+            prefix_len: A::MAX_PREFIX,
         }
     }
 
     /// The network address of this CIDR.
     #[must_use]
-    pub fn network(&self) -> Ipv4Addr {
+    pub fn network(&self) -> A {
         self.network
     }
 
-    /// The prefix length (0..=32) of this CIDR.
+    /// The prefix length (`0..=A::MAX_PREFIX`) of this CIDR.
     #[must_use]
     pub fn prefix_len(&self) -> u8 {
         self.prefix_len
@@ -125,81 +162,14 @@ impl Ipv4Cidr {
         if self.prefix_len == 0 {
             return true;
         }
-        let mask = u32::MAX << (32 - self.prefix_len);
-        (u32::from(self.network) & mask) == (u32::from(other.network) & mask)
+        // Widening to u128 keeps the comparison the family's own: the bits past `A::MAX_PREFIX`
+        // are ones in the mask and zeros in both addresses, so they cannot break the equality.
+        let mask = u128::MAX << (A::MAX_PREFIX - self.prefix_len);
+        (self.network.bits() & mask) == (other.network.bits() & mask)
     }
 }
 
-impl std::fmt::Display for Ipv4Cidr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.network, self.prefix_len)
-    }
-}
-
-/// A validated IPv6 **CIDR**, the v6 twin of [`Ipv4Cidr`]: prefix length guaranteed `0..=128` by
-/// construction, so an out-of-range prefix can never reach the kernel `POLICY6` map.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ipv6Cidr {
-    network: Ipv6Addr,
-    prefix_len: u8,
-}
-
-impl Ipv6Cidr {
-    /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] if `prefix_len > 128`.
-    ///
-    /// # Errors
-    /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 128.
-    pub fn new(network: Ipv6Addr, prefix_len: u8) -> Result<Self, PolicyError> {
-        if prefix_len > 128 {
-            return Err(PolicyError::PrefixTooLong {
-                got: prefix_len,
-                max: 128,
-            });
-        }
-        Ok(Self {
-            network,
-            prefix_len,
-        })
-    }
-
-    /// The `/128` CIDR of a single v6 host, infallible.
-    #[must_use]
-    pub fn host(addr: Ipv6Addr) -> Self {
-        Self {
-            network: addr,
-            prefix_len: 128,
-        }
-    }
-
-    /// The network address of this CIDR.
-    #[must_use]
-    pub fn network(&self) -> Ipv6Addr {
-        self.network
-    }
-
-    /// The prefix length (0..=128) of this CIDR.
-    #[must_use]
-    pub fn prefix_len(&self) -> u8 {
-        self.prefix_len
-    }
-
-    /// Whether `self` contains `other` (i.e. `other` is equal to or narrower than `self`).
-    #[must_use]
-    pub fn contains(&self, other: &Self) -> bool {
-        if other.prefix_len < self.prefix_len {
-            return false;
-        }
-        if self.prefix_len == 0 {
-            return true;
-        }
-        let self_u128 = u128::from(self.network);
-        let other_u128 = u128::from(other.network);
-        let mask = u128::MAX << (128 - self.prefix_len);
-        (self_u128 & mask) == (other_u128 & mask)
-    }
-}
-
-impl std::fmt::Display for Ipv6Cidr {
+impl<A: CidrAddr> std::fmt::Display for Cidr<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.network, self.prefix_len)
     }
@@ -232,7 +202,7 @@ impl EgressPolicy {
     }
 
     /// Allows a single destination **host** (`/32`) on an optional `port` and `proto`, the common case and sugar
-    /// over [`allow`](Self::allow) with [`Ipv4Cidr::host`].
+    /// over [`allow`](Self::allow) with [`Cidr::host`].
     #[must_use]
     pub fn allow_host(self, host: Ipv4Addr, port: Option<u16>, proto: Option<Protocol>) -> Self {
         self.allow(Ipv4Cidr::host(host), port, proto)
