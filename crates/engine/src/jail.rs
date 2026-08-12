@@ -532,46 +532,47 @@ pub(crate) fn stage_ro_base_into_chroot(
 /// and an unbounded one would hang the boot past the `Timeout` the wall promises. If the remount
 /// fails, the half-made bind mount is detached before returning rather than left behind.
 fn bind_ro(src: &Path, dst: &Path, deadline: Instant) -> Result<(), VmmError> {
-    match run_mount(
+    mount_step(
         Command::new("mount").arg("--bind").arg(src).arg(dst),
         "mount --bind",
+        &format!("bind-mount {} -> {}", src.display(), dst.display()),
+        dst,
         deadline,
-    ) {
-        Ok((status, _)) if status.success() => {}
-        // Detach on *every* failure path, not only the remount's: a deadline kill can land after
-        // the child's `mount(2)` completed, and the caller records the mount for teardown only on
-        // `Ok`, so an undetached one here would EBUSY the scratch reclaim. `unmount_base` is a
-        // lazy-detach no-op when nothing was mounted. One residual stays: a D-state mount child
-        // detached past the reap grace can complete *after* this detach; that leak is bounded by
-        // the orphan sweep's `detach_mounts_under`, which retries the dir.
-        Ok((status, stderr)) => {
-            unmount_base(dst);
-            return Err(VmmError::Vmm(format!(
-                "bind-mount {} -> {}: {}",
-                src.display(),
-                dst.display(),
-                crate::proc::failure_detail(status, &stderr)
-            )));
-        }
-        Err(e) => {
-            unmount_base(dst);
-            return Err(e);
-        }
-    }
-    match run_mount(
+    )?;
+    mount_step(
         Command::new("mount")
             .arg("-o")
             .arg("remount,ro,bind")
             .arg(dst),
         "mount -o remount,ro,bind",
+        &format!("remount read-only {}", dst.display()),
+        dst,
         deadline,
-    ) {
+    )
+}
+
+/// One step of [`bind_ro`]: run `cmd`, and on any failure detach `dst` before returning a typed
+/// error prefixed with `context`.
+///
+/// Detaching on *every* failure path, not only the remount's, is what the shared arm is for: a
+/// deadline kill can land after the child's `mount(2)` completed, and the caller records the mount
+/// for teardown only on `Ok`, so an undetached one would EBUSY the scratch reclaim. `unmount_base`
+/// is a lazy-detach no-op when nothing was mounted. One residual stays: a D-state mount child
+/// detached past the reap grace can complete *after* this detach; that leak is bounded by the orphan
+/// sweep's `detach_mounts_under`, which retries the dir.
+fn mount_step(
+    cmd: &mut Command,
+    what: &str,
+    context: &str,
+    dst: &Path,
+    deadline: Instant,
+) -> Result<(), VmmError> {
+    match run_mount(cmd, what, deadline) {
         Ok((status, _)) if status.success() => Ok(()),
         Ok((status, stderr)) => {
             unmount_base(dst);
             Err(VmmError::Vmm(format!(
-                "remount read-only {}: {}",
-                dst.display(),
+                "{context}: {}",
                 crate::proc::failure_detail(status, &stderr)
             )))
         }
