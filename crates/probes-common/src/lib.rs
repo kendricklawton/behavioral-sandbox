@@ -9,6 +9,12 @@
 //!   hash to different slots).
 //! - **Decoding:** both sides run on the same host, so native byte order is shared and each
 //!   `from_bytes` reads field by field with `from_ne_bytes`, no `unsafe` and no transmute.
+//! - **Offsets come from the struct** (`core::mem::offset_of!`), never written out, because one end
+//!   of every record reads it *as a struct* (the kernel dereferences a map value) while the other
+//!   reads it *as bytes*. A hand-written position that stopped matching the field it names would
+//!   reinterpret the record with nothing erroring. The `*_offsets_are_the_wire_contract` tests then
+//!   pin the layout itself, since the eBPF object is built separately and loaded at runtime: a
+//!   reorder plus a stale object on disk is two artifacts disagreeing, at the same size.
 //! - **Address math is byte-wise.** The eBPF target has no native `u128` (`bpf-linker` would emit
 //!   compiler-rt calls that don't exist there), so the v6 matchers loop bytes and run identically in
 //!   the kernel and in these host tests.
@@ -439,19 +445,25 @@ impl FlowKey {
         }
     }
 
-    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. Defined
-    /// next to the fields so it can't drift from the kernel writer.
+    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. The
+    /// offsets are **derived from the struct** (`core::mem::offset_of!`), so the kernel, which reads
+    /// this key through its layout, and this reader cannot disagree about where a field sits.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_KEY_SIZE {
             return None;
         }
+        const SRC_ADDR: usize = core::mem::offset_of!(FlowKey, src_addr);
+        const DST_ADDR: usize = core::mem::offset_of!(FlowKey, dst_addr);
+        const SRC_PORT: usize = core::mem::offset_of!(FlowKey, src_port);
+        const DST_PORT: usize = core::mem::offset_of!(FlowKey, dst_port);
+        const PROTO: usize = core::mem::offset_of!(FlowKey, proto);
         Some(Self::new(
-            u32::from_ne_bytes(b.get(0..4)?.try_into().ok()?),
-            u32::from_ne_bytes(b.get(4..8)?.try_into().ok()?),
-            u16::from_ne_bytes(b.get(8..10)?.try_into().ok()?),
-            u16::from_ne_bytes(b.get(10..12)?.try_into().ok()?),
-            *b.get(12)?,
+            u32::from_ne_bytes(b.get(SRC_ADDR..SRC_ADDR + 4)?.try_into().ok()?),
+            u32::from_ne_bytes(b.get(DST_ADDR..DST_ADDR + 4)?.try_into().ok()?),
+            u16::from_ne_bytes(b.get(SRC_PORT..SRC_PORT + 2)?.try_into().ok()?),
+            u16::from_ne_bytes(b.get(DST_PORT..DST_PORT + 2)?.try_into().ok()?),
+            *b.get(PROTO)?,
         ))
     }
 }
@@ -493,17 +505,27 @@ pub struct FlowCounts {
 pub const FLOW_COUNTS_SIZE: usize = core::mem::size_of::<FlowCounts>();
 
 impl FlowCounts {
-    /// Reconstructs counters from a map value's raw bytes, or `None` if the slice is too short.
+    /// Reconstructs counters from a map value's raw bytes, or `None` if the slice is too short. The
+    /// offsets come from the struct (`core::mem::offset_of!`), which is what the kernel's
+    /// `add_shared(&raw mut (*counts).ingress_bytes, ..)` writes through.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_COUNTS_SIZE {
             return None;
         }
+        const IN_PACKETS: usize = core::mem::offset_of!(FlowCounts, ingress_packets);
+        const IN_BYTES: usize = core::mem::offset_of!(FlowCounts, ingress_bytes);
+        const OUT_PACKETS: usize = core::mem::offset_of!(FlowCounts, egress_packets);
+        const OUT_BYTES: usize = core::mem::offset_of!(FlowCounts, egress_bytes);
         Some(Self {
-            ingress_packets: u64::from_ne_bytes(b.get(0..8)?.try_into().ok()?),
-            ingress_bytes: u64::from_ne_bytes(b.get(8..16)?.try_into().ok()?),
-            egress_packets: u64::from_ne_bytes(b.get(16..24)?.try_into().ok()?),
-            egress_bytes: u64::from_ne_bytes(b.get(24..32)?.try_into().ok()?),
+            ingress_packets: u64::from_ne_bytes(
+                b.get(IN_PACKETS..IN_PACKETS + 8)?.try_into().ok()?,
+            ),
+            ingress_bytes: u64::from_ne_bytes(b.get(IN_BYTES..IN_BYTES + 8)?.try_into().ok()?),
+            egress_packets: u64::from_ne_bytes(
+                b.get(OUT_PACKETS..OUT_PACKETS + 8)?.try_into().ok()?,
+            ),
+            egress_bytes: u64::from_ne_bytes(b.get(OUT_BYTES..OUT_BYTES + 8)?.try_into().ok()?),
         })
     }
 }
@@ -596,16 +618,32 @@ impl PolicyRule {
 
     /// Serializes to the map value's raw native bytes, so the loader can write the policy without an
     /// `unsafe` [`aya::Pod`](https://docs.rs/aya) binding.
+    ///
+    /// **This is the write half of the wire between two independently-built artifacts.** The loader
+    /// puts these bytes in the `POLICY` map; the tc program reads the slot back as a `&PolicyRule`,
+    /// through the struct layout. So the offsets are taken from the struct
+    /// (`core::mem::offset_of!`): a hand-coded position that stopped matching the field it names
+    /// would reinterpret an operator's rule, turning a `/24 tcp` allowance into some other rule
+    /// entirely, with nothing erroring.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE_SIZE] {
         let mut b = [0u8; POLICY_RULE_SIZE];
-        b[0..4].copy_from_slice(&self.addr.to_ne_bytes());
-        b[4..6].copy_from_slice(&self.port.to_ne_bytes());
-        b[6] = self.prefix_len;
-        b[7] = self.proto;
-        b[8] = self.active;
+        b[Self::ADDR..Self::ADDR + 4].copy_from_slice(&self.addr.to_ne_bytes());
+        b[Self::PORT..Self::PORT + 2].copy_from_slice(&self.port.to_ne_bytes());
+        b[Self::PREFIX_LEN] = self.prefix_len;
+        b[Self::PROTO] = self.proto;
+        b[Self::ACTIVE] = self.active;
         b
     }
+
+    /// Where each field sits in the record, from the struct rather than by hand, shared by
+    /// [`to_bytes`](Self::to_bytes) and [`from_bytes`](Self::from_bytes) so the two halves of the
+    /// codec read one source.
+    const ADDR: usize = core::mem::offset_of!(PolicyRule, addr);
+    const PORT: usize = core::mem::offset_of!(PolicyRule, port);
+    const PREFIX_LEN: usize = core::mem::offset_of!(PolicyRule, prefix_len);
+    const PROTO: usize = core::mem::offset_of!(PolicyRule, proto);
+    const ACTIVE: usize = core::mem::offset_of!(PolicyRule, active);
 
     /// Reconstructs a rule from a map value's raw bytes, or `None` if the slice is too short. The
     /// read-side twin of [`to_bytes`](Self::to_bytes), defined beside it so the two can't drift.
@@ -615,11 +653,11 @@ impl PolicyRule {
             return None;
         }
         Some(Self {
-            addr: u32::from_ne_bytes(b.get(0..4)?.try_into().ok()?),
-            port: u16::from_ne_bytes(b.get(4..6)?.try_into().ok()?),
-            prefix_len: *b.get(6)?,
-            proto: *b.get(7)?,
-            active: *b.get(8)?,
+            addr: u32::from_ne_bytes(b.get(Self::ADDR..Self::ADDR + 4)?.try_into().ok()?),
+            port: u16::from_ne_bytes(b.get(Self::PORT..Self::PORT + 2)?.try_into().ok()?),
+            prefix_len: *b.get(Self::PREFIX_LEN)?,
+            proto: *b.get(Self::PROTO)?,
+            active: *b.get(Self::ACTIVE)?,
             _pad: [0; 3],
         })
     }
@@ -706,22 +744,27 @@ impl FlowKey6 {
     }
 
     /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. The v6 twin
-    /// of [`FlowKey::from_bytes`], defined next to the fields so it can't drift from the kernel writer.
+    /// of [`FlowKey::from_bytes`], reading offsets from the struct for the same reason.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_KEY6_SIZE {
             return None;
         }
+        const SRC_ADDR: usize = core::mem::offset_of!(FlowKey6, src_addr);
+        const DST_ADDR: usize = core::mem::offset_of!(FlowKey6, dst_addr);
+        const SRC_PORT: usize = core::mem::offset_of!(FlowKey6, src_port);
+        const DST_PORT: usize = core::mem::offset_of!(FlowKey6, dst_port);
+        const PROTO: usize = core::mem::offset_of!(FlowKey6, proto);
         let mut src = [0u8; 16];
         let mut dst = [0u8; 16];
-        src.copy_from_slice(b.get(0..16)?);
-        dst.copy_from_slice(b.get(16..32)?);
+        src.copy_from_slice(b.get(SRC_ADDR..SRC_ADDR + 16)?);
+        dst.copy_from_slice(b.get(DST_ADDR..DST_ADDR + 16)?);
         Some(Self::new(
             src,
             dst,
-            u16::from_ne_bytes(b.get(32..34)?.try_into().ok()?),
-            u16::from_ne_bytes(b.get(34..36)?.try_into().ok()?),
-            *b.get(36)?,
+            u16::from_ne_bytes(b.get(SRC_PORT..SRC_PORT + 2)?.try_into().ok()?),
+            u16::from_ne_bytes(b.get(DST_PORT..DST_PORT + 2)?.try_into().ok()?),
+            *b.get(PROTO)?,
         ))
     }
 }
@@ -814,13 +857,21 @@ impl PolicyRule6 {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE6_SIZE] {
         let mut b = [0u8; POLICY_RULE6_SIZE];
-        b[0..16].copy_from_slice(&self.addr);
-        b[16..18].copy_from_slice(&self.port.to_ne_bytes());
-        b[18] = self.prefix_len;
-        b[19] = self.proto;
-        b[20] = self.active;
+        b[Self::ADDR..Self::ADDR + 16].copy_from_slice(&self.addr);
+        b[Self::PORT..Self::PORT + 2].copy_from_slice(&self.port.to_ne_bytes());
+        b[Self::PREFIX_LEN] = self.prefix_len;
+        b[Self::PROTO] = self.proto;
+        b[Self::ACTIVE] = self.active;
         b
     }
+
+    /// Where each field sits, from the struct, shared by both halves of the codec. See
+    /// [`PolicyRule::to_bytes`] for why these are derived rather than written out.
+    const ADDR: usize = core::mem::offset_of!(PolicyRule6, addr);
+    const PORT: usize = core::mem::offset_of!(PolicyRule6, port);
+    const PREFIX_LEN: usize = core::mem::offset_of!(PolicyRule6, prefix_len);
+    const PROTO: usize = core::mem::offset_of!(PolicyRule6, proto);
+    const ACTIVE: usize = core::mem::offset_of!(PolicyRule6, active);
 
     /// Reconstructs from a map value's raw native bytes, the read-side twin of
     /// [`to_bytes`](Self::to_bytes). `None` for a short slice, so a map whose value size no longer
@@ -831,13 +882,13 @@ impl PolicyRule6 {
             return None;
         }
         let mut addr = [0u8; 16];
-        addr.copy_from_slice(&b[0..16]);
+        addr.copy_from_slice(b.get(Self::ADDR..Self::ADDR + 16)?);
         Some(Self {
             addr,
-            port: u16::from_ne_bytes([b[16], b[17]]),
-            prefix_len: b[18],
-            proto: b[19],
-            active: b[20],
+            port: u16::from_ne_bytes(b.get(Self::PORT..Self::PORT + 2)?.try_into().ok()?),
+            prefix_len: *b.get(Self::PREFIX_LEN)?,
+            proto: *b.get(Self::PROTO)?,
+            active: *b.get(Self::ACTIVE)?,
             _pad: [0; 3],
         })
     }
@@ -1317,6 +1368,123 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallEvent, detail_len), 20);
         assert_eq!(core::mem::offset_of!(SyscallEvent, comm), 24);
         assert_eq!(core::mem::offset_of!(SyscallEvent, detail), 40);
+    }
+
+    // Each record below carries the same contract for the same reason. The codecs read their
+    // offsets from the struct, so a reorder keeps the two *ends* agreeing and cannot corrupt a
+    // freshly built pair. What it does corrupt is a **stale** eBPF object: the probes are built
+    // separately (`cargo xtask build-probes`, or an installed copy under the data dir) and loaded at
+    // runtime, so a reordered struct plus yesterday's object is one artifact writing fields the
+    // other reads elsewhere, with no size change to catch it. These pins make that reorder a
+    // decision someone has to take rather than one they can make by accident.
+
+    #[test]
+    fn flow_key_offsets_are_the_wire_contract() {
+        assert_eq!(core::mem::offset_of!(FlowKey, src_addr), 0);
+        assert_eq!(core::mem::offset_of!(FlowKey, dst_addr), 4);
+        assert_eq!(core::mem::offset_of!(FlowKey, src_port), 8);
+        assert_eq!(core::mem::offset_of!(FlowKey, dst_port), 10);
+        assert_eq!(core::mem::offset_of!(FlowKey, proto), 12);
+        assert_eq!(core::mem::offset_of!(FlowKey, _pad), 13);
+    }
+
+    #[test]
+    fn flow_counts_offsets_are_the_wire_contract() {
+        assert_eq!(core::mem::offset_of!(FlowCounts, ingress_packets), 0);
+        assert_eq!(core::mem::offset_of!(FlowCounts, ingress_bytes), 8);
+        assert_eq!(core::mem::offset_of!(FlowCounts, egress_packets), 16);
+        assert_eq!(core::mem::offset_of!(FlowCounts, egress_bytes), 24);
+    }
+
+    #[test]
+    fn flow_key6_offsets_are_the_wire_contract() {
+        assert_eq!(core::mem::offset_of!(FlowKey6, src_addr), 0);
+        assert_eq!(core::mem::offset_of!(FlowKey6, dst_addr), 16);
+        assert_eq!(core::mem::offset_of!(FlowKey6, src_port), 32);
+        assert_eq!(core::mem::offset_of!(FlowKey6, dst_port), 34);
+        assert_eq!(core::mem::offset_of!(FlowKey6, proto), 36);
+        assert_eq!(core::mem::offset_of!(FlowKey6, _pad), 37);
+    }
+
+    #[test]
+    fn policy_rule_offsets_are_the_wire_contract() {
+        // The rule the operator writes: a reorder here changes what a `/24 tcp` allowance means to
+        // the classifier, which is the one record where a silent reinterpretation is a policy
+        // decision nobody made.
+        assert_eq!(core::mem::offset_of!(PolicyRule, addr), 0);
+        assert_eq!(core::mem::offset_of!(PolicyRule, port), 4);
+        assert_eq!(core::mem::offset_of!(PolicyRule, prefix_len), 6);
+        assert_eq!(core::mem::offset_of!(PolicyRule, proto), 7);
+        assert_eq!(core::mem::offset_of!(PolicyRule, active), 8);
+        assert_eq!(core::mem::offset_of!(PolicyRule, _pad), 9);
+    }
+
+    #[test]
+    fn policy_rule6_offsets_are_the_wire_contract() {
+        assert_eq!(core::mem::offset_of!(PolicyRule6, addr), 0);
+        assert_eq!(core::mem::offset_of!(PolicyRule6, port), 16);
+        assert_eq!(core::mem::offset_of!(PolicyRule6, prefix_len), 18);
+        assert_eq!(core::mem::offset_of!(PolicyRule6, proto), 19);
+        assert_eq!(core::mem::offset_of!(PolicyRule6, active), 20);
+        assert_eq!(core::mem::offset_of!(PolicyRule6, _pad), 21);
+    }
+
+    #[test]
+    fn every_record_codec_reads_the_byte_positions_the_struct_declares() {
+        // The other half of the contract: the codecs must agree with the layout, not merely with
+        // themselves. Each record is built, serialized where it has a writer, and read back through
+        // the *struct* the way the kernel reads a map value, so a codec that wandered off the field
+        // it names is a mismatch here rather than a wrong rule in production.
+        let rule = PolicyRule::allow(0x5db8_d800, 24, 443, IPPROTO_TCP);
+        let via_bytes = PolicyRule::from_bytes(&rule.to_bytes()).expect("a full-size rule decodes");
+        assert_eq!(via_bytes, rule);
+        assert_eq!(
+            rule.to_bytes()[core::mem::offset_of!(PolicyRule, prefix_len)],
+            24,
+            "`to_bytes` must put prefix_len where the struct keeps it, or the classifier reads \
+             another field as the CIDR length"
+        );
+        assert_eq!(
+            rule.to_bytes()[core::mem::offset_of!(PolicyRule, proto)],
+            IPPROTO_TCP
+        );
+
+        let rule6 = PolicyRule6::allow([0x20; 16], 64, 443, IPPROTO_UDP);
+        assert_eq!(
+            PolicyRule6::from_bytes(&rule6.to_bytes()).expect("a full-size v6 rule decodes"),
+            rule6
+        );
+        assert_eq!(
+            rule6.to_bytes()[core::mem::offset_of!(PolicyRule6, prefix_len)],
+            64
+        );
+        assert_eq!(
+            rule6.to_bytes()[core::mem::offset_of!(PolicyRule6, proto)],
+            IPPROTO_UDP
+        );
+
+        // The read-only records have no writer here (the kernel is the writer), so lay the bytes out
+        // by the struct's own offsets and check the decode lands each field.
+        let mut key = [0u8; FLOW_KEY_SIZE];
+        key[core::mem::offset_of!(FlowKey, proto)] = IPPROTO_UDP;
+        key[core::mem::offset_of!(FlowKey, dst_port)] = 0x35; // 53, little end first
+        let decoded = FlowKey::from_bytes(&key).expect("a full-size key decodes");
+        assert_eq!(decoded.proto, IPPROTO_UDP);
+        assert_eq!(decoded.dst_port, 53);
+
+        let mut counts = [0u8; FLOW_COUNTS_SIZE];
+        counts[core::mem::offset_of!(FlowCounts, egress_bytes)] = 9;
+        let decoded = FlowCounts::from_bytes(&counts).expect("a full-size value decodes");
+        assert_eq!(decoded.egress_bytes, 9);
+        assert_eq!(decoded.ingress_bytes, 0);
+
+        let mut key6 = [0u8; FLOW_KEY6_SIZE];
+        key6[core::mem::offset_of!(FlowKey6, proto)] = IPPROTO_TCP;
+        key6[core::mem::offset_of!(FlowKey6, dst_addr)] = 0xfe;
+        let decoded = FlowKey6::from_bytes(&key6).expect("a full-size v6 key decodes");
+        assert_eq!(decoded.proto, IPPROTO_TCP);
+        assert_eq!(decoded.dst_addr[0], 0xfe);
+        assert_eq!(decoded.src_addr, [0u8; 16]);
     }
 
     #[test]
