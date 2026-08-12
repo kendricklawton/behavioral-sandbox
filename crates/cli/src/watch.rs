@@ -84,15 +84,11 @@ impl Timeline {
                 let id = (denial.dst_addr, denial.dst_port, denial.proto);
                 let before = self.denial_counts.get(&id).copied().unwrap_or(0);
                 if denial.count > before {
-                    let d = denial.dst_addr.to_be_bytes();
                     self.push(
                         at,
                         format!(
-                            "denied  {}.{}.{}.{}:{} {} (+{})",
-                            d[0],
-                            d[1],
-                            d[2],
-                            d[3],
+                            "denied  {}:{} {} (+{})",
+                            std::net::Ipv4Addr::from(denial.dst_addr.to_be_bytes()),
                             denial.dst_port,
                             proto_name(denial.proto),
                             denial.count - before
@@ -418,14 +414,10 @@ fn draw_network(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
                 )));
             }
             for denial in &net.denials {
-                let d = denial.dst_addr.to_be_bytes();
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "  denied {}.{}.{}.{}:{} {} · {} pkt(s)",
-                        d[0],
-                        d[1],
-                        d[2],
-                        d[3],
+                        "  denied {}:{} {} · {} pkt(s)",
+                        std::net::Ipv4Addr::from(denial.dst_addr.to_be_bytes()),
                         denial.dst_port,
                         proto_name(denial.proto),
                         denial.count
