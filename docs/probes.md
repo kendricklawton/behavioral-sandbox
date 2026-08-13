@@ -3,7 +3,7 @@
 The engine has two halves. [The VMM and its jail](./architecture-firecracker.md) documents the Firecracker
 driver: the hardware-isolation boundary that *contains* untrusted code. This document is the
 other half: the host-side eBPF that
-*observes and enforces* what that code does, from the host side of the KVM boundary: the programs
+*observes and enforces* what that code does, from the host side of the KVM boundary — the programs
 are loaded by a host process and attached to host-kernel hooks, outside the guest's address space and
 outside any namespace it can enter (design rule 2). It starts by building, loading, attaching, and reading one program end-to-end, then builds out each axis: the syscall trace, network observation and egress enforcement on
 the tap, resource accounting from the cgroup, and the fused per-run audit record.

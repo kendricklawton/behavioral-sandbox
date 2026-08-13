@@ -53,7 +53,7 @@ path that does not exist and expect `present: false` with empty `content` and no
 ### 4. A non-UTF-8 file is flagged, not silently substituted
 
 Write bytes that are not valid UTF-8 in the guest (`printf '\377\376' > bin.dat`), then `get` it.
-The reply carries `lossy: true`: the content is a lossy rendering and the original bytes are not
+The reply carries `lossy: true` — the content is a lossy rendering and the original bytes are not
 recoverable from this line. A clean text file answers `lossy: false`.
 
 A client must surface that flag. Bulk or binary transfer is the engine's block-device path, not this

@@ -67,7 +67,7 @@ sandbox at this stage, and everything below is written to make that possible.
 BSX runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
 through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
 [aya](https://aya-rs.dev/)) observes and enforces what the code does from the host side of that
-boundary: the programs are loaded by a host process and attached to host-kernel hooks, where they
+boundary — the programs are loaded by a host process and attached to host-kernel hooks, where they
 sit outside the guest's address space and outside any namespace it can enter. The network and the
 cgroup are observed directly. The syscall axis is the **VMM's host footprint**, not the guest's
 syscalls: a microVM services those in its own kernel, so host-side syscall visibility is coarse by
