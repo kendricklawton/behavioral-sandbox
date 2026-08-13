@@ -158,7 +158,7 @@ record at all, which is `--record` or an operator's `records_dir`.
   [Setting `signing_key`](./cli-config.md#setting-signing_key).
 - **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
   a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
-  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `bsx
+  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run — `bsx
   verify` runs that check on a file holding the sequence one envelope per line, and the library
   form is `verify_chain` in `bsx-record`. One limit on the chain's reach: only the daemon's
   `trace` path chains (`bsx run --record` writes one standalone record). What the chain

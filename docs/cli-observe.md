@@ -2,7 +2,7 @@
 
 `--trace`, `--record`, `--record-summary`, and `--watch` bind the host-side eBPF probes to the sandbox
 at launch and fuse what they saw into one per-run audit record, observed from the host side of the KVM
-boundary: the probes are loaded by a host process and attached to host-kernel hooks.
+boundary — the probes are loaded by a host process and attached to host-kernel hooks.
 
 ```console
 # Watch it live, read the trail after, keep the machine record and the model-legible summary:
