@@ -278,14 +278,18 @@ pub(crate) struct RateLimiter {
 }
 
 /// The derived per-drive **bandwidth** cap (bytes/second): 256 MiB/s. Defense in depth against a
-/// disk-thrashing guest starving a co-resident run, it sits well under a typical NVMe's throughput
-/// (so a co-resident run keeps the bulk of it) yet is ample for one sandbox's normal IO.
+/// disk-thrashing guest starving a co-resident run. The number is a **chosen default, not a
+/// measured one**: it aims to sit under a typical NVMe's throughput while leaving one sandbox more
+/// than its ordinary IO, and neither half has been characterised on a host.
+/// `crates/engine/tests/io_throttle.rs` proves the cap is *in force*, which is a different claim
+/// from the value being the right one for a given disk.
 const GUEST_IO_BANDWIDTH_BYTES_PER_S: u64 = 256 * 1024 * 1024;
-/// The one-time burst (bytes) that runs unthrottled before the steady-state cap engages: 1 GiB, past
-/// any rootfs the engine ships, so a cold boot's rootfs read fits inside the burst and runs
-/// unthrottled *by construction*; only *sustained* thrashing beyond the burst is throttled. A
-/// privileged test proves both halves live (sustained rewrites pin to the cap, boot stays
-/// unthrottled): `crates/engine/tests/io_throttle.rs`.
+/// The one-time burst (bytes) that runs unthrottled before the steady-state cap engages: 1 GiB. A
+/// cold boot reads a subset of the rootfs image, so a burst at or above the whole image bounds that
+/// read from above and the steady-state cap cannot engage before userspace; only *sustained*
+/// thrashing past the burst is throttled. The bound is what `the_io_burst_covers_the_shipped_rootfs`
+/// (`xtask/src/rootfs.rs`) holds: growing the image past this constant fails the host-safe gate
+/// rather than quietly throttling boot. `crates/engine/tests/io_throttle.rs` proves both halves live.
 const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;
 
 impl RateLimiter {

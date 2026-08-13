@@ -1060,9 +1060,54 @@ mod tests {
 
     use super::{
         GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
-        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH, in_staging,
-        net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
+        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH, ROOTFS_SIZE_MIB,
+        in_staging, net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
     };
+
+    /// The engine gives each drive a one-time IO burst that runs before the steady-state cap
+    /// engages, sized so a cold boot's rootfs read cannot reach the cap: a burst at or above the
+    /// whole image bounds that read from above, since boot reads only a subset of the image. This
+    /// builder owns the image size and `firecracker.rs` owns the burst, and its constant is private
+    /// to that crate, so neither can read the other: the two are compared here, exactly as the IPv6
+    /// link's copies are.
+    ///
+    /// Drift is silent in the worst direction. An image grown past the burst throttles every cold
+    /// boot to 256 MiB/s partway through, which looks like a slow host rather than a limiter, and
+    /// the comment on the burst would still claim boot is unthrottled.
+    #[test]
+    fn the_io_burst_covers_the_shipped_rootfs() {
+        let src = std::fs::read_to_string(
+            crate::workspace_root().join("crates/engine/src/firecracker.rs"),
+        )
+        .expect("crates/engine/src/firecracker.rs");
+
+        // `const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;`: take the right-hand
+        // side and multiply out its integer literals, so the pin reads whatever units the engine
+        // finds clearest rather than requiring one spelling.
+        let rhs = src
+            .lines()
+            .find_map(|l| l.split("const GUEST_IO_ONE_TIME_BURST_BYTES: u64 =").nth(1))
+            .map(|r| r.trim().trim_end_matches(';').trim())
+            .expect("firecracker.rs must define GUEST_IO_ONE_TIME_BURST_BYTES");
+        let unreadable = format!(
+            "GUEST_IO_ONE_TIME_BURST_BYTES must stay a product of integer literals for this pin \
+             to read it, got `{rhs}`"
+        );
+        let burst: u64 = rhs
+            .split('*')
+            .map(|f| f.trim().replace('_', "").parse::<u64>().ok())
+            .try_fold(1u64, |acc, n| Some(acc * n?))
+            .expect(&unreadable);
+
+        let image = u64::from(ROOTFS_SIZE_MIB) * 1024 * 1024;
+        assert!(
+            image <= burst,
+            "the guest rootfs is {ROOTFS_SIZE_MIB} MiB but the engine's one-time IO burst is only \
+             {} MiB: a cold boot would hit the steady-state cap. Raise \
+             GUEST_IO_ONE_TIME_BURST_BYTES in crates/engine/src/firecracker.rs, or shrink the image.",
+            burst / (1024 * 1024)
+        );
+    }
 
     /// A per-test scratch tree, removed on drop so a failing assertion can't leave one behind.
     fn temp_dir(name: &str) -> bsx_test_support::ScratchDir {

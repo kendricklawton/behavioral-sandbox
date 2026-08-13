@@ -23,6 +23,7 @@
 //! - **Teardown** lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's cgroup at
 //!   its precomputed path, so host death reaches a jailed VMM the same way.
 
+use std::collections::BTreeSet;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -47,21 +48,27 @@ pub const DEFAULT_JAIL_GID: u32 = 10_000;
 /// host reaches the same socket at `<chroot_root>/run/firecracker.socket`.
 const JAILED_API_SOCKET: &str = "/run/firecracker.socket";
 
-/// The chroot-relative path Firecracker binds the **vsock** exec-channel socket at, placed under
-/// `/run` beside the API socket because the jailer makes that dir writable by the dropped uid (so the
-/// unprivileged VMM can create the socket there). The host dials the same file at its absolute path
-/// `<chroot_root>/run/v.sock`. Strictly shorter than [`JAILED_API_SOCKET`], so if that path cleared
-/// `check_sun_path` in [`spawn_jailer`], this one does too.
+/// The chroot-relative path Firecracker binds the **vsock** exec-channel socket at, under `/run`
+/// beside the API socket because the jailer makes that dir writable by the dropped uid. The host
+/// dials the same file at `<chroot_root>/run/v.sock`.
 pub(crate) const JAILED_VSOCK_UDS: &str = "/run/v.sock";
+
+// `launch_jailed` dials the vsock socket at its host path *without* its own `check_sun_path`, on the
+// grounds that [`spawn_jailer`] already bounds-checked the API socket under the same chroot root.
+// That skip is sound only while this path is the shorter of the two, which is a relationship between
+// two literals no reader edits together: lengthening it past the API socket's would let a vsock bind
+// overflow `sun_path` unchecked, surfacing as a cryptic bind failure instead of the typed refusal
+// `check_sun_path` gives.
+const _: () = assert!(JAILED_VSOCK_UDS.len() <= JAILED_API_SOCKET.len());
 
 /// The cgroup v2 `cpu.max` accounting period, in microseconds (the kernel default). A cpu quota of
 /// `n * CPU_PERIOD_US` per period means `n` cores' worth of CPU.
 const CPU_PERIOD_US: u64 = 100_000;
 
-/// Host-side memory headroom above the guest's RAM for the VMM's own footprint (heap, page tables,
-/// slack), in MiB. The guest RAM is the hard floor a full-guest workload needs; the rootfs page cache
-/// above it is reclaimable, so `mem_mib + this` caps the VMM without OOM-killing a legitimate boot.
-/// Measured: a 256 MiB guest booting to userspace peaks ~82 MiB, far under `mem_mib + overhead`.
+/// Host-side headroom above the guest's RAM for the VMM's own footprint (heap, page tables, slack),
+/// in MiB, so `mem_mib + this` caps the VMM without OOM-killing a legitimate boot. A **chosen
+/// default, not a measured one**: the ~82 MiB peak once recorded for a 256 MiB guest carries no host
+/// and no date, so it is not a number this repo can defend.
 const MEMORY_OVERHEAD_MIB: u32 = 128;
 
 /// Confine the VMM under Firecracker's jailer. Opt-in via [`crate::BootConfig::jail`]; `None` (the
@@ -128,9 +135,13 @@ impl Jail {
 #[non_exhaustive]
 pub struct JailIds {
     base: u32,
-    /// One slot per pair, `true` while leased. A `Vec` scan rather than a free list: a span is
-    /// small, and always handing out the lowest free slot keeps the ids a reader sees predictable.
-    taken: Arc<Mutex<Box<[bool]>>>,
+    count: u32,
+    /// The slots currently leased, ordered so [`lease`](Self::lease) still hands out the lowest free
+    /// one and the ids a reader sees stay predictable. Only *leased* slots cost memory: a
+    /// one-entry-per-pair table would make a span an allocation proportional to a range the operator
+    /// may never spend, so `span(1, u32::MAX)` would abort on a ~4 GiB alloc at construction rather
+    /// than return the typed error this API promises.
+    taken: Arc<Mutex<BTreeSet<u32>>>,
 }
 
 impl JailIds {
@@ -160,7 +171,8 @@ impl JailIds {
         })?;
         Ok(Self {
             base,
-            taken: Arc::new(Mutex::new(vec![false; count as usize].into_boxed_slice())),
+            count,
+            taken: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
 
@@ -172,22 +184,30 @@ impl JailIds {
         // but a `Clone` that read the slot table would deadlock a non-reentrant `Mutex`.
         let slot = {
             let mut taken = lock(&self.taken);
-            // Grouped so the sum never exceeds the span's own last id: `span` bounds
-            // `base + (count - 1)`, not `base + count`, so the ungrouped form overflows on a span
-            // that reaches the top of the range. `count >= 1` there, so the subtraction is safe.
-            let last = self.base + (taken.len() as u32 - 1);
-            let slot = taken.iter().position(|t| !t).ok_or_else(|| {
-                VmmError::Vmm(format!(
+            // The lowest free slot is the first index where the ordered set stops counting 0, 1,
+            // 2, …; a set with no gap is full up to its length, so the next slot is that length.
+            let slot = taken
+                .iter()
+                .copied()
+                .zip(0u32..)
+                .find(|(t, i)| t != i)
+                .map_or(taken.len() as u32, |(_, i)| i);
+            if slot >= self.count {
+                // Grouped so the sum never exceeds the span's own last id: `span` bounds
+                // `base + (count - 1)`, not `base + count`, so the ungrouped form overflows on a
+                // span that reaches the top of the range. `count >= 1`, so the subtraction is safe.
+                let last = self.base + (self.count - 1);
+                return Err(VmmError::Vmm(format!(
                     "every jail id in {}..={last} is in use; widen the span or run fewer sandboxes \
                      at once",
                     self.base
-                ))
-            })?;
-            taken[slot] = true;
+                )));
+            }
+            taken.insert(slot);
             slot
         };
         // `slot < count`, and `span` refused a range whose last id would overflow.
-        let id = self.base + slot as u32;
+        let id = self.base + slot;
         Ok(JailLease {
             uid: id,
             gid: id,
@@ -197,10 +217,8 @@ impl JailIds {
     }
 
     /// Give a slot back. Called only from [`JailLease`]'s drop.
-    fn release(&self, slot: usize) {
-        if let Some(t) = lock(&self.taken).get_mut(slot) {
-            *t = false;
-        }
+    fn release(&self, slot: u32) {
+        lock(&self.taken).remove(&slot);
     }
 }
 
@@ -224,7 +242,7 @@ pub(crate) struct JailLease {
     gid: u32,
     /// The span to give the slot back to, and which slot. `None` for the fixed
     /// [`Jail::uid`]/[`Jail::gid`] pair, which is shared and so was never taken from anything.
-    span: Option<(JailIds, usize)>,
+    span: Option<(JailIds, u32)>,
     /// Set when teardown could not reclaim the chowned tree. Atomic rather than a `bool` because
     /// teardown holds only `&Chroot`, and the VM this hangs off crosses threads.
     withheld: std::sync::atomic::AtomicBool,
@@ -400,9 +418,8 @@ pub(crate) fn spawn_jailer(
     if let Some(netns) = netns {
         cmd.arg("--netns").arg(netns);
     }
-    // Everything after `--` is Firecracker's. No `--daemonize` (keep its stdout so the guest serial
-    // console still reaches the host) and no `--no-seccomp`: Firecracker installs its built-in
-    // per-thread seccomp filters by default, and we deliberately never disable them.
+    // Everything after `--` is Firecracker's. The two flags deliberately *absent* here, and so
+    // invisible in this code, are `--daemonize` and `--no-seccomp`; the module header says why.
     cmd.arg("--")
         .arg("--api-sock")
         .arg(JAILED_API_SOCKET)
@@ -475,23 +492,15 @@ pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result
     })
 }
 
-/// Stage the **read-only shared base** into the chroot for a `read_only_root` jailed boot, the
-/// shared-base path, the jailed counterpart of the unjailed read-only boot that references one base in
-/// place. Instead of a full per-VM copy ([`stage_into_chroot`]), **bind-mount** the one base file
-/// into the chroot, so every jailed VM shares its inode (and page cache); the guest layers a per-run
-/// tmpfs overlay over it (`overlay-init`), so `/` is writable but the base is never mutated.
+/// Bind-mount the read-only shared base into the chroot so every jailed VM shares one inode and its
+/// page cache, returning the chroot-relative path to name in the API plus `Some(host_mount_path)`
+/// for teardown to unmount before reclaiming the scratch dir.
 ///
-/// The bind mount is made in the driver's (host) mount namespace, yet the jailer runs the VMM in an
-/// `MS_SLAVE` mount namespace: a mount created under a **shared** host mount propagates *in*, so the
-/// jailed Firecracker sees it. When the scratch base is **not** a shared mount (a hoster pointed
-/// `scratch_dir` at a private mount, so the propagation can't reach the slave namespace), fall back
-/// to a read-only **copy**, correct and still base-immutable, just not page-cache-deduped. Memory-sharing is
-/// a best-effort property; the isolation is not, and the copy confines identically.
-///
-/// Returns the chroot-relative path to name in the API, and `Some(host_mount_path)` when a bind mount
-/// was made, so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
-/// which needs no unmount). Base perms must let the dropped uid read it (the pinned base is `0644`); a
-/// bind mount exposes the source's mode, so no chown is applied to a shared inode.
+/// Falls back to a read-only copy (returning `None`) when `scratch_dir` is not a shared mount: the
+/// bind is made in the host mount namespace and the jailer runs the VMM in an `MS_SLAVE` one, so
+/// only a mount under a **shared** host mount propagates in. The copy confines identically; page-cache
+/// dedup is the only thing lost. A bind mount exposes the source's mode, so nothing is chowned onto a
+/// shared inode: the base must already be readable by the dropped uid (the pinned base is `0644`).
 pub(crate) fn stage_ro_base_into_chroot(
     root: &Path,
     name: &str,
@@ -522,15 +531,11 @@ pub(crate) fn stage_ro_base_into_chroot(
     Ok((rel, Some(dst)))
 }
 
-/// Bind-mount `src` onto `dst` **read-only**. Two steps on purpose: a bind mount is read-write
-/// regardless of a `-o ro` on the initial call, so a second `remount,ro,bind` is what actually drops
-/// write access, the base then can't be mutated through the chroot even before Firecracker opens it
-/// `O_RDONLY`. Shells out to `mount` (as the tap path shells out to `ip`), keeping the host path
-/// `unsafe`-free. Both invocations are bounded by the boot `deadline`, with stdout nulled and
-/// stderr captured into the error:
-/// mount-family syscalls can wedge in D-state (the hazard `unmount_base` already defends against),
-/// and an unbounded one would hang the boot past the `Timeout` the wall promises. If the remount
-/// fails, the half-made bind mount is detached before returning rather than left behind.
+/// Bind-mount `src` onto `dst` **read-only**, in two steps because a bind mount comes up read-write
+/// whatever `-o ro` says on the initial call: the `remount,ro,bind` is what actually drops write
+/// access, so the base cannot be mutated through the chroot even before Firecracker opens it
+/// `O_RDONLY`. Both invocations are bounded by the boot `deadline`, since a mount-family syscall can
+/// wedge in D-state and an unbounded one would outlast the `Timeout` the wall promises.
 fn bind_ro(src: &Path, dst: &Path, deadline: Instant) -> Result<(), VmmError> {
     mount_step(
         Command::new("mount").arg("--bind").arg(src).arg(dst),
@@ -551,15 +556,11 @@ fn bind_ro(src: &Path, dst: &Path, deadline: Instant) -> Result<(), VmmError> {
     )
 }
 
-/// One step of [`bind_ro`]: run `cmd`, and on any failure detach `dst` before returning a typed
-/// error prefixed with `context`.
-///
-/// Detaching on *every* failure path, not only the remount's, is what the shared arm is for: a
-/// deadline kill can land after the child's `mount(2)` completed, and the caller records the mount
-/// for teardown only on `Ok`, so an undetached one would EBUSY the scratch reclaim. `unmount_base`
-/// is a lazy-detach no-op when nothing was mounted. One residual stays: a D-state mount child
-/// detached past the reap grace can complete *after* this detach; that leak is bounded by the orphan
-/// sweep's `detach_mounts_under`, which retries the dir.
+/// One step of [`bind_ro`]: run `cmd`, and on **every** failure path detach `dst` before returning a
+/// typed error prefixed with `context`. The timeout arm needs it as much as the non-zero-exit one: a
+/// deadline kill can land after the child's `mount(2)` completed, and the caller records a mount for
+/// teardown only on `Ok`, so an undetached one would `EBUSY` the scratch reclaim. The residual is a
+/// D-state child completing past the reap grace, bounded by the orphan sweep's `detach_mounts_under`.
 fn mount_step(
     cmd: &mut Command,
     what: &str,
@@ -619,14 +620,12 @@ fn run_mount(
     Ok((status, stderr))
 }
 
-/// Detach a base bind mount (best-effort, **lazy**). `umount -l` never blocks on a busy mount: by
-/// teardown the VMM is already reaped, but a lazy detach also means a mount left by a crashed-mid-boot
-/// driver can always be cleared, so the scratch dir's `remove_dir_all` never `EBUSY`s. Failures are
-/// ignored: a path that isn't a mount (the copy fallback, or one already gone) is a harmless no-op.
+/// Detach a base bind mount, **lazily** and best-effort: `umount -l` never blocks on a busy mount,
+/// so even one left by a driver that crashed mid-boot can be cleared and the scratch dir's
+/// `remove_dir_all` never `EBUSY`s. Bounded because this runs in `Drop`, where a `umount` wedged
+/// behind a busy mount would hang teardown; whatever a failure or timeout leaves behind is retried
+/// by the orphan sweep's `detach_mounts_under`. A path that is not a mount is a harmless no-op.
 pub(crate) fn unmount_base(path: &Path) {
-    // Bounded like `netns_del`: this runs in teardown/`Drop`, and `umount` (even lazy) can wedge in
-    // the kernel behind a busy mount, which a plain `.status()` would let hang `Drop`. On timeout
-    // `run_bounded` detaches; a mount left behind is retried by the orphan sweep's `detach_mounts_under`.
     let mut cmd = Command::new("umount");
     cmd.arg("-l").arg(path);
     let _ = crate::proc::run_bounded(cmd, crate::proc::TEARDOWN_HELPER_TIMEOUT, "umount -l");
@@ -928,6 +927,28 @@ mod tests {
         // A range running past u32 would wrap into ids nobody asked for, including 0.
         assert!(JailIds::span(u32::MAX, 2).is_err());
         assert!(JailIds::span(u32::MAX, 1).is_ok(), "the last id alone fits");
+    }
+
+    /// A span costs memory per *leased* pair, not per pair in the range, so a wide range an
+    /// operator declares but never spends is cheap. The range below is the widest one `span`
+    /// accepts; a one-entry-per-pair table would need ~4 GiB for it, and a failed allocation
+    /// aborts the process instead of returning the typed error this API promises.
+    #[test]
+    fn a_widely_declared_span_costs_only_what_it_leases() {
+        let ids = JailIds::span(1, u32::MAX).expect("the widest valid span");
+        let (a, b, c) = (
+            ids.lease().expect("free"),
+            ids.lease().expect("free"),
+            ids.lease().expect("free"),
+        );
+        assert_eq!((a.uid(), b.uid(), c.uid()), (1, 2, 3));
+
+        // Freeing a middle pair leaves a gap the next lease must reuse, since "lowest free slot"
+        // is what keeps the ids a reader sees predictable rather than ever-climbing.
+        drop(b);
+        assert_eq!(ids.lease().expect("the gap is free again").uid(), 2);
+        drop(a);
+        assert_eq!(ids.lease().expect("the lowest gap wins").uid(), 1);
     }
 
     #[test]
