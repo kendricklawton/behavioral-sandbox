@@ -40,6 +40,13 @@ set -eu
 FC_PIN1="2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7"
 FC_VER="v1.16.1"
 
+# Where this script tells an operator to put firecracker + jailer. A **system** dir on purpose: it
+# is on sudoers' `secure_path`, so the jailed posture (which runs under sudo) resolves both without
+# the caller's PATH. Pointing them at the user-local `$PREFIX` instead would put them exactly where
+# `secure_path` hides them. `install_sh_firecracker_dir_matches_the_install_guide` keeps this equal
+# to the command `docs/cli-install.md` gives, and the line stays at column zero for that test.
+FC_INSTALL_DIR="/usr/local/bin"
+
 say()  { printf '%s\n' "$*"; }
 info() { printf '%b==>%b %b%s%b\n' "$BLUE" "$RESET" "$BOLD" "$*" "$RESET"; }
 ok()   { printf '%b  ✓%b %s\n' "$GREEN" "$RESET" "$*"; }
@@ -286,16 +293,23 @@ main() {
         warn "Firecracker is not bundled: install firecracker + jailer $FC_VER on PATH:"
         say "      curl -LO https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VER/firecracker-$FC_VER-x86_64.tgz"
         say "      tar xzf firecracker-$FC_VER-x86_64.tgz"
-        say "      install release-$FC_VER-x86_64/firecracker-$FC_VER-x86_64 \"$PREFIX/firecracker\""
-        say "      install release-$FC_VER-x86_64/jailer-$FC_VER-x86_64 \"$PREFIX/jailer\""
+        say "      sudo install -m0755 release-$FC_VER-x86_64/firecracker-$FC_VER-x86_64 $FC_INSTALL_DIR/firecracker"
+        say "      sudo install -m0755 release-$FC_VER-x86_64/jailer-$FC_VER-x86_64 $FC_INSTALL_DIR/jailer"
         say "      (sha256 of the firecracker binary, not the tarball: $FC_PIN1)"
     fi
     say "  - check the host; it prints the exact run command for this host:"
     say "      bsx doctor"
     # Unjailed first: it works in the shell reading this, while sudo needs rights a fresh operator
-    # account may lack. The sudo form re-injects the caller's PATH: sudoers secure_path overrides
-    # PATH even under -E, hiding both a user-local bsx and the firecracker/jailer binaries the
-    # engine itself resolves.
+    # account may lack.
+    #
+    # The sudo form re-injects the caller's PATH because sudoers `secure_path` *replaces* PATH, and
+    # -E does not exempt it: this binary sits in a user-local prefix that is not on that list, so
+    # plain `sudo bsx` is command-not-found. `env` is what carries the value across, since it is
+    # itself on secure_path. -E stays for the rest of the caller's environment, HOME above all: the
+    # engine reads ~/.bsx.toml for the artifact paths written above, and a HOME reset to root's
+    # would send it looking in the wrong home. Firecracker and its jailer are resolved by the
+    # engine at runtime the same way, which is why the hint below installs them to a system dir
+    # that secure_path already covers rather than beside this binary.
     say "  - then run something (the default jails the VMM, which needs real root):"
     say "      bsx run --unjailed -- echo hello                 # no root needed: still behind KVM, VMM unconfined"
     say "      sudo -E env \"PATH=\$PATH\" bsx run -- echo hello   # jailed, the supported posture"

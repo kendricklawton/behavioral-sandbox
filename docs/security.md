@@ -30,7 +30,7 @@ Each record includes `sandbox_id` and `started_unix_ns` in the signed payload to
 
 ## Release integrity (signed manifest)
 
-Every release's `SHA256SUMS` carries a **detached ed25519 signature** (`SHA256SUMS.sig`) made by
+Every release's `SHA256SUMS` carries a **detached Ed25519 signature** (`SHA256SUMS.sig`) made by
 the release key. `install.sh` verifies it with the host's own `openssl` (never a binary from the
 artifact being verified) against the public key pinned inside the script, before trusting the
 manifest, hashing the tarball, or extracting anything; a download without a valid signature is a
@@ -112,7 +112,7 @@ to a pre-`v0.1.0` single-maintainer project:
    discussion stays in the private advisory.
 2. **Fix on `main`.** There are no release branches or backports before `v0.1.0`: the fix is a
    regular commit, with a regression test on the gate wherever the bug class allows one.
-3. **Disclose together.** The timeline is agreed with the reporter in the advisory; the default
+3. **Disclose together.** The timeline is agreed upon with the reporter in the advisory; the default
    ask is that the fix lands before publication. When it does, the GitHub advisory is published,
    [`RELEASES.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/RELEASES.md) notes
    it, and the reporter is credited if they want to be.

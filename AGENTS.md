@@ -80,7 +80,7 @@ know, the boot sequence, and the teardown layers.
 | `crates/probes` | `bsx-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` through `bpf-linker`). It is the only crate that can use `unsafe`. Its binary keeps the bare name `probes`, because the loader looks for that object filename. |
 | `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` records that cross the eBPF boundary. Zero dependencies, one source. |
 | `crates/probes-loader` | `bsx-probes-loader` | aya userspace. It attaches to one sandbox, reads the maps, and assembles the record. |
-| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing and verification. It has no aya, so a record verifies off-host. |
+| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and Ed25519 signing and verification. It has no aya, so a record verifies off-host. |
 | `crates/protocol` | `bsx-protocol` | The wire types of the daemon, with versions. |
 | `crates/client` | `bsx-client` | Rust reference client for `bsx serve`. |
 | `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`) and `bsx serve`. The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not the engine. |
@@ -93,10 +93,20 @@ know, the boot sequence, and the teardown layers.
 `docs/cli-install.md` tells you how to prepare a *host* (KVM access, Firecracker, the host tools).
 This section is the developer's side. `cargo xtask setup` is the first command on a new machine.
 
+Run these **from inside the clone**, because `rust-toolchain.toml` pins the stable version and
+`rustup target add` adds the target to whichever toolchain is active where you run it. Outside the
+repo that is your default toolchain, and `build-rootfs` then fails with a missing musl target on a
+box where `rustup target list --installed` shows it present.
+
 ```console
 rustup target add x86_64-unknown-linux-musl   # the static in-guest agent
 cargo install cargo-deny                      # run by the host-safe gate
 ```
+
+Two host tools are dev-toolchain rows in `cargo xtask setup` and are needed before `build-rootfs`:
+**`fakeroot`** (the rootfs is built with uid-0 ownership without root) and **`binutils`** for
+`readelf` (verifies the in-guest agent is really static). Both are absent from a minimal cloud
+image. `readelf` is a soft skip, so a build without it prints a note and proceeds unverified.
 
 You need the eBPF toolchain only for the probes. Both pieces are **pinned** on purpose. They install
 out of band. Thus an unpinned install takes the version that shipped that morning, and a compiler

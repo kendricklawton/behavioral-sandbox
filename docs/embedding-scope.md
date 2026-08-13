@@ -33,7 +33,7 @@ design:
   a *hoster*, not this repo.
 
 The line is a security boundary too: everything the engine ships is inert without host
-privileges the *hoster* grants, it self-limits (deny-by-default network, dropped-uid jail,
+privileges the *hoster* grants; it self-limits (deny-by-default network, dropped-uid jail,
 own-euid sweep), and turning its tools into a multi-tenant service safely is the hoster's job.
 
 What the engine *does* owe a long-lived host, and ships: typed errors instead of panics on every

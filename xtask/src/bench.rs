@@ -74,8 +74,10 @@ impl Progress {
 
 /// Measure boot-to-userspace latency of the guest rootfs. Boots `runs` times on **each** of
 /// two paths, the read-only *shared* base (no per-VM copy) and the read-write *copy* base, and
-/// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
-/// duplicates the whole image per boot, the shared path doesn't.
+/// reports each as three percentile rows: the wall (`Vm::boot` end to end), the guest boot
+/// (InstanceStart → the userspace marker), and host staging (their per-boot difference). The two
+/// paths make the base **size**'s effect visible (the copy path duplicates the whole image per
+/// boot); the split makes the guest kernel's share a measurement rather than an inference.
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     crate::require_kvm("bench-boot")?;
     if runs == 0 {
@@ -95,12 +97,14 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     println!("bench-boot: guest rootfs {used_mib} MiB, {runs} boots per path\n");
 
-    let mut p50s = Vec::with_capacity(2);
+    let mut wall_p50s = Vec::with_capacity(2);
+    let mut split_p50s = Vec::with_capacity(2);
     for (label, read_only_root) in [
         ("read-only shared base", true),
         ("read-write per-VM copy", false),
     ] {
-        let mut latencies = Vec::with_capacity(runs);
+        let mut walls = Vec::with_capacity(runs);
+        let mut guests = Vec::with_capacity(runs);
         let progress = Progress::new(label, runs);
         for i in 0..runs {
             let mut cfg = BootConfig::from_env();
@@ -109,31 +113,59 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
             cfg.userspace_marker = GUEST_READY_MARKER.to_string();
             cfg.guest_cid = Some(DEFAULT_GUEST_CID);
             cfg.read_only_root = read_only_root;
-            // Time the whole `Vm::boot`, not `vm.boot_latency()`: that clock starts *after*
-            // `Spawned::launch` does the per-VM rootfs copy, which is exactly the cost the two paths
-            // differ on, so measuring it is the point. (bench-warm times its cold boot the same way.)
+            // Two clocks per boot: the wall covers the whole `Vm::boot`, host-side staging (workdir,
+            // rootfs copy, device setup) included, and `boot_latency()` covers InstanceStart → the
+            // userspace marker. Reporting both splits the wall into a host share and a guest share:
+            // the copy the two paths differ on shows in the wall, a guest-kernel change shows in the
+            // guest. (bench-warm keeps the wall alone: its subject is what a caller waits on.)
             let t0 = Instant::now();
             let vm = Vm::boot(cfg).with_context(|| format!("{label}: boot {i} failed"))?;
-            let ms = t0.elapsed().as_millis() as u64;
-            latencies.push(ms);
+            let wall = t0.elapsed().as_millis() as u64;
+            let guest = vm.boot_latency().as_millis() as u64;
+            walls.push(wall);
+            guests.push(guest);
             vm.shutdown().ok();
-            progress.tick(i + 1, &format!("(last {ms} ms)"));
+            progress.tick(i + 1, &format!("(last {wall} ms)"));
         }
         progress.clear();
-        report_percentiles(label, &mut latencies, "ms");
-        p50s.push(nearest_p50(&mut latencies));
+        // Before the reports below sort the series in place: the pairwise subtraction needs the
+        // boot-order pairing, not two independently sorted columns.
+        let mut staging = setup_series(&walls, &guests);
+        println!("{label}:");
+        report_percentiles("wall (Vm::boot)", &mut walls, "ms");
+        report_percentiles("guest boot", &mut guests, "ms");
+        report_percentiles("host staging", &mut staging, "ms");
+        println!();
+        wall_p50s.push(nearest_p50(&mut walls));
+        split_p50s.push((nearest_p50(&mut guests), nearest_p50(&mut staging)));
     }
-    // Derive the takeaway from the two p50s instead of asserting it: the read-write path's excess
-    // over the shared base *is* the per-VM copy's contribution to boot latency.
-    let (shared_p50, copy_p50) = (p50s[0], p50s[1]);
+    // Derive the takeaways from the measured series instead of asserting them: the read-write
+    // path's excess over the shared base *is* the per-VM copy's contribution to boot latency, and
+    // the shared-base split is the number a guest-kernel change moves.
+    let (shared_p50, copy_p50) = (wall_p50s[0], wall_p50s[1]);
     let copy_delta = copy_p50.saturating_sub(shared_p50);
+    let (shared_guest, shared_staging) = split_p50s[0];
     println!(
-        "\nShared-base p50 {shared_p50} ms vs per-VM-copy p50 {copy_p50} ms: duplicating the \
+        "Shared-base p50 {shared_p50} ms vs per-VM-copy p50 {copy_p50} ms: duplicating the \
          {used_mib} MiB\nbase adds ~{copy_delta} ms to boot here (the host page cache serves the \
          copy). Keeping the base\nsmall buys that boot delta plus memory-sharing (page-cache dedup \
-         across VMs + disk)."
+         across VMs + disk).\nThe shared-base p50 splits into ~{shared_guest} ms guest boot and \
+         ~{shared_staging} ms host staging, so a\nguest-kernel change is judged on the guest share, \
+         not the wall."
     );
     Ok(())
+}
+
+/// The per-boot host-staging series, `wall − guest` pairwise: each boot's own difference, so
+/// percentiles of the result describe the staging cost of a real boot. Not a difference of
+/// percentiles, which nearest-rank does not preserve: the boot with the slowest wall need not be
+/// the boot with the slowest guest, and rank-wise subtraction of the two sorted series would
+/// reintroduce exactly that error at every rank.
+fn setup_series(wall: &[u64], guest: &[u64]) -> Vec<u64> {
+    wall.iter()
+        .zip(guest)
+        .map(|(w, g)| w.saturating_sub(*g))
+        .collect()
 }
 
 /// A scratch dir removed on drop, so an early `?` return can't leak the snapshot bundle.
@@ -145,9 +177,9 @@ impl Drop for ScratchDir {
 }
 
 /// The agent-rootfs boot config the prewarmed bench uses: vsock (the exec channel) plus the agent's
-/// readiness marker. `read_only_root` is the shared-base switch: `true` is what a prewarmed snapshot
-/// requires (the bundle references the base in place, clones share its page cache), `false` is the
-/// full-copy baseline that duplicates the whole image per VM.
+/// readiness marker. `read_only_root` is the shared-base switch: `true` is the pool shape the CLI
+/// and daemon boot (the bundle references the base in place, clones share its page cache), `false`
+/// is the full-copy baseline that duplicates the whole image per VM.
 fn warm_bench_config(kernel: &Path, rootfs: &Path, read_only_root: bool) -> BootConfig {
     let mut cfg = BootConfig::from_env();
     cfg.kernel = kernel.to_path_buf();
@@ -1426,4 +1458,22 @@ fn run_section(name: &str, skip: Option<&str>, f: impl FnOnce() -> Result<()>) -
     };
     println!();
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_staging_is_split_per_boot_not_per_percentile() {
+        // Boots where the slowest wall is not the slowest guest, so the pairing matters.
+        let wall = [10, 20, 30];
+        let guest = [9, 5, 10];
+        let mut staging = setup_series(&wall, &guest);
+        assert_eq!(staging, vec![1, 15, 20]);
+        // The median staging cost is the median per-boot difference, not the difference of the
+        // two medians (p50(wall) 20 − p50(guest) 9 = 11), which sorting each series before
+        // subtracting would produce.
+        assert_eq!(nearest_p50(&mut staging), 15);
+    }
 }

@@ -39,7 +39,7 @@ Ubuntu / Debian:
 ```console
 sudo apt update
 sudo apt install -y iproute2 e2fsprogs curl ca-certificates
-sudo apt install -y build-essential git        # only if you will build from source
+sudo apt install -y build-essential git fakeroot   # only if you will build from source
 ```
 
 Arch:
@@ -51,7 +51,11 @@ sudo pacman -S --needed base-devel git         # only if you will build from sou
 ```
 
 Most are already present on a normal install. [Prerequisites](#prerequisites) says what each one is
-for and which are optional.
+for and which are optional. The build-from-source line covers the `cargo xtask setup` rows a
+minimal cloud image lacks: **`fakeroot`**, which `build-rootfs` uses to give the guest image uid-0
+ownership without root, and **`readelf`** for the static-link check on the in-guest agent (arrives
+with `binutils` inside `build-essential` and `base-devel`; on Arch, `fakeroot` comes with
+`base-devel`).
 
 ### 3. Get access to `/dev/kvm`
 
@@ -81,7 +85,7 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 
 ### 4. Install Firecracker and its jailer
 
-The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
+The engine drives Firecracker; it does not bundle it (the container image is the one exception), so
 both binaries have to be on `PATH`. Two versions matter, and both track upstream's own patch
 window: the **pinned** release (currently **v1.16.1**) is what CI tests and what `bsx doctor`
 checks the on-`PATH` binary's sha256 against (the hash lives in `install.sh` and
@@ -93,7 +97,7 @@ boot continues with a warning but is neither tested here nor patched upstream, w
 footing for running untrusted code.
 
 This range **moves with upstream, not with our release cadence**: when a series ages out of their
-table the floor rises, which a weekly CI job (`firecracker-pin.yml`) rechecks against their table.
+table, the floor rises, which a weekly CI job (`firecracker-pin.yml`) rechecks against their table.
 
 ```console
 VER=v1.16.1
@@ -359,10 +363,10 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 - **Host-safe gate** (build, unit tests, lints, docs, the eBPF object build) runs in CI on **Ubuntu
   24.04** `x86_64` on every change.
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
-  suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
-  on **Arch Linux** (rolling) during development, both with **Firecracker v1.16**. Other distros
-  are supported per the checks above but not continuously exercised; `bsx doctor` names exactly
-  what a given host is missing.
+  suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM), by hand on
+  **Arch Linux** (rolling) during development, and by hand on a bare-metal **Ubuntu 24.04** host
+  (kernel 7.0), all with **Firecracker v1.16**. Other distros are supported per the checks above but
+  not continuously exercised; `bsx doctor` names exactly what a given host is missing.
 - **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
   carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
@@ -404,7 +408,7 @@ boot error, and are marked as such.
 | **`/dev/kvm` missing or permission denied** | No virtualization exposed (stock cloud VMs lack nested virt), or the user is not in the `kvm` group. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
 | **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export BSX_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.bsx.toml`. |
 | **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `BSX_SCRATCH_DIR=/var/tmp`. |
-| **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
+| **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged user space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
 | **`unix socket path is too long (> 108 bytes)`** (boot error only, no doctor row) | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export BSX_SCRATCH_DIR=/var/tmp` |
 | **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v bsx)`<br>or run with `sudo -E`. |
 | **`eBPF observability` Warn** naming kernel BTF | Host kernel built without `CONFIG_DEBUG_INFO_BTF=y`, so `/sys/kernel/btf/vmlinux` is absent. | Boot a kernel built with that option (check with `ls /sys/kernel/btf/vmlinux`); most general-purpose distribution kernels enable it, custom and minimal ones often do not. |
@@ -481,8 +485,9 @@ Once you have a binary, head to [Using the `bsx` CLI](./cli.md) to run something
 
 ## Vendoring for offline builds
 
-A build otherwise fetches sha-pinned inputs from three places: the guest kernel and boot rootfs from
-Firecracker's CI S3 bucket, the Alpine minirootfs from the Alpine CDN, and `apk-tools-static` from
+A build otherwise fetches sha-pinned inputs from four places: the guest kernel source from
+kernel.org, the raw-boot fixtures (CI kernel + Ubuntu rootfs) from Firecracker's CI S3 bucket, the
+Alpine minirootfs from the Alpine CDN, and `apk-tools-static` from
 this repo's own `build-inputs` release (mirrored there because Alpine's branch repo deletes older
 package revisions, so the upstream URL expires). On top of those sits the guest package
 (`.apk`) closure, which floats within the pinned Alpine branch and is recorded rather than hash-pinned

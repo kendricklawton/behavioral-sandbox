@@ -132,9 +132,9 @@ enum Cmd {
         #[arg(long)]
         update_lock: bool,
     },
-    /// Measure boot-to-userspace latency (percentiles) of the guest rootfs, on both the read-only
-    /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
-    ///. Needs `/dev/kvm` + the built guest rootfs.
+    /// Measure cold-boot latency (percentiles) on both the read-only shared base and the read-write
+    /// per-VM copy, each split into the wall, the guest boot, and host staging. Needs `/dev/kvm`
+    /// plus the built guest rootfs.
     BenchBoot {
         /// How many boots to time per path (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.

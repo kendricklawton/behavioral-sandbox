@@ -137,7 +137,7 @@ pub fn config() -> BootConfig {
     cfg
 }
 
-/// A boot config pointed at the **guest rootfs** (`cargo xtask build-rootfs`): readiness is the
+/// A boot config pointed at the guest rootfs (`cargo xtask build-rootfs`); readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `BSX_ROOTFS`-overridable, the
 /// in-VM exec tests are about *that* image specifically.
 pub fn guest_rootfs_config() -> BootConfig {
@@ -178,12 +178,23 @@ pub fn jailed_overlay_config() -> BootConfig {
     cfg
 }
 
-/// Boot the guest rootfs, prewarmed the Python runtime (so the interpreter + stdlib are page-cache-hot in
-/// the guest's memory), and take a snapshot of *that* prewarmed state. Returns the source's cold-boot
-/// latency alongside the bundle so callers can compare it to restore.
+/// A prewarmed Python snapshot plus the cold-path timings its source paid to reach first output,
+/// so a caller can hold the restore path against the cold path like for like.
+pub struct Prewarmed {
+    pub snap: bsx_engine::Snapshot,
+    /// The source's boot latency (InstanceStart → the userspace marker).
+    pub cold_boot: Duration,
+    /// The source's first Python exec, the warm-up: what a cold caller pays after boot to get a
+    /// first result back.
+    pub cold_exec: Duration,
+}
+
+/// Boot the guest rootfs, prewarm the Python runtime (so the interpreter + stdlib are page-cache-hot in
+/// the guest's memory), and take a snapshot of *that* prewarmed state. Returns the source's cold-path
+/// timings alongside the bundle so callers can compare them to restore.
 // A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
 // workspace lints only re-allow inside test functions.
-pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (bsx_engine::Snapshot, Duration) {
+pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> Prewarmed {
     let mut source = match Vm::boot(guest_rootfs_config()) {
         Ok(vm) => vm,
         Err(e) => panic!("agent microVM should boot: {e}"),
@@ -192,11 +203,13 @@ pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (bsx_engine::Snapshot, Dura
     // "Runtime loaded": run Python once so the snapshot captures a guest with the interpreter and its
     // imports already resident, not a bare boot.
     let prewarmed = ["python3", "-c", "import json, os, sys"].map(String::from);
+    let t0 = std::time::Instant::now();
     match source.exec(&prewarmed, &[]) {
         Ok(out) if out.exit_code == 0 => {}
         Ok(out) => panic!("warm-up python should exit 0, got {}", out.exit_code),
         Err(e) => panic!("warm-up exec should run: {e}"),
     }
+    let cold_exec = t0.elapsed();
     let snap = match source.snapshot(bundle.path()) {
         Ok(s) => s,
         Err(e) => panic!("prewarmed snapshot (read_only_root + vsock) should succeed: {e}"),
@@ -204,7 +217,11 @@ pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (bsx_engine::Snapshot, Dura
     if let Err(e) = source.shutdown() {
         panic!("source shutdown should succeed: {e}");
     }
-    (snap, cold_boot)
+    Prewarmed {
+        snap,
+        cold_boot,
+        cold_exec,
+    }
 }
 
 /// The cgroup v2 dir `pid` currently lives in (`/sys/fs/cgroup` + its `0::` line), or `None` for

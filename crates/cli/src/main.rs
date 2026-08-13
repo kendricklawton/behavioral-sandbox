@@ -453,19 +453,27 @@ fn base_config(sources: &config::Sources) -> BootConfig {
     BootConfig::from_env_with(sources.boot_lookup())
 }
 
-/// Fold the shared hardening posture into `config`, the flag layer over what env/file already set:
-/// `--require-limits` only *strengthens* (an env/file `true` survives an absent flag, never forced
-/// `false`), and `--jail-uid`/`--jail-gid` overlay the folded ids. Shared by `run`, `shell`, and
-/// `serve` so the three cannot drift on which layer wins. An unjailed boot drops the whole `Jail`
-/// later, so setting ids for one is inert rather than wrong, and the require_limits/unjailed
-/// contradiction is owned by the engine (`LimitsUnavailable`, before any VMM); `serve` alone
-/// pre-checks it, because a daemon must fail at startup rather than refuse every session.
+/// Fold the shared posture into `config`: the launch shape these entry points own (the shared
+/// read-only base) plus the flag layer over what env/file already set. `--require-limits` only
+/// *strengthens* (an env/file `true` survives an absent flag, never forced `false`), and
+/// `--jail-uid`/`--jail-gid` overlay the folded ids. Shared by `run`, `shell`, and `serve` so the
+/// three cannot drift on which layer wins. An unjailed boot drops the whole `Jail` later, so
+/// setting ids for one is inert rather than wrong, and the require_limits/unjailed contradiction is
+/// owned by the engine (`LimitsUnavailable`, before any VMM); `serve` alone pre-checks it, because
+/// a daemon must fail at startup rather than refuse every session.
 fn apply_posture(
     config: &mut BootConfig,
     require_limits: bool,
     jail_uid: Option<u32>,
     jail_gid: Option<u32>,
 ) {
+    // The CLI and the daemon boot the agent image, so they boot it as one shared read-only base
+    // under a per-run tmpfs overlay instead of copying the base per VM (the copy costs 48 ms/boot
+    // of the 352 ms p50, exec-01, 2026-08-12). Set here, not in `BootConfig::default()`: the
+    // engine default must boot any rootfs, and the overlay path hands PID 1 to
+    // `bsx_channel::GUEST_OVERLAY_INIT`, which panics an image that lacks it; these entry points
+    // know which image they ship. There is deliberately no flag, env, or file key for it.
+    config.read_only_root = true;
     if require_limits {
         config.require_limits = true;
     }
@@ -1287,6 +1295,20 @@ mod tests {
         let mut bare = bsx_engine::BootConfig::from_env_with(|_| None);
         apply_posture(&mut bare, false, None, None);
         assert!(bare.jail.is_none());
+    }
+
+    #[test]
+    fn the_shared_posture_boots_the_read_only_base() {
+        // `run`, `shell`, and `serve` all fold their config through `apply_posture`, so this is
+        // the one place the launch shape turns the shared base on; a per-command set would let the
+        // three drift apart.
+        let mut config = bsx_engine::BootConfig::from_env_with(|_| None);
+        assert!(
+            !config.read_only_root,
+            "the engine default stays the copy path, which boots any rootfs"
+        );
+        apply_posture(&mut config, false, None, None);
+        assert!(config.read_only_root);
     }
 
     #[test]

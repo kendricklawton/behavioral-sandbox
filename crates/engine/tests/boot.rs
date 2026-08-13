@@ -721,7 +721,7 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-guest.ext4");
     if agent_rootfs.is_file() {
         let bundle = common::TmpDir::new("fd-warm");
-        let (snap, _cold_latency) = common::prewarmed_python_snapshot(&bundle);
+        let snap = common::prewarmed_python_snapshot(&bundle).snap;
         let warm_baseline = open_fds();
         let clone =
             Vm::restore(&snap, &guest_rootfs_config()).expect("prewarmed clone should restore");

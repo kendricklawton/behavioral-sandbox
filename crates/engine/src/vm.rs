@@ -38,6 +38,12 @@ use crate::{Limits, RunResult, VmmError};
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
 /// promptly; `pci=off` trims an unused bus; `random.trust_cpu=on` avoids an entropy stall at boot.
+/// `quiet` drops the kernel's informational printk from the serial console, where every byte is a
+/// VM exit on the boot path. Readiness survives it: both userspace markers (the agent's
+/// `GUEST-READY`, a getty's `login:`) are direct tty writes, not printk. The cost is the
+/// boot-progress trail on a guest that hangs without dying; `quiet` is console loglevel 4, so
+/// kernel errors and a panic (level 3 and below) still reach the console tail that boot errors
+/// carry, while warnings and info do not.
 /// `clocksource=kvm-clock` keeps the guest's clock on the paravirtual clocksource: left to itself
 /// the kernel demotes kvm-clock below raw `tsc` on any invariant-TSC host (every modern CPU), and a
 /// TSC-read clock is frozen state Firecracker restores as-is, so the `clock_realtime` fix-up on
@@ -51,7 +57,7 @@ use crate::{Limits, RunResult, VmmError};
 /// end because no v6 default route is installed, exactly as for v4. Firecracker adds `root=/dev/vda`
 /// itself from the root drive, so it is not listed here.
 const DEFAULT_BOOT_ARGS: &str =
-    "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on clocksource=kvm-clock";
+    "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on quiet clocksource=kvm-clock";
 
 /// Substring that marks the guest reached userspace. The default is the **guest rootfs's** ready
 /// sentinel, printed by `guest-agent` once its vsock listener accepts: that image is what the

@@ -19,6 +19,12 @@ use crate::{build_probes, cargo_reproducible, guest_rootfs_path, kernel_path, wo
 /// `BSX_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
+/// The artifacts staged under `share/bsx/`, the names an installed host carries. `install.sh`
+/// carries its own copy of this list, because a shell script cannot read this one;
+/// `the_installer_installs_exactly_what_dist_stages` holds the two together, since a divergence
+/// surfaces only when a *released* tarball is installed.
+const SHARE_MEMBERS: [&str; 3] = ["vmlinux", "rootfs-guest.ext4", PROBES_NAME];
+
 /// The target the **shipped** binary is built for: static musl, so the package carries no libc
 /// dependency at all.
 ///
@@ -125,13 +131,9 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     std::fs::create_dir_all(&share).context("create stage share/bsx/")?;
 
     copy_mode(&bin, &stage.join("bin/bsx"), 0o755)?;
-    copy_mode(&kernel, &share.join("vmlinux"), 0o644)?;
-    copy_mode(
-        &guest_rootfs_path(),
-        &share.join("rootfs-guest.ext4"),
-        0o644,
-    )?;
-    copy_mode(&object, &share.join(PROBES_NAME), 0o644)?;
+    copy_mode(&kernel, &share.join(SHARE_MEMBERS[0]), 0o644)?;
+    copy_mode(&guest_rootfs_path(), &share.join(SHARE_MEMBERS[1]), 0o644)?;
+    copy_mode(&object, &share.join(SHARE_MEMBERS[2]), 0o644)?;
     copy_mode(
         &workspace_root().join("install.sh"),
         &stage.join("install.sh"),
@@ -562,6 +564,35 @@ mod tests {
         );
     }
 
+    /// `install.sh` installs a hardcoded list of `share/bsx/` members and writes the kernel's
+    /// installed path into the starter `~/.bsx.toml`; a shell script cannot read [`SHARE_MEMBERS`],
+    /// so the two lists are a copy. Held together here because a divergence is invisible until a
+    /// *released* tarball is installed: the loop fails on a missing file, or the config names a
+    /// kernel that was never installed.
+    #[test]
+    fn the_installer_installs_exactly_what_dist_stages() {
+        let install = std::fs::read_to_string(workspace_root().join("install.sh")).unwrap();
+
+        let listed: Vec<&str> = install
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("for f in")?.strip_suffix("; do"))
+            .expect("install.sh has a `for f in <members>; do` install loop")
+            .split_whitespace()
+            .collect();
+        assert_eq!(
+            listed, SHARE_MEMBERS,
+            "install.sh installs a different set of share/bsx/ members than `dist` stages"
+        );
+
+        // The starter config points at the installed kernel by name, so a rename that missed this
+        // line would install the kernel and then configure a path that holds nothing.
+        assert!(
+            install.contains(&format!("\"$DATA/{}\"", SHARE_MEMBERS[0])),
+            "install.sh's starter .bsx.toml must name $DATA/{} as the kernel",
+            SHARE_MEMBERS[0]
+        );
+    }
+
     /// The same drift guard, for the guest's IPv6 link. `bsx-probes-common` needs the prefix as a
     /// `#![no_std]` constant ([`GUEST_LINK6`]) because the in-kernel ICMPv6 spare decides on-link
     /// versus routable without a map lookup; `crates/engine/src/net.rs` owns the addresses it
@@ -638,6 +669,42 @@ mod tests {
             probes.1,
             probes.2
         );
+    }
+
+    /// Same drift guard, for *where* Firecracker goes. `install.sh` prints an install hint when it
+    /// finds no firecracker on PATH, and `docs/cli-install.md` gives the same commands in prose;
+    /// the directory is the load-bearing part. A user-local prefix is not on sudoers'
+    /// `secure_path`, so a hint that pointed there would put the VMM exactly where the jailed
+    /// posture (which runs under sudo) cannot resolve it, and the two copies would drift silently.
+    #[test]
+    fn install_sh_firecracker_dir_matches_the_install_guide() {
+        let install = std::fs::read_to_string(workspace_root().join("install.sh")).unwrap();
+        let guide = std::fs::read_to_string(workspace_root().join("docs/cli-install.md")).unwrap();
+
+        let dir = install
+            .lines()
+            .find_map(|l| l.strip_prefix("FC_INSTALL_DIR=\"")?.strip_suffix('"'))
+            .expect("install.sh declares FC_INSTALL_DIR at column zero");
+
+        // Named rather than inferred: the whole point is that this is a *system* dir, not the
+        // user-local prefix the `bsx` binary itself goes to.
+        assert!(
+            dir.starts_with("/usr/") || dir.starts_with("/opt/"),
+            "{dir} is not a system dir, so sudo would not resolve the VMM from it"
+        );
+
+        for bin in ["firecracker", "jailer"] {
+            // The script installs through the constant, so its hint cannot drift from the value
+            // this test read; the guide spells the path out, so it is compared literally.
+            assert!(
+                install.contains(&format!("$FC_INSTALL_DIR/{bin}")),
+                "install.sh's hint must place {bin} through $FC_INSTALL_DIR, not a literal path"
+            );
+            assert!(
+                guide.contains(&format!("{dir}/{bin}")),
+                "the install guide must install {bin} to {dir}, the dir secure_path covers"
+            );
+        }
     }
 
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned

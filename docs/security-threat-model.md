@@ -131,8 +131,8 @@ What each claim maps to:
 The row above (observation the guest does not address) is one half of
 "tamper-evident." The other half concerns a **different** adversary than the hostile guest this model
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
-compromised relay, an operator, or the transport a supervisor reads it over. To close that gap a
-finalized record is **signed with a host key the guest has no path to** (an `ed25519` detached
+compromised relay, an operator, or the transport a supervisor reads it over. To close that gap, a
+finalized record is **signed with a host key the guest has no path to** (an `Ed25519` detached
 signature over the canonical record bytes), and a verify path ships with it (`bsx verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
@@ -199,7 +199,7 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   only and `#![forbid(unsafe_code)]`, running in-process on the host path, so the surface is a
   memory-safe reader rather than `e2fsck` and `debugfs` holding the driver's privileges; `cargo
   xtask fuzz output_image` is what exercises it on malformed images. The walk the engine puts on top
-  is bounded in bytes, entries, depth and wall time, and the extracted tree is symlink-sanitized.
+  is bounded in bytes, entries, depth, and wall time, and the extracted tree is symlink-sanitized.
 
   **Memory safety does not exclude an allocation sized from attacker bytes, and that class is not
   hypothetical here.** The parser reads through a trait, so it never learns an image's real length

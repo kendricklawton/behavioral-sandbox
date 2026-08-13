@@ -61,7 +61,7 @@ a little-endian `u32` length) and then a payload, with **the length checked agai
 (1 MiB) before anything is allocated**. That ordering is the whole defense against a hostile guest
 declaring a 4 GiB frame.
 
-`bsx-channel` is near dependency-free (`zeroize`, giving the post-send secret wipe a volatile store,
+`bsx-channel` is nearly dependency-free (`zeroize`, giving the post-send secret wipe a volatile store,
 is the one dependency; its `Cargo.toml` states why), and is shared verbatim by the driver and the
 in-guest agent, so a wire-format change reaches both sides in the same commit.
 

@@ -73,6 +73,11 @@ fn main() -> Result<(), VmmError> {
     // pre-warmed means exec-ready.
     let mut source_cfg = BootConfig::from_env();
     source_cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    // The shared read-only base, what the CLI and the daemon boot: every clone references the one
+    // pinned base (sharing its page cache) instead of staging its own private disk copy. Needs an
+    // image carrying the overlay init (`cargo xtask build-rootfs` bakes it in); without this flag
+    // the snapshot carries a private disk, which restores too, just one copy per clone.
+    source_cfg.read_only_root = true;
     let mut source_vm = Vm::boot(source_cfg)?;
 
     // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is

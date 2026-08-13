@@ -92,19 +92,24 @@ PER-VM NETWORK NAMESPACE          |  HOST-SIDE ENFORCEMENT
 ## Storage
 
 The guest root comes from one Alpine base image with the static `guest-agent` baked in, attached one
-of two ways. By default each VM gets its **own read-write copy** of that base in its workdir,
-reclaimed with the workdir at teardown. A `read_only_root` boot instead hands Firecracker the base
-`O_RDONLY` and lets every sandbox share it, with the guest's writable layer supplied by a per-run
-`tmpfs` overlay, which is what makes one base image serve many concurrent VMs. It is an
-embedding-API field: an embedder sets it on the `BootConfig` a snapshot source or a pool boots from,
-and neither the CLI nor the daemon sets it, so their VMs each copy the base. Either way nothing a run
-changes outlives it unless explicitly collected. Bulk data rides block devices instead: a read-only
-ext4 built from `input_dir`, and a writable one extracted after teardown for `output_dir`.
-`read_only_root`, `input_dir`, and `output_dir` are all embedding-API fields rather than CLI flags.
+of two ways. With `read_only_root` off (the engine default) each VM gets its **own read-write copy**
+of that base in its workdir, reclaimed with the workdir at teardown; that path boots any rootfs. A
+`read_only_root` boot instead hands Firecracker the base `O_RDONLY` and lets every sandbox share it,
+with the guest's writable layer supplied by a per-run `tmpfs` overlay: one base image serves many
+concurrent VMs, and nothing pays to duplicate it (the copy costs 48 ms of a 352 ms p50 boot,
+exec-01, 2026-08-12). It requires an image that carries the overlay init, so the callers that know
+their image set it: the CLI and the daemon boot the agent image and turn it on in their shared
+posture fold (`apply_posture`), and an embedder sets it on the `BootConfig` a snapshot source or a
+pool boots from. Either way, nothing a run changes outlives it unless explicitly collected. Bulk
+data rides block devices instead: a read-only ext4 built from `input_dir`, and a writable one
+extracted after teardown for `output_dir`. `read_only_root`, `input_dir`, and `output_dir` are all
+embedding-API fields rather than CLI flags: there is no flag or config key that changes a VM's
+storage shape.
 
 ```text
-SANDBOX STORAGE LAYERING  (a read_only_root boot; the default gives each VM its
-                           own read-write copy of the base instead)
+SANDBOX STORAGE LAYERING  (a read_only_root boot, what the CLI and the daemon run;
+                           the engine default gives each VM its own read-write
+                           copy of the base instead)
 
   read-only base rootfs                per-run writable tmpfs overlay
   (artifacts/rootfs-guest.ext4)        (capped at 50% of guest RAM)

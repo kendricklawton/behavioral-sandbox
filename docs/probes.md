@@ -5,8 +5,7 @@ driver: the hardware-isolation boundary that *contains* untrusted code. This doc
 other half: the host-side eBPF that
 *observes and enforces* what that code does, from the host side of the KVM boundary: the programs
 are loaded by a host process and attached to host-kernel hooks, outside the guest's address space and
-outside any namespace it can enter (design rule 2). It starts with the foundation, build, load, attach, and read one program end to
-end, then builds out each axis: the syscall trace, network observation and egress enforcement on
+outside any namespace it can enter (design rule 2). It starts by building, loading, attaching, and reading one program end-to-end, then builds out each axis: the syscall trace, network observation and egress enforcement on
 the tap, resource accounting from the cgroup, and the fused per-run audit record.
 
 The worked example is a counter: `count_execve` attaches to the `sys_enter_execve` tracepoint and
@@ -65,8 +64,7 @@ Maps are **BTF-defined** (see below), so their key/value types are described in 
 
 ## The verifier
 
-Before the kernel runs a BPF program it *verifies* it: every path must be safe and terminate. Two
-of its rules the counter hits on purpose:
+Before the kernel runs a BPF program it *verifies* it: every path must be safe and terminate. The counter intentionally hits two of its rules:
 
 - **Bounded loops.** Walking the fixed 16-byte `comm` buffer to its NUL terminator is a loop whose
   bound is a compile-time constant, so the verifier can prove it terminates even with a data-dependent
