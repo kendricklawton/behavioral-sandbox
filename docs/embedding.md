@@ -68,7 +68,7 @@ bounding what crosses the tap is the eBPF policy in [`bsx-probes-loader`](./prob
 
 ### Sessions: the VM is the session
 
-Repeated `exec` operations within a sandbox share guest working directory and overlay filesystem
+Repeated `exec` operations within a sandbox share the guest working directory and overlay filesystem
 state, per [decision 4](./architecture-decisions.md#4-ephemeral-sandbox-sessions--snapshots).
 Session state persists for the VM lifetime and is cleared upon `shutdown`.
 

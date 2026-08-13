@@ -43,7 +43,7 @@ sandbox at this stage, and everything below is written to make that possible.
             |                            |                             |
             v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
      `bsx-engine`                 `bsx-protocol`                `bsx-record`
-  (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
+   (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (Ed25519 verify/chain)
             |                            |                             |
             +----------------------------+-----------------------------+
                                          |
@@ -232,12 +232,12 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | Path | Package | Role |
 |------|---------|------|
 | `crates/engine` | `bsx-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
-| `crates/channel` | `bsx-channel` | The host↔guest wire protocol: near dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by driver + agent. |
+| `crates/channel` | `bsx-channel` | The host↔guest wire protocol: nearly dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by driver + agent. |
 | `crates/guest-agent` | `bsx-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/probes` | `bsx-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | `bsx-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
-| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
+| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and Ed25519 signing/verification. No aya, so a record verifies off-host. |
 | `crates/protocol` | `bsx-protocol` | The daemon wire types, versioned. |
 | `crates/client` | `bsx-client` | The Rust reference client for `bsx serve`. |
 | `crates/cli` | `bsx` | The `bsx` CLI: `run`, `shell`, `doctor`, `verify`, plus the `bsx serve` daemon. The binary on `PATH` is `bsx`. |

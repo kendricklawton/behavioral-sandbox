@@ -215,7 +215,7 @@ impl Spawned {
             // 0755 (the jailed uid can walk it), but for a private disk the *leaf* dir is
             // `stage_restore_disk`'s to create: its staging contract (0700, owner euid, refuse a
             // pre-existing dir that isn't) means pre-creating the leaf here would refuse every
-            // jailed private-disk restore, the daemon's whole `--prewarm` path.
+            // jailed private-disk restore, the pool shape of any source without `read_only_root`.
             let baked_rel = snapshot.root_backing.strip_prefix("/").map_err(|_| {
                 VmmError::Vmm(format!(
                     "snapshot's baked-in disk path is not absolute: {}",

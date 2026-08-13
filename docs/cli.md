@@ -1,7 +1,7 @@
 # Using the `bsx` CLI
 
 In addition to the [embedding API](./embedding.md), which lets you use the engine as a library, the
-project provides an `bsx` CLI to run untrusted code in a hardware-isolated microVM from the command
+project provides a `bsx` CLI to run untrusted code in a hardware-isolated microVM from the command
 line. It is the engine's **reference embedder**: the whole sandbox lifecycle, open (confined by
 default), exec with inputs, collect artifacts, close, in one command.
 
@@ -68,10 +68,14 @@ differs is the operational shape — a long-lived process with its own flags, po
   lives in the [`bsx serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API.** The programmatic driver surface is
   [the daemon's](./daemon-protocol.md), not a subcommand.
-- **The shared read-only root** (`BootConfig::read_only_root`, one base image served `O_RDONLY` to
-  many VMs with a per-run tmpfs overlay). A one-shot CLI boots one VM, so the sharing has nothing to
-  share with; it pays off across concurrent sandboxes, which is an embedder's arrangement. Nothing
-  the CLI or the daemon runs sets it, so each `bsx run` gets its own read-write copy of the base.
+- **A storage-shape knob.** The CLI and the daemon boot their VMs on the **shared read-only root**
+  (`BootConfig::read_only_root`: the agent image served `O_RDONLY`, `/` made writable by a per-run
+  tmpfs overlay capped at half the guest's RAM), set in the one posture fold `run`, `shell`, and
+  `serve` share. A one-shot `bsx run` gains no cross-VM sharing from it, but it skips duplicating
+  the base image per boot (48 ms of a 352 ms p50 cold boot, exec-01, 2026-08-12). There is no flag
+  to change the shape: the field stays an embedder's decision on `BootConfig`, and the overlay
+  needs the agent image's overlay init, so a `rootfs` override pointing at a foreign image fails at
+  boot rather than booting unshared.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories or large files as
   ext4 devices) and **out-of-band control** (`KillHandle`, force-killing a blocked exec from another
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,

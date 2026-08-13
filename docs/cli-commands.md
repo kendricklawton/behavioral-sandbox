@@ -117,9 +117,9 @@ detect any alteration made *after* the producing host. The record file is a sche
 `{schema, key_id, signature, record}`, with the record carried inside as a string.
 
 `bsx verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
-mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a file
-over 16 MiB is rejected as "not a signed record" without being read in, since a real envelope is
-kilobytes.
+mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a single
+envelope is bounded at 16 MiB, and a record file (which may hold a session chain of multiple envelopes)
+is bounded at 256 MiB, rejected up front if exceeded.
 
 The file's shape picks the check. One line is a single envelope. Several lines, one envelope per
 line in order (the shape a daemon client saves its `trace` replies in), verify as a **session

@@ -59,7 +59,7 @@ Each section below exists and runs today; only the published result tables are w
 
 | Bench | Question |
 |---|---|
-| `bench-boot` | Cold boot latency, and the cost of the per-VM rootfs copy |
+| `bench-boot` | Cold boot latency, split into guest boot vs host staging, and the cost of the per-VM rootfs copy |
 | `bench-warm` | Snapshot restore and pool take, against cold boot |
 | `bench-density` | Memory sharing across concurrent clones: RSS against PSS |
 | `bench-footprint` | Per-sandbox host cost under each rootfs/overlay choice |

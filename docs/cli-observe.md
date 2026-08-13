@@ -45,7 +45,7 @@ and an agent planning its next turn needs to know what it may retry.
 ## Schema versioning
 
 Each machine JSON surface carries a leading integer **`schema`** field, and the `--json` run result,
-the `--record` audit record, and the `--record-summary` projection version **independently**. The
+the `--record` audit record, and the `--record-summary` projection are versioned **independently**. The
 `--json` result and the summary are at `1`; a `--record` file's outer object is the signing envelope
 at `2`, wrapping a record that is itself `1`, so read the `schema` at the level you are parsing. The compatibility policy: **within a version, changes are additive only**, a new field
 a consumer can ignore; **renaming or removing a field, or changing a value's meaning, bumps the
@@ -110,8 +110,8 @@ the same line [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-th
 draws for the uplink.
 
 `--gateway` fills the field the kernel `ip=` parameter otherwise leaves empty. It names a path
-rather than building one: the engine adds no veth, bridge, forwarding, or NAT, so on a host whose
-per-VM netns nothing has furnished the reachable set is unchanged. What changes is that the guest
+rather than building one: the engine adds no veth, bridge, forwarding, or NAT, so on a host where
+nothing has furnished the per-VM netns, the reachable set is unchanged. What changes is that the guest
 can now *emit* those packets, so the classifier judges them and a refusal lands in `denials`. The
 observable set widens even where the reachable set does not.
 

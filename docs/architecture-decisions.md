@@ -207,3 +207,30 @@ walking a mutated image; it is the first fuzz coverage this parser has had in ei
 e2fsprogs was never fuzzed here either. A genuinely corrupt image now fails the readback with a typed
 error instead of being repaired into something, which is the deliberate posture: refusing to read a
 broken guest image is easier to defend than trusting a repair pass over attacker-chosen bytes.
+
+## 11. The CLI and the daemon boot the shared read-only base
+
+`BootConfig::read_only_root` was designed as an embedder's field, and until this decision neither
+the CLI nor the daemon set it: every `bsx run` copied the base image into its workdir and booted the
+copy read-write. The recorded reason was that sharing pays off across concurrent sandboxes, which a
+one-shot CLI does not have. That reason was incomplete. The copy has a second cost the argument
+never priced: duplicating the 132 MiB base is 48 ms of a 352 ms p50 cold boot (exec-01,
+2026-08-12), and a one-shot `bsx run` pays it in full, every time, for a disk that is discarded
+seconds later.
+
+**`run`, `shell`, and `serve` now set `read_only_root` in their shared posture fold**
+(`apply_posture`), so every CLI- and daemon-launched VM boots the agent image `O_RDONLY` with its
+writable layer on the per-run tmpfs overlay. For the daemon this also puts its pre-warmed pool on
+the shared-base path, where clones reference one pinned base instead of each carrying a private
+disk copy.
+
+**The engine default does not move.** The copy path boots any rootfs; the overlay path hands PID 1
+to the image's overlay init and fails the boot of an image that lacks it. `BootConfig::default()`
+keeping `read_only_root = false` is therefore the honest default for an embedder pointing the
+engine at an arbitrary image, and the flip lives in the layer that knows which image it boots: the
+CLI and the daemon ship the agent image.
+
+**Two behavior changes ride along, named rather than buried.** A `rootfs` override naming an image
+without the overlay init now fails at boot instead of booting unshared. And writes to `/` are
+bounded by the overlay's tmpfs cap (half the guest's RAM) instead of by the copy's free space;
+bulk output belongs on `output_dir` either way.

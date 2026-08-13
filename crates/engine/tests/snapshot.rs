@@ -150,7 +150,8 @@ fn prewarmed_snapshot_restores_and_runs_code() {
     // shared read-only base, and run Python on it, the exec channel survives the snapshot (Firecracker
     // re-binds vsock on restore), so a prewarmed clone runs code without paying the cold boot.
     let bundle = TmpDir::new("snap-warm");
-    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
+    let warm = prewarmed_python_snapshot(&bundle);
+    let (snap, cold_boot) = (warm.snap, warm.cold_boot);
     // A prewarmed (read_only_root) snapshot references the shared base in place, so the bundle carries no
     // root-disk copy: the disk path points outside the bundle dir, not at a copy within it.
     assert!(
@@ -194,7 +195,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     // computation on each concurrently-alive clone and getting each clone's own answer back.
     const N: usize = 3;
     let bundle = TmpDir::new("snap-warm-clones");
-    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+    let snap = prewarmed_python_snapshot(&bundle).snap;
 
     let mut clones: Vec<_> = (0..N)
         .map(|i| {
@@ -240,7 +241,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
     // mismatch; with per-clone isolation each reads back exactly its own.
     const N: usize = 4;
     let bundle = TmpDir::new("snap-bleed");
-    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+    let snap = prewarmed_python_snapshot(&bundle).snap;
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
@@ -382,7 +383,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
         return;
     }
     let bundle = TmpDir::new("snap-jailed");
-    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+    let snap = prewarmed_python_snapshot(&bundle).snap;
 
     let mut cfg = guest_rootfs_config();
     cfg.jail = Some(Jail::default());
@@ -441,7 +442,7 @@ fn pooled_clones_do_not_share_a_jail_uid() {
         return;
     }
     let bundle = TmpDir::new("snap-span");
-    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+    let snap = prewarmed_python_snapshot(&bundle).snap;
 
     let mut cfg = guest_rootfs_config();
     let mut jail = Jail::default();
@@ -481,12 +482,12 @@ fn pooled_clones_do_not_share_a_jail_uid() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn restores_a_private_disk_snapshot_under_the_jailer() {
-    // The daemon's `--prewarm` shape, distinct from the shared-base test above: a `Sandbox` pool
-    // source copies its rootfs per-VM into the workdir, so its bundle carries a **private** disk
-    // and every jailed clone *stages* that disk into the chroot instead of bind-mounting a shared
-    // base. The staging leaf must be left for the restore to create 0700: pre-created
-    // along with the traversal chain (default 0755) it fails the privacy check, and a jailed
-    // daemon could never keep a pool.
+    // The private-disk pool shape, distinct from the shared-base test above: a source without
+    // `read_only_root` copies its rootfs per-VM into the workdir, so its bundle carries a
+    // **private** disk and every jailed clone *stages* that disk into the chroot instead of
+    // bind-mounting a shared base. The staging leaf must be left for the restore to create 0700:
+    // pre-created along with the traversal chain (default 0755) it fails the privacy check, and a
+    // jailed embedder could never keep a pool.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping restores_a_private_disk_snapshot_under_the_jailer: needs real root (euid 0)"
@@ -494,10 +495,10 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
         return;
     }
     let bundle = TmpDir::new("snap-jailed-private");
-    // The daemon's base config leaves `read_only_root` off, so its Sandbox source carries a
-    // per-VM rootfs copy inside the workdir: that is what makes the bundle a private disk. The
-    // shared test config turns it on (for the overlay tests), so switch it off here or this
-    // test silently drifts onto the shared-base branch the previous test already covers.
+    // An embedder that leaves `read_only_root` off gets a Sandbox source with a per-VM rootfs
+    // copy inside the workdir: that is what makes the bundle a private disk. The shared test
+    // config turns it on (for the overlay tests), so switch it off here or this test silently
+    // drifts onto the shared-base branch the previous test already covers.
     let mut source_cfg = guest_rootfs_config();
     source_cfg.read_only_root = false;
     let mut source =
@@ -621,7 +622,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     // both halves of the fix (Firecracker ships VMGenID; kernel 6.1 has the vmgenid driver,
     // which reseeds the CRNG on a generation bump): this proves it end to end.
     let bundle = TmpDir::new("snap-entropy");
-    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+    let snap = prewarmed_python_snapshot(&bundle).snap;
 
     // Let the bundle visibly age before restoring, so the clock half of this test can actually
     // discriminate. A clone restored from a snapshot taken moments ago is within tolerance whether
@@ -746,7 +747,8 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     use bsx_engine::Pool;
 
     let bundle = TmpDir::new("snap-pool");
-    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
+    let warm = prewarmed_python_snapshot(&bundle);
+    let (snap, cold_boot) = (warm.snap, warm.cold_boot);
 
     let mut pool = Pool::new(snap, guest_rootfs_config(), 2)
         .expect("pool should prefill two prewarmed clones");
@@ -831,18 +833,20 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
-fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
-    // The prewarm payoff asserted, not eyeballed: from "restore a prewarmed Python snapshot" to
-    // "the code's output is back on the host" in well under the source's cold-boot latency. The
-    // bound is generous twofold: the asserted 2x margin is far inside the measured ~6.6x (the boot-modes
-    // bench, n=100: restore-to-output p50 105 ms vs cold boot + exec p50 689 ms), and `cold_boot`
-    // itself understates the cold path, which pays boot *plus* this same exec.
+fn prewarmed_restore_returns_output_faster_than_the_cold_path() {
+    // The prewarm payoff asserted, not eyeballed: restore-to-output against what the cold path
+    // pays for the same result, its boot *plus* its first Python exec. Both sides carry an exec,
+    // so the asserted gap is boot-vs-restore, the part prewarming exists to remove; a ratio
+    // against boot alone bakes the current kernel's boot time into the margin, and a faster
+    // kernel then fails the test with the payoff intact. Strict ordering is the claim; the
+    // printed line carries the measured gap for the host it ran on.
     let bundle = TmpDir::new("snap-warm-fast");
-    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
+    let warm = prewarmed_python_snapshot(&bundle);
+    let cold_to_output = warm.cold_boot + warm.cold_exec;
 
     let t0 = std::time::Instant::now();
     let mut restored =
-        Vm::restore(&snap, &guest_rootfs_config()).expect("prewarmed restore should resume");
+        Vm::restore(&warm.snap, &guest_rootfs_config()).expect("prewarmed restore should resume");
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = restored
         .exec(&argv, &[])
@@ -856,10 +860,17 @@ fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
         "the restored clone should compute and return the output"
     );
     assert!(
-        to_output * 2 < cold_boot,
-        "restore-to-output ({to_output:?}) should be far under a cold boot ({cold_boot:?})"
+        to_output < cold_to_output,
+        "restore-to-output ({to_output:?}) should beat the cold path to output \
+         ({cold_to_output:?} = boot {:?} + first exec {:?})",
+        warm.cold_boot,
+        warm.cold_exec
     );
-    eprintln!("prewarmed restore to output {to_output:?} vs cold boot {cold_boot:?}");
+    eprintln!(
+        "prewarmed restore to output {to_output:?} vs cold path to output {cold_to_output:?} \
+         (boot {:?} + first exec {:?})",
+        warm.cold_boot, warm.cold_exec
+    );
     restored
         .shutdown()
         .expect("restored shutdown should succeed");

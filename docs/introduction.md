@@ -6,8 +6,8 @@ isolation, with a host-observed record of what the host was able to see it do.
 Untrusted code runs inside a **Firecracker** microVM, so the isolation boundary is the CPU's,
 enforced by KVM. Everything that watches or restricts that code runs on the *host* side of that
 boundary as **host-side eBPF** (**aya**), outside the guest's address space and outside any
-namespace the guest can enter. It reads the sandbox's network traffic and its cgroup directly. Guest
-syscalls it sees only as the VMM's own host footprint, because a microVM services them in its own
+namespace the guest can enter. It reads the sandbox's network traffic and its cgroup directly. It sees
+guest syscalls only as the VMM's own host footprint, because a microVM services them in its own
 kernel.
 
 It exists for the usual suspects: a third-party binary, a fork's CI job, a dependency's install

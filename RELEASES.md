@@ -113,7 +113,7 @@ or behavior is pinned; pin a git rev.
 
 ### Release Signing (prerequisite for every tagged release)
 
-`SHA256SUMS` ships with a detached ed25519 signature made by the release key. Before the first
+`SHA256SUMS` ships with a detached Ed25519 signature made by the release key. Before the first
 tag (and after any rotation), the operator ceremony is:
 
 1. `cargo xtask release-key --path <file outside the repo>` mints (or shows) the key and prints

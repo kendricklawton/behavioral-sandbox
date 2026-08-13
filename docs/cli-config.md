@@ -143,8 +143,8 @@ which the kernel caps at roughly 108 bytes.
 The stderr log filter, for example `info` or `debug`. Logs go to stderr and only there (the one
 `tracing` subscriber is initialized with a stderr writer), so
 `bsx run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run. A filter
-`tracing` cannot parse is refused up front, the same loudness as a mistyped key in this file; a
-bare unknown word is not that case, since the filter grammar reads it as a target name.
+`tracing` cannot parse is refused up front, with the same loudness as a mistyped key in this file; a
+bare unknown word is not an error, since the filter grammar reads it as a target name.
 
 [`log`]: #setting-log
 
@@ -174,8 +174,8 @@ The `--require-limits` flag sets it per run.
 The id the jailer switches to after building the chroot. Pick one that owns nothing else on the
 host: the jailer chowns the chroot to it, so it needs no `/etc/passwd` entry.
 
-**This is the operator's setting and never a caller's.** Every sandbox one engine starts shares it,
-and so does a second `bsx serve` left at the default, so two daemons meant to separate tenants need
+**This is the operator's setting and never a caller's.** Every sandbox an engine starts shares it,
+as does a second `bsx serve` left at the default; therefore, two daemons meant to separate tenants need
 different ids. Processes sharing a uid can signal each other, so a guest that escaped into its own
 VMM would land beside its neighbours' VMMs at the same id (`ptrace` between them is additionally
 gated by Yama, which `bsx doctor` reports). Nothing on the daemon's wire protocol carries an id, by

@@ -1652,8 +1652,8 @@ mod tests {
         // The jailed-restore sequence for a private disk, host-safe (own uid stands in for the
         // jail's): the traversal chain is pre-created, but the staging *leaf* must be left for
         // `stage_restore_disk` to create 0700. A pre-created leaf (default 0755) fails the 0700
-        // privacy check, refusing every jailed private-disk restore and so the daemon's whole
-        // `--prewarm` path.
+        // privacy check, refusing every jailed private-disk restore: any pool built from a source
+        // without `read_only_root`.
         use std::os::unix::fs::PermissionsExt;
         let base = ScratchDir::created("bsx-stage-jail");
         let root = base.path().join("chroot-root"); // stands in for <jail>/root

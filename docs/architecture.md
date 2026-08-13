@@ -11,7 +11,7 @@ the code, a run from boot to teardown, the eBPF half, and the numbered decisions
 `bsx` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via Linux KVM). **Host-side eBPF** (`aya`) observes and
 enforces what it does from the host side of the KVM boundary: network flows and resource accounting
-directly, syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its
+directly, and sees syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its
 own kernel ([the honest limit](./probes.md#the-hardware-isolation-consequence-the-honest-limit)).
 The programs are loaded by a host process and attached to host-kernel hooks. The guest
 drives four crossings, enumerated in the [threat model](./security-threat-model.md), and none of them names a
@@ -88,7 +88,7 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | Crate | Directory | Role |
 |---|---|---|
 | `bsx-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
-| `bsx-channel` | `crates/channel` | The host/guest wire protocol. Near dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
+| `bsx-channel` | `crates/channel` | The host/guest wire protocol. Nearly dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
 | `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `bsx-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
 | `bsx-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
