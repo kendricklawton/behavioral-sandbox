@@ -85,6 +85,21 @@ fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
     }
 }
 
+/// The deliberate copy above must stay byte-for-byte the shared builder, or this suite proves an
+/// outside consumer can rebuild *something else*. Held here rather than by deleting the copy,
+/// because building the fixture inline is what makes the suite evidence about the public API.
+#[test]
+fn the_public_api_fixture_matches_the_shared_builder() {
+    let mine = ev(59, 0x42, b"/bin/sh", "sh");
+    let shared = bsx_test_support::syscall_event(59, 0x42, b"/bin/sh", "sh");
+    assert_eq!(mine.cgroup_id, shared.cgroup_id);
+    assert_eq!((mine.pid, mine.tid), (shared.pid, shared.tid));
+    assert_eq!(mine.syscall, shared.syscall);
+    assert_eq!(mine.detail_len, shared.detail_len);
+    assert_eq!(mine.comm, shared.comm);
+    assert_eq!(mine.detail, shared.detail);
+}
+
 /// The fixture's record, rebuilt from fixed parts through the public API. Every axis is populated,
 /// so a canonicalization change anywhere in the record shows up as a byte difference.
 fn fixture_record() -> RunRecord {

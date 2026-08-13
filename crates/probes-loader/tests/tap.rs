@@ -15,7 +15,7 @@ use bsx_probes_loader::{EgressPolicy, ProbeError, Protocol, TapMonitor};
 
 mod common;
 
-use common::probe_skip_reason;
+use bsx_probes_loader::skip_reason as probe_skip_reason;
 
 #[test]
 #[ignore = "needs CAP_BPF+CAP_NET_ADMIN/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]

@@ -1,31 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use bsx_record::{
-    AxisGap, COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, HostKey, NetSection, NetStats,
-    RecordSubject, RunRecord, SyscallEvent, SyscallFootprint, Timing, record_hash, verify,
-    verify_chain,
+    AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats, RecordSubject, RunRecord,
+    SyscallEvent, SyscallFootprint, Timing, record_hash, verify, verify_chain,
 };
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 const IPPROTO_TCP: u8 = 6;
 
-/// A synthetic `SyscallEvent`, deliberately another copy of `src/testutil.rs`'s builder: a bench
-/// compiles as a foreign crate and cannot see `pub(crate)`.
+/// A synthetic `SyscallEvent` with the cgroup and comm a bench never varies, from the shared
+/// builder so the bytes timed here are the bytes the tests assert on.
 fn ev(syscall: u32, detail: &[u8]) -> SyscallEvent {
-    let mut d = [0u8; DETAIL_CAP];
-    let n = detail.len().min(d.len());
-    d[..n].copy_from_slice(&detail[..n]);
-    let mut c = [0u8; COMM_CAP];
-    c[..2].copy_from_slice(b"sh");
-    SyscallEvent {
-        cgroup_id: 0x42,
-        pid: 7,
-        tid: 7,
-        syscall,
-        detail_len: n as u32,
-        comm: c,
-        detail: d,
-    }
+    bsx_test_support::syscall_event(syscall, 0x42, detail, "sh")
 }
 
 /// A **populated** record: 64 flows and a full notable set, so `to_json` is timed on what the engine

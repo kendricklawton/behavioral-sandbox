@@ -232,23 +232,10 @@ mod tests {
         SyscallFootprint, Timing,
     };
 
-    /// A synthetic event from public fields, as the loader's own unit tests build them.
+    /// A synthetic event from public fields, from the shared builder so the renderer is exercised
+    /// on the same bytes the record crate's own tests assert on.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; bsx_probes_loader::DETAIL_CAP];
-        let n = detail.len().min(d.len());
-        d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; bsx_probes_loader::COMM_CAP];
-        let m = comm.len().min(c.len());
-        c[..m].copy_from_slice(&comm.as_bytes()[..m]);
-        SyscallEvent {
-            cgroup_id: cgroup,
-            pid: 7,
-            tid: 7,
-            syscall,
-            detail_len: n as u32,
-            comm: c,
-            detail: d,
-        }
+        bsx_test_support::syscall_event(syscall, cgroup, detail, comm)
     }
 
     fn sample() -> RunRecord {

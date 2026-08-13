@@ -19,7 +19,7 @@ use bsx_probes_loader::{Syscall, SyscallTracer, cgroup_id_of_self};
 
 mod common;
 
-use common::probe_skip_reason;
+use bsx_probes_loader::skip_reason as probe_skip_reason;
 
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]

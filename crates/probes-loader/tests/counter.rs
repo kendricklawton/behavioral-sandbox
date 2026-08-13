@@ -15,7 +15,7 @@ use bsx_probes_loader::ExecveCounter;
 
 mod common;
 
-use common::probe_skip_reason;
+use bsx_probes_loader::skip_reason as probe_skip_reason;
 
 #[test]
 #[ignore = "needs /dev/kvm-class privilege (CAP_BPF/root) + BTF + the built object (run via `cargo xtask ci-privileged`)"]
