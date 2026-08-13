@@ -39,5 +39,11 @@ fn main() -> Result<(), ProbeError> {
     for (pid, n) in by_pid.iter().take(5) {
         println!("  pid {pid}: {n}");
     }
+    // The per-PID map is bounded, so on a busy host it can fill: say so rather than let the
+    // breakdown above read as complete. `count` above stays exact either way.
+    let dropped = counter.dropped_pids()?;
+    if dropped > 0 {
+        println!("  ({dropped} pid(s) the map could not admit; the breakdown is partial)");
+    }
     Ok(())
 }

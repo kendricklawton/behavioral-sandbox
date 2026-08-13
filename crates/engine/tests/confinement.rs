@@ -11,9 +11,15 @@
 
 mod common;
 
-use std::ffi::OsString;
+/// The engine's own mountinfo parser, compiled into this test rather than mirrored in it: the
+/// cleanup below decodes mount points with the same code `sweep` does, so a regression in the
+/// octal-escape decoding fails here instead of being hidden by a copy that drifted. Only the
+/// mount-point walk is used, so the module's other selection rules read as dead here.
+#[allow(dead_code)]
+#[path = "../src/mountinfo.rs"]
+mod mountinfo;
+
 use std::io::{BufRead, BufReader};
-use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -86,15 +92,15 @@ fn scratch_under(base: &Path, tag: &str) -> TmpDir {
 /// (`sweep.rs`'s `detach_mounts_under`, which is not public API): a dead run's chroot bind mount
 /// otherwise blocks reclamation and, worse, keeps satisfying mountinfo scans with a stale inode.
 ///
-/// The mount point is decoded before it is compared ([`unescape_octal`]), because `BSX_SCRATCH_DIR`
-/// is operator-supplied and a space in it is legal.
+/// The mount point is decoded before it is compared, because `BSX_SCRATCH_DIR` is operator-supplied
+/// and a space in it is legal. That decoding comes from the engine's own parser (included below),
+/// so this reclaims exactly the mounts the sweep would.
 fn detach_mounts_under(dir: &Path) {
     let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return;
     };
-    let mut targets: Vec<PathBuf> = info
-        .lines()
-        .filter_map(|l| l.split(' ').nth(4).map(unescape_octal))
+    let mut targets: Vec<PathBuf> = mountinfo::mounts(&info)
+        .map(|m| m.point)
         .filter(|mp| mp.starts_with(dir))
         .collect();
     targets.sort_by_key(|mp| std::cmp::Reverse(mp.components().count()));
@@ -104,30 +110,6 @@ fn detach_mounts_under(dir: &Path) {
             .arg(&mp)
             .status();
     }
-}
-
-/// Decode a mountinfo path's octal escapes (`\040` space, `\011` tab, `\012` newline, `\134`
-/// backslash) so a mount point with a space still prefix-matches correctly.
-fn unescape_octal(s: &str) -> PathBuf {
-    if !s.contains('\\') {
-        return PathBuf::from(s);
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8)
-        {
-            out.push(byte);
-            i += 4;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    PathBuf::from(OsString::from_vec(out))
 }
 
 /// The pid of the live VMM belonging to the boot staged under `scratch`, or `None` while none is

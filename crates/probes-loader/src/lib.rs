@@ -150,6 +150,24 @@ pub fn object_path() -> PathBuf {
     )
 }
 
+/// Why this host cannot load the shipped probes, or `None` when it can: [`check_support`]'s reason,
+/// then the object's absence with the command that builds it. Lives here rather than in each
+/// suite's helpers because a test in any crate asks the same two questions, and the answer names
+/// the one thing to fix instead of failing obscurely at load.
+#[must_use]
+pub fn skip_reason() -> Option<String> {
+    if let Err(e) = check_support() {
+        return Some(e.to_string());
+    }
+    if !object_path().is_file() {
+        return Some(format!(
+            "BPF object {} not built (run `cargo xtask build-probes`)",
+            object_path().display()
+        ));
+    }
+    None
+}
+
 /// The pure precedence rule behind [`object_path`]. `built` and `installed` are `Some` only when that
 /// candidate exists, and `fallback` is returned when none do, so the resulting read error names the
 /// source-tree path and its build hint.
@@ -246,10 +264,9 @@ pub fn cgroup_id_of_self() -> Result<u64, ProbeError> {
     cgroup_id_of_pid(std::process::id())
 }
 
-/// Whether the host has kernel BTF, the CO-RE prerequisite. [`check_support`] is the fuller gate:
-/// BTF **and** the capabilities, with a legible reason.
-#[must_use]
-pub fn ebpf_supported() -> bool {
+/// Whether the host has kernel BTF, the CO-RE prerequisite. Private because [`check_support`] is
+/// the gate every caller wants: BTF **and** the capabilities, refused with a legible reason.
+fn ebpf_supported() -> bool {
     Path::new("/sys/kernel/btf/vmlinux").exists()
 }
 

@@ -302,6 +302,7 @@ dependencies = [
 name = "bsx-test-support"
 version = "0.0.3"
 dependencies = [
+ "bsx-probes-common",
  "tracing",
  "tracing-subscriber",
 ]

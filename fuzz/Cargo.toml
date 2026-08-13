@@ -17,7 +17,6 @@ libfuzzer-sys = "0.4"
 # The bulk-output image parser the engine points at guest-authored bytes. Named directly rather than
 # reached through `bsx-engine`, whose readback wraps it in host filesystem writes.
 ext4-view = { version = "0.9", features = ["std"] }
-serde_json = "1"
 toml = "0.8"
 
 [dependencies.bsx-channel]

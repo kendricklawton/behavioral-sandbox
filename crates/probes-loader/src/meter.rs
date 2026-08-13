@@ -22,8 +22,6 @@ const CPU_NS_MAP: &str = "CPU_NS";
 const CPU_DROPS_MAP: &str = "CPU_DROPS";
 /// The set of cgroup ids to meter (`#[map] static METER_TARGETS`, `cgroup_id -> 1`).
 const METER_TARGETS_MAP: &str = "METER_TARGETS";
-/// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` = target set, `1` = all.
-const METER_ALL_MAP: &str = "METER_ALL";
 
 /// A loaded, attached resource meter: the `sched/sched_switch` tracepoint accumulates each
 /// registered cgroup's on-CPU time into a map that [`cpu_time`](Self::cpu_time) reads back per
@@ -41,8 +39,8 @@ pub struct ResourceMeter {
 
 impl ResourceMeter {
     /// Loads the compiled object and attaches the `account_sched_switch` tracepoint. Nothing
-    /// accumulates until [`add_target`](Self::add_target) or [`meter_all`](Self::meter_all): every
-    /// context switch charges the outgoing task's cgroup, but only a registered one.
+    /// accumulates until [`add_target`](Self::add_target): every context switch charges the
+    /// outgoing task's cgroup, but only a registered one.
     ///
     /// # Errors
     /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps, via [`check_support`]);
@@ -111,16 +109,6 @@ impl ResourceMeter {
             cgroup_id,
             &format!("clear cgroup {cgroup_id} CPU total"),
         )
-    }
-
-    /// Turns the meter-everything toggle on or off: off (the default) meters only the
-    /// [`add_target`](Self::add_target) set, on meters every cgroup on the host, so `CPU_NS` grows
-    /// toward one entry per live cgroup.
-    ///
-    /// # Errors
-    /// [`ProbeError::Map`] if the toggle map is missing or the write fails.
-    pub fn meter_all(&mut self, on: bool) -> Result<(), ProbeError> {
-        crate::maps::set_flag(&mut self.ebpf, METER_ALL_MAP, 0, on)
     }
 
     /// The writable `METER_TARGETS` set handle.
@@ -200,8 +188,8 @@ impl ResourceMeter {
     /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolves its cgroup once (id
     /// **and** dir, from `/proc/<pid>/cgroup`), then reads the eBPF CPU total and the native cgroup
     /// v2 memory/IO counters. The CPU figure is meaningful only if this cgroup was
-    /// [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on) while the run
-    /// executed; the memory/IO figures are the kernel's regardless.
+    /// [`add_target`](Self::add_target)ed while the run executed; the memory/IO figures are the
+    /// kernel's regardless.
     ///
     /// # Errors
     /// [`ProbeError::Cgroup`] if the pid's cgroup can't be resolved (`/proc/<pid>/cgroup` unreadable

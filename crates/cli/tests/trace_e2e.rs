@@ -14,22 +14,13 @@
 
 use std::process::Command;
 
-use bsx_probes_loader::{check_support, object_path};
 use bsx_test_support::ScratchDir;
 use bsx_test_support::{vm_skip_reason, workspace_root};
 
-/// Why this host can't run the test (a skip reason), or `None` when it can.
+/// Why this host can't run the test (a skip reason), or `None` when it can: the loader's own probe
+/// gate, then the VM prerequisites.
 fn skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    vm_skip_reason()
+    bsx_probes_loader::skip_reason().or_else(vm_skip_reason)
 }
 
 #[test]

@@ -30,7 +30,7 @@ use bsx_probes_loader::{EgressPolicy, Protocol, object_path};
 
 mod common;
 
-use common::probe_skip_reason;
+use bsx_probes_loader::skip_reason as probe_skip_reason;
 
 /// `TC_ACT_OK`: the classifier accepted the frame.
 const TC_ACT_OK: u32 = 0;

@@ -719,14 +719,9 @@ static CPU_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 static LAST_SWITCH: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// The set of cgroup ids to meter (`cgroup_id -> 1`), written by the loader as sandboxes come and
-/// go. Empty by default; a cgroup is metered when it is in this set **or** [`METER_ALL`] is on.
+/// go. Empty by default, so a cgroup is metered only once the loader registers it.
 #[map]
 static METER_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
-
-/// A meter-**everything** toggle: `0` (the load-time default) meters only [`METER_TARGETS`], `1`
-/// meters every cgroup.
-#[map]
-static METER_ALL: Array<u32> = Array::with_max_entries(1, 0);
 
 /// `tracepoint/sched/sched_switch`: closes the on-CPU interval for the task leaving the CPU and adds
 /// it to that task's cgroup total.
@@ -761,8 +756,7 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
 
     // A non-metered cgroup's slice is dropped here, after the cursor is advanced, so the *next*
     // interval stays exact. `get_ptr` is a presence check without a deref, so no `unsafe`.
-    let all = METER_ALL.get(0).copied().unwrap_or(0) != 0;
-    if !all && METER_TARGETS.get_ptr(cgroup).is_none() {
+    if METER_TARGETS.get_ptr(cgroup).is_none() {
         return 0;
     }
 

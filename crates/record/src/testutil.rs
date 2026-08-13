@@ -9,34 +9,15 @@
 
 use std::time::Duration;
 
-use bsx_probes_common::{COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, IPPROTO_TCP, SyscallEvent};
+use bsx_probes_common::{FlowCounts, FlowKey, IPPROTO_TCP, SyscallEvent};
 
 use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
 use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 
-/// One synthetic event. `syscall` is the **raw discriminant**, not a [`Syscall`], so a test can
-/// feed a value that decodes to nothing and exercise the unknown-kind path.
-///
-/// `detail` and `comm` are truncated to their caps rather than rejected, which is what the probe's
-/// fixed buffers do to an over-long path.
-///
-/// [`Syscall`]: bsx_probes_common::Syscall
+/// One synthetic event, from the shared builder so this crate's unit tests, its `durability`
+/// integration test, its bench, and the CLI's trace renderer all name the same bytes.
 pub(crate) fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-    let mut d = [0u8; DETAIL_CAP];
-    let n = detail.len().min(d.len());
-    d[..n].copy_from_slice(&detail[..n]);
-    let mut c = [0u8; COMM_CAP];
-    let m = comm.len().min(c.len());
-    c[..m].copy_from_slice(&comm.as_bytes()[..m]);
-    SyscallEvent {
-        cgroup_id: cgroup,
-        pid: 7,
-        tid: 7,
-        syscall,
-        detail_len: n as u32,
-        comm: c,
-        detail: d,
-    }
+    bsx_test_support::syscall_event(syscall, cgroup, detail, comm)
 }
 
 /// One flow key with fixed counters: the endpoints are the variable under test, the byte and packet

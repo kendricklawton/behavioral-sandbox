@@ -15,27 +15,13 @@
 use std::time::Duration;
 
 use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
-use bsx_probes_loader::{check_support, object_path};
+use bsx_probes_loader::skip_reason;
 use bsx_test_support::{vm_skip_reason, workspace_root};
-
-/// Why this host cannot load the eBPF programs, or `None` when it can.
-pub fn probe_skip_reason() -> Option<String> {
-    if let Err(e) = check_support() {
-        return Some(e.to_string());
-    }
-    if !object_path().is_file() {
-        return Some(format!(
-            "BPF object {} not built (run `cargo xtask build-probes`)",
-            object_path().display()
-        ));
-    }
-    None
-}
 
 /// Why this host cannot run a test that boots a guest **and** attaches probes, or `None`. The probe
 /// half is reported first, since it is the cheaper thing to fix.
 pub fn probe_and_vm_skip_reason() -> Option<String> {
-    probe_skip_reason().or_else(vm_skip_reason)
+    skip_reason().or_else(vm_skip_reason)
 }
 
 /// An agent-rootfs boot config pointed at the workspace artifacts (absolute paths, so it is

@@ -800,7 +800,6 @@ dependencies = [
  "bsx-record",
  "ext4-view",
  "libfuzzer-sys",
- "serde_json",
  "toml 0.8.23",
 ]
 
