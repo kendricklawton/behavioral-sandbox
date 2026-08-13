@@ -1,12 +1,12 @@
 //! The fused per-run **audit record** and its pure builders.
 //!
-//! Defines the shape of "what a run did" as observed from *outside* the guest, plus the aggregation
-//! that folds the probes' raw output into it. The attach machinery producing those inputs lives in
-//! `bsx-probes-loader`, so keeping this half pure is what lets the whole aggregation be unit-tested on
-//! the host gate with synthetic inputs, no KVM or caps. Every collection is deterministically sorted,
-//! so a record built from the same observations is byte-stable regardless of map-iteration order. The
-//! one exception is *which* distinct events [`MAX_NOTABLE`] keeps past its cap (arrival order); every
-//! count stays exact and order-independent at any size.
+//! The shape of "what a run did" as observed from *outside* the guest, plus the aggregation that
+//! folds the probes' raw output into it. The attach machinery lives in `bsx-probes-loader`, so this
+//! half stays pure and unit-testable on the host gate with synthetic inputs, no KVM or caps.
+//!
+//! Every collection is deterministically sorted, so a record built from the same observations is
+//! byte-stable regardless of map-iteration order. The one exception is *which* distinct events
+//! [`MAX_NOTABLE`] keeps past its cap (arrival order); every count stays exact at any size.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
@@ -19,33 +19,30 @@ use bsx_probes_common::{
 
 use crate::{NetStats, ResourceSummary};
 
-/// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into a
-/// hit count, so this bounds cardinality: a run touching thousands of paths keeps the first `MAX_NOTABLE`
-/// by arrival order and counts the rest. Only sample *membership* depends on arrival order once the cap
-/// is exceeded; `total`, `by_kind`, and `overflow_events` stay exact whatever the order.
+/// The cap on **distinct** notable syscalls kept in a footprint: a run touching thousands of paths
+/// keeps the first `MAX_NOTABLE` by arrival order and counts the rest. Only sample *membership*
+/// depends on arrival order; `total`, `by_kind`, and `overflow_events` stay exact whatever it is.
 pub const MAX_NOTABLE: usize = 64;
 
-/// **What** a record is about and **when** it happened, both part of the signed bytes: a signature
-/// proves authenticity, not attribution, and a record that cannot be attributed cannot settle a dispute.
-///
-/// Deliberately **not** a tenant, which is the hoster's layer and a recorded non-goal. The engine reports
-/// the identity it minted and the hoster maps that onto whatever its own layer tracks.
+/// **What** a record is about and **when** it happened, both part of the signed bytes, since a
+/// signature proves authenticity and not attribution. Deliberately **not** a tenant, which is the
+/// hoster's layer and a recorded non-goal: the engine reports the identity it minted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordSubject {
-    /// The sandbox's name (`bsx-<pid>-<seq>`), the same handle as its scratch dir and netns, so a record
-    /// correlates with on-disk residue. Unique among live VMs; pair it with
-    /// [`started_unix_ns`](Self::started_unix_ns) for a durable identity, since pids are reused.
+    /// The sandbox's name (`bsx-<pid>-<seq>`), the same handle as its scratch dir and netns. Unique
+    /// among live VMs; pair it with [`started_unix_ns`](Self::started_unix_ns) for a durable
+    /// identity, since pids are reused.
     pub sandbox_id: String,
-    /// Wall-clock start of the run, nanoseconds since the Unix epoch. Distinct from [`Timing`], which
-    /// says how *long* a run took and never *when*, so without this a record cannot be placed on a
-    /// timeline. `0` when the host clock could not be read.
+    /// Wall-clock start of the run, nanoseconds since the Unix epoch, which places a record on a
+    /// timeline ([`Timing`] says only how *long* a run took). `0` when the host clock was
+    /// unreadable.
     pub started_unix_ns: u64,
 }
 
 impl RecordSubject {
-    /// Names a record's subject. Pass `0` for `started_unix_ns` when the host clock could not be read,
-    /// which reads as "unstamped" rather than as the epoch.
+    /// Names a record's subject. Pass `0` for `started_unix_ns` when the host clock could not be
+    /// read, which reads as "unstamped" rather than as the epoch.
     #[must_use]
     pub fn new(sandbox_id: String, started_unix_ns: u64) -> Self {
         Self {
@@ -68,16 +65,14 @@ pub struct RunRecord {
     pub resources: ResourceSummary,
     /// The VMM's **host** syscall footprint, not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
-    /// Boot and exec wall time, supplied by the caller as plain [`Duration`]s, so the record never
-    /// depends on `bsx` to learn them.
+    /// Boot and exec wall time, as plain [`Duration`]s from the caller.
     pub timing: Timing,
     /// Which axes were unavailable, and why, so a partial record is legible rather than silently thin.
     pub coverage: Vec<AxisGap>,
 }
 
 impl RunRecord {
-    /// Assembles a record from already-collected parts. Pure, no eBPF, so the unit tests exercise it
-    /// directly.
+    /// Assembles a record from already-collected parts. Pure, no eBPF.
     #[must_use]
     pub fn from_parts(
         subject: RecordSubject,
@@ -116,48 +111,44 @@ pub struct NetSection {
     /// The IPv6 blocked-destination trail, aggregated and sorted like [`denials`](Self::denials).
     pub denials6: Vec<DenialRecord6>,
     /// New flows a full flow table could not admit, so their traffic is **absent** from
-    /// [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero means the section is
-    /// [`truncated`](Self::truncated), since a guest churning source ports must not be able to evict its
-    /// real traffic from its own record silently.
+    /// [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero marks the
+    /// section [`truncated`](Self::truncated), so a guest churning source ports cannot silently
+    /// evict its own traffic from the record.
     pub dropped_flows: u64,
     /// The [`dropped_flows`](Self::dropped_flows) twin for the denial trail. The packets were still
     /// dropped at the tap; only the audit row is missing.
     pub dropped_denials: u64,
-    /// The egress policy in force, read back from the kernel, and the route the guest was given. `None`
-    /// when not read. Without it a record cannot tell an unpoliced run from a policed one: zero flows and
-    /// zero denials is the same shape either way, since the denial trail says what was refused, never what
-    /// was permitted.
+    /// The egress policy in force, read back from the kernel, and the route the guest was given;
+    /// `None` when not read. Without it a record cannot tell an unpoliced run from a policed one,
+    /// since zero flows and zero denials is the same shape either way.
     pub posture: Option<EgressPosture>,
 }
 
-/// What the tap was actually enforcing, and whether the guest had a route to test it with.
-///
-/// Read back from the kernel maps after attach rather than restated from the caller's request, so a
-/// policy that never reached the map reads as absent here instead of as applied.
+/// What the tap was enforcing, and whether the guest had a route to test it with. Read back from
+/// the kernel maps after attach rather than restated from the caller's request, so a policy that
+/// never reached the map reads as absent here instead of as applied.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct EgressPosture {
-    /// Whether the classifier is armed. `false` is observe-only, where every packet passes no matter
-    /// what [`allowed`](Self::allowed) holds, which is why this rides alongside the rules rather than
-    /// being inferred from a non-empty list.
+    /// Whether the classifier is armed. `false` is observe-only, where every packet passes whatever
+    /// [`allowed`](Self::allowed) holds, so this cannot be inferred from a non-empty rule list.
     pub enforcing: bool,
     /// The live IPv4 rules the kernel holds, in slot order.
     pub allowed: Vec<PolicyRule>,
     /// The live IPv6 rules, in slot order.
     pub allowed6: Vec<PolicyRule6>,
-    /// The default route the driver configured for the guest, if any. `None` is the sealed posture,
-    /// where the guest can address nothing beyond the host end of its link, so an allowance naming
-    /// anything further has nothing to act on.
+    /// The default route the driver configured for the guest. `None` is the sealed posture, where
+    /// the guest addresses nothing beyond the host end of its link and an allowance naming anything
+    /// further has nothing to act on.
     pub gateway: Option<Ipv4Addr>,
 }
 
 impl NetSection {
-    /// Build a sorted section from the tap monitor's raw reads. Flows sort on the full 5-tuple; denials
-    /// **aggregate by destination**, summing the kernel's per-5-tuple `DENIALS` rows per `(dst, port,
-    /// proto)` into one row per blocked endpoint. Both collections are totally ordered, so the record is
-    /// byte-stable across map-iteration order. `dropped_flows`/`dropped_denials` are the kernel's
-    /// full-map drop counters, marking the section [`truncated`](Self::truncated) so a saturated table
-    /// never reads as complete.
+    /// Build a sorted section from the tap monitor's raw reads. Flows sort on the full 5-tuple;
+    /// denials **aggregate by destination**, summing the kernel's per-5-tuple `DENIALS` rows per
+    /// `(dst, port, proto)`. Both orders are total, so the record is byte-stable across
+    /// map-iteration order. `dropped_flows`/`dropped_denials` are the kernel's full-map drop
+    /// counters, marking the section [`truncated`](Self::truncated).
     #[must_use]
     pub fn from_tap(
         flows: Vec<(FlowKey, FlowCounts)>,
@@ -171,15 +162,15 @@ impl NetSection {
             .map(|(key, counts)| FlowRecord { key, counts })
             .collect();
         flows.sort_by_key(|f| flow_order(&f.key));
-        // A BTreeMap keyed on the destination triple both sums the per-source entries and yields them
-        // already in the total order.
+        // Keyed on the destination triple, so the map both sums the per-source entries and yields
+        // them already in the total order.
         let mut by_dst: BTreeMap<(u32, u16, u8), u64> = BTreeMap::new();
         for (key, count) in denials {
             let slot = by_dst
                 .entry((key.dst_addr, key.dst_port, key.proto))
                 .or_insert(0);
-            // Kernel-supplied counters are adversarial by this crate's bar, so a wraparound must not
-            // corrupt the audit record.
+            // Kernel-supplied counters are adversarial by this crate's bar: a wraparound would read
+            // a flood as a trickle.
             *slot = slot.saturating_add(count);
         }
         let denials = by_dst
@@ -203,8 +194,8 @@ impl NetSection {
         }
     }
 
-    /// Attaches the egress posture read back from the kernel maps. A builder, so a caller that does not
-    /// read the posture reports `None`, which says "not read" rather than implying an unpoliced run.
+    /// Attaches the egress posture read back from the kernel maps. A builder, so a caller that
+    /// never read it reports `None` ("not read") rather than implying an unpoliced run.
     #[must_use]
     pub fn with_posture(mut self, posture: EgressPosture) -> Self {
         self.posture = Some(posture);
@@ -212,11 +203,11 @@ impl NetSection {
     }
 
     /// Folds the IPv6 half of the tap reads into a [`from_tap`](Self::from_tap) section, sorted and
-    /// aggregated as the v4 ones and summed into [`totals`](Self::totals) for a dual-stack rollup. A
-    /// builder, so a v4-only caller is untouched.
+    /// aggregated as the v4 ones and summed into [`totals`](Self::totals) for a dual-stack rollup.
     ///
-    /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while [`flows6`](Self::flows6) is
-    /// *replaced*, so a second call leaves the first call's bytes in the rollup with its flows gone.
+    /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while
+    /// [`flows6`](Self::flows6) is *replaced*, so a second call leaves the first call's bytes in
+    /// the rollup with its flows gone.
     #[must_use]
     pub fn with_v6(
         mut self,
@@ -265,9 +256,8 @@ impl NetSection {
         self
     }
 
-    /// Whether the section is **incomplete**, meaning a full kernel table dropped at least one flow or
-    /// denial row and the counts undercount what crossed the tap. The per-section flag a consumer checks
-    /// before trusting the flow list as exhaustive.
+    /// Whether the section is **incomplete**: a full kernel table dropped at least one flow or
+    /// denial row, so the counts undercount what crossed the tap.
     #[must_use]
     pub fn truncated(&self) -> bool {
         self.dropped_flows > 0 || self.dropped_denials > 0
@@ -285,7 +275,7 @@ pub struct FlowRecord {
 }
 
 /// One blocked **destination** and how many packets to it were dropped, summed across guest source
-/// ports, since the endpoint is the audit signal and the source of a dropped probe is noise.
+/// ports, since the endpoint is the audit signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DenialRecord {
@@ -299,8 +289,7 @@ pub struct DenialRecord {
     pub count: u64,
 }
 
-/// Sorts a flow by destination first, then source, over the full 5-tuple, so the order is total and the
-/// record byte-stable.
+/// Sorts a flow by destination then source over the full 5-tuple, a total order for byte-stability.
 fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
 }
@@ -337,8 +326,8 @@ pub struct DenialRecord6 {
 }
 
 /// The VMM's host syscall footprint: exact counts plus a bounded, de-duplicated sample of notable
-/// events. Repetition collapses into a hit count and the distinct set is capped at [`MAX_NOTABLE`], so
-/// neither dimension grows without bound.
+/// events. Repetition collapses into a hit count and the distinct set is capped at [`MAX_NOTABLE`],
+/// so neither dimension grows without bound.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SyscallFootprint {
@@ -351,15 +340,15 @@ pub struct SyscallFootprint {
     pub notable: Vec<NotableSyscall>,
     /// `true` if the cap was hit and events overflowed it.
     pub notable_truncated: bool,
-    /// **Events**, not distinct keys, that overflowed the notable cap (one new path opened 1000 times past
-    /// the cap adds 1000). Still tallied in [`by_kind`](Self::by_kind) and [`total`](Self::total); absent
-    /// only from the [`notable`](Self::notable) sample, so this is exactly what the sample omits.
+    /// **Events**, not distinct keys, that overflowed the notable cap (one new path opened 1000
+    /// times past the cap adds 1000). Still tallied in [`by_kind`](Self::by_kind) and
+    /// [`total`](Self::total), so this is exactly what the [`notable`](Self::notable) sample omits.
     pub overflow_events: u64,
 }
 
 impl SyscallFootprint {
-    /// Folds a sequence of events into a footprint, keeping only those in `cgroup_id`. The convenience
-    /// form of [`SyscallFold`] for callers that already have the events in hand.
+    /// Folds a sequence of events into a footprint, keeping only those in `cgroup_id`. The
+    /// convenience form of [`SyscallFold`] for a caller holding the events already.
     #[must_use]
     pub fn from_events<'a>(
         cgroup_id: u64,
@@ -373,8 +362,8 @@ impl SyscallFootprint {
     }
 }
 
-/// Counts of the host syscalls the probes trace, by kind. Fixed fields, so it is deterministic by
-/// construction with no ordering to stabilize.
+/// Counts of the host syscalls the probes trace, by kind. Fixed fields, so there is no ordering to
+/// stabilize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SyscallCounts {
@@ -388,10 +377,10 @@ pub struct SyscallCounts {
     pub unknown: u64,
 }
 
-/// A notable host syscall: its kind, the decoded detail, the `comm` that made it, and how many times this
-/// exact `(kind, detail)` occurred. Where several `comm`s produced the same pair the **lexicographically
-/// smallest** is kept, so which `comm` a row credits does not depend on ring-buffer arrival order.
-/// Which rows exist can, past [`MAX_NOTABLE`].
+/// A notable host syscall: its kind, the decoded detail, the `comm` that made it, and how many
+/// times this exact `(kind, detail)` occurred. Where several `comm`s produced the same pair the
+/// **lexicographically smallest** is kept, so a row's credit does not depend on ring-buffer arrival
+/// order. Which rows exist can, past [`MAX_NOTABLE`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotableSyscall {
@@ -401,28 +390,27 @@ pub struct NotableSyscall {
     /// whole value when [`truncated`](Self::truncated) is set.
     pub detail: String,
     /// The `comm` credited with it, lexicographically smallest when several produced the same
-    /// `(kind, detail)`, so this field does not depend on ring-buffer arrival order.
+    /// `(kind, detail)`.
     pub comm: String,
     /// How many times this exact `(kind, detail)` occurred.
     pub hits: u64,
-    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not the
-    /// path the guest used: the row names something never opened under that name, and distinct paths
-    /// sharing a prefix alias into one entry, making [`hits`](Self::hits) a count of events not of opens.
+    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not
+    /// the path the guest used: distinct paths sharing a prefix alias into one entry, making
+    /// [`hits`](Self::hits) a count of events rather than of opens.
     pub truncated: bool,
 }
 
 /// A streaming accumulator for [`SyscallFootprint`]: [`record`](Self::record) per event, then
-/// [`finish`](Self::finish). Bounds memory *during* the fold, since past [`MAX_NOTABLE`] distinct events
-/// further ones are counted rather than stored.
+/// [`finish`](Self::finish). Bounds memory *during* the fold, since past [`MAX_NOTABLE`] distinct
+/// events further ones are counted rather than stored.
 #[derive(Debug, Clone)]
 pub struct SyscallFold {
     cgroup_id: u64,
     total: u64,
     by_kind: SyscallCounts,
     /// Keyed `kind → detail → accumulator`, nested rather than a flat pair key so
-    /// [`record`](Self::record) can probe the inner map with a **borrowed** `&str` and the common repeat
-    /// path allocates nothing. Both `BTreeMap` levels keep the total order, so
-    /// [`finish`](Self::finish) flattens already-sorted.
+    /// [`record`](Self::record) can probe the inner map with a **borrowed** `&str`. Both `BTreeMap`
+    /// levels keep the total order, so [`finish`](Self::finish) flattens already-sorted.
     notable: BTreeMap<Syscall, BTreeMap<String, NotableAccum>>,
     /// Total distinct `(kind, detail)` entries across the nested map, for the [`MAX_NOTABLE`] check,
     /// since the outer map's `len()` counts kinds rather than entries.
@@ -430,14 +418,14 @@ pub struct SyscallFold {
     overflow_events: u64,
 }
 
-/// The per-`(kind, detail)` accumulator. It carries no `kind`, since the map's outer key is that fact and
-/// a copy here would be a second place for it to be wrong.
+/// The per-`(kind, detail)` accumulator. It carries no `kind`, since the map's outer key is that
+/// fact and a copy here would be a second place for it to be wrong.
 #[derive(Debug, Clone)]
 struct NotableAccum {
     comm: String,
     hits: u64,
-    /// Sticky, set by *any* event folded into this entry: a truncated capture and a complete one can share
-    /// a key, and the honest merge of "certain" with "cut" is "cut".
+    /// Sticky, set by *any* event folded in: a truncated capture and a complete one can share a
+    /// key, and the honest merge of "certain" with "cut" is "cut".
     truncated: bool,
 }
 
@@ -474,16 +462,12 @@ impl SyscallFold {
             Syscall::Openat => self.by_kind.openat += 1,
             Syscall::Connect => self.by_kind.connect += 1,
         }
-        // Probe with the borrowed render, so the common repeat path allocates nothing and the owned key
-        // is built only on a vacant under-cap insert.
         let detail = ev.detail_display_cow();
         let inner = self.notable.entry(kind).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
             acc.truncated |= ev.detail_truncated();
-            // Smallest `comm`, not first to arrive: several processes commonly produce the same
-            // `(kind, detail)`, so first-arrival would make this field vary with stream order. The
-            // compare borrows `comm`; the owned copy is taken only on the rare replace.
+            // Smallest `comm`, not first to arrive, or the field varies with stream order.
             let comm = ev.comm_lossy();
             if comm.as_ref() < acc.comm.as_str() {
                 acc.comm = comm.into_owned();
@@ -503,8 +487,8 @@ impl SyscallFold {
         }
     }
 
-    /// Finalizes into a sorted, capped [`SyscallFootprint`]. Flattening the nested `BTreeMap`s yields
-    /// `(kind, detail)` in total order already, so no further sort key is needed.
+    /// Finalizes into a sorted, capped [`SyscallFootprint`]. Flattening the nested `BTreeMap`s
+    /// yields `(kind, detail)` in total order already, so no further sort key is needed.
     #[must_use]
     pub fn finish(self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
@@ -531,8 +515,7 @@ impl SyscallFold {
         }
     }
 
-    /// Produces a live non-destructive [`SyscallFootprint`] snapshot from references, without cloning the
-    /// `BTreeMap` nodes.
+    /// A live, non-destructive [`SyscallFootprint`] snapshot, without cloning the `BTreeMap` nodes.
     #[must_use]
     pub fn snapshot(&self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
@@ -558,11 +541,9 @@ impl SyscallFold {
     }
 }
 
-/// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from its own measurements,
-/// so the record never depends on `bsx`.
-///
-/// A further measurement lands as a new field plus a `with_*` method, never a wider [`new`](Self::new):
-/// the two-argument constructor is the pair every run has, and [`Default`] is all-zero "unmeasured".
+/// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from its own
+/// measurements, so the record never depends on `bsx`. A further measurement lands as a new field
+/// plus a `with_*` method, never a wider [`new`](Self::new); [`Default`] is all-zero "unmeasured".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Timing {
@@ -580,8 +561,8 @@ impl Timing {
     }
 }
 
-/// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a partial
-/// record explains its own gaps instead of looking complete.
+/// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a
+/// partial record explains its own gaps instead of looking complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AxisGap {
@@ -602,8 +583,7 @@ impl AxisGap {
         }
     }
 
-    /// The name of the axis this gap is filed under, which is the spelling that reaches the signed
-    /// record.
+    /// The name this gap is filed under, the spelling that reaches the signed record.
     #[must_use]
     pub fn axis(&self) -> &'static str {
         match self {

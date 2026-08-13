@@ -1,47 +1,39 @@
 //! Bounded external-helper execution: [`run_bounded`] for the **teardown path**, where a hung child
-//! would hang `Drop` itself, and [`output_bounded`] for the **boot path**, where one gives the caller a
-//! typed error instead of an unbounded stall.
+//! would hang `Drop` itself, and [`output_bounded`] for the **boot path**, where one gives the
+//! caller a typed error instead of an unbounded stall.
 //!
-//! Most host tools the driver shells out to run on the boot path, where the boot deadline gates them
-//! and a stall fails the *run*. But `ip netns del` and `umount -l` run inside teardown, and both can
-//! wedge in uninterruptible kernel sleep: behind the rtnl lock, a device that won't release its
-//! refcount, or a busy mount. A D-state child **cannot be killed or waited** without hanging the very
-//! thread being protected, since a `SIGKILL` pends until the kernel op finishes and `wait` blocks on
-//! the same.
-//!
-//! So teardown helpers run under [`run_bounded`], which detaches on timeout: it converts a rare,
-//! unrecoverable `Drop` **hang** into a rare **leak** of one stuck kernel process holding no CPU, which
-//! the engine's existing recovery already digests. A failed `netns_del` keeps the scratch dir for the
-//! sweep, and a failed unmount is retried by the next sweep. No-hang beats politeness.
+//! - **D-state is unkillable and unwaitable.** `ip netns del` and `umount -l` run inside teardown
+//!   and can wedge in uninterruptible kernel sleep (behind the rtnl lock, a device that won't
+//!   release its refcount, a busy mount). `SIGKILL` pends until the kernel op finishes and `wait`
+//!   blocks on the same, so both hang the very thread being protected.
+//! - **Leak over hang.** [`run_bounded`] therefore detaches on timeout, converting an unrecoverable
+//!   `Drop` hang into one stuck kernel process holding no CPU. A failed `netns_del` keeps the
+//!   scratch dir for the sweep, and a failed unmount is retried by the next sweep.
 
 use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The wall a teardown helper gets before it is declared wedged and detached. `ip netns del` /
-/// `umount -l` normally return in milliseconds, so this is pure headroom for a briefly-busy kernel,
-/// not a budget a healthy helper ever spends.
+/// The wall a teardown helper gets before it is declared wedged and detached. `ip netns del` and
+/// `umount -l` normally return in milliseconds, so this is headroom for a briefly-busy kernel.
 pub(crate) const TEARDOWN_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The wall a **boot-path** `ip` invocation gets ([`output_bounded`]). The same rtnl-lock wedge that
-/// motivated bounding `ip netns del` on teardown reaches `netns add` / `tuntap add` too; healthy
-/// runs are milliseconds.
+/// The wall a **boot-path** `ip` invocation gets ([`output_bounded`]). The same rtnl-lock wedge
+/// that bounds `ip netns del` on teardown reaches `netns add` / `tuntap add` too.
 pub(crate) const IP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The wall a block-device build tool (`truncate`/`mke2fs`) gets. Generous: `mke2fs -d` on a large
-/// bulk-input tree legitimately takes seconds, so this bounds a hung scratch filesystem, not a busy
+/// The wall a block-device build tool (`truncate`/`mke2fs`) gets. Generous, because `mke2fs -d` on
+/// a large bulk-input tree legitimately takes seconds: this bounds a hung scratch fs, not a busy
 /// one.
 pub(crate) const IMAGE_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The wall the one-shot `firecracker --version` probe gets. Without it, an `BSX_FIRECRACKER`
-/// pointed at a binary that hangs on `--version` hangs **every** boot with no typed error, since
-/// the probe runs before any deadline is consulted.
+/// The wall the one-shot `firecracker --version` probe gets, which runs before any boot deadline is
+/// consulted: without it an `BSX_FIRECRACKER` that hangs on `--version` hangs **every** boot.
 pub(crate) const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How a failed helper reads in an error: its own stderr when it wrote one, else its exit status.
-/// A tool killed by a signal (a deadline kill, an operator's `kill`, the OOM killer) writes
-/// nothing at all, and an error message ending in a bare colon names no cause: the status is then
-/// the only fact there is. Callers name the tool themselves, so this carries only the "why".
+/// A tool killed by a signal writes nothing at all, and an error ending in a bare colon names no
+/// cause, so the status is then the only fact there is. Callers name the tool themselves.
 pub(crate) fn failure_detail(status: std::process::ExitStatus, stderr: &str) -> String {
     let line = stderr.trim();
     if line.is_empty() {
@@ -52,18 +44,16 @@ pub(crate) fn failure_detail(status: std::process::ExitStatus, stderr: &str) -> 
 }
 
 /// Run `cmd` with a hard wall, returning its exit status and captured stderr, for a **boot-path**
-/// helper whose caller wants a typed error rather than a stall. Unlike [`run_bounded`] (teardown:
-/// detach and carry on), a timeout here is an `Err` the run surfaces; the child is killed and
-/// briefly reaped, then detached if it cannot be (the D-state case, where waiting is the hang this
-/// exists to prevent). The status comes back rather than a bare success flag so a signal-killed
-/// (silent) helper can still be described, see [`failure_detail`].
+/// helper whose caller wants a typed error rather than a stall. Unlike [`run_bounded`], a timeout
+/// here is an `Err`: the child is killed and briefly reaped, then detached if it cannot be. The
+/// status comes back rather than a bare success flag so a signal-killed (silent) helper can still
+/// be described, see [`failure_detail`].
 ///
 /// stderr is read **after** the child exits, which terminates because these particular helpers
-/// (`ip`, `truncate`, `mke2fs`) do not background a child that would inherit the pipe: reaping the
-/// child closes the last write end. A helper that flooded more than a pipe buffer would block and
-/// be caught by the wall instead, so the unbounded case is a timeout, never a deadlock. Do not
-/// point this at an arbitrary operator-supplied program (`firecracker --version` deliberately uses
-/// a file instead, see `spawn::probe_fc_version`).
+/// (`ip`, `truncate`, `mke2fs`) do not background a child that would inherit the pipe, so reaping
+/// closes the last write end. A helper flooding past a pipe buffer blocks and is caught by the wall
+/// instead. Do not point this at an arbitrary operator-supplied program (`firecracker --version`
+/// deliberately uses a file, see `spawn::probe_fc_version`).
 pub(crate) fn output_bounded(
     mut cmd: Command,
     timeout: Duration,
@@ -90,20 +80,17 @@ pub(crate) fn output_bounded(
     Ok((status, stderr))
 }
 
-/// What a bounded helper run produced: it exited within the wall (with its success flag and captured
-/// stderr), or it outran the wall and was **detached** (left running, unreaped), never waited.
+/// What a bounded helper run produced.
 pub(crate) enum Bounded {
-    /// The helper exited within the wall. `success` is its exit status; `stderr` is its captured
-    /// standard error (for a failure log).
+    /// The helper exited within the wall, with its exit status and captured standard error.
     Exited { success: bool, stderr: String },
-    /// The helper did not finish within the wall (or could not be spawned/polled) and was detached to
-    /// keep teardown from hanging. Nothing was reclaimed by this call.
+    /// The helper did not finish within the wall (or could not be spawned/polled) and was detached
+    /// to keep teardown from hanging. Nothing was reclaimed by this call.
     Detached,
 }
 
-/// Run `cmd` with a hard wall (stdin/stdout null, stderr captured), returning [`Bounded`]. On timeout
-/// it **detaches** the child (does not `kill`/`wait` it, which a D-state helper would hang on) so
-/// `Drop` can never block. See the module doc for why the leak-over-hang trade is correct here.
+/// Run `cmd` with a hard wall (stdin/stdout null, stderr captured), returning [`Bounded`]. On
+/// timeout it **detaches** the child rather than `kill`/`wait`ing it, so `Drop` can never block.
 pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration, label: &str) -> Bounded {
     let mut child = match cmd
         .stdin(Stdio::null())
@@ -121,9 +108,8 @@ pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration, label: &str) -> B
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Safe to read only now the child has exited: the pipe can't back-pressure a live
-                // helper into blocking (if it ever filled the pipe unread it would stall and hit the
-                // timeout below instead). Helper stderr is a line or two.
+                // Safe to read only now the child has exited: a helper that filled the pipe
+                // unread would stall and hit the timeout below instead.
                 let mut stderr = String::new();
                 if let Some(mut e) = child.stderr.take() {
                     let _ = e.read_to_string(&mut stderr);
@@ -153,12 +139,11 @@ pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration, label: &str) -> B
 /// A private scratch file for a child's output: `(the child's write handle, our read-back handle)`,
 /// both onto the same **already-unlinked** file.
 ///
-/// `create_new` (`O_CREAT|O_EXCL`) and 0600, not `File::create`: the driver usually runs as root and
-/// the temp dir is world-writable, so a predictable name opened with plain `create` is a symlink
-/// hijack, a local user pre-creating the path aims the truncating open at any file root can write.
-/// `O_EXCL` refuses to follow a symlink at all, and the retry loop covers a name that already
-/// exists. Unlinking straight away means nothing is left behind on any exit path (including a
-/// panic elsewhere) and the read-back can't be pointed at a different file than the one written.
+/// `create_new` (`O_CREAT|O_EXCL`) and 0600, not `File::create`: the driver usually runs as root
+/// and the temp dir is world-writable, so a predictable name opened with plain `create` is a
+/// symlink hijack that aims the truncating open at any file root can write. `O_EXCL` refuses to
+/// follow a symlink at all, and the retry loop covers an existing name. Unlinking straight away
+/// leaves nothing behind on any exit path and pins the read-back to the file that was written.
 pub(crate) fn scratch_pair(tag: &str) -> std::io::Result<(std::fs::File, std::fs::File)> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let dir = std::env::temp_dir();
@@ -192,9 +177,9 @@ pub(crate) fn scratch_pair(tag: &str) -> std::io::Result<(std::fs::File, std::fs
 }
 
 /// Read at most `cap` bytes from the start of `file`, lossily as text. `take` before the read, not
-/// a truncation after: `fs::read` would pull a flooding child's whole output into host RAM and only
-/// then throw it away. The seek is required because the handle shares its file offset with the
-/// child's (both are dups of one open file description), so it sits at end-of-write.
+/// a truncation after, so a flooding child's whole output never reaches host RAM. The seek is
+/// required because the handle shares its file offset with the child's (both dup one open file
+/// description), so it sits at end-of-write.
 pub(crate) fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     file.seek(SeekFrom::Start(0))?;
@@ -203,13 +188,11 @@ pub(crate) fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<St
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// The last `cap` bytes of `file`, or all of it when shorter: the tail counterpart of [`read_head`],
-/// for a diagnostic that wants the lines nearest the failure rather than the oldest ones.
-///
-/// The `take` is not redundant with the seek: the writer may still be appending, so the file can grow
-/// between the length read and the copy, and only the `take` bounds that. A window that starts
-/// mid-file also starts mid-line, and that fragment is dropped, because a partial line in an error
-/// message reads as a whole one.
+/// The last `cap` bytes of `file`, or all of it when shorter: the tail counterpart of
+/// [`read_head`], for a diagnostic that wants the lines nearest the failure. The `take` is not
+/// redundant with the seek, because the writer may still be appending and the file can grow between
+/// the length read and the copy. A window starting mid-file starts mid-line, and that fragment is
+/// dropped, because a partial line in an error message reads as a whole one.
 pub(crate) fn read_tail(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let len = file.metadata()?.len();

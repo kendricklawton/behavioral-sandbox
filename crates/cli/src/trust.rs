@@ -142,7 +142,7 @@ pub(crate) fn own_euid() -> Option<u32> {
 /// or replaced it.
 pub(crate) fn open_trusted(path: &Path) -> Result<Option<File>, String> {
     let Ok(link) = std::fs::symlink_metadata(path) else {
-        return Ok(None); // nothing there, the same answer `is_file()` gave
+        return Ok(None); // nothing there is nothing to refuse
     };
     let link_uid = link.file_type().is_symlink().then(|| link.uid());
 
@@ -161,8 +161,8 @@ pub(crate) fn open_trusted(path: &Path) -> Result<Option<File>, String> {
 
     match std::fs::metadata(path) {
         Ok(m) if m.is_file() => {}
-        // A directory, a dangling link, or a device named `.bsx.toml` is not a config file. Skipped
-        // rather than refused, which is what `is_file()` did.
+        // A directory, a dangling link, or a device named `.bsx.toml` is not a config file: skipped
+        // rather than refused, since a config that is not there does not apply.
         _ => return Ok(None),
     }
 
@@ -329,7 +329,7 @@ mod tests {
                 .expect("absent is not an error")
                 .is_none()
         );
-        // A directory by that name is skipped, which is what `is_file()` did.
+        // A directory by that name is skipped, not refused.
         std::fs::create_dir(dir.path().join(".bsx.toml")).expect("mkdir");
         assert!(
             open_trusted(&dir.path().join(".bsx.toml"))

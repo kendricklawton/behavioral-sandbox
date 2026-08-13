@@ -21,9 +21,9 @@ use vsock::{VMADDR_CID_ANY, VsockListener};
 
 use bsx_guest_agent::serve_session;
 
-/// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline set,
-/// a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
-/// Generous, because a real host reads continuously and anything this slow is a broken peer.
+/// Read/write deadline on each served connection: with one set, a dead-or-stalled host surfaces as
+/// a typed timeout in `serve` instead of hanging the agent. Generous, because a real host reads
+/// continuously and anything this slow is a broken peer.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Exit code for an operational failure (bad usage, a bind/serve error): conventional "2", named so
@@ -32,8 +32,8 @@ const EXIT_OPERATIONAL: u8 = 2;
 
 /// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
 /// `vsock:<port>` the host scans for is one definition. The vsock one comes from [`bsx_channel`]
-/// because the rootfs build writes it into the guest's init line too, a third side this crate cannot
-/// reach; `unix:` is host-side dev transport only, so it stays local.
+/// because the rootfs build writes it into the guest's init line too; `unix:` is host-side dev
+/// transport only, so it stays local.
 use bsx_channel::VSOCK_SCHEME;
 const UNIX_SCHEME: &str = "unix";
 
@@ -125,12 +125,11 @@ fn serve_incoming<S, E>(
 }
 
 /// The one working directory every connection this process serves runs in, which is what makes a
-/// sequence of execs against one agent a **stateful session**. One agent process per VM, so the VM *is*
-/// the session, and the state's lifetime is the VM's.
+/// sequence of execs against one agent a **stateful session**. One agent process per VM, so the VM
+/// *is* the session.
 ///
 /// The pid in the name is for the host-side `unix:` dev transport, where several agent processes may
-/// share one `/tmp`. In a guest it changes nothing, and a snapshot clone keeps its pid, so the path is
-/// stable across restore.
+/// share one `/tmp`. A snapshot clone keeps its pid, so the path is stable across restore.
 fn session_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bsx-session-{}", std::process::id()))
 }
@@ -138,11 +137,10 @@ fn session_dir() -> std::path::PathBuf {
 /// Serves one connection, logging rather than propagating a failure so one bad peer never ends the
 /// loop. `serve_session` emits its own `exec` span, so only failures need a line here.
 fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
-    // One thread per connection, so a wedged session cannot take the listener down with it: the
-    // whole-tree reap needs cgroup v2 in the guest, so on an off-spec guest a command that
-    // double-forks a daemon holds the output pipes open and its `pump` never sees EOF. Served inline,
-    // that one stuck exec would block `accept` and wedge every later exec too. The session dir stays
-    // shared, since it is the session's state rather than any one exec's.
+    // One thread per connection, so a wedged session cannot take the listener down: the whole-tree
+    // reap needs cgroup v2, so on an off-spec guest a command that double-forks a daemon holds the
+    // output pipes open and its `pump` never sees EOF. Served inline, that one stuck exec would
+    // block `accept`. The session dir stays shared, since it is the session's state.
     let spawned = std::thread::Builder::new()
         .name("bsx-session".to_string())
         .spawn(move || {
@@ -151,15 +149,15 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
             }
         });
     if let Err(e) = spawned {
-        // The spawn took the stream with it, so this connection closes and the host surfaces its typed
-        // dial error, which beats blocking the accept loop.
+        // The spawn took the stream with it, so this connection closes and the host surfaces its
+        // typed dial error rather than the accept loop blocking.
         tracing::warn!("cannot spawn a session thread ({e}); dropping the connection");
     }
 }
 
-/// Prints the readiness sentinel to stdout (the serial console) and flushes, so the host's console scan
-/// fires once the vsock listener is accepting. `writeln!` rather than `println!`, so a closed console is
-/// ignored rather than a panic.
+/// Prints the readiness sentinel to stdout (the serial console) and flushes, so the host's console
+/// scan fires once the vsock listener is accepting. `writeln!` rather than `println!`, which panics
+/// on a closed console.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
     let _ = writeln!(
@@ -186,9 +184,9 @@ fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     }
 }
 
-/// stderr logging, filter from `BSX_LOG` else `info`. `info` rather than the CLI's `warn`, because the
-/// agent's per-command `exec` span is the guest's operational trace, captured off the serial console.
-/// `try_init` plus an explicit fallback, so a bad filter or a double-init never panics the run.
+/// stderr logging, filter from `BSX_LOG` else `info`. `info` rather than the CLI's `warn`, because
+/// the agent's per-command `exec` span is the guest's operational trace, captured off the serial
+/// console. `try_init` plus a fallback, so a bad filter or a double-init never panics the run.
 fn init_tracing() {
     let filter = std::env::var("BSX_LOG").unwrap_or_else(|_| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)

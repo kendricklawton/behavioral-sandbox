@@ -8,28 +8,24 @@ use std::thread::JoinHandle;
 
 use crate::VmmError;
 
-/// Cap on the captured console (the most recent bytes are kept). A guest that floods its serial
-/// port would otherwise grow host memory without bound, so the buffer is capped rather than
-/// trusted to stay small: the compaction below holds it at `CONSOLE_CAP + CONSOLE_SLACK`. Boot
-/// output is tens of KiB, three orders of magnitude inside the cap, so the userspace marker is
-/// still in the buffer when the boot path looks for it.
+/// Cap on the captured console, keeping the most recent bytes, so a guest that floods its serial
+/// port cannot grow host memory without bound. Boot output is tens of KiB, three orders of
+/// magnitude inside the cap, so the userspace marker is still buffered when the boot path looks.
 const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
-/// Slack the buffer may overshoot [`CONSOLE_CAP`] before it compacts. Draining on every 4 KiB chunk
-/// once at the cap memmoves the whole buffer per chunk (O(n) per chunk, ~256x write amplification
-/// under a flooding guest, the exact hostile case); overshooting by a cap's worth and compacting in
-/// one bulk drop amortizes that to O(1) per byte. Memory stays strictly bounded at `CONSOLE_CAP +
-/// CONSOLE_SLACK`.
+/// Slack the buffer may overshoot [`CONSOLE_CAP`] before it compacts, holding memory at
+/// `CONSOLE_CAP + CONSOLE_SLACK`. Draining on every 4 KiB chunk once at the cap memmoves the whole
+/// buffer per chunk (~256x write amplification under a flooding guest); overshooting by a cap's
+/// worth and compacting in one bulk drop amortizes that to O(1) per byte.
 const CONSOLE_SLACK: usize = CONSOLE_CAP;
-/// The captured serial console: a background thread appends the child's stdout into a shared
-/// buffer that the boot loop scans for the userspace marker.
+/// The captured serial console, drained by a background thread into a shared buffer.
 #[derive(Debug, Default)]
 pub(crate) struct Console {
     buf: Arc<Mutex<Capture>>,
     reader: Option<JoinHandle<()>>,
 }
 
-/// The captured bytes and the marker scan's place in them, under one lock so a compaction that drops
-/// bytes off the front can move the scan position with them.
+/// The captured bytes and the marker scan's place in them, under one lock so a compaction that
+/// drops bytes off the front can move the scan position with them.
 #[derive(Debug, Default)]
 struct Capture {
     buf: Vec<u8>,
@@ -78,13 +74,10 @@ impl Console {
         Ok(Self { buf, reader })
     }
 
-    /// Whether the console captured so far contains `marker`.
-    ///
-    /// **Scans only what is new.** The boot loop calls this every few milliseconds until the marker
-    /// appears, so rescanning the whole buffer each time would make the wait cost
-    /// `buffer × polls` rather than the bytes the guest actually wrote, and the buffer is capped at
-    /// 2 MiB. The resume point backs up by `needle.len() - 1`, so a marker straddling two appends is
-    /// still found.
+    /// Whether the console captured so far contains `marker`, **scanning only what is new**: the
+    /// boot loop polls every few milliseconds, so a whole-buffer rescan would cost
+    /// `buffer × polls` rather than the bytes the guest wrote. The resume point backs up by
+    /// `needle.len() - 1`, so a marker straddling two appends is still found.
     pub(crate) fn contains(&self, marker: &str) -> bool {
         let needle = marker.as_bytes();
         let Ok(mut cap) = self.buf.lock() else {
@@ -120,22 +113,19 @@ impl Console {
     }
 }
 
-/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
-/// [`char::is_control`] is category `Cc` only and returns `false` for every one of them. The twin of
-/// `bsx_channel`'s and `bsx-cli`'s predicates of the same name, one per surface that renders a
-/// guest-authored string to a terminal; `the_terminal_escapers_agree_on_the_bidi_controls` pins the
-/// set across all three.
+/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders, and
+/// which [`char::is_control`] (category `Cc` only) returns `false` for. One copy per surface that
+/// renders a guest-authored string to a terminal, with
+/// `the_terminal_escapers_agree_on_the_bidi_controls` pinning the set.
 fn is_bidi_control(c: char) -> bool {
     matches!(c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
-/// The last `n` non-empty lines of `text`, oldest first, joined with ` | `, `None` if there are
-/// none: diagnostic tails for error enrichment, made safe to print.
-///
-/// Escaping happens **here** rather than at the call sites because every caller folds the result into
-/// a [`VmmError`](crate::VmmError) the CLI prints to a terminal, and the console half is bytes the
-/// guest chose: an unescaped tail lets it forge lines or reorder the operator's display around it.
+/// The last `n` non-empty lines of `text`, oldest first, joined with ` | `, escaped here rather
+/// than at the call sites: every caller folds the result into a [`VmmError`](crate::VmmError) the
+/// CLI prints to a terminal, and an unescaped tail of guest-chosen bytes can forge lines or reorder
+/// the operator's display around it.
 pub(crate) fn last_lines(text: &str, n: usize) -> Option<String> {
     let tail: Vec<&str> = text
         .lines()
@@ -167,9 +157,8 @@ fn append_capped(cap: &mut Capture, chunk: &[u8]) {
     if cap.buf.len() > CONSOLE_CAP + CONSOLE_SLACK {
         let excess = cap.buf.len() - CONSOLE_CAP;
         cap.buf.drain(..excess);
-        // The scan position is an index into `buf`, so it moves with the bytes the drain removed.
-        // Saturating rather than wrapping: a compaction can drop past everything scanned so far,
-        // which just means the next scan starts at the new front.
+        // The scan position indexes `buf`, so it moves with the bytes the drain removed; saturating
+        // because a compaction can drop past everything scanned, so the next scan starts at 0.
         cap.scanned = cap.scanned.saturating_sub(excess);
     }
 }
@@ -242,9 +231,9 @@ mod tests {
         );
     }
 
-    /// The three ways an incremental scan can be wrong, each of which a whole-buffer rescan could
-    /// never be: a marker split across two appends, a marker whose bytes the compaction moved, and a
-    /// second call after the match.
+    /// The three ways an incremental scan can be wrong where a whole-buffer rescan could not: a
+    /// marker split across two appends, one whose bytes the compaction moved, and a second call
+    /// after the match.
     #[test]
     fn the_marker_scan_resumes_without_losing_a_marker() {
         // Straddle: the resume point must back up by `needle.len() - 1`, or the halves are never
@@ -276,8 +265,8 @@ mod tests {
 
     #[test]
     fn a_compaction_moves_the_scan_position_with_the_bytes() {
-        // The scan position is an index into a buffer the compaction shifts. If it were not moved
-        // down with the drain, it would point past bytes never scanned and the marker would be lost.
+        // A scan position not moved down with the drain points past bytes never scanned, and the
+        // marker is lost.
         let console = Console::spawn(None).expect("no thread needed");
         {
             let mut cap = console.buf.lock().expect("lock");
@@ -302,8 +291,6 @@ mod tests {
 
     #[test]
     fn a_console_tail_cannot_forge_or_reorder_the_line_it_lands_in() {
-        // `abort` folds this tail into a `VmmError` the CLI prints, and the console is bytes the guest
-        // chose, so the diagnostic must not carry a terminal's control or bidi vocabulary.
         let forged =
             last_lines("boot ok\nowned\x1b]0;pwned\x07 \x1b[2J", 2).expect("two non-empty lines");
         assert!(
@@ -315,7 +302,7 @@ mod tests {
             "the text survives, escaped: {forged:?}"
         );
 
-        // Bidi controls are category `Cf`, so an `is_control`-only guard passes them straight through.
+        // Bidi controls are category `Cf`, so an `is_control`-only guard passes them through.
         let reordered = last_lines("start\u{202E}dne", 1).expect("one non-empty line");
         assert!(
             !reordered.contains('\u{202E}') && reordered.contains("\\u{202e}"),

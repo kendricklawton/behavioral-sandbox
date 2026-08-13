@@ -8,20 +8,20 @@
 //! chroot-relative path in the API.
 //!
 //! - **Layout.** The chroot base is the VM's own scratch dir, so teardown's `remove_dir_all` reclaims
-//!   the whole jail; the cgroup the jailer creates lives outside it and is removed explicitly. No
-//!   `--daemonize`, so Firecracker keeps the piped stdout and the serial console still reaches
-//!   [`crate::console`]. The driver mknods nothing itself, which is why the jailer needs real root:
-//!   mknod of a device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`.
-//! - **Scope.** This confines both a jailed cold boot and a jailed restore: the chroot, the uid/gid
-//!   drop, the jailer's mount namespace, cgroup cpu/memory limits derived from the guest's envelope
-//!   plus a fixed `pids.max`, each fail-open on its own, and Firecracker's built-in seccomp filters,
-//!   which `--no-seccomp` is never passed against.
+//!   the whole jail; the cgroup the jailer creates lives outside it and is removed explicitly. The
+//!   driver mknods nothing itself, which is why the jailer needs real root: mknod is `EPERM` in a
+//!   non-initial user namespace even with `CAP_MKNOD`.
+//! - **Flags.** No `--daemonize`, so Firecracker keeps the piped stdout and the serial console
+//!   still reaches [`crate::console`]; no `--no-seccomp`, so its per-thread filters stay on.
+//! - **Scope.** Confines a jailed cold boot and a jailed restore alike: the chroot, the uid/gid
+//!   drop, the jailer's mount namespace, and cgroup cpu/memory limits from the guest's envelope
+//!   plus a fixed `pids.max`, each fail-open on its own.
 //! - **Composition.** Every boot feature composes with the jail: the vsock exec channel bound
-//!   chroot-relative under the dropped uid, the read-only overlay bind-mounted in by
+//!   chroot-relative under the dropped uid, the read-only base bind-mounted in by
 //!   [`stage_ro_base_into_chroot`], a NIC whose tap lives in a per-VM netns the jailer joins, bulk IO
 //!   built in place inside the chroot, and snapshot restore from a bundle staged into it.
-//! - **Teardown** lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's cgroup at
-//!   its precomputed path, so host death reaches a jailed VMM the same way.
+//! - **Teardown** lives in [`crate::lifetime`]: the sentinel watches the jailer's cgroup at its
+//!   precomputed path, so host death reaches a jailed VMM the same way.
 
 use std::collections::BTreeSet;
 use std::num::{NonZeroU8, NonZeroU32};
@@ -121,26 +121,21 @@ impl Jail {
     }
 }
 
-/// A range of host uid/gid pairs the engine may spend, one pair per jailed sandbox.
-///
-/// **The operator declares the range and the engine spends it.** Uids are a host-wide namespace
-/// shared with real accounts, so which of them are free is administration; handing one to each
-/// sandbox is the allocation the engine already does for netns names, tap names, and cgroup paths.
-/// Neither half learns what a tenant is.
+/// A range of host uid/gid pairs the engine may spend, one pair per jailed sandbox: **the operator
+/// declares the range and the engine spends it**, since which uids are free on a host is
+/// administration rather than something the engine can know.
 ///
 /// Cloning shares the allocator, so a [`BootConfig`](crate::BootConfig) cloned into a
-/// [`Pool`](crate::Pool) gives every clone it restores a distinct pair rather than a copy of one.
-/// Set it on [`Jail::ids`]; leaving it `None` keeps the single fixed pair.
+/// [`Pool`](crate::Pool) gives every clone a distinct pair rather than a copy of one. Set it on
+/// [`Jail::ids`]; leaving it `None` keeps the single fixed pair.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct JailIds {
     base: u32,
     count: u32,
-    /// The slots currently leased, ordered so [`lease`](Self::lease) still hands out the lowest free
-    /// one and the ids a reader sees stay predictable. Only *leased* slots cost memory: a
-    /// one-entry-per-pair table would make a span an allocation proportional to a range the operator
-    /// may never spend, so `span(1, u32::MAX)` would abort on a ~4 GiB alloc at construction rather
-    /// than return the typed error this API promises.
+    /// The leased slots, ordered so [`lease`](Self::lease) hands out the lowest free one. Only
+    /// leased slots cost memory: a one-entry-per-pair table would make `span(1, u32::MAX)` a ~4 GiB
+    /// allocation, aborting where this API promises a typed error.
     taken: Arc<Mutex<BTreeSet<u32>>>,
 }
 
@@ -222,20 +217,18 @@ impl JailIds {
     }
 }
 
-/// Lock a span's slot table, recovering from a poisoned mutex rather than propagating the panic.
-/// A holder that panicked mid-lease leaves the table structurally intact (one `bool` written), and
-/// refusing to allocate afterwards would turn one panic into every later boot failing.
+/// Lock a span's slot set, recovering from a poisoned mutex rather than propagating the panic: a
+/// holder that panicked mid-lease leaves the set structurally intact, and refusing to allocate
+/// afterwards would turn one panic into every later boot failing.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The uid/gid one jailed sandbox runs under, held for as long as its chroot exists.
-///
-/// Returned to its span on drop **unless the tree those ids own outlived teardown**, in which case
-/// [`withhold`](Self::withhold) keeps the slot out of the pool: a chroot still chowned to the pair is
-/// exactly what makes handing it to the next sandbox a collision. [`Chroot`] owns the lease and
-/// `RunningVm`'s `Drop` runs `teardown` before its fields drop, so the reclaim outcome is known by
-/// the time this drops.
+/// The uid/gid one jailed sandbox runs under, held for as long as its chroot exists and returned to
+/// its span on drop **unless the tree those ids own outlived teardown**
+/// ([`withhold`](Self::withhold)): a chroot still chowned to the pair is what would make handing it
+/// to the next sandbox a collision. `RunningVm`'s `Drop` runs `teardown` before its fields drop, so
+/// the reclaim outcome is known by the time this drops.
 #[derive(Debug)]
 pub(crate) struct JailLease {
     uid: u32,
@@ -256,10 +249,10 @@ impl JailLease {
         self.gid
     }
 
-    /// Keep this pair out of the span for the driver's lifetime, because the chroot chowned to it is
-    /// still on the host. A withheld slot is a permanent in-process loss: the orphan sweep may
-    /// reclaim the tree seconds later, but nothing tells this pool, so exhausting a span this way is
-    /// a typed refusal naming the span rather than a silent uid collision.
+    /// Keep this pair out of the span for the driver's lifetime, the chroot chowned to it still
+    /// being on the host. A permanent in-process loss (the orphan sweep may reclaim the tree later,
+    /// but nothing tells this pool), so exhausting a span this way is a typed refusal rather than a
+    /// silent uid collision.
     pub(crate) fn withhold(&self) {
         self.withheld
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -318,22 +311,17 @@ pub(crate) struct Chroot {
     /// The cgroup dir the jailer created for this VMM (`/sys/fs/cgroup/<...>`), learned from
     /// `/proc/<pid>/cgroup` once the VMM is up. Removed (best-effort) on teardown; `None` until read.
     pub(crate) cgroup_dir: Option<PathBuf>,
-    /// The host paths of the read-only **bind mounts** staged into the chroot
-    /// ([`stage_ro_base_into_chroot`]): the shared rootfs base for a `read_only_root` jailed boot,
-    /// and a jailed restore's snapshot memory file + shared base disk. Each must be unmounted before
-    /// the scratch dir's `remove_dir_all`, or the mount point `EBUSY`s and leaks the chroot. Empty
-    /// for a read-write boot (a plain copy) or the copy fallback on a non-shared scratch.
+    /// The host paths of the read-only **bind mounts** staged in by [`stage_ro_base_into_chroot`],
+    /// each of which must be unmounted before the scratch dir's `remove_dir_all` or the mount point
+    /// `EBUSY`s and leaks the chroot. Empty when every resource was copied instead.
     pub(crate) mounts: Vec<PathBuf>,
 }
 
 impl Chroot {
-    /// A fresh chroot record for a just-spawned jail: `root` on the host, the pair the jailer
-    /// dropped to, no cgroup learned yet, and no mounts staged yet (`run_boot`/`run_restore` record
-    /// those as they bind them). One constructor so both jailed launch paths assemble it identically.
-    ///
-    /// Takes the **lease** rather than the [`Jail`], so the ids a chroot reports are the ones its
-    /// VMM actually runs under: re-reading `jail.uid` here would report the fixed pair for a boot
-    /// that leased a different one from a span.
+    /// A fresh chroot record for a just-spawned jail, one constructor so both jailed launch paths
+    /// assemble it identically. Takes the **lease** rather than the [`Jail`], so the ids a chroot
+    /// reports are the ones its VMM runs under: re-reading `jail.uid` would report the fixed pair
+    /// for a boot that leased a different one from a span.
     pub(crate) fn new(root: PathBuf, lease: JailLease) -> Self {
         Self {
             root,
@@ -345,9 +333,9 @@ impl Chroot {
         }
     }
 
-    /// Detach every bind mount staged into this chroot (lazy, best-effort), the step that must run
-    /// before the scratch dir's `remove_dir_all` or the mount point `EBUSY`s and leaks the chroot.
-    /// One home for the invariant, shared by `teardown` and `abort`. A no-op when nothing was mounted.
+    /// Detach every bind mount staged into this chroot, which must happen before the scratch dir's
+    /// `remove_dir_all` or the mount point `EBUSY`s and leaks the chroot. One home for that
+    /// ordering, shared by `teardown` and `abort`.
     pub(crate) fn unmount_all(&self) {
         for mount in &self.mounts {
             unmount_base(mount);
@@ -355,13 +343,11 @@ impl Chroot {
     }
 }
 
-/// Spawn the **jailer**, which builds the chroot and `exec`s Firecracker inside it. Returns the child
-/// (whose pid is Firecracker's, since the jailer `exec`s rather than forks), its console, the host
-/// path of the API socket, and the chroot root (where resources are staged before boot).
-///
-/// The jailer's own stderr and Firecracker's share `<workdir>/fc.stderr` (so `abort` can surface a
-/// jail-setup failure like a failed mknod); Firecracker's stdout stays piped for the serial console.
-/// On a spawn failure nothing is left running; the caller owns `workdir` cleanup.
+/// Spawn the **jailer**, which builds the chroot and `exec`s Firecracker inside it, returning the
+/// child (whose pid is Firecracker's, the jailer `exec`ing rather than forking), its console, the
+/// host path of the API socket, and the chroot root. The jailer's stderr and Firecracker's share
+/// `<workdir>/fc.stderr`, so `abort` can surface a jail-setup failure such as a failed mknod. On a
+/// spawn failure nothing is left running; the caller owns `workdir` cleanup.
 pub(crate) fn spawn_jailer(
     jail: &Jail,
     ids: (u32, u32),
@@ -381,11 +367,10 @@ pub(crate) fn spawn_jailer(
         ))
     })?;
     let chroot_root = workdir.join(exec_name).join(id).join("root");
-    // Firecracker binds `/run/firecracker.socket` relative to its cwd (the chroot root), so on the
-    // host the socket is `<chroot_root>/run/firecracker.socket`.
+    // Firecracker binds the socket relative to its cwd (the chroot root), so the host path is this.
     let socket = chroot_root.join("run/firecracker.socket");
-    // The jailer's chroot nests the socket deep under the scratch dir, so this is the path most
-    // likely to overflow `sun_path`, fail clearly now, not as a cryptic bind failure mid-boot.
+    // The deepest path this VM will bind, so checking it here catches a `sun_path` overflow as a
+    // typed refusal rather than a cryptic bind failure mid-boot.
     check_sun_path(&socket)?;
 
     let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
@@ -401,20 +386,17 @@ pub(crate) fn spawn_jailer(
         .arg(ids.1.to_string())
         .arg("--chroot-base-dir")
         .arg(workdir)
-        // This host is cgroup v2 only; the jailer defaults to v1 and would fail to find the
-        // hierarchy. The jailer always creates the microVM's cgroup (teardown removes it).
+        // The jailer defaults to cgroup v1 and would fail to find the hierarchy on a v2-only host.
         .arg("--cgroup-version")
         .arg("2");
-    // CPU/memory limits: the jailer writes each `<file>=<value>` into that cgroup. Empty when
-    // the host doesn't delegate the cgroup v2 controllers (see `cgroup_limit_args`), so a jailed boot
-    // still runs there, just without limits.
+    // The jailer writes each `<file>=<value>` into the cgroup it creates. Empty on a host that
+    // delegates no controllers (`cgroup_limit_args`), which still boots, just without limits.
     for arg in cgroup_args {
         cmd.arg("--cgroup").arg(arg);
     }
-    // Networked boot: the jailer opens this netns handle and `setns`es into it (as root,
-    // before dropping privileges) so the confined Firecracker runs in the VM's own network namespace,
-    // where its tap lives. The tap was created owned by the jailed uid, so the unprivileged VMM can
-    // attach it.
+    // The jailer `setns`es into this handle as root, *before* dropping privileges, so the confined
+    // Firecracker lands in the VM's own netns where its tap lives. The tap is already owned by the
+    // jailed uid, which is what lets the unprivileged VMM attach it.
     if let Some(netns) = netns {
         cmd.arg("--netns").arg(netns);
     }
@@ -437,13 +419,11 @@ pub(crate) fn spawn_jailer(
     match Console::spawn(stdout) {
         Ok(console) => Ok((child, console, socket, chroot_root)),
         Err(e) => {
-            // Bounded like every other reap on this path; no console to drain (its spawn failed).
             crate::drives::kill_and_reap_briefly(&mut child, "jailer", crate::vm::VMM_REAP_GRACE);
-            // The jailer creates the VM's cgroup early (before it execs Firecracker), but on this
-            // failure the lifetime sentinel isn't armed yet and no `Chroot` exists to carry the dir
-            // into teardown, so remove it here (best-effort) rather than leak an empty cgroup. This
-            // branch fires on `Console::spawn` EAGAIN, i.e. under exactly the many-sandbox load where
-            // leaked cgroups would accrue.
+            // The jailer creates the cgroup before it execs Firecracker, but here the sentinel is
+            // not armed and no `Chroot` exists to carry the dir into teardown, so remove it now.
+            // This branch fires on `Console::spawn` EAGAIN, the many-sandbox load where a leaked
+            // cgroup per failure would accrue.
             if let Some(cgroup) = jailer_cgroup_dir(firecracker, id) {
                 remove_cgroup(&cgroup);
             }
@@ -452,14 +432,11 @@ pub(crate) fn spawn_jailer(
     }
 }
 
-/// Copy `src` into the chroot as `<root>/<name>`, give it `mode`, and chown it to the jailed uid/gid
-/// so the dropped-privilege Firecracker can open it. Returns the **chroot-relative** path (`/<name>`)
-/// to name it by in the API. Called once the chroot exists (after the VMM's API socket is up), so it
-/// never races the jailer's chroot construction.
-///
-/// The copy is the honest cost of the jail on a **read-write** boot: the kernel and rootfs live
-/// outside the chroot, and hardlinking across the `/tmp` (tmpfs) boundary would `EXDEV`. A
-/// `read_only_root` boot instead bind-mounts the shared base zero-copy ([`stage_ro_base_into_chroot`]).
+/// Copy `src` into the chroot as `<root>/<name>` and hand it to the jailed uid, returning the
+/// **chroot-relative** path (`/<name>`) to name it by in the API. Must be called once the chroot
+/// exists (after the VMM's API socket is up) so it cannot race the jailer's construction. A copy
+/// rather than a hardlink because the sources live outside the chroot and linking across the `/tmp`
+/// tmpfs boundary would `EXDEV`; [`stage_ro_base_into_chroot`] is the zero-copy path.
 pub(crate) fn stage_into_chroot(
     root: &Path,
     name: &str,
@@ -475,10 +452,9 @@ pub(crate) fn stage_into_chroot(
     Ok(format!("/{name}"))
 }
 
-/// Hand a chroot-resident file to the jailed uid: set `mode` and chown to `uid:gid`, so the
-/// dropped-privilege Firecracker can open it. The shared tail of [`stage_into_chroot`] (copied
-/// resources) and the bulk-I/O images (built in place inside the chroot, nothing to copy).
-/// `std::os::unix::fs::chown` is a safe wrapper (no `unsafe` on the host path).
+/// Hand a chroot-resident file to the jailed uid, setting `mode` and chowning to `uid:gid` so the
+/// dropped-privilege Firecracker can open it. Shared by [`stage_into_chroot`] and the bulk-IO
+/// images built in place inside the chroot.
 pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), VmmError> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -677,14 +653,11 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
     )))
 }
 
-/// The cgroup dir the jailer will create for a VM, computed **before** the jailer is spawned:
-/// `--cgroup-version 2` with no `--parent-cgroup` places the VMM at
-/// `<cgroup root>/<exec-file name>/<id>`. The name component is whatever the resolved binary is
-/// called: the jailer accepts any exec-file name since v1.13, so an embedder pointing
-/// `BSX_FIRECRACKER` at, say, `/opt/fc` gets a `fc` component. Reading it off the resolved path rather than assuming a literal is what keeps
-/// this correct either way. Precomputing it lets the lifetime sentinel
-/// watch the cgroup from the moment the jailer is spawned instead of after boot; `run_boot` still
-/// learns the *actual* dir from `/proc` and warns if they ever disagree.
+/// The cgroup dir the jailer will create for a VM, computed **before** the jailer is spawned so the
+/// lifetime sentinel can watch it from that moment rather than after boot. `--cgroup-version 2`
+/// with no `--parent-cgroup` puts the VMM at `<cgroup root>/<exec-file name>/<id>`, and the jailer
+/// accepted any exec-file name since v1.13, so the name is read off the resolved binary rather than
+/// assumed. `run_boot` still learns the actual dir from `/proc` and warns if the two disagree.
 pub(crate) fn jailer_cgroup_dir(firecracker: &Path, id: &str) -> Option<PathBuf> {
     let exec = resolve_exec(firecracker).ok()?;
     let name = exec.file_name()?.to_owned();
@@ -717,21 +690,19 @@ pub(crate) fn remove_cgroup(dir: &Path) {
     }
 }
 
-/// Host-side cap on the number of tasks (processes + threads) the jailed VMM's cgroup may hold
-/// (`pids.max`). A guest fork-bomb is already bounded by `memory.max` and never reaches the host (its
-/// processes live in the guest's own kernel); this is **defense in depth** for the narrow case
-/// of a hypervisor-level exploit that tries to fork *host* processes. Firecracker itself holds only a
-/// handful of tasks (an API + VMM thread and one per vCPU), so 1024 is enormous headroom that never
-/// trips a legitimate boot while still capping a runaway.
+/// Host-side cap on the tasks the jailed VMM's cgroup may hold (`pids.max`). **Defense in depth**
+/// only: a guest fork-bomb lives in the guest's own kernel and is already bounded by `memory.max`,
+/// so this covers the narrow case of a hypervisor-level exploit forking *host* processes.
+/// Firecracker holds a handful of tasks (API + VMM thread, one per vCPU), so 1024 is headroom a
+/// legitimate boot never reaches.
 ///
 /// Public so the privileged readback test asserts the live cgroup carries *this* value, not a
 /// hand-copied literal that could drift (the same reason [`crate::FDS_PER_VM`] is public).
 pub const VMM_PIDS_MAX: u64 = 1024;
 
-/// The cgroup v2 controllers the root delegates in `cgroup.subtree_control` (a systemd host delegates
-/// cpu/memory/pids out of the box). Each is gated independently: the jailer sets a limit by enabling
-/// its controller down from the root, which only works when that controller is already delegated there,
-/// so passing `--cgroup <file>` for an undelegated controller would make the jailer *fail* the boot.
+/// The cgroup v2 controllers the root delegates in `cgroup.subtree_control` (a systemd host
+/// delegates cpu/memory/pids out of the box). Gated per controller because the jailer enables one
+/// down from the root, so a `--cgroup <file>` for an undelegated controller *fails* the boot.
 struct Delegated {
     cpu: bool,
     memory: bool,
@@ -751,12 +722,11 @@ fn read_delegated() -> Delegated {
     }
 }
 
-/// Build the `--cgroup <file>=<value>` limits from the delegation state, pure, so the
-/// per-controller fail-open logic is unit-tested without a live cgroup fs. `cpu.max` bounds total CPU
-/// to `vcpus` cores and `memory.max` to the guest's RAM plus a fixed host-side overhead; both require
-/// the cpu **and** memory controllers, so a host missing either gets no limits at all (empty). The
-/// host-side `pids.max` cap is added only when the `pids` controller is *also* delegated, so a host
-/// with cpu/memory but not pids keeps its cpu/memory caps (each controller fails open on its own).
+/// Build the `--cgroup <file>=<value>` limits from the delegation state: `cpu.max` bounds CPU to
+/// `vcpus` cores and `memory.max` to the guest's RAM plus [`MEMORY_OVERHEAD_MIB`]. Both need the
+/// cpu **and** memory controllers, so a host missing either gets no limits at all; `pids.max` rides
+/// on the `pids` controller alone, so each fails open independently. Pure, so that logic is
+/// unit-tested without a live cgroup fs.
 fn cgroup_args_for(d: &Delegated, vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<String> {
     if !(d.cpu && d.memory) {
         return Vec::new();
@@ -773,13 +743,10 @@ fn cgroup_args_for(d: &Delegated, vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<
     args
 }
 
-/// Resolve the jailer `--cgroup` args from the delegation state, honoring a `require_limits` caller.
-/// With `require_limits` set, a host that can't apply the cpu/memory caps is a typed refusal
-/// ([`VmmError::LimitsUnavailable`]) instead of the default empty-args fail-open. Pure
-/// (takes the [`Delegated`] state), so both the fail-open and fail-closed paths are unit-tested
-/// without a live cgroup fs. `require_limits` keys on cpu **and** memory, the caps that bound the
-/// resource envelope; the `pids.max` defense-in-depth cap stays best-effort either way (its absence
-/// can't let a guest exceed its cpu/memory envelope, so it never forces a refusal).
+/// Resolve the jailer `--cgroup` args, turning a `require_limits` caller's missing cpu/memory caps
+/// into a typed [`VmmError::LimitsUnavailable`] instead of the default fail-open. It keys on cpu
+/// **and** memory alone: `pids.max` is defense in depth, and its absence cannot let a guest exceed
+/// its envelope, so it never forces a refusal. Pure, so both directions are unit-tested.
 fn resolve_cgroup_caps(
     require_limits: bool,
     d: &Delegated,
@@ -825,11 +792,10 @@ pub(crate) fn cgroup_limit_args(
 }
 
 /// The memory envelope to cap a **restored** jailed clone at: the larger of the caller's `config`
-/// value and the guest RAM the snapshot memory file implies (`mem_file_len` bytes, since a full
-/// snapshot's memory file *is* the guest's RAM). Deriving from the file's true guest RAM means the cap
-/// can never fall *below* what the restored guest actually uses, the exact hazard that kept restore
-/// uncapped: a `config` under-declaring the envelope must not OOM-kill a legitimate clone. Pure, so
-/// the max logic is unit-tested without a real snapshot.
+/// value and the guest RAM the snapshot memory file implies, a full snapshot's memory file being
+/// the guest's RAM. Taking the max keeps the cap from falling below what the restored guest
+/// actually uses, so a `config` under-declaring the envelope cannot OOM-kill a legitimate clone.
+/// Pure, so the max logic is unit-tested without a real snapshot.
 pub(crate) fn restore_mem_mib(config_mem_mib: NonZeroU32, mem_file_len: u64) -> NonZeroU32 {
     let from_file = u32::try_from(mem_file_len / (1024 * 1024)).unwrap_or(u32::MAX);
     NonZeroU32::new(from_file.max(config_mem_mib.get())).unwrap_or(config_mem_mib)

@@ -38,12 +38,10 @@ pub fn vm_skip_reason() -> Option<String> {
     None
 }
 
-/// Refuses to run a test that measures **process-global** state beside its siblings.
-///
-/// libtest runs tests in parallel by default. A test asserting on open fds, thread count, mounts, or
-/// every `bsx-<pid>-*` scratch dir is measuring the whole test *binary*, since `std::process::id()`
-/// is shared: a concurrent sibling's live VM is indistinguishable from a leak. Call it first in such
-/// a test, or in the fixture that makes it global (see [`SmallFs::create`]).
+/// Refuses to run a test that measures **process-global** state beside its siblings, since libtest
+/// runs tests in parallel by default and `std::process::id()` is shared: a concurrent sibling's
+/// live VM is indistinguishable from a leak. Call it first in such a test, or in the fixture that
+/// makes it global (see [`SmallFs::create`]).
 pub fn require_serial(what: &str) {
     let args: Vec<String> = std::env::args().collect();
     let env = std::env::var("RUST_TEST_THREADS").ok();
@@ -77,11 +75,10 @@ fn serial_requested(args: &[String], env: Option<&str>) -> bool {
 
 /// A `Write` sink that appends into a shared buffer, for a test asserting on what was **logged**.
 ///
-/// `tracing::subscriber::with_default` is thread-local, so a subscriber has to be installed inside
-/// each thread whose output matters while the buffer stays shared: [`subscriber`](Self::subscriber)
-/// hands out one per thread over the same [`LogSink`], and [`contents`](Self::contents) reads them
-/// all back. Behind the `tracing-capture` feature, so the crates that borrow only the pure-std
-/// helpers keep an empty dependency list.
+/// `tracing::subscriber::with_default` is thread-local, so [`subscriber`](Self::subscriber) hands
+/// out one per thread over the same [`LogSink`] and [`contents`](Self::contents) reads them all
+/// back. Behind the `tracing-capture` feature, so crates borrowing only the pure-std helpers keep
+/// an empty dependency list.
 #[cfg(feature = "tracing-capture")]
 #[derive(Clone, Default)]
 pub struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -125,12 +122,10 @@ impl LogSink {
     }
 }
 
-/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only has to
-/// spray varied bytes at a decoder reproducibly.
-///
-/// Shared because the crates that fuzz their own decoders in-gate are leaves that will not take a
-/// `proptest`/`arbitrary` tree as a dev-dependency, and this crate's empty `[dependencies]` costs
-/// them nothing. Fixed seeds mean a failure reproduces exactly and the gate never flakes.
+/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only
+/// sprays varied bytes at a decoder reproducibly, so a failure replays from its seed and the gate
+/// never flakes. Shared because the crates that fuzz their decoders in-gate are leaves that will
+/// not take a `proptest`/`arbitrary` tree as a dev-dependency.
 pub struct Rng(u64);
 
 impl Rng {
@@ -244,9 +239,8 @@ const CPU_PERIOD_US: u64 = 100_000;
 /// A cgroup carrying the engine's own limit derivation: `cpu.max` = `vcpus` cores, `memory.max` =
 /// guest RAM + the fixed VMM overhead.
 ///
-/// Built by the test because those limits normally arrive via the jailer, which pins the
-/// same-derived caps onto an exec-capable boot path. Reclaims its dirs on drop, so declare it
-/// *before* the VM to make it drop after.
+/// Built by the test because those limits normally arrive via the jailer. Reclaims its dirs on
+/// drop, so declare it *before* the VM to make it drop after.
 pub struct LimitCgroup {
     dir: PathBuf,
     parent: PathBuf,
@@ -287,11 +281,10 @@ impl LimitCgroup {
         std::fs::write(this.dir.join("memory.max"), &memory_max).ok()?;
         let cpu_max = format!("{cpu_quota_us} {CPU_PERIOD_US}");
         std::fs::write(this.dir.join("cpu.max"), &cpu_max).ok()?;
-        // The writes succeeding proves delegation only if these paths are a cgroup at all: a
-        // v1/hybrid host (or any tmpfs shadowing /sys/fs/cgroup) presents ordinary files that
-        // accept every write above. Panic rather than return `None`, [`SmallFs::create`]'s
-        // posture: a fixture that is silently a plain directory greens every enforcement test
-        // without capping anything, and `None` reads as an ordinary skip.
+        // The writes succeed on a v1/hybrid host (or any tmpfs shadowing /sys/fs/cgroup), which
+        // presents ordinary files. Panic rather than return `None`, [`SmallFs::create`]'s posture:
+        // a fixture that is silently a plain directory greens every enforcement test without
+        // capping anything, and `None` reads as an ordinary skip.
         if let Err(why) = leaf_holds_the_limits(&this.dir, &memory_max, &cpu_max) {
             panic!(
                 "{} accepted the limit writes but is not a working cgroup v2 leaf: {why}. The \
@@ -390,12 +383,11 @@ fn leaf_holds_the_limits(dir: &Path, memory_max: &str, cpu_max: &str) -> Result<
 /// all-or-nothing restore staging, the snapshot bundle's partial-write sweep, the image builders.
 ///
 /// tmpfs rather than a loop-backed ext4: it needs no free loop device and no `mkfs`, and gives the
-/// same `ENOSPC` on write. The trade is that ext4-specific exhaustion (inodes, block-group
-/// allocation) is out of reach. `dev` is not decoration: a tmpfs is `nodev` by default and the
-/// jailer makes device nodes in a chroot staged on the scratch dir, so a `nodev` fixture would fail
-/// a jailed boot for a reason unrelated to the disk being full. `None` (skip) without real root,
-/// since mounting needs `CAP_SYS_ADMIN`. Unmounts and reclaims on drop, so declare it *before*
-/// anything writing into it.
+/// same `ENOSPC` on write, at the cost of ext4-specific exhaustion (inodes, block-group allocation)
+/// being out of reach. `dev` is load-bearing: a tmpfs is `nodev` by default and the jailer makes
+/// device nodes in a chroot staged on the scratch dir, so a `nodev` fixture fails a jailed boot for
+/// a reason unrelated to the disk being full. `None` (skip) without real root, since mounting needs
+/// `CAP_SYS_ADMIN`. Unmounts and reclaims on drop, so declare it *before* anything writing into it.
 pub struct SmallFs {
     // Dropped after the unmount below, which is what makes the reclaim hit the host dir rather than
     // the tmpfs's contents.
@@ -413,9 +405,9 @@ impl SmallFs {
         if !have_real_root() {
             return None;
         }
-        // Mounting is process-wide, and this fixture's premise is a filesystem of a known size at a
-        // known path. A sibling mounting concurrently breaks that premise, and the symptom lands
-        // elsewhere: the tool under test simply succeeds where the test required it to fail.
+        // Mounting is process-wide, so a sibling mounting concurrently breaks this fixture's
+        // premise of a known size at a known path, and the symptom lands elsewhere: the tool under
+        // test simply succeeds where the test required it to fail.
         require_serial(&format!("the SmallFs fixture ({tag})"));
         let dir = ScratchDir::created(tag);
         let ok = std::process::Command::new("mount")
@@ -461,10 +453,10 @@ impl SmallFs {
     /// Fills the filesystem, then hands back `headroom` bytes of it.
     ///
     /// Writing until `ENOSPC` and shrinking needs no `statvfs` (this crate is pure-std) and leaves
-    /// the actual remaining space at `headroom` rather than at whatever a free-block calculation
-    /// guessed. **Any non-zero headroom is a wager that the target allocates more than that**, and
-    /// losing it quietly leaves the caller passing while testing nothing: pass `0` unless a small
-    /// write genuinely has to succeed first. Panics on an I/O error other than a full disk.
+    /// the remaining space at exactly `headroom`. **Any non-zero headroom is a wager that the
+    /// target allocates more than that**, and losing it leaves the caller passing while testing
+    /// nothing, so pass `0` unless a small write genuinely has to succeed first. Panics on a
+    /// non-`ENOSPC` error.
     pub fn fill_leaving(&self, headroom: u64) {
         use std::io::Write as _;
         let path = self.path().join("bsx-filler");
@@ -481,9 +473,8 @@ impl SmallFs {
             }
         }
         // What the filesystem took, not what the loop counted: `write_all` can fail having
-        // delivered part of its chunk, and those bytes reach the file without reaching any
-        // caller-side tally. Truncating to an undercount would hand back space this method
-        // promises is gone.
+        // delivered part of its chunk, and truncating to that undercount would hand back space this
+        // method promises is gone.
         let taken = match file.metadata() {
             Ok(m) => m.len(),
             Err(e) => panic!("measure the filler {}: {e}", path.display()),
@@ -519,11 +510,9 @@ impl SmallFs {
         Some((kb(1)?, kb(3)?))
     }
 
-    /// A one-line dump of what this fixture actually is right now, for a failure message.
-    ///
-    /// A disk-full test fails saying the tool "unexpectedly succeeded", a symptom of the *fixture*:
-    /// whether the small filesystem is still mounted and how much room it really had are the useful
-    /// questions, and these tests only fail on hosts where nobody can attach a shell afterwards.
+    /// A one-line dump of what this fixture actually is right now, for a failure message. A
+    /// disk-full test fails saying the tool "unexpectedly succeeded", which is usually a symptom of
+    /// the *fixture*, on hosts where nobody can attach a shell afterwards.
     #[must_use]
     pub fn state(&self) -> String {
         let size = self.size_bytes().map_or_else(
@@ -549,10 +538,9 @@ impl SmallFs {
 }
 
 /// Whether `mountinfo` names `target` as a mount point (field 5). Compared in the kernel's own
-/// spelling: `/proc` octal-escapes space, tab, newline and backslash in path fields, so a raw
-/// `TMPDIR` carrying a space would otherwise read as unmounted and [`SmallFs::create`]'s
-/// fail-closed assertion would accuse a healthy fixture. Pure, so the escape cases are unit-tested
-/// without a live mount.
+/// spelling, since `/proc` octal-escapes space, tab, newline and backslash in path fields: a raw
+/// `TMPDIR` carrying a space otherwise reads as unmounted and [`SmallFs::create`]'s fail-closed
+/// assertion accuses a healthy fixture. Pure, so the escape cases are unit-tested without a mount.
 fn names_mount_point(mountinfo: &str, target: &Path) -> bool {
     let target = mountinfo_escape(&target.to_string_lossy());
     mountinfo
@@ -579,8 +567,8 @@ impl Drop for SmallFs {
             .is_ok_and(|s| s.success());
         if !unmounted {
             // Something still holds the mount (a helper the test detached rather than reaped). A
-            // lazy unmount detaches it now and lets the kernel free it when the last reference
-            // goes, so a leaked mount can't poison the next run's fixture.
+            // lazy unmount detaches it now and frees it at the last reference, so a leaked mount
+            // cannot poison the next run's fixture.
             let _ = std::process::Command::new("umount")
                 .arg("-l")
                 .arg(self.dir.path())
@@ -640,12 +628,9 @@ pub fn have_real_root() -> bool {
 }
 
 /// A process's host thread count (`/proc/<pid>/status` `Threads:`), for the hardware-isolation
-/// assertion that guest forks never become host threads. `0` if the process is gone.
-///
-/// The workspace's one thread-count read: the confinement and hardening suites measure a VMM pid
-/// with it, and `bsx-engine`'s boot soak and wedged-dial test measure their own. **`0` on a failed
-/// read is why every caller floors its baseline first**: a flat-count assertion would otherwise pass
-/// as `0 == 0` having measured nothing.
+/// assertion that guest forks never become host threads. `0` if the process is gone, which is why
+/// every caller floors its baseline first: a flat-count assertion otherwise passes as `0 == 0`
+/// having measured nothing.
 #[must_use]
 pub fn process_threads(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
@@ -659,10 +644,8 @@ pub fn process_threads(pid: u32) -> u64 {
 }
 
 /// A process's scheduler state letter (`R`, `S`, `Z`, ...) from `/proc/<pid>/stat`, or `None` when
-/// the entry is gone, unreadable, or carries no state field.
-///
-/// The workspace's one process-state read: the engine's reap tests ask whether a killed child is
-/// still a zombie, which `None` (fully reaped) and `Some("Z")` (leaked) answer.
+/// the entry is gone, unreadable, or carries no state field. The engine's reap tests read `None`
+/// as fully reaped and `Some("Z")` as leaked.
 #[must_use]
 pub fn process_state(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -688,12 +671,9 @@ mod tests {
     };
     use std::path::Path;
 
-    /// The generator repeats for a seed and never sticks, the two properties the fuzz suites that
-    /// share it rely on.
-    ///
-    /// Reproducibility is the whole reason these suites hand-rolled a PRNG instead of taking
-    /// `proptest`: a failure has to be re-runnable from its seed alone. A state that sticks is the
-    /// silent version of the same loss, a suite drawing one value forever and reporting a pass.
+    /// The generator repeats for a seed and never sticks, the two properties the fuzz suites
+    /// sharing it rely on: a failure has to be re-runnable from its seed alone, and a stuck state
+    /// is a suite drawing one value forever and reporting a pass.
     #[test]
     fn the_generator_repeats_for_a_seed_and_never_sticks() {
         let draws = |seed| {
@@ -724,12 +704,9 @@ mod tests {
         assert!(Rng::new(5).bytes_upto(16).len() <= 16);
     }
 
-    /// The root resolves from **this** crate's manifest dir, not the caller's.
-    ///
-    /// `CARGO_MANIFEST_DIR` expands where the macro is written, so hoisting this helper out of the
-    /// test binaries that each had their own copy silently re-anchored it from `crates/<caller>` to
-    /// `crates/test-support`. Both are two levels down, which is why the same `../..` still holds,
-    /// and this is what says so rather than leaving it to a privileged run to discover.
+    /// The root resolves from **this** crate's manifest dir, not the caller's: `CARGO_MANIFEST_DIR`
+    /// expands where the macro is written, so the `../..` holds only because `crates/test-support`
+    /// and every caller's `crates/<name>` sit at the same depth.
     #[test]
     fn the_workspace_root_resolves_from_this_crates_manifest_dir() {
         let root = workspace_root();
@@ -738,8 +715,8 @@ mod tests {
             "workspace_root() must land on the workspace, got {}",
             root.display()
         );
-        // The artifact paths every caller builds on it, so a wrong root is caught here, not by a
-        // privileged suite skipping itself with "guest rootfs not built".
+        // A wrong root is caught here, not by a privileged suite skipping itself with "guest rootfs
+        // not built".
         assert!(
             root.join("crates").is_dir() && root.join("xtask").is_dir(),
             "the root holds the workspace's own directories: {}",
@@ -749,8 +726,8 @@ mod tests {
 
     #[test]
     fn the_thread_count_is_live_for_a_live_pid_and_zero_for_a_gone_one() {
-        // Both halves of the contract three suites are built on. A live process always has at least
-        // this thread, so the floor the callers assert (`>= 1`, `>= 2`) is reachable...
+        // A live process always has at least this thread, so the floor the callers assert (`>= 1`,
+        // `>= 2`) is reachable...
         let live = process_threads(std::process::id());
         assert!(
             live >= 1,
@@ -758,8 +735,7 @@ mod tests {
         );
 
         // ...and a pid that cannot exist reads as `0` rather than propagating an error, which is
-        // exactly what makes those floors load-bearing: without them a flat-count assertion passes
-        // as `0 == 0` on a VMM that died mid-test.
+        // what makes those floors load-bearing on a VMM that died mid-test.
         assert_eq!(
             process_threads(u32::MAX),
             0,
@@ -767,9 +743,8 @@ mod tests {
         );
     }
 
-    /// The comm field decides this parse, and a comm holding `") "` is the case that separates the
-    /// two ways of writing it: a leading split reads a word of the *name* as the state, so a
-    /// zombie-check built on it clears a process that never got reaped.
+    /// A comm holding `") "` separates the two ways of writing this parse: a leading split reads a
+    /// word of the *name* as the state, so a zombie-check built on it clears an unreaped process.
     #[test]
     fn a_process_name_holding_the_field_separator_does_not_become_the_state() {
         assert_eq!(parse_proc_state("7 (sleep) S 1 7 7 0"), Some("S"));
@@ -783,9 +758,9 @@ mod tests {
         assert_eq!(parse_proc_state(""), None);
     }
 
-    /// Both halves of the contract the reap tests are built on. The live letter is left open
-    /// (`R` or `S` depending on which thread the kernel reports for a thread group), because what
-    /// the callers ask is only ever "is this `Z`, and is the entry still there at all".
+    /// The live letter is left open (`R` or `S`, depending on which thread the kernel reports for a
+    /// thread group), because the callers only ever ask whether this is `Z` and whether the entry
+    /// is still there at all.
     #[test]
     fn the_process_state_is_live_for_this_pid_and_absent_for_a_gone_one() {
         let live = process_state(std::process::id());
@@ -835,9 +810,8 @@ mod tests {
         ));
     }
 
-    /// The reproduced host shape: a tmpfs (or v1 hierarchy) at /sys/fs/cgroup accepts every
-    /// limit write into ordinary files. `cgroup.controllers` is a file only cgroupfs creates, so
-    /// its absence is what unmasks the imposter, staged here byte-for-byte.
+    /// A tmpfs (or v1 hierarchy) at /sys/fs/cgroup accepts every limit write into ordinary files.
+    /// `cgroup.controllers` is a file only cgroupfs creates, so its absence unmasks the imposter.
     #[test]
     fn a_plain_directory_holding_the_limit_files_is_not_a_cgroup() {
         let dir = ScratchDir::created("not-a-cgroup");
@@ -868,9 +842,8 @@ mod tests {
     }
 
     /// The kernel octal-escapes space/tab/newline/backslash in mountinfo path fields. The mount
-    /// line below is a real capture of a tmpfs mounted on a path with a space; the raw comparison
-    /// read it as "not mounted" and turned `SmallFs::create`'s fail-closed assertion into a false
-    /// accusation of a healthy fixture.
+    /// line below is a real capture of a tmpfs on a path with a space, which a raw comparison reads
+    /// as "not mounted", turning `SmallFs::create`'s fail-closed assertion into a false accusation.
     #[test]
     fn a_mount_point_with_a_space_is_recognised_in_mountinfo() {
         let line = r"2141 2135 0:264 / /tmp/bsx\040sp rw,relatime - tmpfs tmpfs rw,size=1024k";

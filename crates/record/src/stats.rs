@@ -1,14 +1,13 @@
-//! The plain measurement values the record embeds: per-VM network totals and the per-run
-//! resource summary. The probes in `bsx-probes-loader` *produce* these (the tap monitor sums
-//! flows into a [`NetStats`], the resource meter assembles a [`ResourceSummary`]); they live here
-//! because the record's shape owns them, and the two crates bridge only by plain values.
+//! The plain measurement values the record embeds: per-VM network totals and the per-run resource
+//! summary. `bsx-probes-loader` produces them; they live here because the record's shape owns them,
+//! and the two crates bridge only by plain values.
 
 use std::path::Path;
 use std::time::Duration;
 
 /// Per-VM network **totals**: one sandbox's traffic summed across all its flows, from the tap's
-/// perspective, **ingress** is what the guest sent, **egress** what it received. The sandbox-level
-/// rollup a caller exports, above the per-flow detail `TapMonitor::flows` gives.
+/// perspective, so **ingress** is what the guest sent and **egress** what it received. The rollup
+/// above `TapMonitor::flows`'s per-flow detail.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NetStats {
@@ -22,35 +21,31 @@ pub struct NetStats {
     pub egress_bytes: u64,
 }
 
-/// A per-run **resource summary** for one sandbox: the eBPF-measured CPU time plus the kernel's
-/// native cgroup v2 memory/IO counters, the two halves of the primitive rolled into one value a
-/// caller ships with the run. Assembled by `ResourceMeter::summary_for_pid` from a VMM pid.
+/// A per-run **resource summary** for one sandbox: eBPF-measured CPU time plus the kernel's native
+/// cgroup v2 memory/IO counters, assembled by `ResourceMeter::summary_for_pid` from a VMM pid.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResourceSummary {
-    /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running
-    /// its guest, from the scheduler tracepoint. [`Duration::ZERO`] if the cgroup was never a metered
-    /// target.
+    /// On-CPU time the VMM's cgroup accumulated while metered, from the scheduler tracepoint.
+    /// [`Duration::ZERO`] if the cgroup was never a metered target.
     pub cpu_time: Duration,
-    /// The cgroup's native cgroup v2 counters (memory peak/current, IO bytes, and `cpu.stat`'s
-    /// `usage_usec` as an independent cross-check on [`cpu_time`](Self::cpu_time)).
+    /// The cgroup's own cgroup v2 counters (memory, IO, and a cross-check on `cpu_time`).
     pub cgroup: CgroupStats,
 }
 
-/// A snapshot of a cgroup's **native cgroup v2** memory and IO counters, read straight from the cgroup
-/// dir's files, the complement to `ResourceMeter`'s eBPF CPU accounting. Every field is best-effort: a
-/// missing or unparseable file is [`None`], never an error, since accounting is a metering signal, not
-/// the isolation boundary. Read one with [`read`](Self::read), pointed at the VMM's cgroup dir.
+/// A snapshot of a cgroup's **native cgroup v2** memory and IO counters, read from the cgroup dir's
+/// files by [`read`](Self::read). Every field is best-effort: a missing or unparseable file is
+/// [`None`], never an error, since accounting is a metering signal, not the isolation boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CgroupStats {
-    /// Total CPU time the kernel charged this cgroup, microseconds (`cpu.stat`'s `usage_usec`). An
-    /// independent cross-check on `ResourceMeter::cpu_time`, from the scheduler's own accounting.
+    /// Total CPU time the kernel charged this cgroup, microseconds (`cpu.stat`'s `usage_usec`), an
+    /// independent cross-check on `ResourceMeter::cpu_time`.
     pub cpu_usage_usec: Option<u64>,
     /// Current charged memory, bytes (`memory.current`).
     pub memory_current: Option<u64>,
-    /// Peak charged memory, bytes (`memory.peak`), the high-water mark, the meaningful "how much did
-    /// this run use" number. Absent on kernels before it landed (~5.19), hence [`Option`].
+    /// Peak charged memory, bytes (`memory.peak`), the high-water mark for a run. Absent on kernels
+    /// before it landed (~5.19), hence [`Option`].
     pub memory_peak: Option<u64>,
     /// Bytes read, summed across every backing device (`io.stat`'s `rbytes=`).
     pub io_rbytes: Option<u64>,
@@ -59,9 +54,8 @@ pub struct CgroupStats {
 }
 
 impl CgroupStats {
-    /// Reads the cgroup v2 counters from `cgroup_dir`, best-effort: each missing or unreadable file
-    /// leaves its field [`None`], so a partial cgroup (no `io` controller, an older kernel without
-    /// `memory.peak`) still yields what it has.
+    /// Reads the cgroup v2 counters from `cgroup_dir`, best-effort: a missing or unreadable file
+    /// leaves its field [`None`], so a partial cgroup still yields what it has.
     #[must_use]
     pub fn read(cgroup_dir: &Path) -> Self {
         let read_u64 = |name: &str| {
@@ -88,15 +82,15 @@ impl CgroupStats {
     }
 }
 
-/// Parse a whole-file single unsigned integer (a `memory.current`/`memory.peak` body), trimming
-/// trailing newline. A cgroup "max" sentinel (some files carry it) or any non-numeric body is [`None`].
+/// Parse a whole-file single unsigned integer (a `memory.current`/`memory.peak` body). A cgroup
+/// `max` sentinel, or any other non-numeric body, is [`None`].
 fn parse_single_u64(text: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
-/// Parse the value on the `key <n>` line of a cgroup **flat-keyed** file (`cpu.stat` is `usage_usec
-/// <n>`, `user_usec <n>`, …). Finds the line whose first whitespace token equals `key` and parses the
-/// second. Pure (takes the text) so it is host-unit-testable without a live cgroup fs.
+/// Parse the value on the `key <n>` line of a cgroup **flat-keyed** file (`cpu.stat` is
+/// `usage_usec <n>`, `user_usec <n>`, …), matching the whole first token so a key that is a prefix
+/// of another cannot false-match. Takes the text, so it is host-testable without a live cgroup fs.
 fn parse_keyed_u64(text: &str, key: &str) -> Option<u64> {
     text.lines().find_map(|line| {
         let mut it = line.split_whitespace();
@@ -109,8 +103,8 @@ fn parse_keyed_u64(text: &str, key: &str) -> Option<u64> {
 }
 
 /// Sum `rbytes=` and `wbytes=` across every device line of a cgroup `io.stat` file, returning
-/// `(read_bytes, write_bytes)`. A device missing a field contributes 0. Pure (host-unit-testable) and
-/// saturating, so a pathological file can't overflow the rollup.
+/// `(read_bytes, write_bytes)`. A device missing a field contributes 0, and the sums saturate, so a
+/// pathological file cannot overflow the rollup.
 fn parse_io_bytes(text: &str) -> (u64, u64) {
     let (mut r, mut w) = (0u64, 0u64);
     for line in text.lines() {

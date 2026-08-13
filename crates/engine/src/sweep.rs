@@ -1,24 +1,18 @@
 //! The orphan sweep, the engine's garbage collector for crashed-driver residue.
 //!
-//! Teardown is `Drop`-based and the lifetime sentinel owns the VM *process tree*, but a driver that dies
-//! without `Drop` still leaves filesystem and network residue: its per-VM scratch dirs and its per-VM
-//! network namespaces, each holding the VM's tap. Every netns reuses the same fixed `/30`, so there is
-//! no shared pool to clog, but an orphaned netns is still residue worth reclaiming.
-//!
-//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`bsx-<pid>-<n>`). The netns is
-//! named after the dir it belongs to, so no separate record is needed and a restored clone's netns is
-//! named after its own dir rather than the snapshot source's.
+//! The lifetime sentinel owns the VM *process tree*, but a driver that dies without `Drop` leaves
+//! its per-VM scratch dirs and per-VM network namespaces, each holding the VM's tap. **Ownership is
+//! keyed on the pid embedded in the scratch-dir name** (`bsx-<pid>-<n>`), and a dir's netns carries
+//! that dir's own name (a restored clone's, its own rather than its source's).
 //!
 //! Conservative by construction:
-//! - Only dirs **owned by the sweeping euid** are candidates. The scratch base is world-writable, so a
-//!   hostile local user could otherwise plant a dead-looking dir naming a *victim's* live netns;
-//!   `create_workdir` makes real per-VM dirs `0700` and driver-owned, so ownership is the authorship
-//!   proof. Each uid therefore sweeps its own residue and never another's.
-//! - A dir whose embedded pid is **alive** is skipped, whether a live driver or a recycled pid
-//!   indistinguishable from one. The error direction is always "kept too long", never "reclaimed a live
-//!   VM's resources".
-//! - A dead dir with a **still-running VMM**, only possible where the sentinel degraded, is skipped with
-//!   a warning: the sweep owns fs and net residue, and processes are the sentinel's.
+//! - **Owner uid.** Only dirs owned by the sweeping euid are candidates: the scratch base is
+//!   world-writable, and `create_workdir` makes real per-VM dirs `0700` and driver-owned, so
+//!   ownership is the authorship proof that stops a decoy dir naming a *victim's* live netns.
+//! - **Live pid.** A dir whose embedded pid is alive is skipped, whether a live driver or a
+//!   recycled pid. The error direction is always "kept too long", never "reclaimed a live VM".
+//! - **Live VMM.** A dead dir with a still-running VMM, only possible where the sentinel degraded,
+//!   is skipped with a warning: the sweep owns fs and net residue, processes are the sentinel's.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
@@ -36,37 +30,27 @@ pub struct SweepReport {
     pub dirs_reclaimed: usize,
     /// Orphaned per-VM network namespaces deleted (each cascading its tap away).
     pub netns_reclaimed: usize,
-    /// Scratch dirs skipped because their owner pid is alive (a live driver, or a recycled pid,
-    /// indistinguishable, so both are kept).
+    /// Scratch dirs skipped because their owner pid is alive (a live driver or a recycled pid).
     pub live_skipped: usize,
     /// Dead-pid dirs whose removal was deferred because a restore is staging a disk into them right
-    /// now (a cross-process restore stages the source's disk into the source's old, now-dead dir),
-    /// witnessed by a live stager's pid in the dir's `RESTORE_STAGING_MARKER` file.
+    /// now, witnessed by a live stager's pid in the dir's `RESTORE_STAGING_MARKER` file.
     pub restore_staging_skipped: usize,
 }
 
 /// The marker a restoring driver drops in the staging dir for exactly the copy→`PUT /snapshot/load`
-/// window, holding its own pid (`stage_restore_disk` writes it, `unstage_restore_disk` removes it).
-/// The sweep defers a dead dir only while the marker names a live pid, so an in-flight restore is
-/// never `remove_dir_all`'d mid-copy, and a crashed stager's stale marker (dead pid) defers nothing.
+/// window, holding its own pid (`stage_restore_disk` writes it, `unstage_restore_disk` removes it),
+/// so the sweep defers a dead dir only while the marker names a live pid.
 pub(crate) const RESTORE_STAGING_MARKER: &str = ".restore-staging";
 
 /// Reclaim the residue of **dead** drivers under `scratch_dir` (the [`BootConfig::scratch_dir`]
-/// base, `/tmp` by default): their per-VM scratch dirs, and the per-VM network namespaces named after
-/// them (each holding an orphaned tap). Never touches a live driver's resources; see the module doc
-/// for the ownership rules.
+/// base, `/tmp` by default): their per-VM scratch dirs, and the per-VM network namespaces named
+/// after them (each holding an orphaned tap). Safe to run at any time and concurrently with live
+/// drivers: liveness is checked per dir, everything a live pid owns is skipped, and a per-entry
+/// failure is logged rather than fatal, so one undeletable dir can't shadow the rest of the sweep.
 ///
-/// Safe to run at any time, embedder startup being the natural moment, and concurrently with live
-/// drivers: liveness is checked per dir and everything a live pid owns is skipped. Per-entry failures are
-/// logged and skipped rather than fatal, so one undeletable dir can't shadow the rest of the sweep.
-///
-/// **The hoster's half.** This call only ever reclaims dirs the calling euid owns, but *deploying* it is
-/// the caller's:
-/// - **Schedule it.** Nothing calls this for you; a self-refilling janitor daemon is platform territory.
-/// - **One per identity.** Drivers running as several users each need their own sweep, since one root
-///   sweep does not cover a user driver's residue, nor should it.
-/// - **Harden the base.** Prefer a scratch base only the engine user can write over the world-writable
-///   `/tmp` default, so no other local user can plant a decoy for the ownership check to reject.
+/// **The hoster's half.** This reclaims only dirs the calling euid owns, so deploying it is the
+/// caller's: nothing schedules it, drivers running as several users each need their own sweep, and
+/// a scratch base only the engine user can write leaves no decoy for the ownership check to reject.
 ///
 /// [`BootConfig::scratch_dir`]: crate::BootConfig::scratch_dir
 ///
@@ -75,16 +59,14 @@ pub(crate) const RESTORE_STAGING_MARKER: &str = ".restore-staging";
 pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
     let entries = std::fs::read_dir(scratch_dir)
         .map_err(|e| VmmError::Vmm(format!("read scratch base {}: {e}", scratch_dir.display())))?;
-    // Refusing to sweep at all beats sweeping without the ownership proof (see the module doc):
-    // on a world-writable base, an unowned candidate set is an attacker-writable kill list.
+    // Fail closed: without the ownership proof, the candidate set on a world-writable base is an
+    // attacker-writable kill list.
     let Some(me) = own_euid() else {
         return Err(VmmError::Vmm(
             "cannot read own euid from /proc/self/status; refusing to sweep without it".into(),
         ));
     };
 
-    // Partition the per-VM dirs by owner liveness. The netns a dir owns is named after the dir, so no
-    // separate record or live-name bookkeeping is needed: a dead dir's netns is unambiguously its own.
     let mut report = SweepReport::default();
     let mut dead: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
@@ -92,8 +74,6 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         let Some(pid) = owner_pid(&name) else {
             continue; // Not a per-VM scratch dir; never touched.
         };
-        // Not ours: another uid's residue (their sweep's job), or a planted decoy on the
-        // world-writable base (see the module doc). Either way, not a candidate.
         if entry.metadata().map(|m| m.uid()).ok() != Some(me) {
             continue;
         }
@@ -105,9 +85,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
     }
 
     for dir in dead {
-        // The one way a dead driver leaves a *running* VMM is a degraded sentinel (no writable
-        // cgroup v2). Deleting files under a live VMM would strand it on unlinked
-        // inodes; processes are the sentinel's jurisdiction, so skip loudly instead.
+        // Deleting files under a live VMM would strand it on unlinked inodes.
         if let Some(vmm) = vmm_running_in(&dir) {
             tracing::warn!(
                 dir = %dir.display(),
@@ -117,9 +95,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
             report.live_skipped += 1;
             continue;
         }
-        // The netns is named after the scratch dir; a networked VM whose driver died leaves it behind
-        // (holding the tap). Delete it (cascading the tap away). No ownership ambiguity: the dir is
-        // ours (checked above) and the netns carries its name.
+        // Deleting the netns cascades its tap away.
         if let Some(netns) = dir.file_name().and_then(|n| n.to_str())
             && netns_exists(netns)
         {
@@ -131,11 +107,8 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
                 tracing::info!(%netns, "sweep: reclaimed orphaned network namespace");
             }
         }
-        // Defer removing a dir a live restore is staging into: a cross-process restore stages the
-        // source's disk into this dead-source-pid dir (the baked-in `bsx-<srcpid>-<n>/rootfs.ext4`),
-        // and `remove_dir_all` mid-copy would flake it. The stager's pid marker is the witness (a
-        // dead driver's own boot disk carries no marker, so it never defers). The netns above is
-        // still reclaimed; only the dir removal waits.
+        // A cross-process restore stages the source's disk into this dead-source-pid dir, so
+        // `remove_dir_all` mid-copy would flake it. Only the dir removal waits, not the netns.
         if restore_staging_in(&dir) {
             tracing::debug!(
                 dir = %dir.display(),
@@ -145,18 +118,15 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
             continue;
         }
         // A crashed driver's jailed read-only boot leaves the shared base **bind-mounted** into its
-        // chroot; `remove_dir_all` would `EBUSY` on that mount point and leak the whole dir. Detach any
-        // mount under this dir first (lazy, best-effort), so reclamation is never blocked by a mount
-        // its owning driver died before unmounting.
+        // chroot, and `remove_dir_all` would `EBUSY` on that mount point and leak the whole dir.
         detach_mounts_under(&dir);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
                 report.dirs_reclaimed += 1;
                 tracing::info!(dir = %dir.display(), "sweep: reclaimed dead driver's scratch dir");
             }
-            // E.g. root-owned chroot content under a non-root sweep (jailed boots need root, so
-            // their residue does too). The tap half is already reclaimed; the dir waits for a
-            // sufficiently-privileged sweep.
+            // E.g. root-owned chroot content under a non-root sweep: the tap half is already
+            // reclaimed, and the dir waits for a sufficiently-privileged sweep.
             Err(e) => {
                 tracing::warn!(dir = %dir.display(), error = %e, "sweep: failed to remove dir")
             }
@@ -166,10 +136,8 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
 }
 
 /// Detach (lazy, best-effort) every mount whose mount point lies under `dir`, deepest first, so a
-/// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind, today that is
-/// the read-only base a jailed overlay boot bind-mounts into its chroot. Reads `/proc/self/mountinfo`
-/// through [`crate::mountinfo`], so a mount point whose path contains a space matches like any
-/// other. A no-op when `dir` holds no mounts.
+/// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind. A no-op when
+/// `dir` holds no mounts.
 fn detach_mounts_under(dir: &Path) {
     let Some(info) = crate::mountinfo::self_text() else {
         return;
@@ -180,8 +148,8 @@ fn detach_mounts_under(dir: &Path) {
 }
 
 /// The mount points under `dir` in `mountinfo`, **deepest first**, since a child mount must be
-/// detached before its parent's mount point. Split from the unmounting so the selection and the
-/// order are unit-testable against a fixture rather than a live `/proc`.
+/// detached before its parent's mount point. Split from the unmounting so both are unit-testable
+/// against a fixture rather than a live `/proc`.
 fn mounts_under(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
     let mut points: Vec<PathBuf> = crate::mountinfo::mounts(mountinfo)
         .filter(|m| m.point.starts_with(dir))
@@ -192,10 +160,8 @@ fn mounts_under(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether a live process is staging a restore disk into `dir` right now: its
-/// [`RESTORE_STAGING_MARKER`] names a pid that is alive. Liveness is [`pid_alive`], the same
-/// primitive the dir partition trusts, so a crashed stager (dead pid) or a dead driver's own boot
-/// disk (no marker at all) never defers reclamation. A recycled stager pid reads as alive and
-/// defers, the conservative direction, until that unrelated process exits.
+/// [`RESTORE_STAGING_MARKER`] names a [`pid_alive`] pid. A crashed stager (dead pid) or a dead
+/// driver's own boot disk (no marker) defers nothing; a recycled stager pid defers, conservatively.
 fn restore_staging_in(dir: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(dir.join(RESTORE_STAGING_MARKER)) else {
         return false;
@@ -215,29 +181,21 @@ fn owner_pid(name: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
-/// Whether `pid` currently exists. Deliberately not comm-checked: the driver is the *embedder's*
-/// process, whose name we can't know, so a recycled pid reads as alive and its dir is kept
-/// (the conservative direction; a later sweep gets it).
+/// Whether `pid` currently exists. Deliberately not comm-checked, since the driver is the
+/// *embedder's* process, so a recycled pid reads as alive and its dir is kept for a later sweep.
 fn pid_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
-/// This process's **effective** uid, from `/proc/self/status`, no `unsafe`, no libc. The crate's one
-/// euid read: the identity `create_workdir`'s dirs carry and the candidate filter must match, the
-/// ownership `stage_restore_disk` verifies before adopting a pre-existing dir, and the real-root
-/// answer `doctor`'s jailer rows report.
+/// This process's **effective** uid, from `/proc/self/status`, no `unsafe`, no libc.
 pub(crate) fn own_euid() -> Option<u32> {
     euid_in(&std::fs::read_to_string("/proc/self/status").ok()?)
 }
 
 /// The effective uid in a `/proc/<pid>/status` body. `strip_prefix` consumes the `Uid:` token, so
-/// the remaining whitespace fields are `[real, effective, saved, fs]` and the effective one is index
-/// 1; a `starts_with` split would leave `Uid:` as field 0 and shift it to 2.
-///
-/// Split from the read so the index is pinned against a **setuid-shaped** line, which a live `/proc`
-/// read cannot do: an ordinary process's four uid fields are all equal, so it cannot tell the two
-/// indices apart. `bsx-record`'s `uids` carries the same reasoning for the copy engine cannot reach
-/// (engine does not depend on `bsx-record`).
+/// the remaining whitespace fields are `[real, effective, saved, fs]` and the effective one is
+/// index 1; a `starts_with` split would leave `Uid:` as field 0 and shift it to 2. Split from the
+/// read so that index is pinned against a **setuid-shaped** line, which a live `/proc` cannot do.
 fn euid_in(status: &str) -> Option<u32> {
     let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
     uid.split_whitespace().nth(1)?.parse().ok()
@@ -245,11 +203,10 @@ fn euid_in(status: &str) -> Option<u32> {
 
 /// The pid of a `firecracker`/`jailer` process whose cwd is inside `dir`, if one is running. An
 /// unjailed VMM's cwd *is* its scratch dir (`spawn_fc` sets it for the relative vsock path); a
-/// jailed VMM's cwd is its chroot root, `<dir>/<exec-name>/<id>/root`. Identity is compared by
-/// `(st_dev, st_ino)` through the `/proc/<pid>/cwd` magic link, the link *text* is
-/// namespace-relative after a pivot_root (the finding), but `metadata` resolves through it.
-/// Processes whose cwd we can't stat (another user's) are ignored; jailed boots need root, so a
-/// sweep of jailed residue runs as root and can see them.
+/// jailed VMM's cwd is its chroot root. Identity is compared by `(st_dev, st_ino)` through the
+/// `/proc/<pid>/cwd` magic link, because the link *text* is namespace-relative after a `pivot_root`
+/// while `metadata` resolves through it. Processes whose cwd we can't stat (another user's) are
+/// ignored; jailed boots need root, so a sweep of jailed residue runs as root and can see them.
 fn vmm_running_in(dir: &Path) -> Option<u32> {
     let protected = protected_identities(dir);
     if protected.is_empty() {
@@ -273,14 +230,14 @@ fn vmm_running_in(dir: &Path) -> Option<u32> {
     None
 }
 
-/// The `(st_dev, st_ino)` identities a VMM's cwd could carry for the VM whose scratch dir is
-/// `dir`: the dir itself (unjailed), plus any `<dir>/<x>/<y>/root` chroot roots the jailer built.
+/// The `(st_dev, st_ino)` identities a VMM's cwd could carry for the VM whose scratch dir is `dir`:
+/// the dir itself (unjailed), plus the `<dir>/<exec-file-name>/<id>/root` chroot roots the jailer
+/// nests two levels down.
 fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
     let mut ids = BTreeSet::new();
     if let Ok(m) = std::fs::metadata(dir) {
         ids.insert((m.dev(), m.ino()));
     }
-    // The jailer nests its chroot two levels down: `<chroot-base>/<exec-file-name>/<id>/root`.
     for lvl1 in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         for lvl2 in std::fs::read_dir(lvl1.path())
             .into_iter()

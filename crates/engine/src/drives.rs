@@ -16,17 +16,15 @@ use bsx_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 use crate::VmmError;
 
-/// Size of the blank writable output image. A fixed cap, and the natural bulk-output
-/// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
-/// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
-/// metadata: a fresh image is ~a few MiB of real host blocks, growing only with what's written.
+/// Size of the blank writable output image, the natural bulk-output bound (the guest can't write
+/// more than the filesystem holds). Built with `lazy_itable_init=0` so the guest kernel never
+/// balloons the metadata: a fresh image is a few MiB of real host blocks.
 const OUTPUT_IMAGE_MIB: u32 = 256;
 
-/// Hard ceiling on the **real host bytes** [`RunningVm::collect_outputs`] will write while extracting
-/// the output image. A hole in a guest file reads back as zeros, so a hostile guest could stage a
-/// sparse file with a huge logical size inside the capped image and inflate the readback; the walk
-/// charges what it writes against this bound. Generous headroom over [`OUTPUT_IMAGE_MIB`] (a
-/// legitimate tree's real bytes can't exceed the image), so only abuse trips.
+/// Hard ceiling on the **real host bytes** [`RunningVm::collect_outputs`] will write while
+/// extracting the output image: a hole in a guest file reads back as zeros, so a sparse file with a
+/// huge logical size inside the capped image would otherwise inflate the readback. Generous
+/// headroom over [`OUTPUT_IMAGE_MIB`], which a legitimate tree's real bytes can't exceed.
 const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 512 MiB
 
 /// Wall-clock bound on the output readback, so a pathological image can never hang the host
@@ -42,13 +40,13 @@ const MAX_OUTPUT_ENTRIES: u64 = 500_000;
 /// buffer from the inode's own claim, so this is the per-inode counterpart to
 /// [`refuse_impossible_geometry`]: a claim past what a path can be never reaches an allocator.
 const MAX_SYMLINK_TARGET: u64 = 4096;
-/// Copy buffer for one guest file. An upper bound, not a stride: the reader answers a `read` with at
-/// most one filesystem block, so the buffer is rarely filled. Each read is charged against the byte
-/// cap as it lands, which is what enforces the cap mid-file rather than at file boundaries.
+/// Copy buffer for one guest file. An upper bound, not a stride: the reader answers a `read` with
+/// at most one filesystem block, so the buffer is rarely filled. Each read is charged against the
+/// byte cap as it lands, which is what enforces the cap mid-file rather than at file boundaries.
 const READBACK_CHUNK: usize = 64 * 1024;
 /// How long a killed helper is given to be reaped before it is detached (see
-/// [`kill_and_reap_briefly`]). Short: a killable child dies at once, and anything slower is the
-/// D-state case, where waiting longer only lengthens the hang.
+/// [`kill_and_reap_briefly`]). Short, because a killable child dies at once and anything slower is
+/// the D-state case, where waiting longer only lengthens the hang.
 pub(crate) const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
 /// directory its tree is extracted into on [`RunningVm::collect_outputs`].
@@ -57,10 +55,9 @@ pub(crate) struct OutputDevice {
     pub(crate) image: PathBuf,
     pub(crate) dest: PathBuf,
 }
-/// Build a read-only ext4 from `src_dir` for the bulk-input block device, populated
-/// **rootless** via `mke2fs -d` (no loopback, no `sudo`). Sized from the tree's byte total with
-/// slack and given enough inodes for its file count; the image lands in `workdir` (the per-VM
-/// scratch dir) so teardown reclaims it. Returns the image path.
+/// Build a read-only ext4 from `src_dir` for the bulk-input block device, populated **rootless**
+/// via `mke2fs -d` (no loopback, no `sudo`). The image lands in `workdir` (the per-VM scratch dir)
+/// so teardown reclaims it.
 pub(crate) fn build_input_image(
     src_dir: &Path,
     workdir: &Path,
@@ -68,9 +65,9 @@ pub(crate) fn build_input_image(
 ) -> Result<PathBuf, VmmError> {
     require_dir(src_dir, "input directory")?;
     let (bytes, files) = measure_tree(src_dir)?;
-    // ext4 has a small floor and `mke2fs` needs metadata headroom; over-sizing only wastes scratch
-    // (reclaimed on teardown) while under-sizing fails the build, so size up generously. `-N` gives
-    // enough inodes that many tiny files exhaust bytes before inodes.
+    // ext4 has a small floor and `mke2fs` needs metadata headroom, and over-sizing only wastes
+    // scratch while under-sizing fails the build. `-N` gives enough inodes that many tiny files
+    // exhaust bytes before inodes.
     let size_mib = (bytes / (1024 * 1024) * 3 / 2).max(8) + 8;
     let inodes = files + 256;
 
@@ -91,12 +88,11 @@ pub(crate) fn build_input_image(
     Ok(image)
 }
 
-/// Build a **blank, writable** ext4 for the bulk-output block device, rootless via `mke2fs`.
-/// No `-d` (nothing to seed) and `lazy_itable_init=0`/`lazy_journal_init=0` so the guest kernel never
-/// lazily zeroes the inode table at runtime, that would balloon the sparse image toward its full
-/// [`OUTPUT_IMAGE_MIB`] on the host regardless of how little the command writes. Labelled
-/// [`OUTPUT_LABEL`] so the guest mounts it by label. The image lands in `workdir` (reclaimed on
-/// teardown); [`RunningVm::collect_outputs`] reads it back after the VMM exits.
+/// Build a **blank, writable** ext4 for the bulk-output block device, rootless via `mke2fs`, and
+/// labelled [`OUTPUT_LABEL`] so the guest mounts it by label. `lazy_itable_init=0` and
+/// `lazy_journal_init=0` keep the guest kernel from lazily zeroing the inode table at runtime,
+/// which would balloon the sparse image toward its full [`OUTPUT_IMAGE_MIB`] however little the
+/// command writes.
 pub(crate) fn build_output_image(workdir: &Path, deadline: Instant) -> Result<PathBuf, VmmError> {
     let image = workdir.join("output.ext4");
     allocate_image(&image, u64::from(OUTPUT_IMAGE_MIB), deadline)?;
@@ -112,10 +108,9 @@ pub(crate) fn build_output_image(workdir: &Path, deadline: Instant) -> Result<Pa
     Ok(image)
 }
 
-/// One walk of `dir` for `(total_bytes, file_count)`, to size the input image. Bounded: an input
-/// past a sane ceiling is a typed error, not a giant image. Symlinks are counted (each is an inode)
-/// but not descended, `mke2fs -d` copies them verbatim, so a link resolves inside the *guest* fs,
-/// never the host's, and there's no symlink-loop or host-escape via traversal.
+/// One walk of `dir` for `(total_bytes, file_count)`, to size the input image; an input past the
+/// ceiling is a typed error, not a giant image. Symlinks are counted (each is an inode) but not
+/// descended, since `mke2fs -d` copies them verbatim and a link resolves inside the *guest* fs.
 fn measure_tree(dir: &Path) -> Result<(u64, u64), VmmError> {
     const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB bulk-input ceiling
     let mut bytes = 0u64;
@@ -194,12 +189,10 @@ fn allocate_image(image: &Path, size_mib: u64, deadline: Instant) -> Result<(), 
     )
 }
 
-/// Format `image` as ext4 with `label` and whatever `extra` the caller's device needs. Rootless
-/// (no loopback, no `sudo`): `-F` formats a plain file, `-m 0` leaves no reserved blocks, since a
-/// device with no root user has nothing to reserve them for.
-///
-/// The label is required rather than an `extra`, because the guest mounts both devices **by label**:
-/// an unlabelled image would leave it mounting by `/dev/vdX` probe order.
+/// Format `image` as ext4 with `label` and whatever `extra` the caller's device needs. Rootless (no
+/// loopback, no `sudo`): `-F` formats a plain file, `-m 0` leaves no reserved blocks. The label is
+/// required rather than an `extra`, because the guest mounts both devices **by label** and an
+/// unlabelled image would leave it mounting by `/dev/vdX` probe order.
 fn mkfs_ext4(
     image: &Path,
     label: &str,
@@ -225,15 +218,13 @@ fn mkfs_ext4(
 /// [`VmmError::Artifact`], the driver's only other external process is `firecracker`, so these are
 /// real new runtime dependencies, surfaced clearly rather than as a cryptic spawn failure.
 fn run_host_tool(program: &str, args: &[&OsStr], deadline: Instant) -> Result<(), VmmError> {
-    // Bounded (not a bare `.output()`): a scratch filesystem that has stopped answering would
-    // otherwise stall the boot with no typed error. stderr is captured so a real failure (e.g.
-    // `mke2fs` on a full scratch fs) names the cause, and stdin/stdout are nulled so no tool line
-    // can land on the pipe-clean structured-result stdout.
+    // Bounded (not a bare `.output()`), so a scratch filesystem that has stopped answering is a
+    // typed error rather than a stalled boot. stderr is captured so a real failure names the cause,
+    // and stdin/stdout are nulled so no tool line lands on the pipe-clean structured-result stdout.
     //
-    // The wall is whichever of the two runs out first: the **caller's** boot deadline, which is
-    // the wall the run was actually promised, or [`IMAGE_TOOL_TIMEOUT`], which caps a wedged tool
-    // on a boot with a generous (or absent) budget. A private constant alone would let a hung
-    // `mke2fs` sit for two minutes under a ten-second wall.
+    // The wall is whichever of the two runs out first: the caller's boot deadline, or
+    // [`IMAGE_TOOL_TIMEOUT`], which caps a wedged tool on a boot with a generous (or absent)
+    // budget. The constant alone would let a hung `mke2fs` sit for two minutes under a 10s wall.
     let wall = deadline
         .saturating_duration_since(Instant::now())
         .min(crate::proc::IMAGE_TOOL_TIMEOUT);
@@ -243,17 +234,15 @@ fn run_host_tool(program: &str, args: &[&OsStr], deadline: Instant) -> Result<()
     if !status.success() {
         return Err(VmmError::Vmm(format!(
             "{program} failed building a block device image: {}",
-            // Never just the stderr: `mke2fs` killed by a signal writes none, and the exit status
-            // is then the whole diagnosis.
             crate::proc::failure_detail(status, &stderr)
         )));
     }
     Ok(())
 }
 
-/// Map a failure to spawn one of the driver's host helpers (`mke2fs`/`truncate` for the block
-/// devices, `ip` for the tap) to a typed error: a missing binary is a clear
-/// [`VmmError::Artifact`] (install hint), anything else a [`VmmError::Vmm`].
+/// Map a failure to spawn one of the driver's host helpers (`mke2fs`/`truncate`, `ip`) to a typed
+/// error: a missing binary is a [`VmmError::Artifact`] with an install hint, anything else a
+/// [`VmmError::Vmm`].
 pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
     if e.kind() == std::io::ErrorKind::NotFound {
         VmmError::Artifact(format!(
@@ -264,14 +253,12 @@ pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
     }
 }
 
-/// Read the writable output image back into the host `dest` directory, rootless and in-process.
-/// Ordered so the tree is safe before it's returned: walk the image under a byte/entry/time cap,
+/// Read the writable output image back into the host `dest` directory, rootless and in-process,
+/// ordered so the tree is safe before it's returned: walk the image under a byte/entry/time cap,
 /// neutralise host-escaping symlinks, then list what survived. Called only after the VMM has exited
-/// (see [`RunningVm::collect_outputs`]).
-///
-/// The image is wholly guest-authored, so it is parsed in-process by `ext4-view`, an `unsafe`-free
-/// reader on the `#![forbid(unsafe_code)]` host path. The reader replays the image's journal, which
-/// is what makes a hard-killed guest's dirty image readable.
+/// (see [`RunningVm::collect_outputs`]). The image is wholly guest-authored, so it is parsed by
+/// `ext4-view`, an `unsafe`-free reader on the `#![forbid(unsafe_code)]` host path, which replays
+/// the image's journal and so can read a hard-killed guest's dirty image.
 pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
@@ -301,8 +288,7 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
     collect_paths(dest)
 }
 
-/// Byte offset of the ext4 superblock, and the fields inside it this check reads. Named rather than
-/// spelled inline so the one place that duplicates on-disk layout says which values it needs.
+/// Byte offset of the ext4 superblock, and the fields inside it this check reads.
 const SUPERBLOCK_OFFSET: u64 = 1024;
 const SUPERBLOCK_LEN: usize = 1024;
 const SB_BLOCKS_COUNT_LO: usize = 0x04;
@@ -329,17 +315,15 @@ const MIN_BLOCK_SIZE: u64 = 1024;
 /// Refuse an output image whose superblock describes a filesystem the file could not hold, before
 /// the parser sizes an allocation from that description.
 ///
-/// **This is the one bound `catch_unwind` cannot provide.** `ext4-view` reads through a trait and so
-/// never learns the image's real length; it sizes its block-group descriptor table and its block
-/// cache from the superblock's own claims, so a 2 KiB image naming billions of blocks, or one block
-/// of two gigabytes, asks for tens of gigabytes before it parses anything. A failed allocation of
-/// that size **aborts** the process rather than unwinding, which takes the driver and every sandbox
-/// sharing it down, so it has to be refused before it is attempted rather than caught after.
+/// **This is the one bound `catch_unwind` cannot provide.** `ext4-view` reads through a trait and
+/// so never learns the image's real length; it sizes its block-group descriptor table and its block
+/// cache from the superblock's own claims, and a failed allocation of that size **aborts** the
+/// process rather than unwinding, taking the driver and every sandbox sharing it down.
 ///
-/// A bound, not a parse: it reads the fields that size those allocations (the 64-bit block count, the
-/// group sizes, and the block-size exponent) and holds each against one fact the parser does not
-/// apply, the image's real length or ext4's own format ceiling. Anything that is not an ext4
-/// superblock is passed straight through, so the parser stays the authority on what a valid image is.
+/// A bound, not a parse: it reads the fields that size those allocations (the 64-bit block count,
+/// the group sizes, and the block-size exponent) and holds each against the image's real length or
+/// ext4's own format ceiling. Anything that is not an ext4 superblock passes straight through, so
+/// the parser stays the authority on what a valid image is.
 fn refuse_impossible_geometry(image: &Path) -> Result<(), VmmError> {
     let len = std::fs::metadata(image)
         .map_err(|e| VmmError::Vmm(format!("stat the output image {}: {e}", image.display())))?
@@ -373,9 +357,9 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
     if le32(SB_BLOCKS_PER_GROUP) == 0 || le32(SB_INODES_PER_GROUP) == 0 {
         return Err("corrupt superblock: a zero blocks- or inodes-per-group".into());
     }
-    // The parser builds its block cache from this exponent alone, eight entries plus a read buffer,
-    // before it reads an inode: independent of the block *count*, so a filesystem claiming one block
-    // of two gigabytes fits any image-length check and still asks for eighteen gigabytes at load.
+    // The parser builds its block cache from this exponent alone, eight entries plus a read
+    // buffer, before it reads an inode: independent of the block *count*, so one two-gigabyte block
+    // passes any image-length check and still asks for eighteen gigabytes at load.
     let log_block_size = le32(SB_LOG_BLOCK_SIZE);
     if log_block_size > MAX_LOG_BLOCK_SIZE {
         return Err(format!(
@@ -383,10 +367,9 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
             log_block_size + 10
         ));
     }
-    // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a lower
-    // bound on the claim's real size, so a legitimate image (whose blocks are that size or larger)
-    // always passes. The count is the full 64 bits the parser reads: a small low dword with the high
-    // dword set names billions of blocks.
+    // The filesystem cannot be larger than the file holding it. `MIN_BLOCK_SIZE` keeps this a
+    // lower bound on the claim's real size, so a legitimate image always passes. The count is the
+    // full 64 bits the parser reads: a small low dword with the high dword set names billions.
     let blocks_count = (le32(SB_BLOCKS_COUNT_HI) << 32) | le32(SB_BLOCKS_COUNT_LO);
     let claimed = blocks_count.saturating_mul(MIN_BLOCK_SIZE);
     if claimed > image_len {
@@ -397,11 +380,8 @@ fn superblock_admits_parsing(sb: &[u8], image_len: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// The readback's pre-parse bound, for `cargo xtask fuzz output_image`.
-///
-/// The fuzz target must apply exactly what [`collect_output_image`] applies: a target carrying its
-/// own validator tests a path production does not have, and goes green while production keeps the
-/// bug. One function, one behaviour, both callers.
+/// The readback's pre-parse bound, for `cargo xtask fuzz output_image`, so the target applies
+/// exactly what [`collect_output_image`] applies rather than a validator of its own.
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
     /// `true` when the readback would hand this superblock to the parser.
@@ -413,19 +393,18 @@ pub mod fuzz {
     /// The superblock's offset and length, so a target can slice one out of a candidate image.
     pub const SUPERBLOCK_OFFSET: u64 = super::SUPERBLOCK_OFFSET;
     pub const SUPERBLOCK_LEN: usize = super::SUPERBLOCK_LEN;
-    /// The walk's per-inode bound on a symlink target, so a target's own walk refuses the same
-    /// claims [`Walk::dir`](super::Walk::dir) refuses rather than reporting crashes the readback
-    /// cannot reach.
+    /// The walk's per-inode bound on a symlink target, so a target refuses the same claims
+    /// [`Walk::dir`](super::Walk::dir) refuses rather than reporting crashes the readback can't
+    /// reach.
     pub const MAX_SYMLINK_TARGET: u64 = super::MAX_SYMLINK_TARGET;
 }
 
 /// Remove a **symlink** already sitting at `host_path` before the walk creates anything there.
 ///
-/// `File::create` and `create_dir_all` both follow a link, so a link planted in `output_dir` ahead of
-/// the readback redirects the create onto whatever it names: the guest's bytes land outside `dest`,
-/// and [`sanitize_symlinks`] then removes the link, so the manifest reports a clean run that wrote
-/// nothing. [`Walk::dir`] calls this for every entry, which is what keeps a create inside `dest`.
-/// A regular file or directory already at the name is left alone; only a link redirects a write.
+/// `File::create` and `create_dir_all` both follow a link, so a link planted in `output_dir` ahead
+/// of the readback would redirect the create onto whatever it names, land the guest's bytes outside
+/// `dest`, and leave [`sanitize_symlinks`] reporting a clean run that wrote nothing. [`Walk::dir`]
+/// calls this for every entry it creates; a regular file or directory at the name is left alone.
 fn clear_planted_link(host_path: &Path) -> Result<(), VmmError> {
     match host_path.symlink_metadata() {
         Ok(meta) if meta.is_symlink() => std::fs::remove_file(host_path)
@@ -434,19 +413,16 @@ fn clear_planted_link(host_path: &Path) -> Result<(), VmmError> {
     }
 }
 
-/// One extraction of a guest image into a host directory, carrying the three bounds a guest-authored
-/// tree is walked under.
-///
-/// **Every bound is a typed error, never a silent stop.** A truncated tree reported as a clean
-/// readback is the audit-honesty failure of claiming artifacts that were never written.
+/// One extraction of a guest image into a host directory, carrying the three bounds a
+/// guest-authored tree is walked under. **Every bound is a typed error, never a silent stop**: a
+/// truncated tree reported as a clean readback claims artifacts that were never written.
 struct Walk<'a> {
     dest: &'a Path,
     /// Ceiling on written bytes. A field rather than a constant so a test can drive the bound with
     /// a fixture instead of half a gigabyte of guest output.
     byte_cap: u64,
-    /// Real host bytes written so far, against [`OUTPUT_EXTRACT_CAP`]. A hole in a guest file reads
-    /// back as zeros, so a sparse file staged inside the capped image is counted at the size it
-    /// actually costs the host.
+    /// Real host bytes written so far, against [`OUTPUT_EXTRACT_CAP`], so a sparse file staged
+    /// inside the capped image is counted at the size it actually costs the host.
     bytes: u64,
     /// Directory entries visited so far, against [`MAX_OUTPUT_ENTRIES`]. Entries only: a file's
     /// copy chunks check the clock but must not spend this budget, or one large legitimate file
@@ -478,11 +454,10 @@ impl<'a> Walk<'a> {
         self.dir(fs, &root, self.dest.to_path_buf(), 0)
     }
 
-    /// Extract one guest directory into `host_dir`, recursing at `depth`.
-    ///
-    /// A crafted image can name a directory whose entry points back at an ancestor, so the walk is
-    /// bounded by depth and total entries rather than by a visited set: `ext4-view` exposes no inode
-    /// number to deduplicate on, and both bounds hold a cycle whether or not one is expressible.
+    /// Extract one guest directory into `host_dir`, recursing at `depth`. A crafted image can name
+    /// a directory whose entry points back at an ancestor, so the walk is bounded by depth and
+    /// total entries rather than by a visited set, since `ext4-view` exposes no inode number to
+    /// deduplicate on.
     fn dir(
         &mut self,
         fs: &Ext4,
@@ -515,9 +490,8 @@ impl<'a> Walk<'a> {
             if depth == 0 && name == "lost+found" {
                 continue;
             }
-            // A name with no `str` form names no host file a caller could open. `DirEntryName`
-            // already rejects `/` and NUL, so a name that is valid UTF-8 is a single path component
-            // and cannot climb out of `host_dir`.
+            // `DirEntryName` already rejects `/` and NUL, so a name that is valid UTF-8 is a
+            // single path component and cannot climb out of `host_dir`.
             let Ok(name) = name.as_str() else {
                 tracing::warn!(
                     dir = %guest_dir.display(),
@@ -550,10 +524,9 @@ impl<'a> Walk<'a> {
                 FileType::Regular => self.file(fs, &guest_path, &host_path)?,
                 FileType::Symlink => {
                     // `read_link` allocates the target from the inode's **claimed** size, so an
-                    // inode naming gigabytes aborts the process on the allocation, the same shape as
-                    // the superblock's block count and equally beyond `catch_unwind`. A real target
-                    // is a path, so anything past `PATH_MAX` is corrupt and is refused before the
-                    // claim is allowed to size an allocation.
+                    // inode naming gigabytes aborts the process on the allocation, beyond
+                    // `catch_unwind`. A real target is a path, so a claim past `PATH_MAX` is
+                    // refused before it can size one.
                     if meta.len() > MAX_SYMLINK_TARGET {
                         tracing::warn!(
                             path = %guest_path.display(),
@@ -565,8 +538,8 @@ impl<'a> Walk<'a> {
                     let target = fs.read_link(&guest_path).map_err(|e| {
                         VmmError::Vmm(format!("read guest symlink {}: {e}", guest_path.display()))
                     })?;
-                    // A target with no `str` form names nothing a host read could follow, so it is
-                    // dropped here rather than recreated as a link the sanitizer cannot resolve.
+                    // A non-UTF-8 target names nothing a host read could follow, so it is dropped
+                    // rather than recreated as a link the sanitizer cannot resolve.
                     let Ok(target) = target.to_str() else {
                         tracing::warn!(
                             path = %guest_path.display(),
@@ -575,21 +548,19 @@ impl<'a> Walk<'a> {
                         continue;
                     };
                     // `symlink` refuses to replace an existing name, where `File::create` and
-                    // `create_dir_all` both tolerate one, so a reused `output_dir` would fail on
-                    // this arm alone. Clear the way to keep the three arms consistent.
+                    // `create_dir_all` both tolerate one, so a reused `output_dir` fails here.
                     if host_path.symlink_metadata().is_ok() {
                         let _ = std::fs::remove_file(&host_path)
                             .or_else(|_| std::fs::remove_dir_all(&host_path));
                     }
-                    // Recreated verbatim, then judged by `sanitize_symlinks` against the real `dest`:
-                    // an escaping target is dropped there, where containment is resolved rather than
-                    // guessed from the link text.
+                    // Recreated verbatim, then judged by `sanitize_symlinks` against the real
+                    // `dest`, where containment is resolved rather than guessed from the link text.
                     std::os::unix::fs::symlink(target, &host_path).map_err(|e| {
                         VmmError::Vmm(format!("create symlink {}: {e}", host_path.display()))
                     })?;
                 }
-                // Block/char devices, fifos and sockets carry guest-chosen major/minor numbers and
-                // no data. They are named in the log and skipped rather than recreated on the host.
+                // Block/char devices, fifos and sockets carry guest-chosen major/minor numbers
+                // and no data, so they are logged and skipped rather than recreated on the host.
                 other => tracing::warn!(
                     path = %guest_path.display(),
                     file_type = ?other,
@@ -601,7 +572,6 @@ impl<'a> Walk<'a> {
     }
 
     /// Copy one guest file to `host_path`, charging its bytes against the cap as they are written.
-    ///
     fn file(
         &mut self,
         fs: &Ext4,
@@ -660,11 +630,11 @@ impl<'a> Walk<'a> {
 /// helper run against wedge-prone state (the jail's `mount`, a version probe) can never park the
 /// host thread. A `try_wait` failure or the deadline kills and *briefly* reaps
 /// ([`kill_and_reap_briefly`]: an unkillable D-state child is detached, never waited on) before
-/// returning a typed error; the `what` label names the tool in the timeout/wait messages.
+/// returning a typed error; `what` names the tool in the timeout/wait messages.
 ///
-/// `poll` is the tick and `grace` the post-kill reap wall, both the caller's: a boot-path `mount`
-/// finishing in ~1ms wants a fine tick and a short grace, while a sentinel with its own bounded
-/// retry loop needs a grace longer than that loop or it is detached just before it would exit.
+/// `poll` is the tick and `grace` the post-kill reap wall, both the caller's: a sentinel with its
+/// own bounded retry loop needs a grace longer than that loop or it is detached just before it
+/// would exit.
 pub(crate) fn wait_bounded(
     child: &mut Child,
     deadline: Instant,
@@ -691,21 +661,19 @@ pub(crate) fn wait_bounded(
 }
 
 /// Kill `child` and reap it, but only briefly: a child SIGKILL cannot reach (D-state, the very
-/// wedge these helpers are bounded against) would turn the reap's `wait` into the hang the
-/// deadline just prevented. Past `grace` it is detached with a warning and lingers as a zombie
-/// until this process exits, the same trade `proc::run_bounded` makes on the teardown path: the
-/// no-hang promise outranks a zombie. Returns whether the child was actually reaped, so a caller
-/// with follow-on work that depends on the process being gone (joining its console reader, which
-/// only ends at the child's stdout EOF) can skip that work instead of blocking on it.
+/// wedge these helpers are bounded against) would turn the reap's `wait` into the hang the deadline
+/// just prevented. Past `grace` it is detached with a warning and lingers as a zombie until this
+/// process exits, the trade `proc::run_bounded` also makes. Returns whether the child was actually
+/// reaped, so a caller whose follow-on work needs the process gone (joining its console reader,
+/// which only ends at the child's stdout EOF) can skip that work instead of blocking on it.
 pub(crate) fn kill_and_reap_briefly(child: &mut Child, what: &str, grace: Duration) -> bool {
     let _ = child.kill();
     reap_briefly(|| child.try_wait(), what, grace)
 }
 
 /// The reap loop of [`kill_and_reap_briefly`], over any `try_wait`. A child SIGKILL genuinely
-/// cannot reach needs a wedged FUSE/NFS mount to produce, so the detach arm is reachable in a test
-/// only through this seam: a `try_wait` that answers `Ok(None)` is the D-state child's whole
-/// observable behavior here.
+/// cannot reach needs a wedged FUSE/NFS mount to produce, so this seam is the only way a test can
+/// reach the detach arm: `Ok(None)` forever is the D-state child's whole observable behavior.
 fn reap_briefly(
     mut try_wait: impl FnMut() -> std::io::Result<Option<ExitStatus>>,
     what: &str,
@@ -728,21 +696,17 @@ fn reap_briefly(
     }
 }
 
-/// Remove every symlink under `dest` whose target escapes `dest`. The walk recreates a guest symlink
-/// verbatim as a **host** symlink, so an un-sanitised `link -> /etc/shadow` (or one that
-/// climbs out with `..`) would make a later host read of the results read host files, the inverse of
-/// the input side, where `mke2fs -d` resolves links inside the guest image. In-tree links (e.g.
-/// `a -> sub/b`) are kept.
+/// Remove every symlink under `dest` whose target escapes `dest`, keeping in-tree ones (`a ->
+/// sub/b`). The walk recreates a guest symlink verbatim as a **host** symlink, so an un-sanitised
+/// `link -> /etc/shadow` would make a later host read of the results read host files.
 ///
-/// Containment is checked by **canonical resolution**, not lexically: a lexical `..`-depth count is
-/// unsound because a kept in-tree symlink makes a `Normal` path component *not* descend a real level,
-/// a guest can chain `d -> .` with `evil -> d/../../etc/shadow` to pass a lexical check while
-/// resolving above `dest`. `Path::canonicalize` follows every intermediate link to the real target,
-/// which we require to sit under the canonical `dest`; a target that doesn't resolve (dangling, or
-/// pointing outside to a nonexistent path) can't be proven in-tree, so it's dropped. Safe from
-/// TOCTOU: the VMM is already reaped and `dest` is host-private, so nothing mutates the tree
-/// concurrently. The walk itself never traverses a symlink (`lstat`-like `file_type`), so it can't be
-/// redirected onto the host mid-scan.
+/// Containment is checked by **canonical resolution**, not lexically: a kept in-tree symlink makes
+/// a `Normal` component *not* descend a real level, so a guest can chain `d -> .` with
+/// `evil -> d/../../etc/shadow` to pass a `..`-depth count while resolving above `dest`.
+/// `Path::canonicalize` follows every intermediate link to the real target, which must sit under
+/// the canonical `dest`; a target that doesn't resolve can't be proven in-tree, so it's dropped. No
+/// TOCTOU: the VMM is already reaped and `dest` is host-private. The walk itself never traverses a
+/// symlink (`lstat`-like `file_type`), so it can't be redirected onto the host mid-scan.
 fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
     let root = dest
         .canonicalize()
@@ -752,8 +716,6 @@ fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
             return Ok(());
         }
         let path = entry.path();
-        // Follow the link (and any intermediate links) to a real path; keep only if it stays
-        // within the canonical destination.
         let contained = path
             .canonicalize()
             .map(|real| real.starts_with(&root))
@@ -780,9 +742,8 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
     for_each_leaf(dest, "output", VmmError::Vmm, |entry, _| {
         let path = entry.path();
         if let Ok(rel) = path.strip_prefix(dest) {
-            // A non-UTF-8 name has no lossless `String`, and a `to_string_lossy` U+FFFD form names
-            // no file on disk (an embedder resolving it gets ENOENT), so drop it with a warning
-            // rather than hand back a broken manifest entry (the sanitizer's posture).
+            // A `to_string_lossy` U+FFFD form names no file on disk (an embedder resolving it
+            // gets ENOENT), so drop it rather than hand back a broken manifest entry.
             match rel.to_str() {
                 Some(s) => out.push(s.to_owned()),
                 None => tracing::warn!(

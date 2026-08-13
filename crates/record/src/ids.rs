@@ -1,21 +1,17 @@
 //! Which local uids this host trusts to have authored a file it reads.
 //!
-//! **The threat.** Two files decide what a run does and how its record is signed: the user config
-//! (`~/.bsx.toml`, which names the binary, the images, the key, and the ids a VMM drops to) and the
-//! signing key itself. On a shared host, another local user who can write either one, or replace it
-//! by owning the directory it sits in, chooses those for you. Both gates ask the same question of a
-//! file's owner, so both ask it here.
-//!
-//! **Who is trusted.** The effective uid, root, and the `sudo` invoker. Root is admitted because it
-//! can already replace the binary being configured, so a root-authored file grants nothing new; this
-//! is OpenSSH `StrictModes`'s rule.
-//!
-//! **Where `SUDO_UID` stops being sound.** It is consulted only when the real *and* effective uid
-//! are both 0, which is the state `sudo` produces. A setuid-root `bsx` would leave the real uid at
-//! the caller's, so an unprivileged attacker could otherwise set `SUDO_UID` themselves and have
-//! their own file trusted. `su -` clears the environment and `doas` sets a name rather than a uid,
-//! so a root shell obtained either way reads a user-owned file as untrusted: a refusal naming a fix,
-//! not a silent acceptance.
+//! - **The threat.** Two files decide what a run does and how its record is signed: the user config
+//!   (`~/.bsx.toml`, which names the binary, the images, the key, and the ids a VMM drops to) and
+//!   the signing key. On a shared host, another local user who can write either one, or replace it
+//!   by owning the directory it sits in, chooses those for you; both gates ask the owner question
+//!   here.
+//! - **Who is trusted.** The effective uid, root, and the `sudo` invoker. Root is admitted because
+//!   it can already replace the binary being configured, which is OpenSSH `StrictModes`'s rule.
+//! - **Where `SUDO_UID` stops being sound.** It is consulted only when the real *and* effective uid
+//!   are both 0, the state `sudo` produces: a setuid-root `bsx` leaves the real uid at the
+//!   caller's, so an unprivileged attacker could otherwise set `SUDO_UID` themselves. `su -` clears
+//!   the environment and `doas` sets a name rather than a uid, so a root shell obtained either way
+//!   reads a user-owned file as untrusted, a refusal naming a fix rather than a silent acceptance.
 
 /// This process's uids, plus the invoking uid when it is running under `sudo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +36,7 @@ impl HostIds {
         })
     }
 
-    /// Builds an identity from its parts, for a test that needs a uid combination this process
-    /// cannot be.
+    /// Builds an identity from its parts, for a uid combination this process cannot be.
     #[must_use]
     pub fn from_parts(real: u32, effective: u32, sudo: Option<u32>) -> Self {
         Self {
@@ -67,7 +62,7 @@ impl HostIds {
         }
     }
 
-    /// Whether a file owned by `uid` was written by someone this process trusts to have authored it.
+    /// Whether a file owned by `uid` was authored by someone this process trusts.
     #[must_use]
     pub fn trusts(self, uid: u32) -> bool {
         uid == self.effective || uid == 0 || self.sudo_invoker() == Some(uid)
@@ -75,20 +70,17 @@ impl HostIds {
 
     /// Whether a directory owned by `uid` with permission bits `mode` can be trusted to keep
     /// holding the file found in it: a trusted owner, and no group/world write without the sticky
-    /// bit. A sticky world-writable directory (`/tmp` at `0o1777`) qualifies, because the kernel
-    /// won't let one user unlink or rename another's file there; without the sticky bit, ownership
-    /// of a file proves nothing about what will be at that path a moment later.
+    /// bit. A sticky world-writable directory (`/tmp` at `0o1777`) qualifies, since the kernel
+    /// won't let one user unlink or rename another's file there; without it, owning the file proves
+    /// nothing about what is at that path a moment later.
     #[must_use]
     pub fn trusts_dir(self, uid: u32, mode: u32) -> bool {
         self.trusts(uid) && (mode & 0o022 == 0 || mode & 0o1000 != 0)
     }
 }
 
-/// The `(real, effective)` uids from a `/proc/self/status` body.
-///
-/// `strip_prefix` consumes the `Uid:` token, so the remaining whitespace fields are
-/// `[real, effective, saved, fs]`. (A `starts_with` split would leave `Uid:` as field 0 and shift
-/// both indices by one, which is why the sibling helpers in this workspace differ.)
+/// The `(real, effective)` uids from a `/proc/self/status` body. `strip_prefix` consumes the
+/// `Uid:` token, so the remaining whitespace fields are `[real, effective, saved, fs]`, untagged.
 fn uids(status: &str) -> Option<(u32, u32)> {
     let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
     let mut fields = line.split_whitespace();

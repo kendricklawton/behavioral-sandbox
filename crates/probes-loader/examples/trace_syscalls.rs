@@ -2,8 +2,7 @@
 //! tracepoints and streams decoded events as they happen, until the window closes.
 //!
 //! With a `PID` argument it **attributes** the trace to that process's cgroup: pass a sandbox's
-//! Firecracker VMM pid to watch exactly one sandbox's host footprint. With none, it traces the whole
-//! host.
+//! Firecracker VMM pid to watch one sandbox's host footprint. With none, it traces the whole host.
 //!
 //! ```text
 //! trace_syscalls [SECONDS] [PID]      # defaults: 5 seconds, whole host
@@ -20,8 +19,8 @@
 //! target/debug/examples/trace_syscalls 5 $(pgrep -n firecracker)   # one sandbox
 //! ```
 //!
-//! Returning a boxed error from `main` keeps this within the no-panic host discipline (no
-//! `unwrap`/`expect`): a missing object or a load without the caps prints the typed error and exits.
+//! `main` returns a boxed error rather than unwrapping, so a missing object or a load without the
+//! caps prints the typed error and exits.
 
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -35,7 +34,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut tracer = SyscallTracer::load()?;
     match pid {
-        // Resolve the pid's cgroup id from the Firecracker track and scope the trace to it.
         Some(p) => {
             let cgroup = cgroup_id_of_pid(p)?;
             tracer.watch_cgroup(cgroup)?;
@@ -48,7 +46,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     tracer.drain(|_| {})?; // discard whatever was buffered before the window opens
 
-    // Stream the decoded trace live until the window closes; events print within ~2 ms.
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let count = tracer.stream(
         Duration::from_millis(2),

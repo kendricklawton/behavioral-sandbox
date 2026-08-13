@@ -27,9 +27,8 @@ pub const COMM_CAP: usize = 16;
 pub const DETAIL_CAP: usize = 128;
 
 /// The **maximum** leading bytes of a `connect` sockaddr the probe copies into
-/// [`SyscallEvent::detail`]: `sizeof(struct sockaddr_in6)`, so a full IPv6 address is captured. The
-/// probe picks between this and [`SOCKADDR_SNAP_V4`] by the caller's own `addrlen`, so a 16-byte
-/// `sockaddr_in` is not over-read.
+/// [`SyscallEvent::detail`]: `sizeof(struct sockaddr_in6)`. The probe picks between this and
+/// [`SOCKADDR_SNAP_V4`] by the caller's own `addrlen`, so a 16-byte `sockaddr_in` is not over-read.
 pub const SOCKADDR_SNAP: usize = 28;
 
 /// The IPv4 `sockaddr_in` size, the copy length the probe uses for any `addrlen` below
@@ -233,19 +232,14 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
     "<sockaddr: too short>".to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Syscall tracepoint arguments: where in the kernel's tracepoint record each
-// argument the tracers read sits.
-// ---------------------------------------------------------------------------
+// --- Syscall tracepoint arguments: where each argument sits in the kernel's tracepoint record. ---
 
 /// One `sys_enter_*` argument a tracer reads: a byte offset into the tracepoint record plus the
 /// name the kernel's own `format` file gives it, shared by the kernel program and the loader's
-/// pre-attach `format` check so neither side can name a position the other does not check.
-///
-/// The offset is an **ABI assumption, not a relocation**: BTF does not relocate argument-area
-/// reads, so a kernel that laid the record out differently would hand the probe an unrelated `u64`
-/// to follow as a user pointer, with nothing erroring. The `format` check makes that a typed
-/// refusal.
+/// pre-attach `format` check so neither side can name a position the other does not check. The
+/// offset is an **ABI assumption, not a relocation**: BTF does not relocate argument-area reads, so
+/// a kernel that laid the record out differently would hand the probe an unrelated `u64` to follow
+/// as a user pointer, with nothing erroring, and the `format` check makes that a typed refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TracepointArg {
     /// The event under the `syscalls` category whose record this offset is into.
@@ -263,12 +257,10 @@ pub const ARG_SLOT: usize = 8;
 
 /// Slot of the target **tgid** in the `FILTER` array, and slot of the target **cgroup id**. A zero
 /// slot means "do not filter on this axis"; the map is zero-initialized, so the load-time default is
-/// observe-all.
-///
-/// Single-sourced because the kernel program reads these positions and the loader writes them: if
-/// the two disagreed, `watch_cgroup` would put a cgroup inode in the tgid slot, `passes_filter`
-/// would compare it against a tgid and never match, and the run would report an empty footprint
-/// with no error and no drop counted.
+/// observe-all. Single-sourced because the kernel program reads these positions and the loader
+/// writes them: if the two disagreed, `watch_cgroup` would put a cgroup inode in the tgid slot,
+/// `passes_filter` would compare it against a tgid and never match, and the run would report an
+/// empty footprint with no error and no drop counted.
 pub const FILTER_TGID: u32 = 0;
 /// See [`FILTER_TGID`].
 pub const FILTER_CGROUP: u32 = 1;
@@ -318,9 +310,7 @@ pub const TRACEPOINT_ARGS: [TracepointArg; 4] = [
     CONNECT_ADDRLEN_ARG,
 ];
 
-// ---------------------------------------------------------------------------
-// Network flows: the per-flow record the tc program on a VM's tap writes.
-// ---------------------------------------------------------------------------
+// --- Network flows: the per-flow record the tc program on a VM's tap writes. ---
 
 /// Ethernet header length, the offset the IP header starts at. Shared by the tc program (which reads
 /// with `ctx.load` at absolute offsets) and the host-side parsers (which read through a slice), so
@@ -363,9 +353,9 @@ pub const ETH_P_IPV6: u16 = 0x86dd;
 /// unrepresentable as a flow and counted as unparsed. Not expected on a sandbox's tap, unlike ARP,
 /// which is why ARP is not counted.
 pub const ETH_P_8021Q: u16 = 0x8100;
-/// An L4 protocol a rule or flow is matched on, the typed face of the raw IP protocol number, so a
-/// caller writes `Protocol::Udp` and never `17`. Only the two protocols the parser reads ports
-/// for; "any protocol" is [`None`], not a variant. The discriminant *is* the on-wire number.
+/// An L4 protocol a rule or flow is matched on, so a caller writes `Protocol::Udp` and never `17`.
+/// Only the two protocols the parser reads ports for; "any protocol" is [`None`], not a variant.
+/// The discriminant *is* the on-wire number.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -400,9 +390,9 @@ pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
-/// An IP protocol number rendered for a human: `tcp`, `udp`, or `proto <n>` for one this engine does
-/// not name. The one rendering, so the flow keys, the signed record and the CLI's trail cannot
-/// disagree about what a protocol is called; `core::fmt` only, so the `#![no_std]` half can use it.
+/// An IP protocol number rendered for a human: `tcp`, `udp`, or `proto <n>` for one this engine
+/// does not name. The one rendering, so no surface disagrees about what a protocol is called;
+/// `core::fmt` only, so the `#![no_std]` half can use it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtoName(pub u8);
 
@@ -573,10 +563,8 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     Some(FlowKey::new(src, dst, src_port, dst_port, proto))
 }
 
-// ---------------------------------------------------------------------------
-// Egress policy: the allow-list the tc program on a VM's tap consults to drop or accept
-// a guest-sent packet. Single-sourced here so the in-kernel matcher and the host-tested one can't drift.
-// ---------------------------------------------------------------------------
+// --- Egress policy: the allow-list the tc program consults to drop or accept a guest-sent packet.
+// Single-sourced here so the in-kernel matcher and the host-tested one can't drift. ---
 
 /// How many egress allow-rules a sandbox's policy holds, fixed because the tc program scans the whole
 /// array in a bounded loop (the verifier needs a compile-time cap) and BPF maps are sized at load.
@@ -622,9 +610,9 @@ impl PolicyRule {
     }
 
     /// Serializes to the map value's raw native bytes, so the loader writes the policy without an
-    /// `unsafe` `aya::Pod` binding. The write half of the wire: the tc program reads the slot back
-    /// through the struct layout, so the offsets come from the struct, or a drifted position would
-    /// reinterpret an operator's rule with nothing erroring.
+    /// `unsafe` `aya::Pod` binding. The offsets come from the struct, since the tc program reads
+    /// the slot back through the struct layout and a drifted position would reinterpret an
+    /// operator's rule with nothing erroring.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE_SIZE] {
         let mut b = [0u8; POLICY_RULE_SIZE];
@@ -664,8 +652,8 @@ impl PolicyRule {
 /// Whether one [`PolicyRule`] admits the destination `(dst_addr, dst_port, proto)` (all host byte
 /// order): `active`, its CIDR contains `dst_addr`, and port and protocol match (`0` is a wildcard).
 /// Called per rule by the tc program and looped by [`egress_allowed`], so kernel and host can't
-/// disagree. The mask keeps the shift operand `< 32` (an out-of-range shift is UB in the kernel);
-/// an out-of-range `prefix_len` is no match.
+/// disagree. The mask keeps the shift operand `< 32`, since an out-of-range shift is UB in the
+/// kernel; an out-of-range `prefix_len` is no match.
 #[must_use]
 pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     if rule.active == 0 || rule.prefix_len > 32 {
@@ -689,11 +677,9 @@ pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto:
         .any(|r| rule_matches(r, dst_addr, dst_port, proto))
 }
 
-// ---------------------------------------------------------------------------
-// IPv6: the v6 twins of the flow key, parser, and egress policy above. Deliberately **parallel**
-// types and maps rather than widening the v4 ones, so the proven v4 datapath stays byte-for-byte
-// unchanged. Addresses are `[u8; 16]` in network byte order, matched byte-wise (see the crate docs).
-// ---------------------------------------------------------------------------
+// --- IPv6: the v6 twins of the flow key, parser, and egress policy above. Deliberately parallel
+// types and maps rather than widening the v4 ones, so the v4 datapath stays byte-for-byte
+// unchanged. Addresses are `[u8; 16]` in network byte order, matched byte-wise. ---
 
 /// One **directional** IPv6 network flow's identity: the v6 5-tuple, addresses in network byte order.
 /// A stable 40-byte BPF hash-map key like [`FlowKey`]; build it with [`FlowKey6::new`], which zeroes
@@ -1017,8 +1003,8 @@ mod flow_tests {
 
     #[test]
     fn non_first_fragment_has_no_ports() {
-        // A non-first fragment carries no L4 header, so what sits at the port offsets is payload: the
-        // parser must zero the ports, else a guest mints bogus 5-tuples.
+        // A non-first fragment carries no L4 header, so what sits at the port offsets is payload:
+        // the parser must zero the ports, else a guest mints bogus 5-tuples.
         let mut frag = frame(IPPROTO_TCP, [10, 200, 0, 2], [9, 9, 9, 9], 51000, 443);
         frag[ETH_HLEN + 6] = 0x00;
         frag[ETH_HLEN + 7] = 0xb9; // fragment offset 185 (nonzero)
@@ -1079,9 +1065,8 @@ mod flow_tests {
 
 #[cfg(test)]
 mod policy_tests {
-    /// The one protocol rendering every surface now reaches for: the flow keys' `Display`, the
-    /// signed record's JSON, and the CLI's audit trail. An unnamed protocol keeps its **number**,
-    /// which is what an operator needs to look it up; the CLI's own copy used to drop it.
+    /// The one protocol rendering every surface reaches for. An unnamed protocol keeps its
+    /// **number**, which is what an operator needs to look it up.
     #[test]
     fn a_protocol_number_renders_the_same_wherever_it_is_named() {
         assert_eq!(ProtoName(IPPROTO_TCP).to_string(), "tcp");
@@ -1309,9 +1294,9 @@ mod v6_tests {
 
     #[test]
     fn a_ula_outside_the_guests_own_link_is_policed_not_spared() {
-        // The spare covers one `/64`, not `fc00::/7`: a ULA is routable within a site, so sparing the
-        // whole range would carry an Echo's payload to internal infrastructure without `POLICY6` ever
-        // being consulted.
+        // The spare covers one `/64`, not `fc00::/7`: a ULA is routable within a site, so sparing
+        // the whole range would carry an Echo's payload to internal infrastructure without
+        // `POLICY6` ever being consulted.
         let a = |s: &str| s.parse::<core::net::Ipv6Addr>().unwrap().octets();
         assert!(
             !icmp6_dst_on_link(a("fc00::1")),
@@ -1366,8 +1351,7 @@ mod tests {
     #[test]
     fn layout_offsets_are_the_wire_contract() {
         // The eBPF object is built separately from the loader, so this layout *is* the wire format
-        // between two independently-built artifacts: a layout change would silently make a stale
-        // probe object on disk read as garbage.
+        // between two independently-built artifacts.
         assert_eq!(core::mem::offset_of!(SyscallEvent, cgroup_id), 0);
         assert_eq!(core::mem::offset_of!(SyscallEvent, pid), 8);
         assert_eq!(core::mem::offset_of!(SyscallEvent, tid), 12);
@@ -1377,13 +1361,11 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallEvent, detail), 40);
     }
 
-    // Each record below carries the same contract for the same reason. The codecs read their
-    // offsets from the struct, so a reorder keeps the two *ends* agreeing and cannot corrupt a
-    // freshly built pair. What it does corrupt is a **stale** eBPF object: the probes are built
-    // separately (`cargo xtask build-probes`, or an installed copy under the data dir) and loaded at
-    // runtime, so a reordered struct plus yesterday's object is one artifact writing fields the
-    // other reads elsewhere, with no size change to catch it. These pins make that reorder a
-    // decision someone has to take rather than one they can make by accident.
+    // Each record below carries the same contract. The codecs read their offsets from the struct,
+    // so a reorder keeps the two *ends* agreeing and cannot corrupt a freshly built pair. What it
+    // corrupts is a **stale** eBPF object: the probes are built separately and loaded at runtime,
+    // so a reordered struct plus yesterday's object is one artifact writing fields the other reads
+    // elsewhere, with no size change to catch it.
 
     #[test]
     fn flow_key_offsets_are_the_wire_contract() {
@@ -1439,9 +1421,8 @@ mod tests {
     #[test]
     fn every_record_codec_reads_the_byte_positions_the_struct_declares() {
         // The other half of the contract: the codecs must agree with the layout, not merely with
-        // themselves. Each record is built, serialized where it has a writer, and read back through
-        // the *struct* the way the kernel reads a map value, so a codec that wandered off the field
-        // it names is a mismatch here rather than a wrong rule in production.
+        // themselves, so a codec that wandered off the field it names is a mismatch here rather
+        // than a wrong rule in production.
         let rule = PolicyRule::allow(0x5db8_d800, 24, 443, IPPROTO_TCP);
         let via_bytes = PolicyRule::from_bytes(&rule.to_bytes()).expect("a full-size rule decodes");
         assert_eq!(via_bytes, rule);
@@ -1531,7 +1512,7 @@ mod tests {
     /// so every parser here must return a value or `None` on any input, never panic.
     #[test]
     fn parsers_never_panic_on_arbitrary_bytes() {
-        // xorshift64*: deterministic and dependency-free, with a fixed seed so it never flakes.
+        // xorshift64*: dependency-free, with a fixed seed so it never flakes.
         let mut state: u64 = 0x2545_F491_4F6C_DD1D;
         let mut next = || {
             state ^= state >> 12;
@@ -1545,8 +1526,8 @@ mod tests {
             let len = (next() % 200) as usize;
             let buf: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
             if let Some(ev) = SyscallEvent::from_bytes(&buf) {
-                // `detail_len` is attacker-influenced; the accessors must *clamp*, asserted as a
-                // bound, not just absence of panic: an out-of-range length yields a capped slice.
+                // `detail_len` is attacker-influenced, so the accessors must *clamp*, asserted as a
+                // bound rather than as absence of panic.
                 assert!(
                     ev.detail().len() <= DETAIL_CAP,
                     "detail() must clamp to DETAIL_CAP, got {} (detail_len {})",

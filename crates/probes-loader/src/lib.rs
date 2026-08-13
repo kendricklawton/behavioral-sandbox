@@ -19,8 +19,8 @@
 //! - **Egress enforcement, deny-by-default:** an empty [`EgressPolicy`] allows nothing.
 //!   [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc programs
 //!   go live, and [`set_egress_policy`](TapMonitor::set_egress_policy) replaces one in an order
-//!   that denies mid-update. Until a policy is set a monitor is observe-only; once armed it stays
-//!   armed. Drops are recorded per destination ([`denials`](TapMonitor::denials)).
+//!   that denies mid-update. A monitor is observe-only until armed, then stays armed; drops are
+//!   recorded per destination ([`denials`](TapMonitor::denials)).
 //! - **CO-RE covers the load path, not the tracepoint offsets:** no program reads a kernel struct
 //!   field; the tracers read fixed offsets that `SyscallTracer::load` compares against the
 //!   kernel's own `format` file before attaching.
@@ -39,19 +39,13 @@ pub use bsx_probes_common::{
     ProtoName, Protocol, Syscall, SyscallEvent,
 };
 
-/// The egress policy and its address types: what an `--allow` string parses into, before any map
-/// is touched. No aya, so the policy vocabulary is unit-tested and fuzzed host-safe.
+/// The egress policy and its address types. No aya, so the policy vocabulary is fuzzed host-safe.
 mod egress;
-/// The shared aya-object plumbing: the map and program opens, the load-and-attach, the toggle
-/// write, and the per-cgroup target registration and removal, each in one place.
+/// The shared aya-object plumbing: map and program opens, load-and-attach, toggle writes, and
+/// per-cgroup target registration.
 mod maps;
-/// Per-sandbox resource accounting: the shared `sched_switch` CPU meter and the cgroup v2 counters
-/// read alongside it.
 mod meter;
-/// The per-VM tap monitor: the tc classifiers on the VM's network device, the flow and denial maps
-/// they populate, and the netns join needed to attach inside the VM's namespace.
 mod tap;
-/// The syscall tracepoints: a single-syscall counter and the multi-syscall tracer.
 mod tracer;
 
 pub use egress::{Cidr, CidrAddr, EgressPolicy, Ipv4Cidr, Ipv6Cidr, PolicyError};
@@ -66,8 +60,7 @@ mod observer;
 pub use observer::{AttachParams, LiveSnapshot, Nic, SandboxProbes, SharedMeter, SharedTracer};
 
 // The record itself lives in `bsx-record`, aya-free so a consumer can verify one off-host without
-// linking this loader. Re-exported because these types appear in the attach surface's own signatures, so
-// a caller needs them in scope without a second dependency.
+// linking this loader. Re-exported because these types appear in the attach surface's signatures.
 pub use bsx_record::{
     AUDIT_SCHEMA_VERSION, AxisGap, CgroupStats, ChainError, DenialRecord, DenialRecord6,
     EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError, MAX_ENVELOPE_BYTES, MAX_NOTABLE,
@@ -88,8 +81,7 @@ const OBJECT_ENV: &str = "BSX_PROBES_OBJECT";
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProbeError {
-    /// The host can't load eBPF at all: no kernel BTF, or missing `CAP_BPF`/`CAP_PERFMON`. Caught by
-    /// [`check_support`] *before* a load, so it reads legibly instead of as a verifier reject or `EPERM`.
+    /// The host can't load eBPF at all: no kernel BTF, or missing `CAP_BPF`/`CAP_PERFMON`.
     Unsupported(String),
     /// The compiled BPF object couldn't be found or read (build it with `cargo xtask build-probes`).
     Object(String),
@@ -100,14 +92,14 @@ pub enum ProbeError {
     Attach(String),
     /// Reading a program's map failed.
     Map(String),
-    /// Resolving a process's cgroup failed, the pid-to-cgroup attribution bridge rather than an eBPF map
-    /// read. Includes the cgroup-v1-only host, which has no `0::` line to resolve.
+    /// Resolving a process's cgroup failed, including the cgroup-v1-only host, which has no `0::`
+    /// line to resolve.
     Cgroup(String),
-    /// A shared probe's lock was poisoned by a panic in another thread, reported as a typed error rather
-    /// than propagated.
+    /// A shared probe's lock was poisoned by a panic in another thread, reported rather than
+    /// propagated.
     Poisoned(String),
-    /// The egress policy the caller asked to install is invalid, a caller-input error distinct from a map
-    /// IO failure. See [`PolicyError`].
+    /// The egress policy the caller asked to install is invalid, a caller-input error distinct from
+    /// a map IO failure. See [`PolicyError`].
     Policy(PolicyError),
 }
 
@@ -133,8 +125,7 @@ impl From<PolicyError> for ProbeError {
 }
 
 impl std::error::Error for ProbeError {
-    /// Preserves the chain, so a caller walking `.source()` reaches the [`PolicyError`] rather than a dead
-    /// end.
+    /// Preserves the chain, so a caller walking `.source()` reaches the [`PolicyError`].
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Policy(e) => Some(e),
@@ -144,9 +135,8 @@ impl std::error::Error for ProbeError {
 }
 
 /// Where the compiled BPF object lives, in precedence order: the `BSX_PROBES_OBJECT` override, the
-/// `cargo xtask build-probes` output under the source tree (so a developer's fresh build wins over
-/// a stale installed copy), then the installed copy under the per-host data dir, which is what
-/// makes a packaged install work unconfigured.
+/// `cargo xtask build-probes` output under the source tree (so a fresh build wins over a stale
+/// installed copy), then the installed copy under the per-host data dir.
 #[must_use]
 pub fn object_path() -> PathBuf {
     let built = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -175,9 +165,8 @@ fn pick_object_path(
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
-/// Reads the compiled BPF object and loads it into the kernel. Shared by every probe's `load`, so
-/// the read and load errors read the same everywhere; the returned `Ebpf` owns everything and
-/// tears it down on drop.
+/// Reads the compiled BPF object and loads it into the kernel; the returned `Ebpf` owns everything
+/// and tears it down on drop.
 fn load_object() -> Result<Ebpf, ProbeError> {
     let path = object_path();
     let bytes = std::fs::read(&path).map_err(|e| {
@@ -190,8 +179,7 @@ fn load_object() -> Result<Ebpf, ProbeError> {
 }
 
 /// The cgroup v2 id of process `pid` (the cgroup dir's inode number), the same `u64`
-/// `bpf_get_current_cgroup_id` reports: the **attribution bridge** that resolves a sandbox's VMM
-/// pid to the id [`SyscallTracer::watch_cgroup`] filters on, so the trace covers the whole cgroup
+/// `bpf_get_current_cgroup_id` reports, so [`SyscallTracer::watch_cgroup`] covers the whole cgroup
 /// rather than one tgid.
 ///
 /// # Errors
@@ -201,9 +189,8 @@ pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
     cgroup_id_of_dir(&cgroup_dir_of_pid(pid)?)
 }
 
-/// The **cgroup dir** of process `pid`, the path half of the bridge: [`cgroup_id_of_pid`]
-/// resolves the id for the eBPF meter, this resolves the dir [`CgroupStats::read`] reads the
-/// native memory/IO counters from.
+/// The **cgroup dir** of process `pid`, the dir [`CgroupStats::read`] reads the native memory/IO
+/// counters from.
 ///
 /// # Errors
 /// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
@@ -259,16 +246,16 @@ pub fn cgroup_id_of_self() -> Result<u64, ProbeError> {
     cgroup_id_of_pid(std::process::id())
 }
 
-/// Whether the host has kernel BTF, the CO-RE prerequisite, as a cheap pre-flight before attaching
-/// anything. [`check_support`] is the fuller gate, BTF **and** the capabilities, with a legible reason.
+/// Whether the host has kernel BTF, the CO-RE prerequisite. [`check_support`] is the fuller gate:
+/// BTF **and** the capabilities, with a legible reason.
 #[must_use]
 pub fn ebpf_supported() -> bool {
     Path::new("/sys/kernel/btf/vmlinux").exists()
 }
 
-/// `CAP_PERFMON` (bit 38): attaching a program to a tracepoint goes through `perf_event_open`, which
-/// this gates. `CAP_BPF` (bit 39): loading programs/maps and reading maps. The two split out of
-/// `CAP_SYS_ADMIN` in Linux 5.8, so a loader needs **just these two**, not full root.
+/// `CAP_PERFMON` (bit 38) gates the `perf_event_open` a tracepoint attach goes through; `CAP_BPF`
+/// (bit 39) gates loading and reading programs and maps. The two split out of `CAP_SYS_ADMIN` in
+/// Linux 5.8, so a loader needs **just these two**, not full root.
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
 
@@ -287,8 +274,8 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
     u64::from_str_radix(low64, 16).ok()
 }
 
-/// Whether an effective-capability `mask` holds both caps the probes need: `true` for root and
-/// for a `setcap cap_bpf,cap_perfmon+ep` binary alike.
+/// Whether an effective-capability `mask` holds both caps the probes need: `true` for root and for
+/// a `setcap cap_bpf,cap_perfmon+ep` binary alike.
 fn mask_has_load_caps(mask: u64) -> bool {
     (mask >> CAP_BPF) & 1 == 1 && (mask >> CAP_PERFMON) & 1 == 1
 }
@@ -304,9 +291,8 @@ fn have_load_caps() -> bool {
 }
 
 /// Checks the host can load the probes and, if not, returns a **typed error naming the
-/// requirement**, so a BTF-less kernel or a missing capability is caught here rather than as a
-/// verifier reject or `EPERM` deep in the load. BTF is required uniformly (the shipped object is
-/// CO-RE), so the support story stays one line rather than a per-probe matrix.
+/// requirement**. BTF is required uniformly (the shipped object is CO-RE), so the support story
+/// stays one line rather than a per-probe matrix.
 ///
 /// # Errors
 /// [`ProbeError::Unsupported`] naming the first missing prerequisite (BTF, then capabilities).
@@ -380,8 +366,6 @@ mod tests {
 
     #[test]
     fn cgroup_id_of_self_resolves_or_reports_v1() {
-        // Host-safe: the resolver reads `/proc/self/cgroup` and the cgroup dir's inode, so a v2 host
-        // returns a nonzero id and a v1-only host errors legibly.
         match cgroup_id_of_self() {
             Ok(id) => assert!(id > 0, "a real cgroup id is nonzero (got {id})"),
             Err(e) => {
@@ -400,10 +384,9 @@ mod tests {
 
     #[test]
     fn the_root_cgroup_is_refused_rather_than_registered_as_a_sandbox() {
-        // Resolving `0::/` yields `/sys/fs/cgroup` itself, whose inode is a perfectly registerable
-        // target id, so the whole host would fold into one sandbox's record. Every shape the kernel
-        // writes for a process in the root cgroup, including the one every process reads inside a
-        // container with the default private cgroup namespace.
+        // Resolving `0::/` yields `/sys/fs/cgroup` itself, whose inode is a registerable target id,
+        // so the whole host would fold into one sandbox's record. Every shape the kernel writes for
+        // a process in the root cgroup, including inside a default private cgroup namespace.
         for body in ["0::/\n", "0::\n", "0::   \n", "1:name=systemd:/x\n0::/\n"] {
             let err = cgroup_dir_in(body, "/proc/2/cgroup")
                 .expect_err(&format!("{body:?} names the root cgroup"));
@@ -413,16 +396,15 @@ mod tests {
             );
         }
 
-        // A sandbox's own cgroup still resolves, or this test would pass on a resolver that refuses
-        // everything.
+        // Or this test would pass on a resolver that refuses everything.
         assert_eq!(
             cgroup_dir_in("0::/user.slice/bsx-1.scope\n", "/proc/2/cgroup")
                 .expect("a non-root cgroup resolves"),
             Path::new("/sys/fs/cgroup/user.slice/bsx-1.scope")
         );
 
-        // The v1-only host stays its own refusal: the two failures are told apart by their message,
-        // and only one of them means "this host cannot do cgroup v2".
+        // The two failures are told apart by their message, and only one of them means "this host
+        // cannot do cgroup v2".
         let v1 = cgroup_dir_in("1:name=systemd:/x\n", "/proc/2/cgroup")
             .expect_err("no unified line on a v1-only host");
         assert!(
@@ -463,8 +445,7 @@ mod tests {
             pick_object_path(None, Some(built), Some(installed), built),
             built
         );
-        // The packaged case: no source tree on the host, so the installed copy is found with no
-        // BSX_PROBES_OBJECT set. This is what makes an install work unconfigured.
+        // The packaged case: no source tree, so the installed copy is found unconfigured.
         assert_eq!(
             pick_object_path(None, None, Some(installed), built),
             installed

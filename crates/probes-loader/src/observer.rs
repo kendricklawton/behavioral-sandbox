@@ -24,14 +24,14 @@ use bsx_record::{
 
 use crate::{EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor, cgroup_id_of_pid};
 
-/// A process-shared [`ResourceMeter`]: loaded **once** and handed to every sandbox's
-/// [`attach`](SandboxProbes::attach), which registers its cgroup as a target. The one CPU-metering
-/// program for the whole host. Cheap, thread-safe clone.
+/// A process-shared [`ResourceMeter`]: the one CPU-metering program for the whole host, cloned to
+/// each sandbox's [`attach`](SandboxProbes::attach), which registers its cgroup as a target.
 #[derive(Clone)]
 pub struct SharedMeter(Arc<Mutex<ResourceMeter>>);
 
 impl SharedMeter {
-    /// Load and attach the shared `sched_switch` meter (needs `CAP_BPF`+`CAP_PERFMON` + the object).
+    /// Load and attach the shared `sched_switch` meter (needs `CAP_BPF`+`CAP_PERFMON` + the
+    /// object).
     ///
     /// # Errors
     /// [`ProbeError`] if the meter can't be loaded/attached.
@@ -39,8 +39,8 @@ impl SharedMeter {
         Ok(Self(Arc::new(Mutex::new(ResourceMeter::load()?))))
     }
 
-    /// Runs `f` against the meter, or `None` if the lock is poisoned, which is a fail-open loss of the CPU
-    /// axis rather than a panic on the host path.
+    /// Runs `f` against the meter, or `None` if the lock is poisoned: a fail-open loss of the CPU
+    /// axis, not a panic on the host path.
     fn with<R>(&self, f: impl FnOnce(&mut ResourceMeter) -> R) -> Option<R> {
         self.0.lock().ok().map(|mut m| f(&mut m))
     }
@@ -53,33 +53,32 @@ impl SharedMeter {
     }
 }
 
-/// A process-shared [`SyscallTracer`]: loaded **once**, switched to set mode, and handed to every
-/// sandbox's [`attach`](SandboxProbes::attach). Each sandbox registers its cgroup and gets a
-/// private [`SyscallFold`]; one drain routes each event to the matching fold, so concurrent
-/// sandboxes stay independent. Cheap, thread-safe clone.
+/// A process-shared [`SyscallTracer`]: one set of tracepoints for the whole host, where each
+/// registered sandbox gets a private [`SyscallFold`] and one drain routes each event to the
+/// matching fold, so concurrent sandboxes stay independent.
 #[derive(Clone)]
 pub struct SharedTracer(Arc<Mutex<TracerInner>>);
 
 /// The tracer and its per-cgroup accumulators, behind the [`SharedTracer`] lock.
 struct TracerInner {
     tracer: SyscallTracer,
-    /// One accumulator per registered sandbox, keyed by cgroup id. Draining routes each event here.
+    /// One accumulator per registered sandbox, keyed by cgroup id.
     folds: HashMap<u64, SyscallFold>,
 }
 
 impl SharedTracer {
-    /// Load + attach the three `sys_enter_*` tracepoints once and switch to **set mode** with an empty
-    /// target set, so nothing is emitted until a sandbox is registered via
-    /// [`attach`](SandboxProbes::attach) (needs `CAP_BPF`+`CAP_PERFMON` + the object).
+    /// Load + attach the three `sys_enter_*` tracepoints once and switch to **set mode** with an
+    /// empty target set, so nothing is emitted until a sandbox registers (needs
+    /// `CAP_BPF`+`CAP_PERFMON` + the object).
     ///
     /// # Errors
     /// [`ProbeError`] if the tracer can't be loaded/attached or the mode can't be set.
     pub fn load() -> Result<Self, ProbeError> {
         let mut tracer = SyscallTracer::load()?;
         tracer.use_target_set()?;
-        // Between the unfiltered attach inside `load()` and the mode flip above, the whole host's events
-        // stream into the ring buffer, so drain and discard them: residue occupies space a full buffer needs
-        // for *new* events, and could misattribute onto a later sandbox whose recycled cgroup id collides.
+        // `load()` attaches unfiltered, so the whole host's events stream in until the mode flip
+        // above: drain them, since residue crowds out space a full buffer needs for *new* events
+        // and could misattribute onto a later sandbox whose recycled cgroup id collides.
         let _ = tracer.drain(|_| {});
         Ok(Self(Arc::new(Mutex::new(TracerInner {
             tracer,
@@ -87,17 +86,16 @@ impl SharedTracer {
         }))))
     }
 
-    /// Drains the shared ring buffer now, routing pending events to every registered sandbox's
-    /// fold, and returns how many were delivered. Draining also happens at each `attach` and
-    /// `collect`; a long-lived host calls this between them to keep a busy VMM from filling the
-    /// buffer (a drop is counted and surfaces as a gap, but polling is what prevents it).
+    /// Drains the shared ring buffer now, routing pending events to every registered sandbox's fold
+    /// and returning how many were delivered: a long-lived host polls between `attach` and
+    /// `collect` to keep a busy VMM from filling the buffer.
     pub fn poll(&self) -> usize {
         self.with(drain_route).unwrap_or(0)
     }
 
     /// Registers one sandbox's cgroup: routes pending events, adds the cgroup to the kernel target
-    /// set, and opens a **fresh** fold rather than reusing a stale one, because cgroup ids are
-    /// inode numbers that recycle and a dead run's fold would misattribute its events.
+    /// set, and opens a **fresh** fold, because cgroup ids are inode numbers that recycle and a
+    /// dead run's fold would misattribute its events.
     ///
     /// # Errors
     /// [`ProbeError::Poisoned`] if the lock is poisoned, or the target write's error (the caller
@@ -119,17 +117,16 @@ impl SharedTracer {
     fn finalize(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
-            // Best-effort unregister: this footprint is already drained, and a failure's only
-            // effect, extra ring-buffer pressure, surfaces as ring-drop gaps in later records.
+            // Best-effort: this footprint is already drained, and a failed unregister only adds
+            // ring-buffer pressure, which surfaces as ring-drop gaps in later records.
             let _ = inner.tracer.remove_target(cgroup_id);
             inner.folds.remove(&cgroup_id).map(SyscallFold::finish)
         })
         .flatten()
     }
 
-    /// A live, non-destructive read of one sandbox's footprint so far: finishes a **clone** of
-    /// this cgroup's fold, so the original keeps accumulating. `None` if the lock is poisoned or
-    /// the fold is gone.
+    /// A live, non-destructive read of one sandbox's footprint so far: finishes a **clone** of this
+    /// cgroup's fold, so the original keeps accumulating.
     fn snapshot_fold(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
@@ -138,7 +135,7 @@ impl SharedTracer {
         .flatten()
     }
 
-    /// Detaches one sandbox without producing a footprint, the abandoned path. Best-effort; a
+    /// Detaches one sandbox without producing a footprint, the abandoned path. Best-effort: a
     /// poisoned lock is a no-op (the fold goes with the process).
     fn detach(&self, cgroup_id: u64) {
         let _ = self.with(|inner| {
@@ -155,9 +152,9 @@ impl SharedTracer {
             .flatten()
     }
 
-    /// The reader-side twin of [`drops`](Self::drops): the tracer's undecodable-record counter
-    /// ([`SyscallTracer::undecodable_events`]), covering writer/reader drift the way `drops` covers
-    /// a full buffer. `None` only if the lock is poisoned.
+    /// The reader-side twin of [`drops`](Self::drops)
+    /// ([`SyscallTracer::undecodable_events`]): writer/reader drift, where `drops` covers a full
+    /// buffer. `None` only if the lock is poisoned.
     fn undecodable(&self) -> Option<u64> {
         self.with(|inner| inner.tracer.undecodable_events())
     }
@@ -168,9 +165,9 @@ impl SharedTracer {
 }
 
 /// Drain the tracer's ring buffer, routing each event to its cgroup's fold; returns how many events
-/// were delivered. Events for an unregistered cgroup are dropped (under the set filter none should
-/// exist except a just-unregistered sandbox's stragglers). The disjoint-field split lets the drain
-/// closure borrow `folds` while `tracer` drains.
+/// were delivered. An unregistered cgroup's events are dropped (under the set filter, only a
+/// just-unregistered sandbox's stragglers). The disjoint-field split lets the drain closure borrow
+/// `folds` while `tracer` drains.
 fn drain_route(inner: &mut TracerInner) -> usize {
     let TracerInner { tracer, folds } = inner;
     tracer
@@ -200,11 +197,9 @@ fn loss_gap(
 }
 
 /// One sandbox's NIC as the driver names it: the netns and the tap device inside it, **both or
-/// neither**, so the mixed state a bare pair of `Option<&str>`s admits is unrepresentable.
-///
-/// Deliberately not `#[non_exhaustive]` (the crate's one exception): named-field literal
-/// construction is the anti-swap mechanism for two same-typed strings, and a constructor would
-/// reintroduce the positional pair.
+/// neither**, so the mixed state a bare pair of `Option<&str>`s admits is unrepresentable. Not
+/// `#[non_exhaustive]` (the crate's one exception), because named-field literal construction is
+/// what stops two same-typed strings being swapped and a constructor would take them positionally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Nic<'a> {
     /// The sandbox's network namespace name (the driver's `netns()`).
@@ -213,9 +208,8 @@ pub struct Nic<'a> {
     pub tap: &'a str,
 }
 
-/// The per-run inputs to [`SandboxProbes::attach`]: [`new`](Self::new) starts at the sealed
-/// posture (no NIC, no policy, no route) and the optional fields are set on the value, so a new
-/// knob lands additively (`#[non_exhaustive]`) rather than as a positional-parameter break.
+/// The per-run inputs to [`SandboxProbes::attach`]: [`new`](Self::new) starts at the sealed posture
+/// and the optional fields are set on the value, so a new knob lands additively.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct AttachParams<'a> {
@@ -227,9 +221,8 @@ pub struct AttachParams<'a> {
     /// `Some(policy)` arms enforcement before the tc programs go live on the tap; `None` is
     /// observe-only.
     pub egress: Option<&'a EgressPolicy>,
-    /// The default route the driver configured, carried through to the record. The tap cannot
-    /// see it (it is on the guest's command line, not on the wire), and the record needs it
-    /// because an allowance means something different with a route than without.
+    /// The default route the driver configured, carried through to the record because the tap
+    /// cannot see it (it is on the guest's command line, not on the wire).
     pub gateway: Option<std::net::Ipv4Addr>,
 }
 
@@ -246,10 +239,10 @@ impl<'a> AttachParams<'a> {
     }
 }
 
-/// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and the
-/// coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`] while
-/// the sandbox is still alive; dropping without collecting detaches (RAII) and unregisters both shared
-/// targets so a dead sandbox leaves no residue.
+/// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and
+/// the coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`];
+/// dropping without collecting detaches (RAII) and unregisters both shared targets, so a dead
+/// sandbox leaves no residue.
 #[must_use = "dropping SandboxProbes detaches this run's probes; call collect() first to finalize the record"]
 pub struct SandboxProbes {
     vmm_pid: u32,
@@ -270,8 +263,7 @@ pub struct SandboxProbes {
     /// The [`drops_at_attach`](Self::drops_at_attach) twin on the CPU axis: cgroups a full `CPU_NS`
     /// map turned away. `None` if unreadable at attach, or if this sandbox was never metered.
     cpu_drops_at_attach: Option<u64>,
-    /// The default route the driver configured, carried through to the record. The tap cannot see
-    /// it, so it rides as a plain value rather than being observed.
+    /// The driver's default route: a plain value, since the tap cannot observe it.
     gateway: Option<std::net::Ipv4Addr>,
     gaps: Vec<AxisGap>,
     /// Set once [`collect`](Self::collect) has read + detached everything, so `Drop` is a no-op.
@@ -280,10 +272,9 @@ pub struct SandboxProbes {
 
 impl SandboxProbes {
     /// Post-boot: bind every available probe to this one VM by the plain values in `params`:
-    /// resolve the VMM's cgroup and register it on the shared tracer and meter, and attach a
-    /// per-VM tap monitor when a [`Nic`] is given, enforcing `params.egress` (armed before the tc
-    /// programs go live) when set. Each sub-attach degrades to a recorded [`AxisGap`]; the
-    /// returned bundle is always valid.
+    /// register the VMM's cgroup on the shared tracer and meter, and attach a per-VM tap monitor
+    /// when a [`Nic`] is given, enforcing `params.egress` (armed before the tc programs go live)
+    /// when set. Each sub-attach degrades to a recorded [`AxisGap`], so the bundle is always valid.
     pub fn attach(
         params: AttachParams<'_>,
         tracer: &SharedTracer,
@@ -291,7 +282,6 @@ impl SandboxProbes {
     ) -> SandboxProbes {
         let mut gaps: Vec<AxisGap> = Vec::new();
 
-        // The cgroup id is the tracer and meter axis, resolved from the pid.
         let cgroup_id = match cgroup_id_of_pid(params.vmm_pid) {
             Ok(id) => Some(id),
             Err(e) => {
@@ -300,7 +290,6 @@ impl SandboxProbes {
             }
         };
 
-        // Host syscalls: register the cgroup on the shared tracer (opens its fold).
         let traced = match cgroup_id {
             Some(cgid) => match tracer.register(cgid) {
                 Ok(()) => true,
@@ -319,8 +308,6 @@ impl SandboxProbes {
             }
         };
 
-        // Attach the per-VM tap monitor. No `Nic` = no NIC: the network section is simply absent
-        // (not a gap); an attach failure is a gap.
         let tap_mon = params.nic.and_then(|nic| {
             let attached = match params.egress {
                 Some(policy) => TapMonitor::enforce_in_netns(nic.netns, nic.tap, policy),
@@ -335,7 +322,6 @@ impl SandboxProbes {
             }
         });
 
-        // Register the cgroup as a target on the shared meter (the CPU axis).
         let metered = match cgroup_id {
             Some(cgid) => match meter.with(|m| m.add_target(cgid)) {
                 Some(Ok(())) => true,
@@ -368,14 +354,12 @@ impl SandboxProbes {
         }
     }
 
-    /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
-    /// unregister this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
-    /// alive**, the cgroup dir and map fds must be live. `timing` comes from the caller
+    /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and unregister
+    /// this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
+    /// alive**: the cgroup dir and map fds must be live. `timing` comes from the caller
     /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `bsx`.
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, subject: RecordSubject, timing: Timing) -> RunRecord {
-        // A lost fold or poisoned lock is a recorded gap, never an empty footprint passed off as a
-        // quiet run.
         let had_tracer = matches!((self.traced, self.cgroup_id), (true, Some(_)));
         let host_syscalls = match (self.traced, self.cgroup_id) {
             (true, Some(cgid)) => match self.tracer.finalize(cgid) {
@@ -392,8 +376,6 @@ impl SandboxProbes {
         };
         self.traced = false;
 
-        // The ring buffer is host-global: a moved loss counter means the footprint may undercount,
-        // and an unreadable endpoint is unknown loss, still a gap.
         if had_tracer {
             self.gaps.extend(
                 loss_gap(
@@ -426,7 +408,7 @@ impl SandboxProbes {
         }
 
         // Totals are the section's spine (a section without them misreads as "no traffic"), so
-        // their failure gaps the whole axis; a failed flow/denial read keeps the rest.
+        // their failure gaps the whole axis, where a failed flow/denial read keeps the rest.
         let network = match self.tap.as_ref() {
             Some(monitor) => match monitor.totals() {
                 Err(e) => {
@@ -446,8 +428,6 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap denials: {e}").into()));
                         Vec::new()
                     });
-                    // Full-map drop counters: nonzero means this section undercounts and the loss
-                    // must ride the record; a failed read of a counter is its own gap.
                     let dropped_flows = monitor.dropped_flows().unwrap_or_else(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read tap flow drops: {e}").into()));
@@ -477,8 +457,6 @@ impl SandboxProbes {
                             .into(),
                         ));
                     }
-                    // Frames the flow view can't represent mean the section is not the whole tap
-                    // traffic, so gap them; a failed read of the counter is itself a gap.
                     match monitor.unparsed_l3() {
                         Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(
                             format!(
@@ -492,8 +470,6 @@ impl SandboxProbes {
                             format!("read tap unparsed-L3 counter: {e}").into(),
                         )),
                     }
-                    // The IPv6 half: an unreadable v6 map is its own gap, so v6 traffic is never
-                    // silently absent.
                     let flows6 = monitor.flows6().unwrap_or_else(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read tap v6 flows: {e}").into()));
@@ -504,8 +480,8 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap v6 denials: {e}").into()));
                         Vec::new()
                     });
-                    // The posture is read back from the classifier's own maps; a failed read is a
-                    // gap, because "no rules" and "could not tell" must never conflate.
+                    // Read back from the classifier's own maps, and gapped on failure, because
+                    // "no rules" and "could not tell" must never conflate.
                     let posture = monitor.posture(self.gateway).map_err(|e| {
                         self.gaps
                             .push(AxisGap::Network(format!("read egress posture: {e}").into()));
@@ -527,7 +503,7 @@ impl SandboxProbes {
             None => None,
         };
 
-        // Read the resources *before* unregistering, while the cgroup dir is still live; a failure
+        // Read the resources *before* unregistering, while the cgroup dir is still live. A failure
         // is a recorded gap, so zero CPU never means "the read silently failed".
         let resources = match self.meter.with(|m| m.summary_for_pid(self.vmm_pid)) {
             Some(Ok(summary)) => summary,
@@ -543,9 +519,6 @@ impl SandboxProbes {
         };
 
         if self.metered {
-            // A cgroup a full `CPU_NS` could not admit reads back zero CPU, which must never pass
-            // for "this run used none"; the counter is host-global, so any delta stops the number
-            // being called exact.
             self.gaps.extend(
                 loss_gap(
                     self.cpu_drops_at_attach,
@@ -563,8 +536,8 @@ impl SandboxProbes {
                 .map(AxisGap::Cpu),
             );
             if let Some(cgid) = self.cgroup_id {
-                // Unregister and free the `CPU_NS` row (already read above), so a long-lived
-                // meter doesn't accumulate dead cgroups against `MAX_CGROUPS`. Best-effort.
+                // Best-effort, and only after the read above: freeing the `CPU_NS` row keeps a
+                // long-lived meter from accumulating dead cgroups against `MAX_CGROUPS`.
                 let _ = self.meter.with(|m| {
                     let _ = m.remove_target(cgid);
                     m.clear(cgid)
@@ -584,9 +557,10 @@ impl SandboxProbes {
         )
     }
 
-    /// A **live, non-destructive** read of this sandbox's probes so far, the watcher's poll. A
-    /// transiently unreadable axis is `None` (the watcher keeps its last good view); the
-    /// authoritative, gap-recording read is [`collect`](Self::collect), which this never disturbs.
+    /// A **live, non-destructive** read of this sandbox's probes so far, the watcher's poll. An
+    /// unreadable axis is `None` and an unreadable counter within one reads as zero or empty, since
+    /// the authoritative, gap-recording read is [`collect`](Self::collect), which this never
+    /// disturbs.
     #[must_use]
     pub fn snapshot(&self) -> LiveSnapshot {
         let host_syscalls = match (self.traced, self.cgroup_id) {
@@ -597,12 +571,8 @@ impl SandboxProbes {
             let totals = monitor.totals().ok()?;
             let flows = monitor.flows().ok()?;
             let denials = monitor.denials().ok()?;
-            // Live view: a transiently unreadable drop counter reads as 0 (the authoritative,
-            // gap-recording read is `collect`); a real nonzero still marks the view truncated.
             let dropped_flows = monitor.dropped_flows().unwrap_or(0);
             let dropped_denials = monitor.dropped_denials().unwrap_or(0);
-            // Live view: v6 reads that transiently fail read as empty (the authoritative read is
-            // `collect`); a real v6 flow still shows here.
             let flows6 = monitor.flows6().unwrap_or_default();
             let denials6 = monitor.denials6().unwrap_or_default();
             Some(
@@ -629,10 +599,9 @@ impl SandboxProbes {
     }
 }
 
-/// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`], what a
-/// live view redraws from between attach and collect. Pure data (no aya), so consumers stay
-/// host-safe testable. An unreadable axis is `None`; *why* an axis is missing belongs to the final
-/// [`RunRecord`](crate::RunRecord)'s coverage, not here.
+/// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`]. Pure
+/// data (no aya), so consumers stay host-safe testable. An unreadable axis is `None`: *why* an axis
+/// is missing belongs to the final [`RunRecord`](crate::RunRecord)'s coverage, not here.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LiveSnapshot {
@@ -647,9 +616,9 @@ pub struct LiveSnapshot {
 
 impl Drop for SandboxProbes {
     /// Detach on close: unregister this run's cgroup from the shared tracer + meter so neither set
-    /// accumulates dead cgroups. A no-op after [`collect`](Self::collect) (which already detached). The
-    /// per-VM tap detaches via its own aya `Ebpf` drop (nothing pinned); its in-kernel
-    /// filter is reclaimed by the sandbox's netns teardown.
+    /// accumulates dead cgroups, a no-op after [`collect`](Self::collect). The per-VM tap detaches
+    /// via its own aya `Ebpf` drop (nothing pinned), and its in-kernel filter is reclaimed by the
+    /// sandbox's netns teardown.
     fn drop(&mut self) {
         if self.finalized {
             return;
@@ -662,8 +631,7 @@ impl Drop for SandboxProbes {
         if self.metered
             && let Some(cgid) = self.cgroup_id
         {
-            // Drop-path teardown with no final read: unregister and free the `CPU_NS` row so the
-            // shared map doesn't accumulate this dead cgroup (mirrors `collect`).
+            // No final read on this path: unregister and free the `CPU_NS` row as `collect` does.
             let _ = self.meter.with(|m| {
                 let _ = m.remove_target(cgid);
                 m.clear(cgid)
@@ -679,8 +647,7 @@ mod tests {
 
     #[test]
     fn attach_params_new_is_the_sealed_posture() {
-        // A bare `new` must mean the sealed sandbox: no NIC, no allowance, no route. A default
-        // that opened anything would arm probes (or claim a route) no caller asked for.
+        // A default that opened anything would arm probes (or claim a route) no caller asked for.
         let params = AttachParams::new(4242);
         assert_eq!(params.vmm_pid, 4242);
         assert!(params.nic.is_none());
@@ -703,7 +670,6 @@ mod tests {
 
     #[test]
     fn an_unreadable_endpoint_is_unknown_loss_which_is_still_a_gap() {
-        // Unknown loss is loss: a missing endpoint on either side must gap, never read as exact.
         for (before, after) in [(None, Some(5)), (Some(2), None), (None, None)] {
             let gap = loss_gap(before, after, |n| format!("{n} lost"), "counter unreadable")
                 .expect("a missing endpoint is unknown loss");
