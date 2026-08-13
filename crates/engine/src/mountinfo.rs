@@ -1,44 +1,35 @@
-//! One walk over `/proc/self/mountinfo`, for the three questions the driver asks of it.
+//! One walk over `/proc/self/mountinfo`, for the three questions the driver asks of it: the mount
+//! points under a dir (`sweep`, detaching a crashed run's binds), whether a path's mount is shared
+//! (`jail`), and that mount's `nodev`/`noexec` flags (`doctor`).
 //!
-//! - **`sweep`** wants the mount points under a dir, to detach a crashed run's binds before
-//!   reclaiming it.
-//! - **`jail`** wants whether the mount holding a path is *shared*, since only a shared mount
-//!   propagates a bind into the jailer's slave namespace.
-//! - **`doctor`** wants the `nodev`/`noexec` flags of the mount holding the scratch dir.
-//!
-//! Three questions, one line format, and one place that knows it. The mount point is **decoded**
-//! here ([`unescape_octal`]), because the kernel writes space, tab, newline and backslash as octal
-//! escapes and a raw comparison silently fails to match a path containing one. The "which mount
-//! holds this path" selection is also answered once, by [`covering`], so `jail` and `doctor` judge
-//! the same mount; `sweep` keeps its own walk because it asks a different question (every mount
-//! under a dir, deepest first).
-//!
-//! Pure and `/proc`-free: the callers read the file, this reads the text, so every selection rule is
-//! unit-tested against a fixture.
+//! - **The mount point is decoded here** ([`unescape_octal`]): the kernel writes space, tab,
+//!   newline and backslash as octal escapes, so a raw comparison misses a path containing one.
+//! - **One selection rule.** [`covering`] answers "which mount holds this path" once, so `jail` and
+//!   `doctor` judge the same mount; `sweep` keeps its own walk for a different question.
+//! - **Pure and `/proc`-free.** The callers read the file, this reads the text, so every selection
+//!   rule is unit-tested against a fixture.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 
-/// One mountinfo line, reduced to the fields the driver asks about.
-///
-/// A line is `id parent major:minor root MOUNT_POINT OPTIONS <optional…> - fstype src super`. Mount
-/// point and options sit at fixed indices before the *variable-length* optional tags, which is why
-/// those two are slices and the propagation tag is resolved here instead.
+/// One mountinfo line, reduced to the fields the driver asks about: a line is
+/// `id parent major:minor root MOUNT_POINT OPTIONS <optional…> - fstype src super`, so mount point
+/// and options sit at fixed indices before the *variable-length* optional tags, and the propagation
+/// tag has to be resolved here rather than handed back as a slice.
 pub(crate) struct Mount<'a> {
     /// Field 5, with its octal escapes decoded.
     pub(crate) point: PathBuf,
     /// Field 6, the comma-separated per-mount VFS options (`nodev`, `noexec`, `relatime`, …).
     pub(crate) options: &'a str,
-    /// Whether an optional tag marks this mount **shared** (`shared:N`), the propagation type that
-    /// decides whether a bind made under it reaches another namespace.
+    /// Whether an optional tag marks this mount **shared** (`shared:N`), the one propagation type
+    /// that carries a bind made under it into another namespace (the jailer's slave one).
     pub(crate) shared: bool,
 }
 
 /// Every parseable line of `mountinfo`. A line too short to carry a mount point and its options is
 /// skipped rather than failing the walk, so a truncated table degrades to "fewer mounts" and each
-/// caller's own default (copy rather than bind, assume fine, detach nothing) decides what that
-/// means.
+/// caller's own default (copy rather than bind, assume fine, detach nothing) decides the rest.
 pub(crate) fn mounts(mountinfo: &str) -> impl Iterator<Item = Mount<'_>> {
     mountinfo.lines().filter_map(parse_line)
 }
@@ -53,9 +44,8 @@ pub(crate) fn covering<'a>(mountinfo: &'a str, target: &Path) -> Option<Mount<'a
         }
         let depth = mount.point.components().count();
         // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the
-        // topmost, the **last** mountinfo line, is the visible filesystem. It decides both what a
-        // later mount there inherits and the flags a file there feels, so the first-seen line
-        // would answer for a mount the path no longer touches.
+        // topmost, the **last** mountinfo line, is the visible filesystem, and it decides both what
+        // a later mount there inherits and the flags a file there feels.
         if best.as_ref().is_none_or(|(d, _)| depth >= *d) {
             best = Some((depth, mount));
         }
@@ -63,8 +53,7 @@ pub(crate) fn covering<'a>(mountinfo: &'a str, target: &Path) -> Option<Mount<'a
     best.map(|(_, mount)| mount)
 }
 
-/// This process's own mount table, or `None` when `/proc/self/mountinfo` is unreadable, so each
-/// caller's default (copy rather than bind, assume fine, detach nothing) decides what that means.
+/// This process's own mount table, or `None` when `/proc/self/mountinfo` is unreadable.
 pub(crate) fn self_text() -> Option<String> {
     std::fs::read_to_string("/proc/self/mountinfo").ok()
 }

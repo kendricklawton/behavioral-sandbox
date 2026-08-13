@@ -1,32 +1,27 @@
 //! One **absolute budget** per call instead of a bare socket timeout.
 //!
-//! - **The threat is the slow peer, not the silent one.** `SO_RCVTIMEO` and `SO_SNDTIMEO` are
-//!   re-armed by the OS per syscall, so a bare socket timeout bounds one `read`/`write`, not one
-//!   call: a daemon dribbling a byte at a time inside the interval stretches a call indefinitely.
-//!   Shrinking the sockopt to the time left before one absolute deadline makes the sum of all the
-//!   syscalls honor the bound the caller named.
-//! - The parked thread here is the caller's own, not a shared daemon slot; what this bounds is the
-//!   *promise* of `set_read_timeout`/`set_write_timeout`, which are documented as per-call bounds.
-//! - The daemon and the engine hold their own copies of this discipline (`bsx` and `bsx-engine`
-//!   cannot be dependencies here without voiding this crate's wire-only proof);
-//!   `every_deadline_bounded_socket_refuses_a_spent_budget` pins each copy to the same invariant.
+//! - **The threat is the slow peer, not the silent one.** The OS re-arms
+//!   `SO_RCVTIMEO`/`SO_SNDTIMEO` per syscall, so a bare socket timeout bounds one `read`/`write`,
+//!   not one call: a daemon that keeps each syscall progressing stretches a call indefinitely.
+//!   Shrinking the sockopt to the time left before one absolute deadline makes the sum of the
+//!   syscalls honor the caller's bound.
+//! - The parked thread is the caller's own, not a shared daemon slot.
+//! - `bsx` and `bsx-engine` hold their own copies of this discipline (depending on either would
+//!   void this crate's wire-only proof); `every_deadline_bounded_socket_refuses_a_spent_budget`
+//!   pins them.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// The most one bounded `write` hands the kernel at a time.
-///
-/// **The deadline is only checked between syscalls, so the syscalls have to be small.** A unix
-/// socket's `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent,
-/// re-applying `SO_SNDTIMEO` to each internal wait, so handing it a 4 MiB request is one `write`
-/// call that can block for as long as a slow reader keeps draining it. Chunking bounds the
-/// overshoot to one chunk, which the armed sockopt bounds in turn.
+/// The most one bounded `write` hands the kernel at a time, since the deadline is checked only
+/// *between* syscalls: a unix socket's `sendmsg` loops inside the kernel until the whole buffer is
+/// sent, re-applying `SO_SNDTIMEO` to each internal wait, so one 4 MiB `write` blocks for as long
+/// as a slow reader keeps draining it. Chunking bounds the overshoot to one chunk.
 const WRITE_CHUNK: usize = 64 * 1024;
 
-/// A stream whose reads and writes are bounded by one absolute deadline per call: the whole
-/// message must complete within one budget of [`rearm`](Self::rearm). A `None` budget passes
-/// through plain.
+/// A stream whose reads and writes are bounded by one absolute deadline per call: the whole message
+/// must complete within one budget of [`rearm`](Self::rearm). A `None` budget passes through plain.
 #[derive(Debug)]
 pub(crate) struct DeadlineStream {
     stream: UnixStream,
@@ -49,12 +44,9 @@ impl DeadlineStream {
         }
     }
 
-    /// Sets the per-call budget, effective from the next [`rearm`](Self::rearm).
-    ///
-    /// Disabling clears the sockopt a bounded call last armed, or it would stay on the socket (one
-    /// file description, shared by every clone) and fire on a later unbounded call. Both
-    /// directions are cleared, because a direction whose budget is still live re-arms on its next
-    /// syscall anyway. The daemon's copy fixes its budget at construction and cannot need this.
+    /// Sets the per-call budget, effective from the next [`rearm`](Self::rearm). Disabling clears
+    /// both sockopts, or the one a bounded call last armed stays on the socket (one file
+    /// description, shared by every clone) and fires on a later unbounded call.
     pub(crate) fn set_budget(&mut self, budget: Option<Duration>) -> std::io::Result<()> {
         if budget.is_none() {
             self.stream.set_read_timeout(None)?;
@@ -70,10 +62,9 @@ impl DeadlineStream {
         self.deadline = self.budget.map(|b| Instant::now() + b);
     }
 
-    /// The time left on the in-flight call, or `None` when the deadline is disabled.
-    ///
-    /// `Some(ZERO)` is the spent budget and must be refused rather than armed: the kernel reads a
-    /// zero `SO_RCVTIMEO`/`SO_SNDTIMEO` as "block forever", the hang this wrapper exists to stop.
+    /// The time left on the in-flight call, or `None` when the deadline is disabled. `Some(ZERO)`
+    /// is a spent budget and must be refused rather than armed: the kernel reads a zero
+    /// `SO_RCVTIMEO`/`SO_SNDTIMEO` as "block forever", the hang this wrapper exists to stop.
     fn remaining(&self) -> Option<Duration> {
         self.deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
@@ -95,8 +86,7 @@ impl Read for DeadlineStream {
         let Some(remaining) = self.remaining() else {
             return self.stream.read(buf);
         };
-        // Shrink the socket timeout to the time left, so the sum of all reads honors one wall
-        // clock. The refusal precedes the arming, since a zero timeout means "block forever".
+        // The refusal precedes the arming, since a zero timeout means "block forever".
         if remaining.is_zero() {
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
         }
@@ -110,9 +100,6 @@ impl Write for DeadlineStream {
         let Some(remaining) = self.remaining() else {
             return self.stream.write(buf);
         };
-        // The same shrink as the read half, against the receiving end of the same shape: a peer
-        // draining just fast enough to keep each `write` returning re-arms `SO_SNDTIMEO` every
-        // time, so only an absolute deadline bounds the whole request.
         if remaining.is_zero() {
             return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
         }

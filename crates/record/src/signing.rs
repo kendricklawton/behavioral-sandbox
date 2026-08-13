@@ -429,8 +429,8 @@ pub fn data_dir() -> PathBuf {
 /// case is unit-testable without mutating the process environment (`set_var` is `unsafe` in edition 2024
 /// and races the parallel test runner).
 fn data_dir_in(xdg: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
-    // A relative value names a directory that moves with the cwd, which the untrusted repo dir a run
-    // starts in can supply; skip it so it identifies no host's state.
+    // A relative value names a directory that moves with the cwd, which the untrusted repo dir a
+    // run starts in can supply.
     let base = xdg
         .filter(|p| p.is_absolute())
         .or_else(|| {
@@ -769,9 +769,9 @@ mod tests {
         HostKey::from_seed([7u8; 32])
     }
 
-    /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that get
-    /// signed, and two escapers would be two chances to be wrong about them. The control characters below
-    /// are where two escapers most easily diverge.
+    /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that
+    /// get signed, and two escapers would be two chances to be wrong about them. The control
+    /// characters below are where two escapers most easily diverge.
     #[test]
     fn the_envelope_escapes_a_string_exactly_as_the_record_does() {
         let hostile = "tab\tnl\nquote\"backslash\\bs\u{08}ff\u{0C}nul\u{00}";
@@ -835,8 +835,8 @@ mod tests {
             "the unreadable version outranks the untrusted key"
         );
 
-        // No `schema` at all was never a shape this crate produced, and there is no number to
-        // report, so it is malformed rather than a version complaint.
+        // No `schema` at all is not a shape this crate produces, and there is no number to report,
+        // so it is malformed rather than a version complaint.
         let none = good.replacen("{\"schema\":2,", "{", 1);
         assert!(
             matches!(verify(&none, &trusted), Err(VerifyError::Malformed(_))),
@@ -1013,9 +1013,9 @@ mod tests {
     fn a_re_framed_prev_cannot_relabel_where_the_record_starts() {
         // `link_message` joins with a single `\n`, so two different splits of the same bytes carry
         // the same signature: signing `prev = "A\nB"` over `canonical = "C"` produces a signature
-        // that also checks against `prev = "A"` with `record = "B\nC"`. Measured against the unfixed
-        // verifier, which returned `"B\nC"` as the authentic canonical bytes. The 64-hex shape is
-        // what makes the frame single-valued, and it is refused before the signature is even read.
+        // that also checks against `prev = "A"` with `record = "B\nC"`, and a verifier without the
+        // shape check hands back `"B\nC"` as the authentic canonical bytes. The 64-hex shape makes
+        // the frame single-valued, and it is refused before the signature is even read.
         let key = test_key();
         let real = key.sign_canonical_chained("C", Some("A\nB"));
         let v: serde_json::Value = serde_json::from_str(&real).expect("valid JSON");
@@ -1037,9 +1037,9 @@ mod tests {
 
     #[test]
     fn a_prev_that_is_present_but_not_a_string_is_malformed_rather_than_absent() {
-        // `and_then(as_str)` yielded `None` for a numeric `prev`, so a broken field read as
-        // "unchained" and the entry verified as a standalone record. The signature caught it only
-        // because the message then lacked the link; a reader still learned nothing about the fault.
+        // `and_then(as_str)` yields `None` for a numeric `prev`, which would read a broken field as
+        // "unchained" and verify the entry as a standalone record. The signature catches that only
+        // because the message then lacks the link, and a reader learns nothing about the fault.
         let key = test_key();
         let unchained = key.sign_canonical("C");
         let v: serde_json::Value = serde_json::from_str(&unchained).expect("valid JSON");
@@ -1059,10 +1059,10 @@ mod tests {
 
     #[test]
     fn the_data_dir_skips_a_relative_value_in_either_variable() {
-        // A relative `$HOME` yielded `relative/home/.local/share/bsx`, so a `--record` run minted and
-        // read its host signing key at a path that moves with the cwd, which on this project's own
-        // workflow is an untrusted repo directory. `$XDG_DATA_HOME` was already filtered; this is the
-        // sibling branch. `Sources::discover_with` applies the same rule to `~/.bsx.toml`.
+        // An unfiltered relative `$HOME` gives `relative/home/.local/share/bsx`, so a `--record`
+        // run mints and reads its host signing key at a path that moves with the cwd, which on this
+        // project's own workflow is an untrusted repo directory. Both variables take the same rule,
+        // as `Sources::discover_with` does for `~/.bsx.toml`.
         let p = |s: &str| Some(PathBuf::from(s));
         for (xdg, home, want, why) in [
             (p("/x/data"), p("/home/you"), "/x/data/bsx", "XDG wins"),
@@ -1098,9 +1098,9 @@ mod tests {
 
     #[test]
     fn an_empty_chain_is_refused_rather_than_answered_ok() {
-        // A chain of nothing is not a verified chain. `Ok(vec![])` reads to a caller as "checked,
-        // and it held"; the CLI guards the empty file in another crate, so an embedder calling this
-        // directly got that pass.
+        // A chain of nothing is not a verified chain: `Ok(vec![])` reads to a caller as "checked,
+        // and it held". The CLI guards the empty file in another crate, so only this refusal covers
+        // an embedder calling `verify_chain` directly.
         assert_eq!(
             verify_chain(&[], &[test_key().verifying_key()]),
             Err(ChainError::Empty)
@@ -1182,8 +1182,8 @@ mod tests {
     #[test]
     fn arbitrary_mutations_of_an_envelope_never_panic_the_verifier() {
         // The cheap in-gate tier of the envelope fuzzing (the deep tier is the `signing_envelope`
-        // libFuzzer target): deterministic mutations of a valid
-        // chained envelope must always land in Ok/Err, never a panic.
+        // libFuzzer target): deterministic mutations of a valid chained envelope must always land
+        // in Ok/Err, never a panic.
         let key = test_key();
         let trusted = [key.verifying_key()];
         let valid = key.sign_canonical_chained(r#"{"schema":1,"n":1}"#, Some(&record_hash("{}")));

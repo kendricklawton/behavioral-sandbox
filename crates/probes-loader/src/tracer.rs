@@ -24,25 +24,22 @@ const TP_SYSCALLS: &str = "syscalls";
 /// The event the counter program hooks: `syscalls/sys_enter_execve`.
 const TP_NAME: &str = "sys_enter_execve";
 
-/// A loaded, attached `sys_enter_execve` counter. Holds the aya [`Ebpf`] that owns the
-/// program, its map, and the live attachment; dropping this detaches and frees them, pinning
-/// nothing. Read the running total with [`count`](ExecveCounter::count).
+/// A loaded, attached `sys_enter_execve` counter. Owns the aya [`Ebpf`] and pins nothing, so
+/// dropping it detaches; read the running total with [`count`](ExecveCounter::count).
 #[must_use = "dropping an ExecveCounter detaches the probe"]
 pub struct ExecveCounter {
     ebpf: Ebpf,
 }
 
 impl ExecveCounter {
-    /// Load the compiled object, load + attach the `count_execve` tracepoint, and return the live
-    /// counter. From here every host `execve` bumps the per-CPU map until this value is dropped.
+    /// Loads the compiled object and attaches the `count_execve` tracepoint, so from here every
+    /// host `execve` bumps the per-CPU map until this value is dropped.
     ///
     /// # Errors
     /// [`ProbeError::Object`] if the object can't be read (build it: `cargo xtask build-probes`);
     /// [`ProbeError::Load`] if the kernel rejects the object/program (no `CAP_BPF`, no BTF, or a
     /// verifier reject); [`ProbeError::Attach`] if the tracepoint attach fails.
     pub fn load() -> Result<Self, ProbeError> {
-        // Name the missing prerequisite up front: no kernel BTF, or no CAP_BPF/CAP_PERFMON, is
-        // a legible `Unsupported` error here rather than a cryptic verifier reject / `EPERM` below.
         check_support()?;
         let mut ebpf = load_object()?;
 
@@ -60,10 +57,9 @@ impl ExecveCounter {
         per_cpu_sum(&self.ebpf, MAP)
     }
 
-    /// The per-PID `execve` counts as `(pid, count)` pairs, read from the `EXECVE_BY_PID` hash
-    /// map. Order is unspecified (hash-map iteration); the [`count`](ExecveCounter::count) total is
-    /// authoritative, since the per-PID map is bounded and drops new keys when full, and
-    /// [`dropped_pids`](ExecveCounter::dropped_pids) says how many.
+    /// The per-PID `execve` counts as `(pid, count)` pairs, order unspecified. The
+    /// [`count`](ExecveCounter::count) total is authoritative, since the per-PID map is bounded and
+    /// drops new keys when full ([`dropped_pids`](ExecveCounter::dropped_pids) says how many).
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
@@ -79,10 +75,10 @@ impl ExecveCounter {
         Ok(out)
     }
 
-    /// Pids a full `EXECVE_BY_PID` could not admit, summed across CPUs: the loss that makes
-    /// [`counts_by_pid`](ExecveCounter::counts_by_pid) shorter than the host's real set of
-    /// exec'ing processes. Monotonic since [`load`](ExecveCounter::load). Nonzero means the per-pid
-    /// view is partial, while [`count`](ExecveCounter::count) stays exact.
+    /// Pids a full `EXECVE_BY_PID` could not admit, summed across CPUs and monotonic since
+    /// [`load`](ExecveCounter::load). Nonzero means
+    /// [`counts_by_pid`](ExecveCounter::counts_by_pid) is partial, while
+    /// [`count`](ExecveCounter::count) stays exact.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
@@ -91,21 +87,16 @@ impl ExecveCounter {
     }
 }
 
-/// Read a kernel-side single-slot **per-CPU** `u64` counter (the `EVENT_DROPS` shape) and sum its
-/// slots into one total. Every drop/count surface in this crate reads through here, and the
-/// mechanism is that this holds the crate's only per-CPU map open, so the map-open/read error
-/// story is one story rather than one per counter. Deliberately not a list of the callers: such a
-/// list is one more copy, and it drifts like every copy.
+/// Reads a kernel-side single-slot **per-CPU** `u64` counter and sums its slots into one total, the
+/// crate's only per-CPU map open, so the map-open/read error story is one story.
 pub(crate) fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
     let counter: PerCpuArray<_, u64> = crate::maps::open(ebpf, name, "a per-cpu array")?;
     let per_cpu = counter
         .get(&0, 0)
         .map_err(|e| ProbeError::Map(format!("read `{name}`[0]: {e}")))?;
-    // Saturate, don't `.sum()`: these are adversarial kernel-written counters, and the crate's bar
-    // is that a hostile guest can never wrap a large drop/event count down to a small one (the same
-    // discipline `totals()`/denials use). A plain `.sum()` would also panic on overflow in a debug
-    // build, which the host path forbids. Unreachable in practice, since per-CPU drop slots can't sum past
-    // `u64::MAX`), but kept consistent with the stated invariant rather than relying on that.
+    // Saturate rather than `.sum()`: these counters are kernel-written and adversarial, so a large
+    // drop count must never wrap down to a small one, and `.sum()` would also panic on overflow in
+    // a debug build, which the host path forbids.
     Ok(per_cpu.iter().copied().fold(0u64, u64::saturating_add))
 }
 
@@ -132,21 +123,19 @@ const TRACE_SET_MAP: &str = "TRACE_SET";
 /// [`SyscallTracer::dropped_events`] so best-effort loss is reported, never silent.
 const EVENT_DROPS_MAP: &str = "EVENT_DROPS";
 
-/// Where the kernel publishes each tracepoint's own field layout, in the order aya resolves them for
-/// the attach itself (it reads the `id` file in the same directory), so verifying the layout needs
-/// no access the attach does not already need.
+/// Where the kernel publishes each tracepoint's field layout, in the order aya resolves them for
+/// the attach itself, so verifying the layout needs no access the attach does not already need.
 const TRACEFS_ROOTS: [&str; 2] = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"];
 
 /// Checks every offset in [`TRACEPOINT_ARGS`] against the kernel's own `format` file for that
 /// event, before a program is loaded.
 ///
-/// The tracers read their arguments at fixed byte offsets, and nothing relocates those: BTF
-/// relocates struct-field accesses, and reading the argument area is not one. On a kernel that laid
-/// the record out differently, `read_at` returns whatever `u64` sits at the offset and the probe
-/// follows it as a user pointer, so the event reaches the record with an empty or unrelated path,
-/// nothing errors, and no drop counter moves. This makes that disagreement a typed
-/// [`ProbeError::Unsupported`], which [`crate::SandboxProbes`] records as a coverage gap on the
-/// syscall axis.
+/// BTF relocates struct-field accesses, and reading a tracepoint's argument area is not one, so
+/// those offsets are an unrelocated ABI assumption: on a kernel that laid the record out
+/// differently, `read_at` returns whatever `u64` sits there and the probe follows it as a user
+/// pointer, recording an empty or unrelated path with nothing erroring and no drop counter moving.
+/// This makes that disagreement a typed [`ProbeError::Unsupported`], which
+/// [`crate::SandboxProbes`] records as a coverage gap on the syscall axis.
 fn check_tracepoint_abi() -> Result<(), ProbeError> {
     for (_, event) in TRACERS {
         let format = read_tracepoint_format(event)?;
@@ -190,11 +179,10 @@ fn read_tracepoint_format(event: &str) -> Result<String, ProbeError> {
 }
 
 /// The `(offset, size)` a tracepoint `format` body declares for `field`, or `None` when it declares
-/// no such field. Pure, so the parse is tested without a readable tracefs (the directory is
-/// root-only on a normal host).
-///
-/// Each line is `field:<C declaration>;\toffset:<n>;\tsize:<n>;\tsigned:<0|1>;`. The declaration is
-/// C, so the field name is its last token once pointer stars and any array suffix are stripped.
+/// no such field. Pure, so the parse is tested without a readable tracefs (root-only on a normal
+/// host). Each line is `field:<C declaration>;\toffset:<n>;\tsize:<n>;\tsigned:<0|1>;`, and the
+/// declaration is C, so the field name is its last token once pointer stars and any array suffix
+/// are stripped.
 fn field_layout(format: &str, field: &str) -> Option<(usize, usize)> {
     format.lines().find_map(|line| {
         let mut parts = line.trim().strip_prefix("field:")?.split(';');
@@ -221,25 +209,23 @@ fn field_layout(format: &str, field: &str) -> Option<(usize, usize)> {
     })
 }
 
-/// A loaded, attached syscall tracer: the `sys_enter_{execve,openat,connect}` tracepoints
-/// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the aya
-/// [`Ebpf`], so dropping it detaches everything and pins nothing,
-/// like [`ExecveCounter`]. Narrow the stream to one sandbox with [`watch_pid`](Self::watch_pid) /
-/// [`watch_cgroup`](Self::watch_cgroup); the default (nothing set) observes the whole host.
+/// A loaded, attached syscall tracer: the `sys_enter_{execve,openat,connect}` tracepoints stream
+/// per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the aya
+/// [`Ebpf`] and pins nothing, so dropping it detaches. Narrow the stream to one sandbox with
+/// [`watch_pid`](Self::watch_pid) / [`watch_cgroup`](Self::watch_cgroup); the default observes the
+/// whole host.
 #[must_use = "dropping a SyscallTracer detaches the probes"]
 pub struct SyscallTracer {
     ebpf: Ebpf,
-    /// The ring-buffer consumer, built **once** at load and reused by every [`drain`](Self::drain).
-    /// This is load-bearing, not an optimization: aya tracks the consumer position and a producer-
-    /// position cache *inside* this value, so a fresh `RingBuf` per drain (its cache reset to 0 while
-    /// the kernel-side consumer offset is already advanced) would defeat the "caught up?" check and
-    /// spin forever. Its `MapData` owns the map fd, taken out of `ebpf`; the attached programs keep
-    /// writing to the same kernel map.
+    /// The ring-buffer consumer, built **once** at load and reused by every [`drain`](Self::drain):
+    /// aya tracks the consumer position and a producer-position cache *inside* this value, so a
+    /// fresh `RingBuf` per drain (its cache reset to 0 while the kernel-side consumer offset is
+    /// already advanced) would defeat the "caught up?" check and spin forever. Its `MapData` owns
+    /// the map fd, taken out of `ebpf`; the attached programs keep writing to the same kernel map.
     events: RingBuf<MapData>,
-    /// Ring records [`drain`](Self::drain) could not decode as a [`SyscallEvent`] (the userspace
-    /// twin of the kernel's `EVENT_DROPS` counter), read by
-    /// [`undecodable_events`](Self::undecodable_events) so writer/reader drift surfaces as a
-    /// coverage gap instead of an empty footprint reading as a quiet run.
+    /// Ring records [`drain`](Self::drain) could not decode as a [`SyscallEvent`], the userspace
+    /// twin of the kernel's `EVENT_DROPS` counter, so writer/reader drift surfaces as a coverage
+    /// gap rather than an empty footprint reading as a quiet run.
     undecodable: u64,
 }
 
@@ -256,9 +242,6 @@ impl SyscallTracer {
     /// [`ProbeError::Attach`] if a tracepoint attach fails.
     pub fn load() -> Result<Self, ProbeError> {
         check_support()?;
-        // Before anything attaches: the offsets the programs read their arguments at are an ABI
-        // assumption no relocation carries, and a wrong one records an empty or unrelated path
-        // rather than failing.
         check_tracepoint_abi()?;
         let mut ebpf = load_object()?;
 
@@ -266,9 +249,8 @@ impl SyscallTracer {
             crate::maps::attach_tracepoint(&mut ebpf, program, TP_SYSCALLS, event)?;
         }
 
-        // Build the ring-buffer consumer once (see the field doc). `take_map` moves the map's owned
-        // handle out of `ebpf`; the kernel map stays alive (this `RingBuf` holds its fd) and the
-        // attached programs keep writing to it. `FILTER` stays in `ebpf` for the `watch_*` setters.
+        // Build the ring-buffer consumer once (see the `events` field doc). `FILTER` stays in
+        // `ebpf` for the `watch_*` setters.
         let events_map = ebpf
             .take_map(EVENTS_MAP)
             .ok_or_else(|| ProbeError::Map(format!("map `{EVENTS_MAP}` not found")))?;
@@ -282,12 +264,10 @@ impl SyscallTracer {
         })
     }
 
-    /// Watch only the process tree with this **tgid** (the userspace pid): the programs drop events
-    /// from any other tgid. Pass `0` to stop filtering on tgid. Composes with
-    /// [`watch_cgroup`](Self::watch_cgroup), since both configured axes must match. **Selects
-    /// single-filter mode**, switching the tracer off the [`add_target`](Self::add_target) set if it was
-    /// on, so the two filter models can't half-apply and the mode always matches the last
-    /// setter used).
+    /// Watch only the process tree with this **tgid** (the userspace pid), or `0` to stop filtering
+    /// on tgid. Composes with [`watch_cgroup`](Self::watch_cgroup), since both configured axes must
+    /// match. **Selects single-filter mode**, switching the tracer off the
+    /// [`add_target`](Self::add_target) set, so the two filter models can't half-apply.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
@@ -318,12 +298,11 @@ impl SyscallTracer {
         self.set_filter(FILTER_CGROUP, 0)
     }
 
-    /// Switch to **set mode**: the tracepoints now pass an event iff its cgroup is a registered
-    /// [`add_target`](Self::add_target) member, ignoring the single-target [`watch_pid`](Self::watch_pid)
-    /// / [`watch_cgroup`](Self::watch_cgroup) filter. This is what the shared multi-sandbox tracer
-    /// ([`crate::SharedTracer`]) drives; a single-sandbox caller stays on the default `FILTER` path and never
-    /// calls this. Symmetric with the `watch_*` setters, which switch back, the mode always matches
-    /// the last setter used, so neither filter model can silently no-op. Idempotent.
+    /// Switch to **set mode**: the tracepoints pass an event iff its cgroup is a registered
+    /// [`add_target`](Self::add_target) member, ignoring the single-target
+    /// [`watch_pid`](Self::watch_pid) / [`watch_cgroup`](Self::watch_cgroup) filter. What
+    /// [`crate::SharedTracer`] drives; the `watch_*` setters switch back, so the mode always
+    /// matches the last setter used and neither filter model can silently no-op. Idempotent.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the mode map is missing or unwritable.
@@ -331,9 +310,8 @@ impl SyscallTracer {
         self.set_mode(true)
     }
 
-    /// Events the kernel **dropped** because the ring buffer was full, summed across CPUs, the
-    /// best-effort loss made visible. Monotonic since [`load`](Self::load), so a caller snapshots it around
-    /// a window and reports a nonzero delta, which the audit bundle turns into a coverage gap.
+    /// Events the kernel **dropped** because the ring buffer was full, summed across CPUs and
+    /// monotonic since [`load`](Self::load), so a nonzero delta around a window is a coverage gap.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
@@ -342,19 +320,18 @@ impl SyscallTracer {
     }
 
     /// Ring records [`drain`](Self::drain) read but could not decode as a [`SyscallEvent`]: the
-    /// userspace twin of [`dropped_events`](Self::dropped_events), covering writer/reader drift
-    /// (a resized or reshaped kernel event record) the way that one covers a full buffer. A
-    /// monotonic counter since [`load`](Self::load); callers snapshot it around a window and
-    /// report a nonzero delta as a coverage gap. Zero on a healthy host: the kernel writer sizes
-    /// every record it commits.
+    /// userspace twin of [`dropped_events`](Self::dropped_events), covering writer/reader drift (a
+    /// resized or reshaped kernel event record) rather than a full buffer. Monotonic since
+    /// [`load`](Self::load), and zero on a healthy host, since the kernel writer sizes every record
+    /// it commits.
     #[must_use]
     pub fn undecodable_events(&self) -> u64 {
         self.undecodable
     }
 
     /// Registers `cgroup_id` in the trace target *set*, switching to set mode if needed, so from
-    /// here the tracepoints emit that sandbox's host syscalls. The multi-sandbox path: one shared
-    /// tracer, every sandbox's cgroup registered, the per-syscall cost a single hash lookup. Idempotent.
+    /// here the tracepoints emit that sandbox's host syscalls. One shared tracer serves every
+    /// registered sandbox at a per-syscall cost of one hash lookup. Idempotent.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the target/mode map is missing or the write fails.
@@ -367,13 +344,12 @@ impl SyscallTracer {
         )
     }
 
-    /// Unregisters `cgroup_id`, so the tracepoints stop emitting its events. Removing a cgroup that was never
-    /// a target is a no-op, not an error; `maps::remove_cgroup_key` holds which failures it
-    /// swallows and which it surfaces.
+    /// Unregisters `cgroup_id`, so the tracepoints stop emitting its events. Removing a cgroup that
+    /// was never a target is a no-op, not an error.
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other than the
-    /// key being absent.
+    /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other
+    /// than the key being absent.
     pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
         remove_cgroup_key(
             &mut self.trace_targets()?,
@@ -388,8 +364,7 @@ impl SyscallTracer {
         crate::maps::set_flag(&mut self.ebpf, TRACE_SET_MAP, FILTER_MODE_SLOT, set_mode)
     }
 
-    /// The writable `TRACE_TARGETS` set handle, shared by [`add_target`](Self::add_target) /
-    /// [`remove_target`](Self::remove_target).
+    /// The writable `TRACE_TARGETS` set handle.
     fn trace_targets(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u8>, ProbeError> {
         crate::maps::open_mut(&mut self.ebpf, TRACE_TARGETS_MAP, "a hash map")
     }
@@ -403,24 +378,19 @@ impl SyscallTracer {
             .map_err(|e| ProbeError::Map(format!("set `{FILTER_MAP}`[{slot}]: {e}")))
     }
 
-    /// Drain every event currently in the ring buffer, calling `on_event` for each, and return how
-    /// many were delivered. **Non-blocking**: it returns 0 when the buffer is empty rather than
-    /// waiting; [`stream`](Self::stream) wraps it in the live-trace loop. A record that does not
-    /// decode is **counted** ([`undecodable_events`](Self::undecodable_events)) and skipped, never
-    /// silent: an `Err` here would abandon every event still queued behind the bad record (and the
-    /// shared multi-sandbox drain discards drain errors), so the loss rides a counter the collector
-    /// turns into a coverage gap instead.
+    /// Drains every event currently in the ring buffer, calling `on_event` for each, and returns
+    /// how many were delivered. **Non-blocking**: returns 0 on an empty buffer rather than waiting.
+    /// A record that does not decode is **counted**
+    /// ([`undecodable_events`](Self::undecodable_events)) and skipped rather than returned as an
+    /// `Err`, which would abandon every event still queued behind the bad record.
     ///
     /// # Errors
     /// Currently infallible (the consumer was opened once at [`load`](Self::load)); the `Result` is
-    /// kept for uniformity with the fallible probe surface, so the blocking consumer can add an
-    /// error path without breaking callers.
+    /// kept so a blocking consumer can add an error path without breaking callers.
     pub fn drain(&mut self, mut on_event: impl FnMut(SyscallEvent)) -> Result<usize, ProbeError> {
         let mut delivered = 0;
-        // One `RingBufItem` is outstanding at a time; each is consumed (parsed to an owned, `Copy`
-        // event) before the next `next()`, so the loop never holds two. `self.events` is the same
-        // consumer every call, so its position/cache stay coherent (a fresh one would spin, see the
-        // field doc).
+        // One `RingBufItem` is outstanding at a time: each is parsed to an owned `Copy` event
+        // before the next `next()`, so the loop never holds two.
         while let Some(item) = self.events.next() {
             if let Some(event) = decode_or_count(&item, &mut self.undecodable) {
                 on_event(event);
@@ -430,16 +400,14 @@ impl SyscallTracer {
         Ok(delivered)
     }
 
-    /// Stream a **live trace**: loop, calling `on_event` for each event as it arrives, until
-    /// `keep_going` returns `false`, returning the total delivered. When the buffer is momentarily empty
-    /// it sleeps `idle` before polling again (so an idle tracer doesn't spin), but drains greedily
-    /// while events are flowing, so latency is bounded by `idle`. Decode + print with
-    /// [`SyscallEvent::describe`].
+    /// Streams a **live trace**: calls `on_event` for each event as it arrives until `keep_going`
+    /// returns `false`, sleeping `idle` when the buffer is momentarily empty and draining greedily
+    /// otherwise, so latency is bounded by `idle` and `keep_going` is where a caller wires a
+    /// deadline.
     ///
-    /// A poll-with-sleep loop rather than a zero-idle-latency `poll`/`epoll` wait: aya's `RingBuf` exposes
-    /// only `AsRawFd`, so handing its fd to a poller needs `BorrowedFd::borrow_raw`, which is `unsafe` and
-    /// this crate is `#![forbid(unsafe_code)]`. The only caller is a live-trace viewer, never the audit
-    /// record, so the idle sleep is immaterial. `keep_going` is where a caller wires a deadline.
+    /// A poll-with-sleep loop rather than a `poll`/`epoll` wait, because aya's `RingBuf` exposes
+    /// only `AsRawFd` and handing its fd to a poller needs `BorrowedFd::borrow_raw`, which is
+    /// `unsafe` while this crate is `#![forbid(unsafe_code)]`.
     ///
     /// # Errors
     /// Propagates a [`drain`](Self::drain) error (currently none in practice).
@@ -461,10 +429,9 @@ impl SyscallTracer {
     }
 }
 
-/// Decode one ring record, or count it: `Some(event)` when the bytes decode as a [`SyscallEvent`],
-/// else bump `undecodable` (saturating, the adversarial-counter discipline [`per_cpu_sum`] states)
-/// and `None`. Pure, so the skip branch, unreachable from a real kernel ring buffer (the writer
-/// sizes every record it commits), is testable host-safe.
+/// Decodes one ring record, or counts it: `Some(event)` when the bytes decode as a
+/// [`SyscallEvent`], else a saturating bump of `undecodable` and `None`. Pure, so the skip branch,
+/// unreachable from a real kernel ring buffer, is testable host-safe.
 fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> {
     match SyscallEvent::from_bytes(bytes) {
         Some(event) => Some(event),
@@ -477,15 +444,14 @@ fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> 
 
 #[cfg(test)]
 mod tests {
-    // Host-safe: the decode-or-count decision on raw bytes and the tracepoint-format parse, no aya,
-    // no kernel (tracefs is root-only on a normal host).
+    // Host-safe: raw-byte decode and the `format` parse, no aya and no readable tracefs.
     use super::{decode_or_count, field_layout};
     use bsx_probes_common::{ARG_SLOT, EVENT_SIZE, TRACEPOINT_ARGS};
 
     /// A transcript of `events/syscalls/<event>/format` for the three traced events, as an
     /// `x86_64` kernel writes it: the four `common_*` header fields, then one 8-byte slot per
-    /// syscall argument. A transcript is not the kernel's word, which is why the check runs against
-    /// the live file at attach; this is here so the parse and the table are exercised host-safe.
+    /// syscall argument. A transcript is not the kernel's word, which is why the check itself runs
+    /// against the live file at attach; this exercises the parse and the table host-safe.
     fn format_body(event: &str) -> String {
         let header = "name: EVENT\nID: 42\nformat:\n\
              \tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n\
@@ -546,9 +512,7 @@ mod tests {
 
     #[test]
     fn the_field_name_is_read_past_the_c_declaration_it_hides_behind() {
-        // A name is the last token of a C declaration, so pointer stars (attached or detached),
-        // qualifiers and an array suffix must not become part of it. Reading `* filename` as the
-        // name would match nothing and refuse a healthy kernel.
+        // Reading `* filename` as the name would match nothing and refuse a healthy kernel.
         for decl in [
             "const char * filename",
             "char *filename",

@@ -18,52 +18,36 @@ const TP_SCHED: &str = "sched";
 const TP_SCHED_SWITCH: &str = "sched_switch";
 /// The per-cgroup on-CPU-nanoseconds map (`#[map] static CPU_NS`), keyed by cgroup id.
 const CPU_NS_MAP: &str = "CPU_NS";
-/// The per-CPU counter of cgroups a full `CPU_NS` dropped (`#[map] static CPU_DROPS`), read by
-/// [`ResourceMeter::dropped_cgroups`] so an unmeasured sandbox is a gap, not a zero.
+/// The per-CPU counter of cgroups a full `CPU_NS` dropped (`#[map] static CPU_DROPS`).
 const CPU_DROPS_MAP: &str = "CPU_DROPS";
-/// The set of cgroup ids to meter (`#[map] static METER_TARGETS`, `cgroup_id -> 1`); the loader
-/// registers a sandbox's cgroup here so one shared program meters many sandboxes.
+/// The set of cgroup ids to meter (`#[map] static METER_TARGETS`, `cgroup_id -> 1`).
 const METER_TARGETS_MAP: &str = "METER_TARGETS";
-/// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` meters only the target set,
-/// `1` meters every cgroup, the whole-host escape hatch, not the default.
+/// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` = target set, `1` = all.
 const METER_ALL_MAP: &str = "METER_ALL";
 
-/// A loaded, attached **resource meter**: the `sched/sched_switch` tracepoint accumulates each
-/// registered cgroup's on-CPU time into a map, which [`cpu_time`](Self::cpu_time) reads back per cgroup id.
-/// This is the host CPU a sandbox's VMM burns running the guest vCPUs, attributed to the sandbox's own
-/// cgroup: the engine measures, the hoster bills. Owns the aya [`Ebpf`] and pins nothing, so dropping it
-/// detaches cleanly like
-/// the other loaders.
+/// A loaded, attached resource meter: the `sched/sched_switch` tracepoint accumulates each
+/// registered cgroup's on-CPU time into a map that [`cpu_time`](Self::cpu_time) reads back per
+/// cgroup id. Owns the aya [`Ebpf`] and pins nothing, so dropping it detaches.
 ///
-/// **One meter, many sandboxes.** `sched_switch` is a global tracepoint, so this attaches **once** and
-/// meters a *set* of cgroups: [`add_target`](Self::add_target) registers a sandbox's cgroup,
-/// [`remove_target`](Self::remove_target) unregisters it, and the hot path stays a single hash lookup no
-/// matter how many are metered, where a program-per-sandbox would run every attached program on every
-/// switch). Hold one `ResourceMeter` for the process and register each sandbox's cgroup id (what
-/// [`crate::cgroup_id_of_pid`] resolves from its VMM pid).
-///
-/// **CPU here, memory and IO from cgroup v2.** CPU is where per-event timing earns its keep, so it rides
-/// eBPF; a cgroup's memory high-water mark and IO bytes are already maintained by the kernel's native
-/// cgroup v2 counters, read by [`CgroupStats::read`], the "or cgroup" half of the primitive.
-/// [`summary_for_pid`](Self::summary_for_pid) rolls both into a [`ResourceSummary`] for one sandbox
-/// (bridge a VMM pid → cgroup id **and** cgroup dir, then roll the summary).
+/// `sched_switch` is a global tracepoint, so this attaches **once** and meters a *set* of cgroups
+/// ([`add_target`](Self::add_target), keyed by what [`crate::cgroup_id_of_pid`] resolves from a VMM
+/// pid), where a program-per-sandbox would run every attached program on every switch. Only CPU
+/// rides eBPF: memory and IO come from the kernel's native cgroup v2 counters via
+/// [`CgroupStats::read`], which [`summary_for_pid`](Self::summary_for_pid) rolls in alongside.
 #[must_use = "dropping a ResourceMeter detaches the accounting probe"]
 pub struct ResourceMeter {
     ebpf: Ebpf,
 }
 
 impl ResourceMeter {
-    /// Loads the compiled object and attaches the `account_sched_switch` tracepoint. From here every context
-    /// switch charges the outgoing task's on-CPU time to its cgroup, **but only for registered cgroups**, so
-    /// nothing accumulates until [`add_target`](Self::add_target) or [`meter_all`](Self::meter_all).
-    /// Attaching once and metering a set is what keeps this bounded under
-    /// many concurrent sandboxes.
+    /// Loads the compiled object and attaches the `account_sched_switch` tracepoint. Nothing
+    /// accumulates until [`add_target`](Self::add_target) or [`meter_all`](Self::meter_all): every
+    /// context switch charges the outgoing task's cgroup, but only a registered one.
     ///
     /// # Errors
     /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps, via [`check_support`]);
     /// [`ProbeError::Object`] if the object can't be read (build it: `cargo xtask build-probes`);
-    /// [`ProbeError::Load`] if the kernel rejects the object/program; [`ProbeError::Attach`] if the
-    /// tracepoint attach fails.
+    /// [`ProbeError::Load`] on a kernel reject; [`ProbeError::Attach`] if the attach fails.
     pub fn load() -> Result<Self, ProbeError> {
         check_support()?;
         let mut ebpf = load_object()?;
@@ -73,11 +57,8 @@ impl ResourceMeter {
         Ok(Self { ebpf })
     }
 
-    /// Register `cgroup_id` for metering: from here the tracepoint charges its on-CPU time into the
-    /// `CPU_NS` map. The multi-sandbox path, register each sandbox's cgroup (via
-    /// [`crate::cgroup_id_of_pid`]) with one shared meter, and the per-switch cost stays a single
-    /// hash lookup. Idempotent (re-registering is harmless). Does **not** zero any prior total for this
-    /// cgroup; [`reset`](Self::reset) does that if a caller wants a clean per-run baseline.
+    /// Registers `cgroup_id` for metering, so the tracepoint charges its on-CPU time into `CPU_NS`.
+    /// Idempotent, and does **not** zero any prior total: [`reset`](Self::reset) does that.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the target map is missing or the write fails.
@@ -89,13 +70,13 @@ impl ResourceMeter {
         )
     }
 
-    /// Unregisters `cgroup_id`, so the tracepoint stops charging its time. The accumulated `CPU_NS` total
-    /// stays readable for a final snapshot until [`reset`](Self::reset) or the meter is dropped).
-    /// Removing a cgroup that was never a target is a no-op, not an error.
+    /// Unregisters `cgroup_id`, so the tracepoint stops charging its time. The accumulated `CPU_NS`
+    /// total stays readable for a final snapshot, and removing a cgroup that was never a target is
+    /// a no-op, not an error.
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other than
-    /// the key being absent.
+    /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other
+    /// than the key being absent.
     pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
         remove_cgroup_key(
             &mut self.targets()?,
@@ -104,10 +85,9 @@ impl ResourceMeter {
         )
     }
 
-    /// Zero the accumulated on-CPU total for `cgroup_id` (write a `0` entry), so a following
-    /// [`cpu_time`](Self::cpu_time) measures only what accrues *after* this, the clean baseline for a
-    /// per-run measurement. The kernel's accumulate path then adds onto the `0`. Independent of
-    /// registration: reset before starting a run, read after.
+    /// Zeroes the accumulated on-CPU total for `cgroup_id`, so a following
+    /// [`cpu_time`](Self::cpu_time) measures only what accrues after it. Independent of
+    /// registration: reset before a run starts, read after.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the CPU map is missing or the write fails.
@@ -117,13 +97,10 @@ impl ResourceMeter {
             .map_err(|e| ProbeError::Map(format!("reset cgroup {cgroup_id} CPU total: {e}")))
     }
 
-    /// Delete `cgroup_id`'s `CPU_NS` row entirely (not just zero it like [`reset`](Self::reset)),
-    /// freeing its slot in the fixed-capacity map. Called after a finished sandbox's final read so
-    /// dead cgroups don't accumulate against `MAX_CGROUPS`: without it a long-lived meter fills the
-    /// map, and once full the kernel's `CPU_NS.insert` for a *new* sandbox silently fails, so its
-    /// `cpu_ns` reads back an indistinguishable `0` (a used-no-CPU lie) with no coverage gap.
-    /// Removing a cgroup with no row is a no-op, not an error, mirroring
-    /// [`remove_target`](Self::remove_target).
+    /// Deletes `cgroup_id`'s `CPU_NS` row (rather than zeroing it like [`reset`](Self::reset)),
+    /// freeing its slot in the fixed-capacity map: once dead cgroups have filled `MAX_CGROUPS`, a
+    /// *new* sandbox's `insert` silently fails and its `cpu_ns` reads back an indistinguishable
+    /// `0`. Removing a cgroup with no row is a no-op, not an error.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the CPU map is missing, or the removal fails for a reason other than
@@ -136,10 +113,9 @@ impl ResourceMeter {
         )
     }
 
-    /// Turn the **meter-everything** toggle on or off. Off (the default) meters only the registered
-    /// [`add_target`](Self::add_target) set, the multi-sandbox path. On meters every cgroup on the host, so
-    /// `CPU_NS` grows toward one entry per live cgroup: the whole-host escape hatch for a snapshot or
-    /// a test, not the per-sandbox path.
+    /// Turns the meter-everything toggle on or off: off (the default) meters only the
+    /// [`add_target`](Self::add_target) set, on meters every cgroup on the host, so `CPU_NS` grows
+    /// toward one entry per live cgroup.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the toggle map is missing or the write fails.
@@ -147,32 +123,25 @@ impl ResourceMeter {
         crate::maps::set_flag(&mut self.ebpf, METER_ALL_MAP, 0, on)
     }
 
-    /// The writable `METER_TARGETS` set handle, shared by [`add_target`](Self::add_target) /
-    /// [`remove_target`](Self::remove_target).
+    /// The writable `METER_TARGETS` set handle.
     fn targets(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u8>, ProbeError> {
         crate::maps::open_mut(&mut self.ebpf, METER_TARGETS_MAP, "a hash map")
     }
 
-    /// The read-only `CPU_NS` handle, shared by [`cpu_ns`](Self::cpu_ns) and
-    /// [`for_each_cpu`](Self::for_each_cpu).
+    /// The read-only `CPU_NS` handle.
     fn cpu_totals(&self) -> Result<AyaHashMap<&MapData, u64, u64>, ProbeError> {
         crate::maps::open(&self.ebpf, CPU_NS_MAP, "a hash map")
     }
 
-    /// The writable `CPU_NS` handle, shared by [`reset`](Self::reset) / [`clear`](Self::clear).
+    /// The writable `CPU_NS` handle.
     fn cpu_totals_mut(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u64>, ProbeError> {
         crate::maps::open_mut(&mut self.ebpf, CPU_NS_MAP, "a hash map")
     }
 
-    /// The accumulated on-CPU time charged to `cgroup_id` since [`load`](Self::load). `Duration::ZERO` if
-    /// the cgroup has no entry yet, whether never scheduled or not a metered target. The
-    /// nanosecond total the map holds, wrapped for the caller.
-    ///
-    /// **Charges post at switch-out.** A slice is charged when the task *leaves* its CPU (that is when
-    /// `sched_switch` fires), so a task still running has its current slice pending, a pegged vCPU
-    /// thread can hold a whole busy window un-posted until the guest idles and the thread blocks. For a
-    /// run-scoped number, read after the workload has gone quiet (a brief settle after the exec
-    /// returns); a mid-run read is a floor, not the total.
+    /// The accumulated on-CPU time charged to `cgroup_id` since [`load`](Self::load),
+    /// `Duration::ZERO` if the cgroup has no entry yet. **Charges post at switch-out**, when
+    /// `sched_switch` fires, so a pegged vCPU thread holds a whole busy window un-posted until the
+    /// guest idles: read after the workload goes quiet, because a mid-run read is a floor.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
@@ -180,11 +149,9 @@ impl ResourceMeter {
         Ok(Duration::from_nanos(self.cpu_ns(cgroup_id)?))
     }
 
-    /// The raw accumulated on-CPU **nanoseconds** for `cgroup_id` (0 if absent). A **keyed lookup**:
-    /// aya 0.13 returns a typed `MapError::KeyNotFound`, so a missing key is an unambiguous `0` (never
-    /// scheduled, or not the metered target) with no scan, distinct from a real read error. (Under
-    /// `meter_all` the map can hold up to `MAX_CGROUPS` rows, which a full scan would walk every
-    /// read.)
+    /// The raw accumulated on-CPU **nanoseconds** for `cgroup_id` (0 if absent). A keyed lookup,
+    /// not a scan: aya 0.13 returns a typed `MapError::KeyNotFound`, so a missing key is an
+    /// unambiguous `0` distinct from a real read error.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or the read fails for a reason other than a missing key.
@@ -198,15 +165,10 @@ impl ResourceMeter {
         }
     }
 
-    /// Cgroups a full `CPU_NS` map could not admit, summed across CPUs: each one is a cgroup whose
+    /// Cgroups a full `CPU_NS` map could not admit, summed across CPUs: each is a cgroup whose
     /// on-CPU time went unaccounted, so its [`cpu_ns`](Self::cpu_ns) reads back `0` and cannot be
-    /// told from a sandbox that used no CPU. Monotonic since [`load`](Self::load); a caller snapshots
-    /// it around a run and reports a nonzero delta as a coverage gap. The counter is host-global, so
-    /// the attribution is approximate, which is the same trade the ring buffer's drop counter makes.
-    ///
-    /// Reachable when [`meter_all`](Self::meter_all) is on (every cgroup on the host competes for
-    /// `MAX_CGROUPS` slots), or when a long-lived meter's [`clear`](Self::clear) teardown has been
-    /// failing and dead cgroups have filled the map.
+    /// told from a sandbox that used no CPU. Monotonic since [`load`](Self::load), so a nonzero
+    /// delta around a run is a coverage gap; host-global, so the attribution is approximate.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
@@ -214,8 +176,7 @@ impl ResourceMeter {
         per_cpu_sum(&self.ebpf, CPU_DROPS_MAP)
     }
 
-    /// Every metered cgroup's on-CPU nanoseconds as `(cgroup_id, ns)` pairs (order unspecified), the
-    /// meter-all view, for a whole-host snapshot or a test. A targeted meter yields a single pair.
+    /// Every metered cgroup's on-CPU nanoseconds as `(cgroup_id, ns)` pairs, order unspecified.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
@@ -225,8 +186,7 @@ impl ResourceMeter {
         Ok(out)
     }
 
-    /// Iterate the `CPU_NS` map, handing each `(cgroup_id, ns)` to `f`. The single map read
-    /// [`cpu_ns`](Self::cpu_ns) and [`cpu_ns_all`](Self::cpu_ns_all) share. The key and value are plain
+    /// Iterates the `CPU_NS` map, handing each `(cgroup_id, ns)` to `f`. Key and value are plain
     /// `u64`s (aya's built-in `Pod`), so no `unsafe` map-type binding and no byte decode is needed.
     fn for_each_cpu(&self, mut f: impl FnMut(u64, u64)) -> Result<(), ProbeError> {
         for entry in self.cpu_totals()?.iter() {
@@ -237,13 +197,11 @@ impl ResourceMeter {
         Ok(())
     }
 
-    /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolve its cgroup
-    /// once (id **and** dir, from `/proc/<pid>/cgroup`), read the eBPF CPU total for that cgroup id, and
-    /// read the native cgroup v2 memory/IO counters from that cgroup dir. The per-run summary a caller
-    /// ships alongside the run's `RunResult` (no link: this crate is deliberately free of `bsx`,
-    /// and nothing here is on docs.rs), the CPU figure is meaningful
-    /// only if this cgroup was [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on)
-    /// while the run executed; the memory/IO figures are the kernel's regardless.
+    /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolves its cgroup once (id
+    /// **and** dir, from `/proc/<pid>/cgroup`), then reads the eBPF CPU total and the native cgroup
+    /// v2 memory/IO counters. The CPU figure is meaningful only if this cgroup was
+    /// [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on) while the run
+    /// executed; the memory/IO figures are the kernel's regardless.
     ///
     /// # Errors
     /// [`ProbeError::Cgroup`] if the pid's cgroup can't be resolved (`/proc/<pid>/cgroup` unreadable

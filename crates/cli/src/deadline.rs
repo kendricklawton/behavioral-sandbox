@@ -1,17 +1,15 @@
-//! Both directions of a socket bounded by one **absolute deadline** instead of a bare socket timeout.
+//! Both directions of a socket bounded by one **absolute deadline**, not a bare socket timeout.
 //!
-//! - **The threat is the slow peer, not the silent one.** `SO_RCVTIMEO` and `SO_SNDTIMEO` are both
-//!   re-armed by the OS per syscall, so a bare socket timeout bounds one `read`/`write`, not one
-//!   message. A peer that keeps each syscall progressing stretches a single message while holding the
-//!   thread carrying it. Shrinking the sockopt to the time left before one absolute deadline makes
-//!   the sum of all the syscalls honor one wall clock.
-//! - **The two directions differ in how much a peer can spend.** A slow *sender* pays nothing, so the
-//!   read side is where the cheap attack is. A slow *receiver* has to keep draining fast enough to
-//!   keep the writer progressing, so the write side bounds a client that is expensive to be, and the
-//!   overrun without this is bounded by the reply size rather than unbounded.
-//! - `bsx-engine` holds its own copies of this discipline and cannot share this type across the crate
-//!   boundary, so `every_deadline_bounded_socket_refuses_a_spent_budget` pins each copy to the same
-//!   invariant.
+//! - **The threat is the slow peer, not the silent one.** The OS re-arms
+//!   `SO_RCVTIMEO`/`SO_SNDTIMEO` per syscall, so a bare socket timeout bounds one `read`/`write`,
+//!   not one message: a peer that keeps each syscall progressing stretches one message while
+//!   holding the thread carrying it. Shrinking the sockopt to the time left before one absolute
+//!   deadline makes the sum of the syscalls honor one wall clock.
+//! - **The two directions differ in what a peer spends.** A slow *sender* pays nothing, so the
+//!   read side is the cheap attack; a slow *receiver* must keep draining to hold the writer, so
+//!   the write side costs more to mount and its overrun is bounded by the reply size.
+//! - `bsx-engine` holds its own copies of this discipline and cannot share this type across the
+//!   crate boundary, so `every_deadline_bounded_socket_refuses_a_spent_budget` pins each copy.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -24,8 +22,8 @@ pub(crate) trait SetReadTimeout {
     fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()>;
 }
 
-/// The write sockopt, the twin of [`SetReadTimeout`] and a separate trait for the same reason: a
-/// caller that only ever reads should not have to name a write timeout it never arms.
+/// The write sockopt, a trait separate from [`SetReadTimeout`] so a read-only caller never has to
+/// name a write timeout it does not arm.
 pub(crate) trait SetWriteTimeout {
     fn set_write_timeout(&self, dur: Option<Duration>) -> std::io::Result<()>;
 }
@@ -58,7 +56,7 @@ impl SetReadTimeout for &TcpStream {
 
 /// A stream whose reads and writes are bounded by one absolute deadline per message: the whole
 /// message must complete within one `budget` of [`rearm`](Self::rearm). A `None` budget passes
-/// through plain (the daemon's idle-timeout opt-out).
+/// through plain (the daemon's `--idle-timeout` opt-out).
 pub(crate) struct DeadlineStream<S> {
     stream: S,
     /// The per-message budget; [`rearm`](Self::rearm) restarts the clock for the next message.
@@ -93,10 +91,8 @@ impl<S> DeadlineStream<S> {
     }
 
     /// The time left on the in-flight message, or `None` when the deadline is disabled.
-    ///
-    /// `Some(ZERO)` is the spent budget and must be refused rather than armed: a zero `SO_RCVTIMEO`
-    /// or `SO_SNDTIMEO` is what the kernel reads as "block forever", the hang this wrapper exists to
-    /// stop.
+    /// `Some(ZERO)` is a spent budget and must be refused rather than armed: the kernel reads a
+    /// zero `SO_RCVTIMEO`/`SO_SNDTIMEO` as "block forever", the hang this wrapper exists to stop.
     fn remaining(&self) -> Option<Duration> {
         self.deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
@@ -106,8 +102,7 @@ impl<S> DeadlineStream<S> {
 impl<S: Read + SetReadTimeout> Read for DeadlineStream<S> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if let Some(remaining) = self.remaining() {
-            // Shrink the socket timeout to the time left, so the sum of all reads honors one wall
-            // clock. The refusal precedes the arming, since a zero timeout means "block forever".
+            // The refusal precedes the arming, since a zero timeout means "block forever".
             if remaining.is_zero() {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
             }
@@ -117,21 +112,15 @@ impl<S: Read + SetReadTimeout> Read for DeadlineStream<S> {
     }
 }
 
-/// The most one bounded `write` hands the kernel at a time.
-///
-/// **The deadline is only checked between syscalls, so the syscalls have to be small.** A unix
-/// socket's `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent, re-applying
-/// `SO_SNDTIMEO` to each internal wait, so handing it a 16 MiB reply is one `write` call that can
-/// block for minutes while a slow peer drains it, and no per-call check ever runs. Chunking bounds
-/// the overshoot to one chunk, which the armed sockopt bounds in turn.
+/// The most one bounded `write` hands the kernel at a time, since the deadline is checked only
+/// *between* syscalls: a unix socket's `sendmsg` loops inside the kernel until the whole buffer is
+/// sent, re-applying `SO_SNDTIMEO` to each internal wait, so one 16 MiB reply is a single `write`
+/// that blocks for minutes while a slow peer drains it. Chunking bounds the overshoot to one chunk.
 const WRITE_CHUNK: usize = 64 * 1024;
 
 impl<S: Write + SetWriteTimeout> Write for DeadlineStream<S> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if let Some(remaining) = self.remaining() {
-            // The same shrink as the read half, against the receiving end of the same shape: a peer
-            // draining just fast enough to keep each `write` returning re-arms `SO_SNDTIMEO` every
-            // time, so only an absolute deadline bounds the whole reply.
             if remaining.is_zero() {
                 return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, self.what));
             }

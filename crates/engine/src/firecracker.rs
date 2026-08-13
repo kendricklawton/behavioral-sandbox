@@ -376,32 +376,26 @@ pub(crate) enum SnapshotType {
 /// `PUT /snapshot/load`, rebuild a VM from a snapshot on a fresh VMM and (with `resume_vm`) resume
 /// it. `mem_backend` names the memory file (the older `mem_file_path` is deprecated).
 ///
-/// The load body is where the pin's *capabilities* show up, so what is deliberately **not** sent
-/// matters as much as what is:
+/// What this body deliberately omits matters as much as what it sends:
 /// - `network_overrides` (rename the host tap at load) exists on the pin, but the per-VM netns
-///   already makes every clone's baked-in tap name correct in its own namespace, so there is
-///   nothing to rename. See `net.rs`.
-/// - `vsock_override` (rebind the vsock UDS at load) exists on the pin; the driver instead bakes a
-///   **relative** socket path and gives each VMM its own cwd, which achieves the same per-clone
-///   socket without the field.
-/// - There is **no** drive-path override at any version, which is why Firecracker reopens each
-///   block device at the path baked into the snapshot and why `stage_restore_disk` exists.
+///   already makes every clone's baked-in tap name correct in its own namespace (`net.rs`).
+/// - `vsock_override` (rebind the vsock UDS at load) exists on the pin; a **relative** socket path
+///   plus a per-VMM cwd reaches the same per-clone socket without it.
+/// - There is **no** drive-path override at any version, so Firecracker reopens each block device
+///   at the path baked into the snapshot, which is why `stage_restore_disk` exists.
 #[derive(Serialize)]
 pub(crate) struct SnapshotLoad<'a> {
     pub snapshot_path: &'a str,
     pub mem_backend: MemBackend<'a>,
     pub resume_vm: bool,
-    /// Advance the guest's kvmclock by the wall-clock time elapsed since the snapshot was taken,
-    /// instead of resuming it frozen at the instant of the snapshot (`KVM_CLOCK_REALTIME` on the
-    /// restore's `KVM_SET_CLOCK`). Without it a clone wakes believing no time passed, so its
-    /// monotonic clock stalls by the snapshot's age: for a **prewarmed pool**, whose whole point is
-    /// that a clone may sit minutes between snapshot and take, that skew is the common case rather
-    /// than the exception. x86_64-only upstream, which is this engine's only target anyway.
+    /// Advance the guest's kvmclock by the wall-clock time since the snapshot was taken rather than
+    /// resuming frozen at that instant (`KVM_CLOCK_REALTIME` on the restore's `KVM_SET_CLOCK`),
+    /// without which a clone's monotonic clock stalls by the snapshot's age. A **prewarmed pool**
+    /// makes that the common case, a clone sitting minutes between snapshot and take.
     ///
-    /// **`None` omits the key**, which is load-bearing rather than tidy: the field exists only from
-    /// v1.16 and Firecracker rejects unknown fields outright, so sending it unconditionally fails
-    /// restore on every older release. Set from the probed version (`spawn::clock_realtime_arg`), so an
-    /// older-but-supported binary gets a body it accepts and only loses the clock fix-up.
+    /// **`None` omits the key**, which is load-bearing: the field exists only from v1.16 and
+    /// Firecracker rejects unknown fields outright, so sending it unconditionally fails restore on
+    /// every older release. Set from the probed version (`spawn::clock_realtime_arg`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clock_realtime: Option<bool>,
 }
@@ -418,21 +412,16 @@ pub(crate) enum MemBackendType {
 }
 
 /// Connect to a Unix domain socket with a deadline, so a wedged listener is a typed timeout rather
-/// than a parked host thread.
+/// than a parked host thread. Non-blocking rather than a thread per dial: `std`'s
+/// `UnixStream::connect` blocks, and this runs for *every* API request and exec dial, so a
+/// thread abandoned on timeout would leak one detached thread and fd per wedged peer.
 ///
-/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it with a
-/// throwaway thread abandoned on timeout would leak one detached, never-joined thread per dial
-/// (and this is called for *every* Firecracker API request and every exec dial), each stuck in
-/// `connect` for as long as the peer stays wedged, holding its fd. A non-blocking socket needs no
-/// thread at all.
-///
-/// The retry loop is the AF_UNIX shape: for a unix socket, `connect` either completes or fails
-/// **immediately** (`ECONNREFUSED` with no listener, so the callers' "nothing is accepting"
-/// classification is unchanged), except when the listener's backlog is full, which a non-blocking
-/// socket reports as `EAGAIN` where a blocking one would have parked. That is precisely the
-/// wedged-peer case the deadline exists for, so it is retried until the deadline, then reported as
-/// a timeout. Each attempt uses a fresh socket: after a failed `connect` the socket's state is
-/// unspecified, so reusing it would be undefined-ish territory for the sake of one syscall.
+/// The retry loop is the AF_UNIX shape. `connect` on a unix socket completes or fails immediately
+/// (`ECONNREFUSED` with no listener, leaving the callers' "nothing is accepting" classification
+/// intact), except on a full backlog, which a non-blocking socket reports as `EAGAIN` where a
+/// blocking one would park: exactly the wedged-peer case the deadline exists for, so it is retried
+/// until then. Each attempt takes a fresh socket, a failed `connect` leaving the old one's state
+/// unspecified.
 pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
     use nix::errno::Errno;
     use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};

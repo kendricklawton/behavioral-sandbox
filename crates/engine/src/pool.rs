@@ -2,40 +2,32 @@
 //! [`exec`](crate::RunningVm::exec), so a run starts in milliseconds instead of a cold boot.
 //!
 //! **Synchronous by design.** The engine has no async runtime and no background threads on the host
-//! path (the console reader is the one exception), and the pool doesn't smuggle one in: restores
-//! happen inline, in [`new`](Pool::new) (the prefill), in [`refill`](Pool::refill) (explicit
-//! top-up, at the *caller's* chosen moment), and in [`take`](Pool::take) only as the
-//! pool-ran-dry fallback. A prewarmed restore is milliseconds, so even the fallback path keeps the
-//! "starts in ms" property; what the pool buys over restore-on-demand is the **µs pop** when stock
-//! is ready, and a place to put the health/discard policy. A self-refilling, concurrency-managed
-//! pool belongs to the daemon, not the library.
+//! path (the console reader is the one exception), and the pool smuggles none in: restores run
+//! inline, in [`new`](Pool::new), in [`refill`](Pool::refill) at the *caller's* chosen moment, and
+//! in [`take`](Pool::take) only as the pool-ran-dry fallback. A self-refilling,
+//! concurrency-managed pool belongs to the daemon, not the library.
 
 use crate::vm::{Snapshot, Vm};
 use crate::{BootConfig, FDS_PER_VM, RunningVm, VmmError};
 
-/// Fd slack reserved for everything that is *not* a pooled clone: the process baseline (stdio,
-/// logging, the embedder's own files) plus the transient fds a boot/exec opens and closes. Part of
-/// the sizing rule [`Pool::new`] states: `target × FDS_PER_VM + POOL_FD_HEADROOM ≤ ulimit -n`.
+/// Fd slack reserved for everything that is *not* a pooled clone: the process baseline plus the
+/// transient fds a boot/exec opens. Part of `target × FDS_PER_VM + POOL_FD_HEADROOM ≤ ulimit -n`.
 const POOL_FD_HEADROOM: usize = 64;
 
 /// A pool of pre-restored, exec-ready prewarmed clones of one [`Snapshot`].
 ///
 /// [`take`](Pool::take) health-checks each candidate before handing it out: a clone that died or
-/// wedged while pooled (a typed probe failure, most specifically
-/// [`VmmError::GuestUnavailable`]) is **discarded and replaced by the next**, never handed to the
-/// caller (the retry semantics that variant exists for). An empty pool falls back to an inline
-/// restore, so `take` fails only when a *fresh* restore fails too.
-///
-/// Dropping the pool tears down every pooled clone; [`shutdown`](Pool::shutdown) is the graceful form.
-/// Networked snapshots pool without a concurrency limit, since each clone recreates the baked-in tap in
-/// its own netns, and setting [`jail`](crate::BootConfig::jail) makes every pooled clone restore under
-/// the jailer, so prewarmed starts and confinement compose.
+/// wedged while pooled (a typed probe failure, most specifically [`VmmError::GuestUnavailable`]) is
+/// **discarded and replaced by the next**, never handed to the caller. An empty pool falls back to
+/// an inline restore, so `take` fails only when a *fresh* restore fails too. Dropping the pool
+/// tears down every clone; [`shutdown`](Pool::shutdown) is the graceful form. Networked snapshots
+/// pool without a concurrency limit, since each clone recreates the baked-in tap in its own netns.
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
 /// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n`.
-/// [`new`](Pool::new) logs one warning naming the numbers and the fix when a target is over budget,
-/// rather than refusing: sizing is fairness hygiene rather than the isolation boundary, and the soft
-/// limit may be raised after this process was probed.
+/// [`new`](Pool::new) warns rather than refuses when a target is over budget: sizing is fairness
+/// hygiene, not the isolation boundary, and the soft limit may be raised after this process was
+/// probed.
 #[derive(Debug)]
 #[must_use = "dropping a Pool kills its pooled microVMs"]
 pub struct Pool {
@@ -43,24 +35,22 @@ pub struct Pool {
     config: BootConfig,
     /// How many clones [`new`](Pool::new)/[`refill`](Pool::refill) keep ready.
     target: usize,
-    /// Ready clones, taken LIFO: the most recently restored (or checked) clone is the most likely
-    /// to still be healthy, and its guest memory the most likely to still be page-cache-hot.
+    /// Ready clones, taken LIFO: the most recently restored clone is the likeliest to still be
+    /// healthy, and its guest memory the likeliest to still be page-cache-hot.
     ready: Vec<RunningVm>,
 }
 
 impl Pool {
     /// Restore `target` clones from `snapshot` and keep them ready. `config` is what
-    /// [`Vm::restore`] takes (the `firecracker` binary and `boot_timeout`). `target` may be `0`:
-    /// every [`take`](Pool::take) then restores on demand, which still makes sense as a single
-    /// place to hold the snapshot + config + discard policy.
+    /// [`Vm::restore`] takes (the `firecracker` binary and `boot_timeout`). `target` may be `0`,
+    /// which makes every [`take`](Pool::take) restore on demand.
     ///
     /// # Errors
     /// Any [`Vm::restore`] failure during the prefill; already-restored clones are torn down by
     /// `Pool`'s drop on the error return, so a failed prefill leaks nothing.
     pub fn new(snapshot: Snapshot, config: BootConfig, target: usize) -> Result<Self, VmmError> {
-        // State the fd bound up front rather than letting the prefill discover it as an
-        // illegible mid-restore `EMFILE` in whatever syscall lands first. Warn-only: sizing is
-        // fairness hygiene, not the isolation boundary, so it fails open rather than refusing.
+        // Stated up front rather than discovered as an illegible mid-restore `EMFILE` in whatever
+        // syscall lands first.
         if let Some((need, soft)) = nofile_soft_limit().and_then(|s| fd_budget_excess(target, s)) {
             tracing::warn!(
                 target,
@@ -82,30 +72,22 @@ impl Pool {
         Ok(pool)
     }
 
-    /// Hand out a ready, health-checked clone. Pops ready stock (microseconds, plus a fast probe);
-    /// a pooled clone that fails its probe is discarded (logged, torn down) and the next is tried.
-    /// If the pool is dry, falls back to restoring a fresh clone inline: milliseconds for a prewarmed
-    /// snapshot, and the caller can't tell the difference except by latency. A snapshot without the
-    /// vsock exec channel has nothing to probe, so its clones are handed out directly (no health
-    /// check) rather than discarded on the structural no-vsock condition.
-    ///
-    /// Does **not** refill what it hands out: the caller decides when to pay restore time back via
-    /// [`refill`](Pool::refill) (e.g. between requests, not on the hot path).
+    /// Hand out a ready, health-checked clone: pops ready stock, discards and tears down any clone
+    /// that fails its probe, and falls back to an inline restore when the pool is dry. A snapshot
+    /// without the vsock exec channel has nothing to probe, so its clones are handed out directly
+    /// rather than discarded on that structural condition. Does **not** refill what it hands out;
+    /// the caller pays restore time back through [`refill`](Pool::refill), off the hot path.
     ///
     /// # Errors
     /// Only what a fresh [`Vm::restore`] can return; pooled-clone health failures are consumed by
     /// the discard-and-retry loop, not surfaced.
     pub fn take(&mut self) -> Result<RunningVm, VmmError> {
         while let Some(mut vm) = self.ready.pop() {
-            // The probe is a vsock health check. A snapshot without the exec channel has nothing to
-            // probe, `probe_agent` would return the *permanent* `require_vsock` error, a structural
-            // condition, not a dead-clone signal, so hand the popped clone out directly rather than
-            // reading that error as "unhealthy" and tearing down the whole pool on the first take.
-            // The one cheap liveness signal left is the VMM process itself: a clone whose VMM died
-            // while pooled is discarded like a failed probe, not handed out to fail on first use.
-            // `try_wait` (not a `/proc/<pid>` probe): the pooled VMM is nobody's `wait()`, so a dead
-            // one is an unreaped zombie that keeps its `/proc` entry, which a `/proc` probe reads as
-            // alive; `try_wait` sees the real exit and reaps it.
+            // Without the exec channel `probe_agent` returns the *permanent* `require_vsock` error,
+            // which read as "unhealthy" would tear down the whole pool on the first take. The
+            // liveness signal left is the VMM process, checked with `try_wait` rather than a
+            // `/proc/<pid>` probe: a pooled VMM is nobody's `wait()`, so a dead one is an unreaped
+            // zombie whose `/proc` entry still reads as alive.
             if !self.snapshot.has_vsock {
                 let pid = vm.vmm_pid();
                 if vm.vmm_alive() {
@@ -121,8 +103,6 @@ impl Pool {
             match vm.probe_agent() {
                 Ok(()) => return Ok(vm),
                 Err(e) => {
-                    // The typed discard signal (GuestUnavailable for a dead clone's channel; any
-                    // probe failure means this clone is useless). Dropping it tears it down.
                     tracing::warn!(
                         vmm_pid = vm.vmm_pid(),
                         error = %e,
@@ -132,8 +112,7 @@ impl Pool {
                 }
             }
         }
-        // Dry (or everything pooled was dead): restore inline rather than failing a take that a
-        // fresh clone could serve.
+        // Dry, or everything pooled was dead: a fresh clone can still serve this take.
         Vm::restore(&self.snapshot, &self.config)
     }
 
@@ -145,10 +124,9 @@ impl Pool {
         self.refill_up_to(usize::MAX)
     }
 
-    /// Like [`refill`](Self::refill), but restore at most `max_new` clones this call: for a caller
-    /// that accounts pool memory against a host-wide ceiling and can only pay for part of the
-    /// shortfall right now. The pool stays below target rather than overshooting the caller's
-    /// budget; a later call tops up the rest.
+    /// Like [`refill`](Self::refill), but restore at most `max_new` clones this call, for a caller
+    /// accounting pool memory against a host-wide ceiling: the pool stays below target rather than
+    /// overshooting that budget, and a later call tops up the rest.
     ///
     /// # Errors
     /// The first [`Vm::restore`] failure; clones restored before it stay pooled.
@@ -167,39 +145,35 @@ impl Pool {
         self.ready.len()
     }
 
-    /// The pooled clones' VMM pids, for out-of-band supervision (the same rationale as
-    /// [`RunningVm::vmm_pid`]: cgroup placement under confinement, host-side observers,
-    /// leak assertions in tests). Valid only while the clones stay pooled.
+    /// The pooled clones' VMM pids, for out-of-band supervision (see [`RunningVm::vmm_pid`]).
+    /// Valid only while the clones stay pooled.
     #[must_use]
     pub fn vmm_pids(&self) -> Vec<u32> {
         self.ready.iter().map(RunningVm::vmm_pid).collect()
     }
 
-    /// Gracefully shut down every pooled clone. Ask **every** guest to power off first, then poll them
-    /// all against **one** shared grace window, so a pool of N clones pays one power-off grace
-    /// (`POWER_OFF_TIMEOUT`), not N: shutting each down in turn serializes the grace, so a pool of
-    /// guests ignoring `SendCtrlAltDel` would pay it per clone. A guest
-    /// still alive at the deadline is hard-killed by its `Drop` when `self.ready` drops below, the same
-    /// teardown `drop(pool)` runs, just without the polite ask.
+    /// Gracefully shut down every pooled clone. Asks **every** guest to power off first, then polls
+    /// them all against **one** shared grace window, so a pool of N clones that ignore
+    /// `SendCtrlAltDel` pays one `POWER_OFF_TIMEOUT` rather than N. A guest still alive at the
+    /// deadline is hard-killed by its `Drop` when `self.ready` drops below.
     pub fn shutdown(mut self) {
         use std::time::Instant;
         for vm in &mut self.ready {
             vm.request_power_off();
         }
         let deadline = Instant::now() + crate::vm::POWER_OFF_TIMEOUT;
-        // Poll the whole set on one clock; `vmm_alive` reaps a clone the instant it exits, so a
-        // cooperative guest is gone within a tick and only the stubborn ones ride to the deadline.
+        // One clock for the whole set: `vmm_alive` reaps a clone the instant it exits, so only the
+        // stubborn ones ride to the deadline.
         while Instant::now() < deadline && self.ready.iter_mut().any(RunningVm::vmm_alive) {
             std::thread::sleep(crate::vm::POWER_OFF_POLL);
         }
-        // `self.ready` drops here: each `RunningVm::Drop` kills+reaps whatever is still alive.
+        // `self.ready` drops here: each `RunningVm::Drop` kills and reaps whatever is still alive.
     }
 }
 
-/// The sizing rule [`Pool::new`] states, as a pure check: `Some((need, soft))` when `target`
-/// pooled clones (at [`FDS_PER_VM`] each, plus [`POOL_FD_HEADROOM`]) would oversubscribe the soft
-/// fd limit; `None` when the budget holds. Pure so the arithmetic is unit-testable without a
-/// snapshot to pool.
+/// The sizing rule [`Pool::new`] states, as a pure check: `Some((need, soft))` when `target` pooled
+/// clones (at [`FDS_PER_VM`] each, plus [`POOL_FD_HEADROOM`]) would oversubscribe the soft fd
+/// limit. Pure so the arithmetic is unit-testable without a snapshot to pool.
 fn fd_budget_excess(target: usize, soft: u64) -> Option<(usize, u64)> {
     let need = target
         .saturating_mul(FDS_PER_VM)
@@ -207,16 +181,15 @@ fn fd_budget_excess(target: usize, soft: u64) -> Option<(usize, u64)> {
     (need as u64 > soft).then_some((need, soft))
 }
 
-/// This process's soft `RLIMIT_NOFILE`, read from `/proc/self/limits` (the host path takes no
-/// `libc`, and `getrlimit` has no `unsafe`-free std surface). `None` if the file is missing or
-/// unparseable, the sizing warning is then simply skipped, never a boot failure.
+/// This process's soft `RLIMIT_NOFILE`, read from `/proc/self/limits` because the host path takes
+/// no `libc` and `getrlimit` has no `unsafe`-free std surface. `None` if the file is missing or
+/// unparseable, which skips the sizing warning rather than failing a boot.
 fn nofile_soft_limit() -> Option<u64> {
     parse_nofile_soft(&std::fs::read_to_string("/proc/self/limits").ok()?)
 }
 
-/// The testable core of [`nofile_soft_limit`]: find the "Max open files" row and parse its **soft**
-/// column. The row's layout is `Max open files  <soft>  <hard>  files`; a soft limit of
-/// `unlimited` parses as `None` (no bound to warn against).
+/// The testable core of [`nofile_soft_limit`]: finds the `Max open files  <soft>  <hard>  files`
+/// row and parses its **soft** column. A soft limit of `unlimited` is `None`, no bound to warn on.
 fn parse_nofile_soft(limits: &str) -> Option<u64> {
     let line = limits.lines().find(|l| l.starts_with("Max open files"))?;
     line.trim_start_matches("Max open files")
@@ -238,8 +211,7 @@ mod tests {
         // A target that oversubscribes a small limit: the warning carries the arithmetic.
         let need = 100 * FDS_PER_VM + POOL_FD_HEADROOM;
         assert_eq!(fd_budget_excess(100, 256), Some((need, 256)));
-        // Exactly at the bound is still within budget ("stays under with headroom", the headroom
-        // is already inside `need`, so equality holds the line).
+        // Equality holds the line, since the headroom is already inside `need`.
         let exact = (10 * FDS_PER_VM + POOL_FD_HEADROOM) as u64;
         assert_eq!(fd_budget_excess(10, exact), None);
         assert!(fd_budget_excess(10, exact - 1).is_some());
@@ -247,7 +219,7 @@ mod tests {
 
     #[test]
     fn nofile_soft_parses_the_proc_limits_shape() {
-        // The real /proc/self/limits layout: name column padded with spaces, then soft, hard, unit.
+        // The real layout: name column padded with spaces, then soft, hard, unit.
         let limits = "Limit                     Soft Limit           Hard Limit           Units\n\
                       Max cpu time              unlimited            unlimited            seconds\n\
                       Max open files            1024                 524288               files\n\
@@ -267,8 +239,7 @@ mod tests {
 
     #[test]
     fn this_process_reports_a_soft_limit() {
-        // The /proc read itself: on any Linux dev box the row exists and is numeric or unlimited,
-        // either way the call must not panic; a numeric result must be nonzero.
+        // The row is numeric or unlimited on any Linux box; either way the call must not panic.
         if let Some(soft) = super::nofile_soft_limit() {
             assert!(soft > 0);
         }

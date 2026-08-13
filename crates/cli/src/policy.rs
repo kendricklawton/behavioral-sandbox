@@ -728,9 +728,8 @@ mod tests {
         );
     }
 
-    /// The v6 half of the same ceiling. Both families run one containment check, and the v6 leg had
-    /// no test: a check_egress that returned after the v4 leg would have passed every suite here
-    /// while a client's v6 allow-list reached wherever it liked.
+    /// The v6 half of the same ceiling: a `check_egress` that returned after the v4 leg passes
+    /// every other test here while a client's v6 allow-list reaches wherever it likes.
     #[test]
     fn the_v6_egress_ceiling_permits_narrowing_and_refuses_widening() {
         use std::net::Ipv6Addr;
@@ -793,10 +792,9 @@ mod tests {
 
     #[test]
     fn the_daemon_flavor_names_the_serve_flag_not_the_file() {
-        // Two renderings of one refusal, each naming where the posture actually lives: `Display`
-        // is the CLI's (`.bsx.toml` governs), `daemon_message` the daemon's (its own flags do; it
-        // reads no `.bsx.toml`). Pointing a wire client at the file would name a control surface
-        // that does not govern its daemon.
+        // Two renderings of one refusal, each naming where the posture lives: `Display` is the
+        // CLI's (`.bsx.toml` governs), `daemon_message` the daemon's (its own flags do; it reads no
+        // `.bsx.toml`). Pointing a wire client at the file names a surface that does not govern it.
         for (knob, flag) in [
             ("vcpus", "--max-vcpus"),
             ("mem_mib", "--max-mem-mib"),

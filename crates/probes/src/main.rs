@@ -9,8 +9,8 @@
 //!
 //! **Program set:**
 //! - **Host syscalls:** [`count_execve`] counts, and [`trace_execve`]/[`trace_openat`]/
-//!   [`trace_connect`] push whole [`SyscallEvent`]s into the [`EVENTS`] ring buffer. Deliberately the
-//!   *host's* footprint: a microVM services its own syscalls in-guest and they never trap here.
+//!   [`trace_connect`] push whole [`SyscallEvent`]s into the [`EVENTS`] ring buffer. Deliberately
+//!   the *host's* footprint: a microVM services its own syscalls in-guest and they never trap here.
 //! - **Network flows:** [`tap_ingress`]/[`tap_egress`] are `tc`/clsact classifiers on a VM's tap,
 //!   parsing each frame's 5-tuple into [`FLOWS`] (v4) or [`FLOWS6`] (v6). This *is* the guest's own
 //!   traffic, since a microVM's packets cross its tap on the host.
@@ -19,16 +19,15 @@
 //!   [`DENIALS`]/[`DENIALS6`] first. ARP and on-link ICMPv6 are always allowed, so the guest can
 //!   resolve its host end; the egress hook always accepts.
 //! - **Resources:** [`account_sched_switch`] attaches **once** to `sched/sched_switch` and
-//!   accumulates each registered cgroup's on-CPU nanoseconds into [`CPU_NS`]. Memory and IO ride the
-//!   kernel's native cgroup v2 counters on the loader side.
+//!   accumulates each registered cgroup's on-CPU nanoseconds into [`CPU_NS`]. Memory and IO ride
+//!   the kernel's native cgroup v2 counters on the loader side.
 //!
 //! **Target filtering.** Every program that feeds an audit record consults [`FILTER`] (single
-//! sandbox) or a target *set* ([`TRACE_TARGETS`], [`METER_TARGETS`]) before recording: the three
-//! [`record`]-based tracers, and [`account_sched_switch`]. The global tracepoints make a
-//! program-per-sandbox O(sandboxes) per event, so one shared program plus a set keeps the hot path a
-//! single hash lookup. [`count_execve`] is the exception and is **host-wide on purpose**: it counts
-//! every `execve` on the machine, whoever ran it, and its only consumer is
-//! `bsx_probes_loader::ExecveCounter`, which never reaches a record.
+//! sandbox) or a target *set* ([`TRACE_TARGETS`], [`METER_TARGETS`]) before recording. The global
+//! tracepoints make a program-per-sandbox O(sandboxes) per event, so one shared program plus a set
+//! keeps the hot path a single hash lookup. [`count_execve`] is the exception and is **host-wide on
+//! purpose**: its only consumer is `bsx_probes_loader::ExecveCounter`, which never reaches a
+//! record.
 //!
 //! **Built against BTF (CO-RE).** The object carries `.BTF` / `.BTF.ext` (emitted by `bpf-linker
 //! --btf`), which aya relocates against the running kernel's BTF at load. No program here reads a
@@ -37,12 +36,11 @@
 //! [`bsx_probes_common::TRACEPOINT_ARGS`], which is an ABI assumption; the loader compares each one
 //! against the kernel's own tracepoint `format` file before it attaches.
 //!
-//! **Counters, and which losses are visible.** A **per-CPU** counter is contention-free (each CPU
-//! writes its own copy) and the loader sums it; a **shared** map value every CPU writes goes through
-//! [`add_shared`], because a plain `+=` there loses an increment under concurrency and no drop
-//! counter can see it. A full map is the other loss, and every bounded map counts what it turned
-//! away, so the loader can report it as a coverage gap rather than a thinner record that looks
-//! whole.
+//! **Counters, and which losses are visible.** A **per-CPU** counter is contention-free and the
+//! loader sums it; a **shared** map value every CPU writes goes through [`add_shared`], because a
+//! plain `+=` there loses an increment under concurrency and no drop counter can see it. A full map
+//! is the other loss, and every bounded map counts what it turned away, so the loader reports a
+//! coverage gap rather than a thinner record that looks whole.
 //!
 //! **The verifier's rules, hit on purpose.** Loops are bounded by compile-time constants so
 //! termination is provable, and a map lookup result is dereferenced only after the null-check the
@@ -78,7 +76,7 @@ use bsx_probes_common::{
 
 /// The object's kernel `license` section. Declaring `GPL` makes the programs GPL-compatible
 /// (dual-licensable: this crate is Apache-2.0); without it the first GPL-only helper added would
-/// fail to load with a cryptic "cannot call GPL-restricted function". `#[no_mangle]` plus the exact
+/// fail to load with a cryptic "cannot call GPL-restricted function". `#[no_mangle]` and the exact
 /// section name are what the kernel loader reads.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = "license")]
@@ -91,9 +89,8 @@ static EXECVE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// Per-PID `execve` counts (keyed by tgid) for **every** pid on the host, since [`count_execve`]
 /// filters on nothing, bounded at [`MAX_PIDS`]; a full map drops new keys (counted in
-/// [`PID_DROPS`]). The counts accumulate through [`add_shared`], but two concurrent first-sightings
-/// of one pid can each insert `1` and lose an increment, which is why [`EXECVE_COUNT`] is the
-/// authoritative total.
+/// [`PID_DROPS`]). Two concurrent first-sightings of one pid can each insert `1` and lose an
+/// increment, which is why [`EXECVE_COUNT`] is the authoritative total.
 #[map]
 static EXECVE_BY_PID: HashMap<u32, u64> = HashMap::with_max_entries(MAX_PIDS, 0);
 
@@ -102,8 +99,7 @@ static EXECVE_BY_PID: HashMap<u32, u64> = HashMap::with_max_entries(MAX_PIDS, 0)
 const MAX_PIDS: u32 = 4096;
 
 /// Attaches to `tracepoint/syscalls/sys_enter_execve`, bumping the global per-CPU total and then a
-/// per-PID count. Consults **no target filter**: it counts every `execve` on the host, whoever ran
-/// it, which is what its one consumer (`bsx_probes_loader::ExecveCounter`) reports. A tracepoint
+/// per-PID count. Consults **no target filter**: it counts every `execve` on the host. A tracepoint
 /// returns 0.
 #[tracepoint]
 pub fn count_execve(_ctx: TracePointContext) -> u32 {
@@ -123,9 +119,8 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
     0
 }
 
-/// A single-slot **per-CPU** counter of pids a full [`EXECVE_BY_PID`] could not admit, so the
-/// difference between [`EXECVE_COUNT`] and the sum of the per-pid rows has a stated cause rather
-/// than reading as a shorter list of busier processes.
+/// A single-slot **per-CPU** counter of pids a full [`EXECVE_BY_PID`] could not admit, so the gap
+/// between [`EXECVE_COUNT`] and the sum of the per-pid rows has a stated cause.
 #[map]
 static PID_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -140,21 +135,18 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 #[map]
 static FILTER: Array<u64> = Array::with_max_entries(2, 0);
 
-/// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`].
-/// Consulted only when [`TRACE_SET`] is on; empty plus off is the load-time single-[`FILTER`]
-/// behaviour.
+/// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`],
+/// consulted only when [`TRACE_SET`] is on.
 #[map]
 static TRACE_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
 /// Selects which filter governs the tracepoints, read at [`FILTER_MODE_SLOT`]: `0` (the load-time
-/// default) uses the single-target [`FILTER`], `1` uses the [`TRACE_TARGETS`] set. One toggle, so
-/// the two modes never interfere.
+/// default) uses the single-target [`FILTER`], `1` uses the [`TRACE_TARGETS`] set.
 #[map]
 static TRACE_SET: Array<u32> = Array::with_max_entries(1, 0);
 
-/// A single-slot **per-CPU** counter of events a full [`EVENTS`] rejected. The loader surfaces a
-/// nonzero delta as a coverage gap on the run's record, so best-effort loss is visible rather than a
-/// silently thinner footprint.
+/// A single-slot **per-CPU** counter of events a full [`EVENTS`] rejected, which the loader
+/// surfaces as a coverage gap rather than a silently thinner footprint.
 #[map]
 static EVENT_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -176,10 +168,9 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
 ///
 /// `arg_off` is the byte offset of the syscall's pointer argument in the tracepoint record (a
 /// [`bsx_probes_common::TRACEPOINT_ARGS`] entry, which the loader checks against the kernel's own
-/// `format` file before it attaches);
-/// `path_like` selects reading it as a NUL-terminated user string or as raw leading sockaddr bytes,
-/// and `len_off` (sockaddr only) is the offset of the companion `addrlen` that bounds the copy. A
-/// tracepoint returns 0.
+/// `format` file before it attaches), `path_like` selects reading it as a NUL-terminated user
+/// string or as raw leading sockaddr bytes, and `len_off` (sockaddr only) is the offset of the
+/// companion `addrlen` that bounds the copy. A tracepoint returns 0.
 #[inline(always)]
 fn record(
     ctx: &TracePointContext,
@@ -220,10 +211,10 @@ fn record(
             }
         } else {
             // The caller's own `addrlen` picks the snapshot size: reading the full `sockaddr_in6`
-            // length unconditionally over-reads a 16-byte `sockaddr_in` by 12 bytes of whatever
-            // follows it in the traced process's memory, and publishes those bytes in the event
-            // stream as captured sockaddr. Both arms stay constant-size, which keeps the copies
-            // simple for the verifier.
+            // length unconditionally over-reads a 16-byte `sockaddr_in` by 12 bytes of the traced
+            // process's adjacent memory and publishes them in the event stream as captured
+            // sockaddr. Both arms stay constant-size, which keeps the copies simple for the
+            // verifier.
             // SAFETY: reads the tracepoint's own argument area at a constant offset. Narrowed to
             // `i32` first, because `connect`'s `addrlen` is an `int`: the raw register can carry
             // dirty upper bits or a negative the kernel truncates, and reading it as a full `u64`
@@ -305,9 +296,8 @@ pub fn trace_connect(ctx: TracePointContext) -> u32 {
 
 /// Per-flow byte/packet counters keyed by the directional IPv4 [`FlowKey`], bounded at
 /// [`MAX_FLOWS`]; a full map drops new flows (counted in [`FLOW_DROPS`]). Accumulation goes through
-/// [`add_shared`], so a burst racing two CPUs on one flow loses nothing; what remains is the
-/// **first** sighting of a key, where two CPUs can both miss the lookup and each insert a fresh
-/// count, losing one packet. Bounded at one per key, and never an over-count.
+/// [`add_shared`], so a burst racing two CPUs on one flow loses nothing; only the **first**
+/// sighting of a key can lose one packet, bounded at one per key and never an over-count.
 #[map]
 static FLOWS: HashMap<FlowKey, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
@@ -315,8 +305,7 @@ static FLOWS: HashMap<FlowKey, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS
 const MAX_FLOWS: u32 = 4096;
 
 /// Per-destination **denied**-packet counters, keyed by the guest-sent [`FlowKey`] the egress policy
-/// dropped, which the loader folds into the per-run record. Bounded at [`MAX_FLOWS`] like [`FLOWS`];
-/// empty until enforcement drops something.
+/// dropped. Bounded at [`MAX_FLOWS`] like [`FLOWS`]; empty until enforcement drops something.
 #[map]
 static DENIALS: HashMap<FlowKey, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
@@ -330,9 +319,8 @@ static FLOWS6: HashMap<FlowKey6, FlowCounts> = HashMap::with_max_entries(MAX_FLO
 static DENIALS6: HashMap<FlowKey6, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
 /// A single-slot **per-CPU** counter of new flows a full [`FLOWS`] map dropped, surfaced by the
-/// loader as a truncated network section plus a coverage gap. Without it a guest could fill the map
-/// with 4096 benign flows (one per ephemeral source port) and evict its real traffic from its own
-/// audit record silently.
+/// loader as a coverage gap. Without it a guest could fill the map with 4096 benign flows (one per
+/// ephemeral source port) and evict its real traffic from its own audit record silently.
 #[map]
 static FLOW_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -351,22 +339,18 @@ static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// Adds `n` to a counter inside a **shared** (not per-CPU) map value, atomically.
 ///
 /// A plain `*slot += n` is a load, an add and a store, so two CPUs writing one key at the same
-/// instant each read the same value and one of the two increments is lost. **No drop counter catches
-/// that**, which is what separates it from every other loss here: the insert succeeded, the map is
-/// not full, and the value is simply lower than the truth. The loss scales with contention rather
-/// than being a one-off, and [`DENIALS`] is keyed by destination only, so a guest flooding one
-/// blocked endpoint from many source ports has its packets spread across CPUs by the NIC and then
-/// collapsed back onto that single key, which is the shape that maximizes it.
+/// instant lose one of the increments, and **no drop counter catches that**: the insert succeeded,
+/// the map is not full, and the value is simply lower than the truth. The loss scales with
+/// contention, and [`DENIALS`] is keyed by destination only, so a guest flooding one blocked
+/// endpoint from many source ports is the shape that maximizes it.
 ///
 /// `core::sync::atomic`'s read-modify-write methods are unavailable here: rustc declares
 /// `bpfel-unknown-none` as `atomic-cas: false` (BPF has the atomic add but no compare-and-swap
-/// below ISA v3), so `AtomicU64` offers only load and store. The intrinsic is what reaches the
-/// instruction. Its result is unused, which is what lets the backend emit the plain `lock ... +=`
-/// rather than the fetching form that would need a newer ISA; there is no silent fallback to a
-/// load-add-store, since the backend errors instead.
+/// below ISA v3), so `AtomicU64` offers only load and store. The intrinsic's result is unused,
+/// which lets the backend emit the plain `lock ... +=` rather than the fetching form that would
+/// need a newer ISA, and there is no silent fallback to a load-add-store: the backend errors.
 ///
-/// A **per-CPU** map value needs none of this and keeps its plain `+=`: each CPU writes its own copy
-/// and the loader sums them.
+/// A **per-CPU** map value needs none of this and keeps its plain `+=`.
 #[inline(always)]
 unsafe fn add_shared(slot: *mut u64, n: u64) {
     // SAFETY: the caller passes a pointer into a map value the verifier proved in-bounds and
@@ -390,9 +374,8 @@ fn count_map_drop(counter: &PerCpuArray<u64>) {
 ///
 /// The accumulate step is atomic ([`add_shared`]), so a flood is counted whole; the lookup-or-insert
 /// can still lose one increment per key, when two CPUs both miss the lookup and each insert a fresh
-/// count. Bounded at one per key, and never an over-count. `#[inline(always)]` monomorphizes this
-/// into each caller, so every program stays one self-contained unit (no BPF-to-BPF call) and the
-/// verifier's bounds are unmoved.
+/// count. `#[inline(always)]` monomorphizes this into each caller, so every program stays one
+/// self-contained unit with no BPF-to-BPF call.
 #[inline(always)]
 fn accumulate<K>(totals: &HashMap<K, u64>, key: &K, n: u64, drops: &PerCpuArray<u64>) {
     if let Some(slot) = totals.get_ptr_mut(key) {
@@ -409,9 +392,8 @@ fn accumulate<K>(totals: &HashMap<K, u64>, key: &K, n: u64, drops: &PerCpuArray<
 const TC_ACT_OK: i32 = 0;
 const TC_ACT_SHOT: i32 = 2;
 
-/// A classifier's decision in the program's own terms rather than a bare `i32`, lowered to the `tc`
-/// ABI by [`as_tc`](Verdict::as_tc) at the entry points, so no magic action number leaks into the
-/// logic.
+/// A classifier's decision, lowered to the `tc` ABI by [`as_tc`](Verdict::as_tc) at the entry
+/// points, so no magic action number leaks into the logic.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// Accept the packet (`TC_ACT_OK`).
@@ -431,8 +413,8 @@ impl Verdict {
 }
 
 /// The per-sandbox egress allow-list the loader fills and the ingress classifier scans.
-/// Zero-initialized at load, so every slot starts `active == 0` and an un-configured monitor has an
-/// empty policy. Sized per-object, so it is naturally per VM.
+/// Zero-initialized at load, so an un-configured monitor has an empty policy. Sized per-object, so
+/// it is naturally per VM.
 #[map]
 static POLICY: Array<PolicyRule> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
 
@@ -441,13 +423,11 @@ static POLICY: Array<PolicyRule> = Array::with_max_entries(MAX_POLICY_RULES as u
 static POLICY6: Array<PolicyRule6> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
 
 /// Enforcement toggle: `0` for **observe-only** (accept every packet), `1` for **deny-by-default
-/// egress**. Zero-initialized at load, so a monitor enforces nothing until the loader opts in and
-/// every allowance is explicit.
+/// egress**. Zero-initialized at load, so a monitor enforces nothing until the loader opts in.
 #[map]
 static ENFORCE: Array<u32> = Array::with_max_entries(1, 0);
 
-/// Whether the loader has armed deny-by-default egress ([`ENFORCE`] slot 0). `false` is the
-/// load-time default, so a monitor that has not opted in is observe-only.
+/// Whether the loader has armed deny-by-default egress ([`ENFORCE`] slot 0).
 #[inline(always)]
 fn enforcing() -> bool {
     ENFORCE.get(0).copied().unwrap_or(0) != 0
@@ -462,12 +442,11 @@ enum Direction {
 }
 
 /// `tc`/clsact **ingress** on a VM's tap, a frame the guest sent. Counts it against its flow, then
-/// returns the egress-policy verdict. Attached by the loader's `TapMonitor` after it adds the clsact
-/// qdisc.
+/// returns the egress-policy verdict.
 #[classifier]
 pub fn tap_ingress(ctx: TcContext) -> i32 {
-    // Parse the 5-tuple **once** and hand it to both the counter and the verdict: on the enforcement
-    // hot path this halves the per-packet `bpf_skb_load_bytes` calls.
+    // Parse the 5-tuple once and hand it to both the counter and the verdict: this halves the
+    // per-packet `bpf_skb_load_bytes` calls on the enforcement hot path.
     if let Some(key) = parse(&ctx) {
         count(&ctx, Direction::Ingress, Some(key));
         return egress_verdict(&ctx, Some(key)).as_tc();
@@ -503,8 +482,8 @@ fn egress_verdict(ctx: &TcContext, key: Option<FlowKey>) -> Verdict {
         return Verdict::Pass;
     }
     // Anything `parse` couldn't key needs the ethertype only to spare ARP: without it the guest
-    // can't resolve its gateway and so can't send IP at all. Everything else is deny-by-default
-    // (no 5-tuple to prove allowed or to log).
+    // can't resolve its gateway and so can't send IP at all. Everything else is deny-by-default,
+    // with no 5-tuple to prove allowed or to log.
     let Some(key) = key else {
         return match ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
             Ok(ETH_P_ARP) => Verdict::Pass,
@@ -527,11 +506,11 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     if !enforcing() {
         return Verdict::Pass;
     }
-    // ICMPv6 is the v6 twin of ARP, but unlike ARP (its own ethertype) it rides the IPv6 ethertype
-    // and can carry a routable Echo, so spare it only to **on-link** scopes: the neighbor-discovery
-    // / MLD / NUD traffic the guest needs to resolve and keep its host end, none of which routes off
-    // the link. ICMPv6 to a global-unicast destination falls through to `POLICY6`, so a spared Echo
-    // can't be an egress channel leaning solely on the netns having no v6 default route.
+    // Unlike ARP (its own ethertype) ICMPv6 rides the IPv6 ethertype and can carry a routable Echo,
+    // so spare it only to **on-link** scopes: the neighbor-discovery / MLD / NUD traffic the guest
+    // needs to resolve and keep its host end, none of which routes off the link. ICMPv6 to a
+    // global-unicast destination falls through to `POLICY6`, so a spared Echo can't be an egress
+    // channel leaning solely on the netns having no v6 default route.
     if key.proto == IPPROTO_ICMPV6 && icmp6_dst_on_link(key.dst_addr) {
         return Verdict::Pass;
     }
@@ -548,7 +527,7 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
 fn record_denial(key: &FlowKey) {
     // Key by **destination only** (src addr/port zeroed): keying on the guest's ephemeral source
     // port would spread one blocked endpoint across a row per port, filling the map far faster and
-    // diluting the "which endpoint was blocked" trail. It is also the shape the loader aggregates to.
+    // diluting the "which endpoint was blocked" trail.
     let dst = FlowKey::new(0, key.dst_addr, 0, key.dst_port, key.proto);
     accumulate(&DENIALS, &dst, 1, &DENIAL_DROPS);
 }
@@ -561,10 +540,8 @@ fn record_denial6(key: &FlowKey6) {
     accumulate(&DENIALS6, &dst, 1, &DENIAL_DROPS);
 }
 
-/// Whether [`POLICY`] admits destination `(addr, port, proto)`, scanning the fixed rule array in a
-/// bounded loop (the compile-time cap the verifier needs) and accepting on the first active match.
-/// Deny-by-default. The per-rule test is [`rule_matches`], single-sourced with the host-tested
-/// parser.
+/// Whether [`POLICY`] admits destination `(addr, port, proto)`. The per-rule test is
+/// [`rule_matches`], single-sourced with the host-tested parser.
 #[inline(always)]
 fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     policy_admits(&POLICY, |rule| {
@@ -572,8 +549,8 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     })
 }
 
-/// The IPv6 twin of [`policy_allows`], scanning [`POLICY6`] in the same bounded loop. Per-rule test
-/// is [`rule_matches6`] (byte-wise, no `u128`).
+/// The IPv6 twin of [`policy_allows`], over [`POLICY6`]. Per-rule test is [`rule_matches6`]
+/// (byte-wise, no `u128`).
 #[inline(always)]
 fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
     policy_admits(&POLICY6, |rule| {
@@ -597,15 +574,14 @@ fn policy_admits<R>(policy: &Array<R>, admits: impl Fn(&R) -> bool) -> bool {
 }
 
 /// Adds one packet to its flow's per-direction counters. `key` is the caller's single parse of the
-/// frame, `None` for one a flow can't represent (which this skips, though the caller still accepts
-/// it).
+/// frame, `None` for one a flow can't represent.
 #[inline(always)]
 fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
     let Some(key) = key else {
-        // Reached only when neither parser could key the frame: a VLAN tag, or a truncated v4/v6
-        // frame. `ETH_P_IP` here is the truncated-or-malformed-IPv4 case, which `egress_verdict`
-        // drops under enforcement, so leaving it uncounted would drop traffic the record then claims
-        // never existed. ARP is spared (expected on-link, not a flow).
+        // Neither parser could key the frame: a VLAN tag, or a truncated v4/v6 frame. `ETH_P_IP`
+        // here is the truncated-or-malformed-IPv4 case, which `egress_verdict` drops under
+        // enforcement, so leaving it uncounted would drop traffic the record then claims never
+        // existed. ARP is spared (expected on-link, not a flow).
         if let Ok(ethertype) = ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be)
             && (ethertype == ETH_P_IP || ethertype == ETH_P_IPV6 || ethertype == ETH_P_8021Q)
         {
@@ -623,10 +599,10 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
     count_in(&FLOWS6, ctx, dir, key);
 }
 
-/// The shared body of [`count`] and [`count6`]: bump `key`'s per-direction counters in `flows`,
+/// The shared body of [`count`] and [`count6`]: bumps `key`'s per-direction counters in `flows`,
 /// inserting the first sighting; a refused insert (full map) is counted in [`FLOW_DROPS`].
-/// `#[inline(always)]` monomorphizes into each caller, so the program stays self-contained (no
-/// BPF-to-BPF call) and the verifier's bounds are unmoved.
+/// `#[inline(always)]` monomorphizes into each caller, so the program stays self-contained with no
+/// BPF-to-BPF call.
 #[inline(always)]
 fn count_in<K>(flows: &HashMap<K, FlowCounts>, ctx: &TcContext, dir: Direction, key: &K) {
     // `skb->len` is the full frame length, counting a GSO super-frame's real bytes, which `data_end -
@@ -666,12 +642,10 @@ fn count_in<K>(flows: &HashMap<K, FlowCounts>, ctx: &TcContext, dir: Direction, 
 }
 
 /// Reads the frame's IPv4 5-tuple with `ctx.load`, or `None` if it is not IPv4-over-Ethernet or a
-/// read runs off the packet.
-///
-/// Every byte position is a `const` from [`bsx_probes_common`], the same ones
-/// [`bsx_probes_common::parse_ipv4_5tuple`] reads, so the two cannot disagree on where a field
-/// lives. The surrounding logic is still mirrored by hand, since this half runs only under the
-/// verifier; `crates/probes-loader/tests/differential.rs` is the enforcer for that mirror.
+/// read runs off the packet. Every byte position is a `const` from [`bsx_probes_common`], the same
+/// ones [`bsx_probes_common::parse_ipv4_5tuple`] reads; the surrounding logic is mirrored by hand,
+/// since this half runs only under the verifier, and
+/// `crates/probes-loader/tests/differential.rs` is the enforcer for that mirror.
 #[inline(always)]
 fn parse(ctx: &TcContext) -> Option<FlowKey> {
     let ethertype = u16::from_be(ctx.load::<u16>(ETHERTYPE_OFFSET).ok()?);
@@ -722,10 +696,9 @@ fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
 }
 
 /// Per-cgroup accumulated on-CPU time in **nanoseconds**, keyed by the same cgroup id
-/// [`bsx_probes_loader::cgroup_id_of_pid`] resolves from a VMM pid, so the loader reads exactly the
-/// sandbox it means. Bounded at [`MAX_CGROUPS`] (overflow counted in [`CPU_DROPS`]). Slices
-/// accumulate through [`add_shared`], so a cgroup running on many CPUs at once loses none of them;
-/// the first switch that creates the row can lose one slice to a concurrent first sighting.
+/// [`bsx_probes_loader::cgroup_id_of_pid`] resolves from a VMM pid. Bounded at [`MAX_CGROUPS`]
+/// (overflow counted in [`CPU_DROPS`]). Slices accumulate through [`add_shared`], so a cgroup
+/// running on many CPUs loses none of them; only the switch that creates the row can lose one.
 #[map]
 static CPU_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
@@ -733,9 +706,9 @@ static CPU_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 const MAX_CGROUPS: u32 = 1024;
 
 /// A single-slot **per-CPU** counter of cgroups a full [`CPU_NS`] could not admit. Without it a
-/// sandbox that arrives after the map fills accumulates no time and reports a `cpu_time` of zero,
-/// which reads as "this run used no CPU" rather than "this was not measured"; the loader turns a
-/// nonzero delta into a coverage gap on the CPU axis instead.
+/// sandbox that arrives after the map fills reports a `cpu_time` of zero, which reads as "this run
+/// used no CPU" rather than "this was not measured"; the loader turns a nonzero delta into a
+/// coverage gap on the CPU axis instead.
 #[map]
 static CPU_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -750,8 +723,8 @@ static LAST_SWITCH: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static METER_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
 
-/// A meter-**everything** toggle, for a whole-host view or a test: `0` (the load-time default)
-/// meters only [`METER_TARGETS`], `1` meters every cgroup. The escape hatch, not the default.
+/// A meter-**everything** toggle: `0` (the load-time default) meters only [`METER_TARGETS`], `1`
+/// meters every cgroup.
 #[map]
 static METER_ALL: Array<u32> = Array::with_max_entries(1, 0);
 
@@ -769,8 +742,7 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     let now = unsafe { bpf_ktime_get_ns() };
     let cgroup = unsafe { bpf_get_current_cgroup_id() };
 
-    // Always restamp: the cursor tracks when this CPU last switched, independent of which cgroup is
-    // metered.
+    // Always restamp: the cursor tracks when this CPU last switched, independent of metering.
     // SAFETY: `get_ptr_mut(0)` returns this CPU's own slot of the one-element per-CPU array; the
     // program is its sole writer on this CPU and the pointer is only used inside the null-check.
     let last = match LAST_SWITCH.get_ptr_mut(0) {
@@ -787,9 +759,8 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     }
     let delta = now - last;
 
-    // A non-metered cgroup's slice is dropped here; the cursor above was already advanced, so the
-    // *next* interval stays exact. `get_ptr` is a presence check without a deref, so the membership
-    // test needs no `unsafe`.
+    // A non-metered cgroup's slice is dropped here, after the cursor is advanced, so the *next*
+    // interval stays exact. `get_ptr` is a presence check without a deref, so no `unsafe`.
     let all = METER_ALL.get(0).copied().unwrap_or(0) != 0;
     if !all && METER_TARGETS.get_ptr(cgroup).is_none() {
         return 0;

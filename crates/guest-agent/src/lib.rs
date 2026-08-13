@@ -34,10 +34,9 @@ use bsx_channel::{ChannelError, Request, Response, ServerConnection};
 /// buggy host can't ask the agent to wait effectively forever.
 const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
 
-/// Exponential backoff for the child-exit poll: starts tight so a fast command returns almost at
-/// once, widening toward a cap so a long one polls cheaply. Kept local rather than shared with
-/// `bsx`'s `PollBackoff`, because this crate is the static musl guest binary and takes no `bsx`
-/// dependency.
+/// Exponential backoff for the child-exit poll, starting tight and widening toward a cap. Local
+/// rather than shared with `bsx`'s `PollBackoff`, because this crate is the static musl guest
+/// binary and takes no `bsx` dependency.
 struct WaitBackoff {
     next: Duration,
 }
@@ -115,9 +114,9 @@ impl From<ChannelError> for AgentError {
 /// Serves one exec request over `stream` and returns the command's exit code, in a **fresh working
 /// directory** removed afterwards. A stateful session server uses [`serve_session`].
 ///
-/// On a spawn failure the agent sends a terminal [`Response::Error`] *and* returns
-/// [`AgentError::Spawn`], so both sides learn the command never ran. A hung command is bounded by its
-/// `timeout_ms` budget: past the deadline the agent SIGKILLs it and replies [`Response::TimedOut`].
+/// A spawn failure sends a terminal [`Response::Error`] *and* returns [`AgentError::Spawn`], so
+/// both sides learn the command never ran. A hung command is bounded by its `timeout_ms` budget:
+/// past the deadline the agent SIGKILLs it and replies [`Response::TimedOut`].
 ///
 /// # Errors
 /// [`AgentError`] on any channel, spawn, or wait failure. A command that runs and exits non-zero is
@@ -142,10 +141,6 @@ where
     serve_with(stream, RunDir::at(dir))
 }
 
-/// The shared body of [`serve`]/[`serve_session`]: `workdir` is where injected files land, the
-/// command's cwd, and where artifacts are read back from, and the two entry points differ only in how
-/// it was made. Taken as a `Result` so a creation failure is still reported to the host over the
-/// accepted connection.
 /// Reports a spawn failure to the host and returns it as the typed error. The local `Spawn` error
 /// is the salient one either way, so a failed report is dropped.
 fn refuse_spawn<S: Read + Write>(
@@ -157,6 +152,9 @@ fn refuse_spawn<S: Read + Write>(
     AgentError::Spawn(e)
 }
 
+/// The shared body of [`serve`]/[`serve_session`]: `workdir` is where injected files land, the
+/// command's cwd, and where artifacts are read back from. Taken as a `Result` so a creation failure
+/// is still reported to the host over the accepted connection.
 fn serve_with<S>(stream: S, workdir: std::io::Result<RunDir>) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
@@ -199,8 +197,8 @@ where
         }
     };
 
-    // The span carries argv and the env *count*, never a value or key list: env values are secrets by
-    // presumption, and this log reaches the serial console, which the host exposes verbatim.
+    // argv and the env *count*, never a value or key list: env values are secrets by presumption,
+    // and this log reaches the serial console, which the host exposes verbatim.
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _enter = span.enter();
 
@@ -212,24 +210,21 @@ where
     let budget = budget_from(timeout_ms);
     let started = Instant::now();
     let deadline = started + budget;
-    // Created before spawn, so the child can enroll itself via the trampoline and every process the
-    // command forks inherits membership. Best-effort: `None` on a guest without cgroup v2, where the
-    // agent falls back to the direct-child kill.
+    // Before spawn, so the child enrolls itself via the trampoline and every process the command
+    // forks inherits membership.
     let cgroup = ExecCgroup::create();
 
-    // Resolve the program up front so "no such binary" stays the typed spawn error the host knows:
-    // with the trampoline, the real `execvp` happens inside the child, where a failure can only
-    // surface as a shell-style 127 on stderr.
+    // Resolved up front so "no such binary" stays the typed spawn error the host knows: with the
+    // trampoline, the real `execvp` happens inside the child, where a failure can only surface as a
+    // shell-style 127 on stderr.
     if let Err(e) = resolve_program(program, workdir.path(), effective_path(&env).as_deref()) {
         return Err(refuse_spawn(&mut conn, program, e));
     }
 
-    // Spawn through the cgroup **trampoline**: a tiny `sh` leg that enrolls *itself* in the per-exec
-    // cgroup and then `exec`s the real command (same pid, so wait/kill are untouched). Self-placement
-    // rather than a parent-side `cgroup.procs` write after `spawn`, because that write races the
-    // already-running child and anything it forks first, which would escape the cgroup, survive
-    // `cgroup.kill`, and wedge the connection holding the output pipes open. Enrollment in the child
-    // strictly precedes its `exec`, so the ordering admits no race.
+    // Self-placement through the trampoline rather than a parent-side `cgroup.procs` write after
+    // `spawn`: that write races the already-running child and anything it forks first, which would
+    // escape the cgroup, survive `cgroup.kill`, and wedge the connection holding the output pipes
+    // open. Enrollment in the child strictly precedes its `exec`, so the ordering admits no race.
     let mut cmd = match cgroup.as_ref() {
         Some(cg) => {
             let mut cmd = Command::new("sh");
@@ -247,9 +242,9 @@ where
             cmd
         }
     };
-    // Injected environment lands on the **spawned command only**, never `std::env::set_var`: the
-    // agent's own process outlives this run and serves the next connection, so mutating it would leak
-    // one run's secrets into another.
+    // The **spawned command only**, never `std::env::set_var`: the agent's own process outlives
+    // this run and serves the next connection, so mutating it would leak one run's secrets into
+    // another.
     for (key, value) in &env {
         cmd.env(key, value);
     }
@@ -273,8 +268,8 @@ where
     let first_err: Mutex<Option<ChannelError>> = Mutex::new(None);
 
     let waited = std::thread::scope(|scope| {
-        // Feed stdin on its own thread, concurrently with the output pumps, so a command that writes
-        // before draining its stdin can't deadlock against us.
+        // Concurrently with the output pumps, so a command that writes before draining its stdin
+        // cannot deadlock against this.
         if let Some(mut sink) = child_stdin {
             scope.spawn(move || {
                 let _ = sink.write_all(&stdin);
@@ -287,13 +282,12 @@ where
         if let Some(err) = stderr {
             scope.spawn(|| pump(err, Kind::Stderr, &conn, &first_err));
         }
-        // Reap in the scope's own thread while the pumps drain in parallel, which is what keeps the
+        // In the scope's own thread while the pumps drain in parallel, which is what keeps the
         // child from blocking on a full pipe.
         let result = wait_bounded(&mut child, deadline);
-        // Then reap the *whole tree*: a double-forked grandchild or `setsid` daemon that inherited the
-        // output pipes keeps its write end open, so the pumps never see EOF and this scope cannot join
-        // them. `cgroup.kill` reaches every process at once, which a direct-child kill (or a `killpg`)
-        // cannot.
+        // Then the *whole tree*: a double-forked grandchild or `setsid` daemon that inherited the
+        // output pipes keeps its write end open, so the pumps never see EOF and this scope cannot
+        // join them. `cgroup.kill` reaches every process at once; a direct-child kill cannot.
         if let Some(cg) = cgroup.as_ref() {
             cg.kill_all();
         }
@@ -360,10 +354,9 @@ enum Waited {
     TimedOut,
 }
 
-/// The command's wall-clock budget from the host's `timeout_ms`, clamped to [`MAX_EXEC_TIMEOUT`] so a
-/// buggy host can't ask the agent to wait effectively forever. [`None`] asks for that ceiling rather
-/// than naming a limit; the wire spells it `0`, and [`NonZeroU32`] keeps it from colliding with a real
-/// budget.
+/// The command's wall-clock budget from the host's `timeout_ms`, clamped to [`MAX_EXEC_TIMEOUT`].
+/// [`None`] asks for that ceiling rather than naming a limit; the wire spells it `0`, and
+/// [`NonZeroU32`] keeps it from colliding with a real budget.
 fn budget_from(timeout_ms: Option<NonZeroU32>) -> Duration {
     timeout_ms.map_or(MAX_EXEC_TIMEOUT, |ms| {
         Duration::from_millis(u64::from(ms.get())).min(MAX_EXEC_TIMEOUT)
@@ -394,10 +387,10 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited>
 /// The cgroup v2 unified-hierarchy mount inside the guest (mounted by the rootfs `inittab`).
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-/// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self, drop the
-/// cgroup arg, then `exec` the real command, which keeps the same pid so the agent's wait/kill handles
-/// are untouched. The command and its arguments arrive as real argv entries (`"$@"`), never
-/// interpolated into the script, so they can't inject into it. Enrollment is best-effort and
+/// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self, drop
+/// the cgroup arg, then `exec` the real command, keeping the same pid so the agent's wait/kill
+/// handles are untouched. The command and its arguments arrive as real argv entries (`"$@"`), never
+/// interpolated into the script, so they cannot inject into it. Enrollment is best-effort and
 /// **sequenced before the `exec` in the child itself**, which a parent-side write cannot be.
 const TRAMPOLINE_SCRIPT: &str = r#"{ echo $$ > "$1/cgroup.procs"; } 2>/dev/null; shift; exec "$@""#;
 
@@ -416,14 +409,14 @@ fn effective_path(env: &[(String, String)]) -> Option<std::ffi::OsString> {
 }
 
 /// Mirrors `execvp`'s lookup just enough to report a missing or non-executable program as the typed
-/// spawn error before the trampoline runs. TOCTOU-tolerant: a program vanishing between this check and
-/// the child's `exec` surfaces as the trampoline's shell-style 127 instead.
+/// spawn error before the trampoline runs. TOCTOU-tolerant: a program vanishing between this check
+/// and the child's `exec` surfaces as the trampoline's shell-style 127 instead.
 ///
 /// Judged where the child will resolve it, on both axes: `path` is the **command's** `PATH`
 /// ([`effective_path`]), not the agent's, and every candidate is rooted at `workdir` (the child's
-/// cwd), which `join` leaves alone when it is already absolute. Resolving against the agent's own
-/// environment or cwd instead would falsely reject a program injected via `--put`, built by an
-/// earlier exec in the session, or reached through a `PATH` the caller set.
+/// cwd), which `join` leaves alone when it is already absolute. The agent's own environment or cwd
+/// would falsely reject a program injected via `--put`, built by an earlier exec, or on a caller's
+/// `PATH`.
 fn resolve_program(
     program: &str,
     workdir: &Path,
@@ -471,15 +464,14 @@ static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// per process rather than one per exec.
 static CGROUP_LOSS_REPORTED: AtomicBool = AtomicBool::new(false);
 
-/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns. cgroup v2
-/// membership is inherited by every child the command forks and cannot be escaped by `setsid`, so
-/// writing `cgroup.kill` reaches the double-fork and daemon cases a direct-child `kill` (or a `killpg`)
-/// misses.
+/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns: cgroup
+/// v2 membership is inherited by every child and cannot be escaped by `setsid`, so `cgroup.kill`
+/// reaches the double-fork and daemon cases a direct-child `kill` (or a `killpg`) misses.
 ///
 /// Best-effort: [`create`](Self::create) returns `None` on a guest without cgroup v2, and the agent
-/// falls back to the direct-child kill. No controllers are enabled, so it works even though the guest's
-/// root cgroup holds processes (the no-internal-process rule only bites when enabling controllers in
-/// `subtree_control`), and it needs no host-side delegation.
+/// falls back to the direct-child kill. No controllers are enabled, so it works even though the
+/// guest's root cgroup holds processes (the no-internal-process rule bites only when enabling
+/// controllers in `subtree_control`), and it needs no host-side delegation.
 struct ExecCgroup {
     path: PathBuf,
 }
@@ -493,8 +485,7 @@ impl ExecCgroup {
             Ok(()) => Some(Self { path }),
             Err(e) => {
                 // Once, not per exec: this is a property of the guest image, so every later exec
-                // would report the same thing and bury the command's own output on the console the
-                // host reads verbatim.
+                // repeats it and buries the command's own output on the console the host reads.
                 if !CGROUP_LOSS_REPORTED.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         cgroup_root = CGROUP_ROOT,
@@ -533,9 +524,9 @@ impl Drop for ExecCgroup {
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The run's working directory. Injected files are written in and artifacts read out through
-/// path-checked helpers so a host path can't escape the directory. A [`fresh`](RunDir::fresh) one is
-/// private to its run and removed on drop; an [`at`](RunDir::at) one is the caller's stable **session**
-/// dir, created if missing and kept, since session state belongs to the session and not to one exec.
+/// path-checked helpers, so a host path cannot escape the directory. A [`fresh`](RunDir::fresh) one
+/// is private to its run and removed on drop; an [`at`](RunDir::at) one is the caller's stable
+/// **session** dir, created if missing and kept.
 struct RunDir {
     path: PathBuf,
     /// `false` for a fresh per-run dir (removed on drop); `true` for a session dir (kept).
@@ -599,8 +590,8 @@ impl RunDir {
         if !real.starts_with(&root) {
             return Ok(None);
         }
-        // Skip an over-cap artifact *before* reading it: `fs::read` would slurp a multi-GiB (even
-        // sparse) file whole and OOM-kill the agent, taking the session down instead of skipping. The
+        // Checked *before* the read: `fs::read` would slurp a multi-GiB (even sparse) file whole
+        // and OOM-kill the agent, taking the session down instead of skipping one artifact. The
         // send side's `PayloadTooLarge` catch is the precise-boundary and TOCTOU backstop.
         match std::fs::metadata(&real) {
             Ok(md) if md.len() > bsx_channel::MAX_PAYLOAD as u64 => {
@@ -654,9 +645,9 @@ fn pump<R, S>(
         match src.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // This lock is a *temporary* whose guard drops at the end of the `if` condition; bound
-                // to a local it would still be held when `conn.lock()` is taken below, and the two
-                // pump threads could deadlock.
+                // A *temporary* whose guard drops at the end of the `if` condition; bound to a
+                // local it would still be held at the `conn.lock()` below, and the two pump threads
+                // could deadlock.
                 if first_err
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -718,11 +709,9 @@ mod tests {
             .collect()
     }
 
-    /// The check reads the `PATH` the **child** gets, not the agent's.
-    ///
-    /// The two disagree exactly when a caller injects `PATH`, which is wire-reachable through
-    /// `ExecParams.env`. The gate then refuses, as a typed spawn error, a program that the `spawn`
-    /// thirty lines later would have found and run.
+    /// The check reads the `PATH` the **child** gets, not the agent's. The two disagree exactly
+    /// when a caller injects `PATH`, which is wire-reachable through `ExecParams.env`, and the gate
+    /// would then refuse a program the `spawn` below it finds and runs.
     #[test]
     fn the_program_is_resolved_against_the_commands_path_not_the_agents() {
         let scratch = ScratchDir::created("agent-path");
@@ -755,8 +744,8 @@ mod tests {
         assert!(with(&[("PATH", bin), ("PATH", "/nonexistent")]).is_err());
     }
 
-    /// A non-absolute `PATH` entry is rooted at the child's cwd, which is what `execvp` does with an
-    /// empty entry and what the `/`-bearing branch already did.
+    /// A non-absolute `PATH` entry is rooted at the child's cwd, matching `execvp` on an empty
+    /// entry and the `/`-bearing branch.
     #[test]
     fn a_relative_path_entry_is_rooted_at_the_childs_working_dir() {
         let scratch = ScratchDir::created("agent-relpath");
@@ -789,12 +778,9 @@ mod tests {
         );
     }
 
-    /// Two names from one process never collide.
-    ///
-    /// Both callers depend on it for correctness, not tidiness: a reused per-run dir hands one
-    /// exec another's working directory, and a reused per-exec cgroup makes one command's kill
-    /// reach another's processes. Nothing else in the suite would report either as anything but
-    /// flakiness.
+    /// Two names from one process never collide: a reused per-run dir hands one exec another's
+    /// working directory, and a reused per-exec cgroup makes one command's kill reach another's
+    /// processes. Nothing else in the suite reports either as more than flakiness.
     #[test]
     fn a_unique_name_never_repeats_within_this_process() {
         static SEQ: AtomicU64 = AtomicU64::new(0);

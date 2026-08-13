@@ -3,20 +3,21 @@
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session), until `close` (or a hung-up connection) tears it down.
 //!
-//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](bsx_engine::Sandbox), so a warm clone
-//! popped from the pool and a cold boot serve through the exact same code, the only difference the
-//! client sees is the `pooled` flag and the boot latency.
+//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](bsx_engine::Sandbox), so a warm
+//! clone popped from the pool and a cold boot serve through the same code; the client sees only the
+//! `pooled` flag and the boot latency.
 //!
-//! **The verbs.** `open` boots, `exec` runs a command, `put`/`get` write and read a working-directory
-//! file through a no-op exec (injection is the engine's only file seam), `snapshot` writes a bundle and is
-//! a typed refusal for a jailed session, `trace` returns the host-observed record so far, and `close`
-//! ends it.
-//!
-//! **Untrusted input.** Bad JSON, a wrong first message, a wrong wire schema, a command that can't spawn,
-//! or a mid-session hang-up is a typed [`Response::Error`] or a dropped connection, never a daemon panic.
-//! The exec-fault taxonomy follows the CLI's shell: a **guest** fault is per-request and the session
-//! survives it, while an **infra or transport** fault means the VM is gone, so the session ends and its VM
-//! drops. Losing the whole daemon process can't leak a VM either, since the lifetime sentinel owns that.
+//! - **The verbs.** `open` boots, `exec` runs a command, `put`/`get` write and read a
+//!   working-directory file through a no-op exec (injection is the engine's only file seam),
+//!   `snapshot` writes a bundle and is a typed refusal for a jailed session, `trace` returns the
+//!   host-observed record so far, and `close` ends it.
+//! - **Untrusted input.** Bad JSON, a wrong first message, a wrong wire schema, a command that
+//!   can't spawn, or a mid-session hang-up is a typed [`Response::Error`] or a dropped connection,
+//!   never a daemon panic.
+//! - **The exec-fault taxonomy** follows the CLI's shell: a **guest** fault is per-request and the
+//!   session survives it, while an **infra or transport** fault means the VM is gone, so the
+//!   session ends and its VM drops. Losing the whole daemon process drops one too, through the
+//!   lifetime sentinel.
 
 use std::io::BufReader;
 use std::num::{NonZeroU8, NonZeroU32};
@@ -58,13 +59,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
             return;
         }
     };
-    // The idle timeout bounds **both** directions with the same shape, one absolute deadline per
-    // message, because both sockopts have the same defect: `SO_RCVTIMEO` and `SO_SNDTIMEO` are
-    // re-armed by the OS per syscall, so either one bounds a single `read`/`write` rather than a whole
-    // message. A client that keeps each syscall progressing (dripping a request in, or draining a
-    // reply out) resets a bare socket timeout indefinitely and pins a session thread plus a
-    // `--max-sessions` slot and its committed envelope. Arming the sockopt to the *time left* is what
-    // makes the sum of the syscalls honor one wall clock.
+    // One absolute deadline per message, in both directions: the OS re-arms `SO_RCVTIMEO` and
+    // `SO_SNDTIMEO` per syscall, so a bare sockopt bounds one `read`/`write` and a client that
+    // keeps each syscall progressing resets it forever. Arming it to the *time left* is what makes
+    // the sum of the syscalls honor one wall clock.
     let mut reader = BufReader::new(DeadlineStream::new(
         stream,
         server.idle_timeout,
@@ -72,8 +70,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     ));
     let mut writer = DeadlineStream::new(writer, server.idle_timeout, IDLE_REPLY_MSG);
 
-    // The first message must be `open` (carrying the session's resource envelope). Anything else,
-    // EOF, a stray verb, a malformed/wrong-schema line, ends the connection before any VM is booted.
+    // The first message must be `open`; anything else ends the connection before any VM is booted.
     let open = match read_request(&mut reader) {
         Ok(Some(req)) => req,
         Ok(None) => return, // client hung up before opening; nothing to tear down
@@ -105,9 +102,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    // The count ticket (acquired at accept) bounds *how many* sessions; this reservation bounds *how
-    // much* they commit, so a memory-heterogeneous fleet cannot overcommit the host into OOM while
-    // still under `--max-sessions`. Charged before boot, released on teardown by `Drop`.
+    // The count ticket (acquired at accept) bounds *how many* sessions; this bounds *how much* they
+    // commit, so a heterogeneous fleet cannot overcommit the host while still under
+    // `--max-sessions`. Charged before boot, released on teardown by `Drop`.
     let _reservation = match ResourceReservation::try_acquire(
         server,
         u64::from(limits.mem_mib.get()),
@@ -126,9 +123,6 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    // Boot the session's VM: a warm clone from the pool when this is a bare-default `open`, else a
-    // cold boot with the requested envelope. A boot failure is fatal to the session (there is no
-    // sandbox), reported and then done.
     let (mut vm, pooled) = match boot_session_vm(server, limits, bare, net.nic) {
         Ok(booted) => booted,
         Err(e) => {
@@ -143,19 +137,17 @@ pub fn serve(stream: UnixStream, server: &Server) {
     let boot = vm.boot_latency();
     let boot_ms = ms(boot);
 
-    // Observation is fail-open, so a host without the eBPF caps yields a coverage-gapped record rather
-    // than a refused session, but **enforcement is not**: a session that asked for an egress policy and
-    // could not police the tap is a fatal refusal below. The gateway comes from the daemon's own
-    // `BootConfig` rather than the wire, since whether a route out exists is the operator's posture.
+    // Observation is fail-open (a host without the eBPF caps yields a coverage-gapped record rather
+    // than a refused session); **enforcement is not**, because the alternative is a running sandbox
+    // whose caller believes its allow-list is in force. The gateway comes from the daemon's own
+    // `BootConfig` rather than the wire, since whether a route out exists is the operator's
+    // posture.
     let gateway = server.base.egress.map(|e| e.gateway());
     let enforcing = net.egress.is_some();
     let attach_params = crate::audit::attach_params(&vm, net.egress.as_ref(), gateway);
     let probes = match server.observ.attach(vm.name(), attach_params) {
         Ok(p) => Some(p),
         Err(e) => {
-            // Enforcement does not fail open. If the session asked for an egress policy and the tap
-            // could not be policed, ending the session is the only honest answer: the alternative is
-            // a running sandbox whose caller believes its allow-list is in force.
             if enforcing {
                 server.metrics.open_failed();
                 let _ = write_response(
@@ -165,11 +157,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         wire_kind(e.kind()),
                     ),
                 );
-                // Shut the VM down directly rather than through `end_session`, which decrements the
-                // active-session gauge this path never incremented (`session_opened` is below).
-                // Nothing else of `end_session`'s work applies: a session that reached enforcement
-                // asked for a NIC, and a NIC request is never pool-eligible, so no clone was taken
-                // and there is nothing to refill.
+                // Not `end_session`: it decrements the active-session gauge this path never
+                // incremented (`session_opened` is below), and a NIC request is never
+                // pool-eligible, so no clone was taken and there is nothing to refill.
                 if let Err(e) = vm.shutdown() {
                     tracing::debug!(error = %e, "shutdown after a failed enforcement attach");
                 }
@@ -189,15 +179,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
         return;
     }
 
-    // The command loop: one request per line until `close`, EOF, or a session-ending fault.
     let mut total_exec_wall = Duration::ZERO;
-    // The session's record hash-chain: each `trace` reply commits to the previous
-    // one's hash, so a client can `verify_chain` the sequence and detect a reordered/dropped record.
-    // `None` until the first `trace`; the first record is the unchained anchor.
+    // The session's record hash-chain: each `trace` reply commits to the previous one's hash, so a
+    // client can `verify_chain` the sequence and detect a reordered/dropped record. `None` until
+    // the first `trace`; the first record is the unchained anchor.
     let mut record_chain: Option<String> = None;
     loop {
-        // Each message gets a fresh full budget: the clock starts here, not at `open`, so a long
-        // boot or a long-running previous command never eats into the next request's deadline.
+        // A fresh full budget per message: the clock starts here, not at `open`, so a long boot or
+        // a long previous command never eats into the next request's deadline.
         reader.get_mut().rearm();
         match read_request(&mut reader) {
             Ok(None) => break, // clean EOF, teardown below
@@ -230,12 +219,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     &reader,
                 );
                 if interrupted {
-                    // The sandbox is gone, so the exec's own error is noise. Acknowledge only a real
-                    // `cancel`, since a hang-up has nobody to read the reply. This read awaits a *new*
-                    // message, so it gets a fresh deadline: the in-flight one was armed when the exec
-                    // request arrived, and an exec longer than the idle budget has already spent it, which
-                    // would turn the ack into a reset with the cancel line unread
-                    // (`a_cancel_after_the_idle_deadline_still_gets_its_ack` pins this).
+                    // The sandbox is gone, so the exec's own error is noise. Acknowledge only a
+                    // real `cancel`, since a hang-up has nobody to read the reply. Rearmed because
+                    // this awaits a *new* message and the in-flight budget was armed when the exec
+                    // request arrived (`a_cancel_after_the_idle_deadline_still_gets_its_ack`).
                     server.metrics.request_failed(false);
                     reader.get_mut().rearm();
                     if matches!(read_request(&mut reader), Ok(Some(Request::Cancel))) {
@@ -263,10 +250,8 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 }
             }
             Ok(Some(Request::Cancel)) => {
-                // Legal only while a request is in flight, and that case is handled inside
-                // `exec_watching_for_cancel`. Reaching the top of the loop means nothing is
-                // outstanding, so there is nothing to cancel: the client's state machine is wrong,
-                // but the session is fine.
+                // Legal only while a request is in flight, which `exec_watching_for_cancel`
+                // handles. Reaching the top of the loop means nothing is outstanding to cancel.
                 if !send(
                     &mut writer,
                     &nonfatal(
@@ -349,11 +334,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
             Ok(Some(Request::Trace)) => {
                 server.metrics.request(Verb::Trace);
                 let timing = Timing::new(boot, total_exec_wall);
-                // Sign the finalized record with the host key. and carry the envelope:
-                // the record rides inside it as a string, so its signed bytes survive the wire's
-                // serde round-trip and a client can verify without trusting this daemon's transport.
-                // Chained to the previous `trace` in this session, so the sequence is tamper-evident
-                // as a whole, not just per record.
+                // The record rides inside the envelope as a string, so its signed bytes survive the
+                // wire's serde round-trip and a client verifies without trusting this daemon's
+                // transport. Chained to the previous `trace`, so the sequence is tamper-evident as
+                // a whole and not just per record.
                 let resp = match probes.as_ref() {
                     Some(p) => {
                         let canonical = p.live_record(timing).to_json();
@@ -378,8 +362,8 @@ pub fn serve(stream: UnixStream, server: &Server) {
             Ok(Some(Request::TraceSummary)) => {
                 server.metrics.request(Verb::TraceSummary);
                 let timing = Timing::new(boot, total_exec_wall);
-                // The same live, non-destructive record snapshot as `trace`, projected to the
-                // model-legible summary the CLI's `--record-summary` writes.
+                // `trace`'s live, non-destructive snapshot, projected to the model-legible summary
+                // the CLI's `--record-summary` writes.
                 let resp = match probes.as_ref() {
                     Some(p) => Response::trace_summary(record_to_value(
                         &p.live_record(timing).to_summary_json(),
@@ -396,10 +380,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler cannot tell
-            // us a verb went unhandled; that check is this runtime reply instead of a build error.
-            // Unreachable from the wire (an unknown `op` fails at decode), so getting
-            // here means `bsx-protocol` grew a verb the daemon never wired up. Loud on purpose.
+            // `Request` is `#[non_exhaustive]`, so an unhandled verb is this runtime reply rather
+            // than a build error. Unreachable from the wire (an unknown `op` fails at decode), so
+            // reaching it means `bsx-protocol` grew a verb the daemon never wired up.
             Ok(Some(other)) => {
                 server.metrics.protocol_error();
                 tracing::error!(request = ?other, "unhandled wire verb; the daemon is behind its own protocol crate");
@@ -417,9 +400,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
             // A wrong wire schema means the peer speaks another protocol, end the session. A
             // transport I/O error means the connection itself is broken, stop.
             Err(ProtocolError::Io(e)) => {
-                // An idle-timeout read surfaces here as `WouldBlock`/`TimedOut` (the armed
-                // `SO_RCVTIMEO`); name it so an operator can tell an idle drop from a real transport
-                // break. Either way the connection is done, tear the session down.
+                // An idle-timeout read surfaces as `WouldBlock`/`TimedOut` (the armed
+                // `SO_RCVTIMEO`); named so an operator can tell an idle drop from a transport
+                // break.
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -460,12 +443,10 @@ fn serve_run(
     is_command: bool,
     to_response: impl FnOnce(&bsx_engine::RunResult) -> Response,
 ) -> bool {
-    // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
-    // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
-    // dilute the user-command latency signal with file-transfer overhead; `requests_total{verb}`
-    // already counts put/get separately. For a real command, accumulate the **host-measured** wall on
-    // both success and failure: a timed-out or capped exec still consumed time (up to the whole
-    // budget), so `exec_wall` must count it, not silently drop it by only summing successful runs.
+    // Only a real `exec` counts as a guest command: `put`/`get` ride a no-op `true` to carry a
+    // file, so folding their wall in would dilute the latency signal with file-transfer overhead.
+    // The **host-measured** wall accumulates on failure too, since a timed-out or capped exec still
+    // consumed time up to the whole budget.
     if is_command {
         *total_exec_wall += wall;
     }
@@ -480,7 +461,7 @@ fn serve_run(
             let session_survives = e.kind() == ErrorKind::Guest;
             metrics.request_failed(session_survives);
             // Logged host-side too: the error reply reaches only the one client, and an operator
-            // (or CI log) diagnosing a failed request needs the cause without owning that client.
+            // diagnosing a failed request does not own that client.
             tracing::warn!(error = %e, fatal = !session_survives, "request failed");
             let sent = send(
                 w,
@@ -491,41 +472,36 @@ fn serve_run(
     }
 }
 
-/// Boot the session's VM: a **bare** `open` (every knob defaulted) is served from the pre-warmed pool
-/// when the daemon has one, and any custom resource knob (or no pool) is a cold boot with the
-/// requested envelope.
+/// Boot the session's VM: a **bare** `open` (every knob defaulted) is served from the pre-warmed
+/// pool when the daemon has one, and any custom resource knob (or no pool) is a cold boot.
 ///
-/// The pool lock is **non-blocking** (`try_lock`) and held only for an O(1) pop of ready stock, never
-/// across a `Vm::restore`. It declines on an empty, poisoned, *or contended* pool, because
+/// The pool lock is **non-blocking** (`try_lock`) and held only for an O(1) pop of ready stock,
+/// never across a `Vm::restore`. It declines on an empty, poisoned, *or contended* pool, because
 /// `end_session` holds this same lock across its refill's inline restores, so a blocking `lock()`
-/// would serialize every bare `open` behind that window. The trade is a `pooled: false` on the
-/// transient dry/busy window instead of a stall.
+/// would serialize every bare `open` behind that window.
 fn boot_session_vm(
     server: &Server,
     limits: Limits,
     bare: bool,
     nic: bool,
 ) -> Result<(RunningVm, bool), VmmError> {
-    // Pool-eligible only when the resolved limits equal the clones' actual profile, not merely
-    // when the request was bare: with operator defaults set, a bare open resolves to a different
-    // profile than the pooled clones hold, and handing one out would both under-serve the session
-    // and desynchronize the committed-resource accounting from the real footprint.
+    // Pool-eligible only when the resolved limits equal the clones' actual profile, not merely when
+    // the request was bare: with operator defaults set the two differ, and handing a clone out
+    // would under-serve the session and desynchronize the committed-resource accounting.
     if bare
         && limits == pool_clone_limits()
         && let Some(pool) = &server.pool
     {
         match pool.try_lock() {
             Ok(mut p) => {
-                // Pop only when there is ready stock, `Pool::take` would otherwise restore
-                // inline under this lock, the exact hold-across-restore this function's doc
-                // rules out. No stock ⇒ fall through to a lock-free cold boot below.
+                // Only with ready stock: `Pool::take` would otherwise restore inline under this
+                // lock, the hold-across-restore this function's doc rules out.
                 if p.ready() > 0 {
                     match p.take() {
                         Ok(vm) => {
-                            // The clone's charge hands off to the session's own reservation
-                            // (already acquired), so the committed gauges keep matching the
-                            // RAM actually resident; the brief overlap between the two
-                            // charges is conservative, never an undercount.
+                            // The clone's charge hands off to the session's own (already-acquired)
+                            // reservation, so the committed gauges keep matching resident RAM; the
+                            // brief overlap is conservative, never an undercount.
                             release_pool_clones(server, 1, &pool_clone_limits());
                             return Ok((vm, true));
                         }
@@ -536,7 +512,6 @@ fn boot_session_vm(
                     }
                 }
             }
-            // Contended (a refill holds the lock): don't wait it out, cold-boot instead.
             Err(std::sync::TryLockError::WouldBlock) => {
                 tracing::debug!("pool busy (refilling?); cold-booting this session")
             }
@@ -551,9 +526,9 @@ fn boot_session_vm(
     Ok((vm, false))
 }
 
-/// Why a `snapshot` produced no bundle. Split by fault: a disk ceiling is the operator's posture and
-/// a client can retry against it once a bundle is removed, an engine refusal (a jailed session) never
-/// will be, and an unreadable bundle directory is the daemon's own problem.
+/// Why a `snapshot` produced no bundle, split by fault: a disk ceiling is retryable once a bundle
+/// is removed, an engine refusal (a jailed session) never is, and an unreadable bundle directory is
+/// the daemon's own problem.
 enum SnapshotRefusal {
     /// The daemon already holds `--max-snapshots` bundles.
     AtCeiling { held: usize },
@@ -608,21 +583,19 @@ fn do_snapshot(server: &Server, vm: &mut RunningVm) -> Result<String, SnapshotRe
     }
     let dir = server.next_snapshot_dir();
     // Don't pre-create the bundle dir: `Vm::snapshot` refuses a restored/jailed/device-bearing VM
-    // *before* writing anything, and creates the dir itself only on its success path. Pre-creating it
-    // would orphan an empty `snap-N` on every refusal, and the default daemon posture is jailed (where
-    // snapshot is always a refusal), so a client looping `snapshot` would leak dirs unbounded.
-    // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
-    // directory (the bundle stays on the daemon host, keeping bulk bytes off this line).
+    // *before* writing anything and creates the dir itself only on its success path, so
+    // pre-creating would orphan an empty `snap-N` on every refusal, unbounded under the jailed
+    // default posture. The client gets the directory, since the bundle stays on the daemon host.
     let _snapshot = vm.snapshot(&dir).map_err(SnapshotRefusal::Engine)?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
-/// between sessions, the moment the [`Pool`](bsx_engine::Pool) doc reserves for restore cost).
+/// Tear the session down: detach the probes, shut the VM, and top the pool back up between
+/// sessions, the moment the [`Pool`](bsx_engine::Pool) doc reserves for restore cost.
 ///
-/// The refill is **best-effort and non-blocking** (`try_lock`, skip if contended), so a burst of closes
-/// cannot queue behind one another's restore. Stock recovers on the next uncontended close, and a bare
-/// `open` that meanwhile finds the pool dry cold-boots: correct, just not pooled.
+/// The refill is **best-effort and non-blocking** (`try_lock`, skip if contended), so a burst of
+/// closes cannot queue behind one another's restore. A bare `open` that meanwhile finds the pool
+/// dry cold-boots.
 fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
     server.metrics.session_closed(vm.sentinel_degraded());
     drop(probes); // detach from the shared tracer/meter (its own `Drop`)
@@ -632,10 +605,9 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
     if let Some(pool) = &server.pool {
         match pool.try_lock() {
             Ok(mut p) => {
-                // Reserve-then-restore, one clone at a time: each restored clone is paid for
-                // against the committed ceilings *before* it exists, so a refill can never push
-                // the daemon past a ceiling that live sessions' reservations are holding. No
-                // headroom means no refill this close; stock recovers on a later one.
+                // Reserve-then-restore, one clone at a time: each is paid for against the committed
+                // ceilings *before* it exists, so a refill cannot push the daemon past a ceiling
+                // live sessions' reservations are holding.
                 let clone = pool_clone_limits();
                 let mut restored = 0usize;
                 loop {
@@ -673,12 +645,11 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 }
 
 /// Why an `open` was refused before any VM existed, split the way the wire's fault table splits
-/// (docs/daemon-protocol.md): [`Malformed`](Self::Malformed) is the client's own message (a value
-/// the VMM could never boot, a contradiction like allowances without a NIC), which goes out as
-/// [`FaultKind::Protocol`]; [`Policy`](Self::Policy) is a well-formed ask the operator's posture
-/// declines, which goes out as [`FaultKind::Refused`], so a client branching on the table repairs
-/// the right thing (its own message vs its ask).
-/// `an_operator_ceiling_refusal_is_kind_refused_on_the_wire` pins the split.
+/// (docs/daemon-protocol.md): [`Malformed`](Self::Malformed) is the client's own message and goes
+/// out as [`FaultKind::Protocol`], [`Policy`](Self::Policy) is a well-formed ask the operator's
+/// posture declines and goes out as [`FaultKind::Refused`], so a client branching on the table
+/// repairs the right thing. `an_operator_ceiling_refusal_is_kind_refused_on_the_wire` pins the
+/// split.
 #[derive(Debug, PartialEq, Eq)]
 enum OpenRefusal {
     /// The client's message is wrong in itself: fix the client.
@@ -709,12 +680,11 @@ impl OpenRefusal {
     }
 }
 
-/// What an `open` asked for on the network axis, resolved against the operator's policy: whether the
-/// session gets a NIC, and the egress policy to arm on its tap.
+/// What an `open` asked for on the network axis, resolved against the operator's policy: whether
+/// the session gets a NIC, and the egress policy to arm on its tap.
 ///
-/// The daemon's own posture is untouched by this. A client can ask for a NIC and bound what crosses
-/// it; whether a route out exists is the daemon's launch-time `BootConfig`, the same way the jail is,
-/// so no wire message can route a session out of its sandbox (design decision 9).
+/// Whether a route out exists stays the daemon's launch-time `BootConfig`, as the jail is, so no
+/// wire message can route a session out of its sandbox (design decision 9).
 #[derive(Debug, Default)]
 struct SessionNet {
     /// Whether to boot with a tap.
@@ -747,12 +717,11 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
     if !nic {
         return Ok(SessionNet::default());
     }
-    // **A NIC over the wire is always policed**, deny-all at minimum. The CLI treats a bare `--net`
-    // as observe-only, which is safe there because the caller is local and owns the config file; a
-    // wire client is neither. Left observe-only, a client could ask for a NIC with no allowances and
-    // get an unpoliced tap, which on a host that configured a gateway and furnished an uplink is
-    // unrestricted egress, and `max_egress_v4` would never be consulted because it is only checked
-    // against rules that were asked for. Deny-all costs the same attach and keeps design rule 3.
+    // **A NIC over the wire is always policed**, deny-all at minimum, unlike the CLI's observe-only
+    // bare `--net` (safe there because the caller owns the config file; a wire client does not).
+    // Observe-only here would hand an unpoliced tap to a client on a host that furnished an uplink,
+    // with `max_egress_v4` never consulted, since it is only checked against rules that were asked
+    // for. Deny-all costs the same attach and keeps design rule 3.
     if allows.is_empty() {
         return Ok(SessionNet {
             nic: true,
@@ -771,9 +740,8 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
         let rule = parse_allow(spec).map_err(OpenRefusal::Malformed)?;
         egress = egress.allow(rule.cidr, rule.port, rule.proto);
     }
-    // Containment against the operator's ceilings (`max_egress_v4`/`max_egress_v6`), the check that
-    // makes a ceiling real for a caller who controls neither this process's environment nor its
-    // config file.
+    // Containment against `max_egress_v4`/`max_egress_v6`, the check that makes a ceiling real for
+    // a caller who controls neither this process's environment nor its config file.
     policy
         .check_egress(&egress)
         .map_err(|e| OpenRefusal::Policy(e.daemon_message()))?;
@@ -784,9 +752,8 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
 }
 
 /// Fold an [`Request::Open`]'s optional knobs onto the [`Limits`] the operator's `policy` allows,
-/// validating each as a typed message (never a panic): a vCPU count the VMM accepts (1 or an even
-/// number up to 32), memory and wall nonzero. Also reports whether the `open` was **bare** (every knob
-/// defaulted), which decides pool eligibility; a non-`Open` first message is the caller's error too.
+/// validating each as a typed message (never a panic), and report whether the `open` was **bare**
+/// (every knob defaulted), which decides pool eligibility.
 ///
 /// The daemon's policy boundary: a client controls neither this process's environment nor its
 /// `.bsx.toml`, so bounding the request here is what makes an operator ceiling real. Asking past a
@@ -816,8 +783,8 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRef
         && net.is_none_or(|n| !n)
         && allow.is_none();
 
-    // Shape errors first (a vCPU count the VMM would refuse is malformed regardless of policy), so
-    // the caller gets the specific complaint rather than a ceiling message about a nonsense value.
+    // Shape errors first, so a value the VMM would refuse regardless of policy gets the specific
+    // complaint rather than a ceiling message about a nonsense value.
     let mut requested = Requested::default();
     if let Some(v) = vcpus {
         if !vcpus_supported(*v) {
@@ -841,9 +808,8 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRef
         }
         requested.wall_secs = Some(*s);
     }
-    // Narrow the wire's fixed-width `u64` to this host's `usize`. Saturating, not wrapping: on a
-    // 32-bit daemon an absurd cap becomes "as much as this host can address", which the policy layer
-    // then clamps to the operator's ceiling anyway. Lossless on 64-bit.
+    // Saturating, not wrapping: on a 32-bit daemon an absurd cap becomes "as much as this host can
+    // address", which the policy layer then clamps to the operator's ceiling. Lossless on 64-bit.
     requested.output_cap = output_cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
 
     let limits = policy
@@ -864,11 +830,9 @@ fn record_to_value(json: &str) -> serde_json::Value {
 fn send(w: &mut DeadlineStream<UnixStream>, resp: &Response) -> bool {
     match reply(w, resp) {
         Ok(()) => true,
-        // Not a gone client: the daemon's own reply outgrew what one line carries, which a run can
-        // reach under an `output_cap` larger than the wire's (output dense in C0 controls escapes
-        // to six bytes each, invalid UTF-8 to three). The session is intact, so answer the typed
-        // flooded-output error the taxonomy already carries rather than dropping the connection and
-        // leaving the client to infer why.
+        // Not a gone client: the reply outgrew what one line carries, which a run reaches under an
+        // `output_cap` larger than the wire's (C0-dense output escapes to six bytes a byte, invalid
+        // UTF-8 to three). The session is intact, so answer the typed flooded-output error.
         Err(ProtocolError::TooLarge { limit }) => {
             let (what, kind) = oversize_reply(resp);
             tracing::warn!(
@@ -897,10 +861,8 @@ fn send(w: &mut DeadlineStream<UnixStream>, resp: &Response) -> bool {
 
 /// What did not fit, and whose fault that is, for a reply the wire cannot carry. Named per variant
 /// because `send` serves every reply: a `get` of a binary file expands 3x through [`lossy`] and
-/// trips the same bound as a flooding `exec`, and telling that caller its *run's output* was too big
-/// would point at the wrong thing. The record replies are host-built, so they are [`FaultKind::Infra`]
-/// rather than the guest's doing.
-/// `a_flooded_reply_names_what_did_not_fit` pins the pairing.
+/// trips the same bound as a flooding `exec`. The record replies are host-built, so they are
+/// [`FaultKind::Infra`]. `a_flooded_reply_names_what_did_not_fit` pins the pairing.
 fn oversize_reply(resp: &Response) -> (&'static str, FaultKind) {
     match resp {
         Response::Result { .. } => ("the run's output", FaultKind::Guest),
@@ -918,28 +880,25 @@ fn lossy(bytes: &[u8]) -> String {
 }
 
 /// How long each readability check waits before re-testing whether the exec finished. The `peek`
-/// itself blocks for this, so the watch costs one syscall per tick, never a spin; it only bounds how
-/// stale a cancel can be, so it trades a few milliseconds of latency against wakeups on an idle
-/// session.
+/// itself blocks for this, so the watch costs one syscall per tick rather than a spin, and it
+/// bounds only how stale a cancel can be.
 const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 /// Run one guest command while watching the socket, returning `(result, interrupted)`.
 ///
-/// `interrupted` means the client became readable mid-exec: either a [`Request::Cancel`] or an
-/// outright hang-up. Both mean the same thing (nothing else is legal while a request is in flight),
-/// so both kill the sandbox, which is what unblocks the exec: the guest dies, the vsock peer closes,
-/// and `exec` returns a typed error instead of running out its wall budget with a client that is no
-/// longer listening.
+/// `interrupted` means the client became readable mid-exec, a [`Request::Cancel`] or a hang-up.
+/// Nothing else is legal while a request is in flight, so both kill the sandbox, which is what
+/// unblocks the exec: the guest dies, the vsock peer closes, and `exec` returns a typed error
+/// instead of running out its wall budget with nobody listening.
 ///
 /// **Thread discipline.** The worker is scoped, so `thread::scope` cannot return until it finishes,
-/// which is safe only because `exec` is bounded on both sides: by the session's wall budget and, once
-/// the kill lands, by the dead guest. A scoped thread wrapping an unbounded call would be a host hang,
-/// which is why a `peek` rather than a second blocking read does the watching.
+/// which holds only because `exec` is bounded by the session's wall budget and, once the kill
+/// lands, by the dead guest. That is why a `peek` rather than a second blocking read does the
+/// watching.
 ///
-/// The `reader` is taken whole rather than as a "has it buffered" flag, so no caller can answer that
-/// question wrongly: the peek sees only the *kernel* receive queue, and a client that wrote its
-/// `cancel` in the same call as its `exec` has already had that line pulled into the `BufReader`,
-/// leaving the peek blind to it. Nothing reads the reader again until this returns.
+/// The `reader` is taken whole rather than as a "has it buffered" flag: the peek sees only the
+/// *kernel* receive queue, and a client that wrote its `cancel` in the same call as its `exec` has
+/// already had that line pulled into the `BufReader`. Nothing reads it again until this returns.
 fn exec_watching_for_cancel(
     vm: &mut RunningVm,
     argv: &[String],
@@ -950,8 +909,7 @@ fn exec_watching_for_cancel(
 ) -> (Result<bsx_engine::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
-        // `exec_with_files` rather than `exec`: same call, but it carries the session's env. No
-        // files or artifacts here, those ride the `put`/`get` verbs on their own.
+        // `exec_with_files` rather than `exec`: the same call, but it carries the session's env.
         let worker = scope.spawn(|| vm.exec_with_files(argv, stdin.as_bytes(), &[], env, &[]));
         let mut interrupted = false;
         while !worker.is_finished() {
@@ -962,14 +920,11 @@ fn exec_watching_for_cancel(
                 if let Err(e) = kill.kill() {
                     tracing::warn!(error = %e, "cancel could not reach the sandbox");
                 }
-                // Nothing left to watch: the join below blocks (zero CPU) until the exec
-                // returns, bounded by its wall budget. Staying in this loop would busy-spin,
-                // since `client_spoke`'s 50ms block was the only thing pacing it.
+                // Nothing left to watch, and staying here would busy-spin: `client_spoke`'s 50ms
+                // block was the only thing pacing the loop. The join below blocks instead.
                 break;
             }
         }
-        // Joins the worker: already-returned on the loop's natural exit, or blocking out the
-        // killed exec's remaining wall budget after a cancel.
         (
             worker
                 .join()
@@ -981,13 +936,12 @@ fn exec_watching_for_cancel(
 
 /// Whether the client sent anything (or hung up), waiting up to [`CANCEL_POLL`].
 ///
-/// `peek` is deliberate: it does **not** consume, so the pending line is still there for the reply
-/// path to parse, and the session's framing cannot desync on a partially-arrived message.
+/// `peek` does **not** consume, so the pending line is still there for the reply path to parse and
+/// the session's framing cannot desync on a partially-arrived message.
 ///
-/// `buffered` short-circuits it, because the peek only ever sees what is still in the kernel. Bytes
-/// the session's `BufReader` has already pulled into userspace are just as much the client speaking,
-/// and a `cancel` that arrived coalesced with its `exec` is exactly that case: the queue is empty, so
-/// the peek alone would return `false` for the whole run and the kill would never land.
+/// `buffered` short-circuits it, because the peek only ever sees the kernel receive queue. A
+/// `cancel` coalesced with its `exec` sits in the `BufReader` with the queue empty, so the peek
+/// alone would return `false` for the whole run and the kill would never land.
 fn client_spoke(socket: &UnixStream, buffered: bool) -> bool {
     use std::os::fd::AsRawFd as _;
 
@@ -1043,11 +997,9 @@ const IDLE_DEADLINE_MSG: &str = "session message exceeded the idle deadline";
 /// [`IDLE_DEADLINE_MSG`].
 const IDLE_REPLY_MSG: &str = "session reply exceeded the idle deadline";
 
-/// Writes one reply, starting its idle budget first.
-///
-/// Every reply goes through here rather than `write_response` directly, so the deadline bounds one
-/// reply's drain the way [`DeadlineStream::rearm`] on the read half bounds one request's arrival. A
-/// reply that shares the previous one's spent budget would refuse a client that did nothing wrong.
+/// Writes one reply, starting its idle budget first, so the deadline bounds one reply's drain the
+/// way [`DeadlineStream::rearm`] on the read half bounds one request's arrival. A reply sharing the
+/// previous one's spent budget would refuse a client that did nothing wrong.
 fn reply(w: &mut DeadlineStream<UnixStream>, resp: &Response) -> Result<(), ProtocolError> {
     w.rearm();
     write_response(w, resp)
@@ -1065,10 +1017,9 @@ mod tests {
 
     #[test]
     fn the_wire_can_carry_the_default_output_cap() {
-        // The enforcer for `MAX_RESPONSE_BYTES`, which lives here because `bsx-protocol` is
-        // engine-free and cannot read `Limits::default()` itself. A `result` carrying the default
-        // cap's worth of ordinary text must encode: bounding a reply below what the engine will
-        // capture is what makes a legitimate run's own output undeliverable.
+        // The enforcer for `MAX_RESPONSE_BYTES`, here because `bsx-protocol` is engine-free and
+        // cannot read `Limits::default()` itself. Bounding a reply below what the engine captures
+        // is what makes a legitimate run's own output undeliverable.
         let cap = Limits::default().output_cap;
         let encodes = |stdout: String| {
             let mut wire = Vec::new();
@@ -1091,10 +1042,9 @@ mod tests {
             "quote-dense output at the cap escapes to 2x and must still fit: {encoded:?}"
         );
 
-        // What the number does *not* cover, stated as a test so the limit is measured rather than
-        // assumed: a C0 control byte is valid UTF-8 and JSON-escapes to six bytes, so a cap's worth
-        // of them exceeds the reply bound and is reported (`send` answers a flooded-output error)
-        // rather than carried.
+        // What the number does *not* cover: a C0 control byte is valid UTF-8 and JSON-escapes to
+        // six bytes, so a cap's worth of them exceeds the reply bound and `send` answers a
+        // flooded-output error rather than carrying it.
         assert!(
             matches!(
                 encodes("\u{1}".repeat(cap)),
@@ -1109,8 +1059,7 @@ mod tests {
     #[test]
     fn a_flooded_reply_names_what_did_not_fit() {
         // `send` serves every reply, so one hard-coded "the run's output" is wrong for three of
-        // them. A `get` of a binary file reaches this bound through the 3x lossy expansion, and the
-        // record replies reach it without the guest doing anything at all.
+        // them.
         for (resp, want, kind) in [
             (
                 Response::result(0, String::new(), String::new(), 0),
@@ -1323,10 +1272,8 @@ mod tests {
         assert!(!sealed.nic);
         assert!(sealed.egress.is_none());
 
-        // A NIC with no allowance is deny-all, **not** observe-only. This is the one place the
-        // daemon is deliberately stricter than the CLI: a local caller owns the config file, a wire
-        // client does not, so handing one an unpoliced tap would be unrestricted egress on any host
-        // that furnished an uplink, with `max_egress_v4` never consulted.
+        // A NIC with no allowance is deny-all, **not** observe-only: the one place the daemon is
+        // deliberately stricter than the CLI, because a wire client does not own the config file.
         let observed = open(&Policy::default(), &open_net(Some(true), &[])).expect("a bare NIC");
         assert!(observed.nic);
         let bare_policy = observed
@@ -1474,10 +1421,9 @@ mod tests {
 
     #[test]
     fn a_slow_drip_message_is_bounded_by_the_absolute_deadline() {
-        // The property `serve` relies on for the read half: a client dripping one byte per interval
-        // (each drip inside what a bare `SO_RCVTIMEO` would allow, so a per-read timeout would reset
-        // forever) is ended when the *message* deadline lapses. Prove it at the socket level, no VM:
-        // the drip happens before any `open` completes.
+        // The read half's property: a client dripping one byte per interval (each drip inside what
+        // a bare `SO_RCVTIMEO` would allow, so a per-read timeout would reset forever) is ended
+        // when the *message* deadline lapses. At the socket level, no VM.
         let (client, server_end) = UnixStream::pair().expect("socketpair");
         let budget = Duration::from_millis(200);
         let mut reader = BufReader::new(DeadlineStream::new(
@@ -1521,9 +1467,8 @@ mod tests {
     fn a_cancel_coalesced_with_its_exec_is_still_noticed() {
         use std::io::Write as _;
 
-        // A pipelining client writes `exec` and `cancel` in one `write_all`, which is legal. Reading
-        // the exec pulls *both* lines into the `BufReader`, so the cancel is sitting in userspace
-        // and the kernel receive queue is empty.
+        // A pipelining client writes `exec` and `cancel` in one legal `write_all`. Reading the exec
+        // pulls *both* lines into the `BufReader`, leaving the kernel receive queue empty.
         let (client, server_end) = UnixStream::pair().expect("socketpair");
         let peer = server_end
             .try_clone()
@@ -1549,8 +1494,8 @@ mod tests {
             !reader.buffer().is_empty(),
             "the cancel is buffered in userspace, which is what sets this case up"
         );
-        // The defect, asserted rather than described: with only the peek to go on, the watcher sees
-        // an idle socket for the whole exec and the kill never lands.
+        // With only the peek to go on, the watcher sees an idle socket for the whole exec and the
+        // kill never lands.
         assert!(
             !client_spoke(&peer, false),
             "precondition: the peek cannot see a line the reader already took"
@@ -1591,11 +1536,9 @@ mod tests {
 
     #[test]
     fn an_armed_write_timeout_unblocks_a_stalled_reply_instead_of_hanging() {
-        // The property `serve` relies on: with the write timeout armed, a reply to a client that has
-        // stopped reading fails in bounded time (`send` returns false → the session ends → the VM
-        // drops → the slot frees) rather than parking the session thread in `write_all` forever. Prove
-        // it at the socket level, no VM: fill the buffers of a peer that never reads and assert the
-        // write gives up at its timeout.
+        // With the write timeout armed, a reply to a client that stopped reading fails in bounded
+        // time (`send` returns false → the session ends → the VM drops → the slot frees) rather
+        // than parking the session thread in `write_all` forever.
         use std::io::Write;
         let (writer, _reader) = UnixStream::pair().expect("socketpair");
         writer
@@ -1627,17 +1570,13 @@ mod tests {
         );
     }
 
-    /// A client that drains *slowly* is cut off at the reply's absolute deadline.
+    /// A client that drains *slowly* is cut off at the reply's absolute deadline: the OS re-arms
+    /// `SO_SNDTIMEO` per `write` syscall, so a peer draining just fast enough to keep each one
+    /// returning holds `write_all`, a session thread, and a `--max-sessions` slot indefinitely.
     ///
-    /// The case the test above does not reach. A peer that never reads is caught by a bare
-    /// `SO_SNDTIMEO` on its own, but the OS re-arms that sockopt per `write` syscall, so a peer
-    /// draining just fast enough to keep each one returning holds `write_all` for as long as it keeps
-    /// paying, and with it a session thread, a `--max-sessions` slot and its committed envelope.
-    ///
-    /// Measured on this dev box 2026-08-11: a peer reading 1 B per 150 ms does **not** sustain it (the
-    /// write dies in ~410 ms, the same as never reading, because a 1-byte read frees no whole `skb`);
-    /// somewhere between ~107 and ~213 KiB/s it does. The drip below sits well above that, so the
-    /// only thing that can end the write in time is the deadline.
+    /// Measured on this dev box 2026-08-11: a peer reading 1 B per 150 ms does **not** sustain it
+    /// (the write dies in ~410 ms, the same as never reading, because a 1-byte read frees no whole
+    /// `skb`); somewhere between ~107 and ~213 KiB/s it does. The drip below sits well above that.
     #[test]
     fn a_slow_draining_client_is_cut_off_at_the_absolute_reply_deadline() {
         use std::io::{Read as _, Write};
@@ -1677,10 +1616,8 @@ mod tests {
 
     #[test]
     fn a_vmm_error_kind_maps_onto_the_wire_kind() {
-        // The daemon computes the engine's pinned bucket and must hand it to the client intact:
-        // discarding it after deriving `fatal` would leave a client string-matching `message`.
-        // A drift here is a silently wrong client branch, not a
-        // compile error, so pin all three.
+        // Discarding the bucket after deriving `fatal` would leave a client string-matching
+        // `message`, and a drift here is a silently wrong client branch, so pin all three.
         assert_eq!(wire_kind(ErrorKind::Infra), FaultKind::Infra);
         assert_eq!(wire_kind(ErrorKind::Transport), FaultKind::Transport);
         assert_eq!(wire_kind(ErrorKind::Guest), FaultKind::Guest);

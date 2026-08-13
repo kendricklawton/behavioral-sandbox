@@ -1,4 +1,4 @@
-//! Host readiness check: does this machine have what the engine needs to boot and confine a sandbox?
+//! Host readiness: does this machine have what the engine needs to boot and confine a sandbox?
 //!
 //! - **One implementation, two entry points.** `bsx doctor` and `cargo xtask setup` both render
 //!   [`checks`], so they ask the host the same questions. Each appends the eBPF row itself, since
@@ -39,8 +39,8 @@ enum KernelVerdict {
 }
 
 /// The supported CPU architectures, `x86_64` only: aarch64 has no hardware or CI lane to test its
-/// privileged path on. The engine builds for no others, so this row names an unsupported
-/// cross-compile rather than letting it fail obscurely at first boot.
+/// privileged path on, so this row names an unsupported cross-compile rather than letting it fail
+/// obscurely at first boot.
 const SUPPORTED_ARCHES: [&str; 1] = ["x86_64"];
 
 /// The consequence line every firecracker-derived row shares when the binary is missing, so they
@@ -89,7 +89,8 @@ impl Check {
 
 /// Run the engine-runtime host checks against `config` (whose `firecracker`/`kernel`/`rootfs` paths
 /// are the resolved ones a boot would use). The eBPF-capability row is appended by the caller. Pure
-/// detection: reads `/proc`, `/sys`, `/dev`, `PATH`, and runs `firecracker --version`; boots nothing.
+/// detection: reads `/proc`, `/sys`, `/dev`, `PATH` and runs `firecracker --version`, booting
+/// nothing.
 #[must_use]
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
@@ -135,7 +136,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
              fresh login) or run as root; already in the group? check the device mode \
              (`ls -l /dev/kvm`)",
         ),
-        // The boot artifacts, hard: nothing boots without a kernel + rootfs at the configured paths.
+        // The boot artifacts, hard: no kernel or rootfs at the configured paths, no boot.
         Check::new(
             "guest kernel present (BSX_KERNEL)",
             config.kernel.is_file(),
@@ -205,9 +206,9 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "jailed VMs run WITHOUT cpu/memory caps: a fail-open DoS mitigation",
         ),
-        // Informational, never a warning: a MAC is the normal posture on most supported hosts. It
-        // earns a row because its denials surface as a bare EPERM naming no LSM, which reads as an
-        // engine bug; `matrix()` carries the "check the audit log first" pointer.
+        // Informational, never a warning: a MAC is the normal posture. It earns a row because its
+        // denials surface as a bare EPERM naming no LSM, which reads as an engine bug, and
+        // `matrix()` carries the "check the audit log first" pointer.
         Check::new(
             &match mac_posture(Path::new(SYS_LSM), Path::new(SYS_SELINUX_ENFORCE)) {
                 Some(active) => format!("mandatory access control: {active}"),
@@ -217,9 +218,8 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "",
         ),
-        // The jailer's chroot lives under the scratch dir: it mknods /dev/kvm there (inert on
-        // `nodev`) and execs its firecracker copy there (refused on `noexec`). Systemd hosts mount
-        // /tmp `nodev` by default, so this catches a boot that would fail deep in InstanceStart.
+        // Systemd hosts mount /tmp `nodev` by default, so this catches a jailed boot that would
+        // otherwise fail deep in InstanceStart.
         Check::new(
             "scratch dir is not nodev/noexec (the jailer's chroot /dev/kvm and VMM binary live there)",
             !scratch_mount_flags(&config.scratch_dir).is_some_and(MountFlags::blocks_jail),
@@ -239,8 +239,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "bulk `input_dir` and `cargo xtask build-rootfs` fail; per-frame files are unaffected",
         ),
-        // Host hardening, advisory: these side channels live in the layer beneath the engine, so
-        // doctor names the multi-tenant baseline (`docs/security-threat-model.md`) and never refuses.
+        // Host hardening, advisory: the multi-tenant baseline is `docs/security-threat-model.md`.
         Check::new(
             "CPU vulnerability mitigations in effect",
             exposed.is_empty(),
@@ -312,8 +311,8 @@ pub fn can_boot(checks: &[Check]) -> bool {
 }
 
 /// Whether a jailed run (the default) works on this host as invoked right now: real root *and* the
-/// `jailer` binary. Not a readiness check, since an unjailed run is still a valid boot; a caller uses
-/// it to suggest a first-run command that works here.
+/// `jailer` binary. Not a readiness check, since an unjailed run is still a valid boot: a caller
+/// uses it to suggest a first-run command that works here.
 #[must_use]
 pub fn jailed_run_available() -> bool {
     crate::sweep::own_euid() == Some(0) && command_on_path("jailer")
@@ -360,8 +359,7 @@ const PINNED_FIRECRACKER_SHA256: &[&str] = &[
 
 /// Where `bin` resolves: a path with a directory component is judged as that path, a bare name is
 /// searched along `PATH` in order. The one resolution behind both this and [`command_on_path`], so
-/// the row that reports a binary present and the row that hashes it cannot disagree about which
-/// file they mean.
+/// the row reporting a binary present and the row hashing it cannot mean different files.
 fn resolve_binary_path(bin: &str) -> Option<PathBuf> {
     let p = Path::new(bin);
     if p.components().count() > 1 {
@@ -554,8 +552,8 @@ fn ptrace_scope_restricts(content: &str) -> bool {
     content.trim().parse::<u32>().is_ok_and(|level| level >= 1)
 }
 
-/// Whether cgroup v2 `cpu`+`memory` are delegated at the root (a systemd host does this by default),
-/// so the jailer can cap a jailed VM's CPU/memory.
+/// Whether cgroup v2 `cpu`+`memory` are delegated at the root (a systemd host does this by
+/// default), so the jailer can cap a jailed VM's CPU/memory.
 fn cgroup_controllers_delegated() -> bool {
     std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")
         .map(|s| {
@@ -586,16 +584,16 @@ impl MountFlags {
 /// determined, so "unknown" reads as "assume fine" rather than a false alarm. Public for the guided
 /// install; a diagnostic helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
 pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
-    // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
-    // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
+    // The scratch dir may not exist yet, and its nearest existing ancestor is on the same
+    // filesystem the chroot will be created on, since mkdir does not cross a mount.
     let target = nearest_existing(dir)?.canonicalize().ok()?;
     let mountinfo = crate::mountinfo::self_text()?;
     mount_flags_in(&mountinfo, &target)
 }
 
-/// The [`MountFlags`] of the mount holding `target`, selected by [`crate::mountinfo::covering`], the
-/// same selection the jailed boot judges by. `None` only on malformed input, since an absolute path
-/// is always covered by `/`.
+/// The [`MountFlags`] of the mount holding `target`, selected by [`crate::mountinfo::covering`],
+/// the same selection the jailed boot judges by. `None` only on malformed input, since an absolute
+/// path is always covered by `/`.
 fn mount_flags_in(mountinfo: &str, target: &Path) -> Option<MountFlags> {
     let mount = crate::mountinfo::covering(mountinfo, target)?;
     Some(MountFlags {
@@ -619,11 +617,10 @@ fn nearest_existing(dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// `doctor` is the command a failed boot points the operator at, so it is the surface that
-    /// least affords a hang. `BSX_FIRECRACKER` may name a wrapper script, and a wrapper that
-    /// backgrounds anything inheriting its stdout keeps a pipe's write end open after the wrapper
-    /// itself is reaped: a read of that pipe blocks for as long as the background process lives,
-    /// which is why the probe hands the child a file.
+    /// `BSX_FIRECRACKER` may name a wrapper script, and a wrapper that backgrounds anything
+    /// inheriting its stdout keeps the pipe's write end open after the wrapper is reaped: a read
+    /// blocks for as long as the background process lives, which is why the probe hands the child
+    /// a file.
     #[test]
     fn a_firecracker_wrapper_that_backgrounds_a_child_does_not_stall_the_report() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -641,10 +638,9 @@ mod tests {
         std::fs::set_permissions(&fc, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         let fc = fc.to_str().expect("a utf-8 scratch path").to_string();
 
-        // The failure this guards against is a stall, and a stall is not a test failure unless the
-        // test bounds it: the probe runs on its own thread and this receive is the bound. Three
-        // seconds is well under the background child's thirty and well over the milliseconds a
-        // wrapper that exits actually takes.
+        // A stall is not a test failure unless the test bounds it: the probe runs on its own
+        // thread and this receive is the bound, three seconds being well under the background
+        // child's thirty and well over the milliseconds a wrapper that exits takes.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(firecracker_version(&fc));
@@ -801,8 +797,8 @@ mod tests {
         assert!(!command_on_path("definitely-not-a-real-binary-xyzzy"));
 
         // The other branch: a name carrying a directory component is judged as a path rather than
-        // searched for. Covered here because `command_on_path` reads its answer off
-        // `resolve_binary_path`, so the presence rows and the sha256 row judge one resolution.
+        // searched for, covered here because the presence rows and the sha256 row must resolve
+        // through the same function.
         let resolved = resolve_binary_path("sh").expect("sh resolves to a path");
         assert!(
             resolved.is_absolute(),
@@ -814,10 +810,8 @@ mod tests {
 
     #[test]
     fn a_missing_firecracker_defers_the_rows_that_would_judge_it() {
-        // With no binary at all, the version and sha256 rows have nothing to judge: warning
-        // "custom or unpinned binary; verify provenance" would be a verdict on a binary that does
-        // not exist. They must defer to the FAIL row instead of pretending to have checked
-        // something.
+        // With no binary at all, "custom or unpinned binary; verify provenance" would be a verdict
+        // on a binary that does not exist, so both rows must defer to the FAIL row.
         let cfg = BootConfig {
             firecracker: "definitely-not-a-real-binary-xyzzy".into(),
             ..Default::default()
@@ -858,9 +852,8 @@ mod tests {
             nodev: false,
             noexec: false,
         };
-        // A minimal mountinfo: `/` is a normal fs, `/tmp` is tmpfs mounted `nodev` (the modern
-        // systemd default), `/home` allows everything, and `/srv` is a hardened-baseline
-        // `nodev,noexec` while `/opt` is `noexec` alone (each flag must read independently).
+        // `/tmp` is tmpfs mounted `nodev` (the modern systemd default), and `/srv` carries both
+        // flags where `/opt` carries `noexec` alone, so each flag must read independently.
         let mi = "\
 21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
 30 21 0:21 / /tmp rw,nosuid,nodev shared:2 - tmpfs tmpfs rw
@@ -901,9 +894,9 @@ mod tests {
 
     #[test]
     fn an_overmount_reports_the_topmost_entrys_flags() {
-        // Two mounts at the same point: the visible filesystem is the topmost, the *last*
-        // mountinfo line, and its flags are what a file there feels. Reporting the buried line
-        // lets doctor bless a scratch base the jailed boot then refuses (or the reverse).
+        // With two mounts at one point the visible filesystem is the topmost, the *last* mountinfo
+        // line, and reporting the buried line lets doctor bless a scratch base the jailed boot
+        // then refuses (or the reverse).
         let restrictive_buried = "\
 21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
 30 21 0:24 / /scratch rw,nodev,noexec shared:2 - tmpfs a rw
@@ -955,8 +948,7 @@ mod tests {
             .find(|c| c.label.contains("jailer"))
             .expect("a jailer check");
         assert!(matches!(jailer.status, CheckStatus::Ok | CheckStatus::Warn));
-        // The supported-platform floor is present and **hard**, architecture and a
-        // kernel LTS are never degradations, so an off-platform host is refused, not warned.
+        // The supported-platform floor is **hard**: an off-platform host is refused, not warned.
         let arch = checks
             .iter()
             .find(|c| c.label.contains("architecture"))
@@ -966,12 +958,10 @@ mod tests {
             CheckStatus::Warn,
             "the platform floor is hard, never a degradation"
         );
-        // The kernel row states whichever signal qualified the host (a probed `cgroup.kill`, or
-        // the version fallback when there was no cgroup hierarchy to probe), so match either
-        // wording rather than pinning the one this host happens to produce.
-        // "host kernel", not "kernel": the latter also matches "guest kernel present", and a
-        // `find` that silently takes the wrong row is how a test passes on something other than
-        // its subject.
+        // The row states whichever signal qualified the host, so match either wording rather than
+        // pinning the one this host happens to produce. "host kernel", not "kernel": the latter
+        // also matches "guest kernel present", and a `find` that silently takes the wrong row is
+        // how a test passes on something other than its subject.
         let kernel = checks
             .iter()
             .find(|c| c.label.starts_with("host kernel"))
@@ -986,8 +976,8 @@ mod tests {
             CheckStatus::Warn,
             "the kernel floor is hard, never a degradation"
         );
-        // The host-hardening posture and Firecracker pin are present and advisory:
-        // whatever this host's state, those rows never read Fail.
+        // The host-hardening posture and the Firecracker pin are advisory: whatever this host's
+        // state, those rows never read Fail.
         for needle in ["CPU vulnerability", "SMT", "KSM", "binary sha256"] {
             let row = checks
                 .iter()
@@ -1033,9 +1023,8 @@ mod tests {
         for level in ["1\n", "2\n", "3\n"] {
             assert!(ptrace_scope_restricts(level), "{level:?} denies a sibling");
         }
-        // A kernel built without Yama has no file at all, which is scope-0 behavior. Unreadable and
-        // unparseable both have to warn: reading them as restricted would clear an advisory on the
-        // strength of a fact nobody established.
+        // A kernel built without Yama has no file at all, which is scope-0 behavior, so unreadable
+        // and unparseable must warn rather than clear an advisory on a fact nobody established.
         assert!(!ptrace_scope_restricts(""));
         assert!(!ptrace_scope_restricts("banana\n"));
         assert!(!ptrace_scope_restricts_at(Path::new(

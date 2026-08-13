@@ -46,11 +46,10 @@ const EXIT_OPERATIONAL: u8 = 2;
 /// version, a rename or removal bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
 
-/// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error (and
-/// its `kind()` buckets, pinned by embedders) is never minted for a fault that is the CLI's own: a bad
-/// flag combination, a refused artifact path, a local file write. `Engine` passes the driver's error
-/// through untouched; both print as `bsx: <reason>` and exit 2, so the split is for honesty rather
-/// than for different handling.
+/// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
+/// (and its `kind()` buckets, pinned by embedders) is never minted for a fault that is the CLI's
+/// own. Both print as `bsx: <reason>` and exit 2, so the split is for honesty rather than for
+/// handling.
 #[derive(Debug)]
 enum CliError {
     /// A CLI-layer fault (usage or local I/O), phrased for the operator.
@@ -117,13 +116,10 @@ impl From<policy::PolicyError> for CliError {
 #[derive(Parser)]
 #[command(
     name = "bsx",
-    // The crate version, which release tags mirror (`RELEASES.md`): `bsx --version` exists so an
-    // installed binary can be told from a stale one, which is a different question from "which
-    // release is this".
+    // The crate version, which release tags mirror (`RELEASES.md`): this tells an installed binary
+    // from a stale one, not which release it is.
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
-    // A first-run reader needs a command to type, not a feature list: `doctor` explains the host,
-    // then the two run forms differ only by whether this host can jail.
     after_help = "\
 Getting started:
   bsx doctor                          check what this host can do
@@ -143,16 +139,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    // Each variant's doc comment is user-facing help, so the first line is a one-line summary (what
-    // `bsx --help` lists) and the detail follows after a blank line (what `bsx <cmd> --help`
-    // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
+    // Each variant's doc comment is user-facing help: the first line is what `bsx --help` lists and
+    // the detail after a blank line is what `bsx <cmd> --help` shows. Rationale about the *code*
+    // belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
     ///
     /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default,
     /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
     /// `--trace`, `--record`, `--record-summary`, and `--watch`.
-    // Boxed because `run` carries far more flags than the other subcommands: behind an indirection
-    // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
+    // Boxed so the whole `Cmd` enum is not sized to `run`'s flag count
+    // (`clippy::large_enum_variant`).
     #[command(after_help = "\
 Examples:
   bsx run -- echo hello
@@ -353,16 +349,15 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging (info default, optional JSON) and reads no `.bsx.toml`
-    // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
-    // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
+    // The daemon owns its own logging and reads no `.bsx.toml` (its config is flags + environment),
+    // so `serve` dispatches *before* the project-file discovery and tracing init below. It still
     // receives the shared global `--log` filter.
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
     // The `.bsx.toml` layers are discovered once: the user's own file, and the nearest one above
-    // the cwd. A mistyped key, or a project-local file reaching for a user-only one, is a loud
-    // failure here, before any boot (a config the operator got wrong must not silently no-op).
+    // the cwd. A mistyped key, or a project-local file reaching for a user-only one, fails loudly
+    // here, before any boot, rather than silently not applying.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let sources = match config::Sources::discover(&cwd) {
         Ok(s) => s,
@@ -382,9 +377,8 @@ fn main() -> ExitCode {
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
             let _ = writeln!(std::io::stderr(), "bsx: {e}");
-            // An infra-bucket failure means the host couldn't stand the microVM up, so point at the
-            // tool that explains the host. Keyed on the `kind()` bucket rather than on variants, so
-            // the hint can't drift as `VmmError` (which is `#[non_exhaustive]`) grows.
+            // Keyed on the `kind()` bucket rather than on variants, so the hint cannot drift as
+            // `VmmError` (which is `#[non_exhaustive]`) grows.
             if matches!(&e, CliError::Engine(err) if err.kind() == ErrorKind::Infra) {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -408,9 +402,8 @@ fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
         }
         Cmd::Doctor(args) => Ok(doctor::report(&base_config(sources), &args, sources)),
         Cmd::Verify(args) => verify::run(args, sources),
-        // `serve` is dispatched in `main` before this point (it skips the project-file/tracing
-        // setup `run` runs under), so this arm is never reached; a typed error rather than a
-        // panic keeps the no-panic discipline even for the impossible case.
+        // `serve` is dispatched in `main` before this point, so this arm is never reached; a typed
+        // error rather than a panic keeps the no-panic discipline for the impossible case.
         Cmd::Serve(_) => Err(CliError::Cli(
             "internal: serve is dispatched in main() before run()".into(),
         )),
@@ -419,10 +412,10 @@ fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
 
 /// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `bsx` left: a
 /// `Ctrl-C`/SIGKILL skips `Drop`, so the lifetime sentinel reaps the VM process but the scratch dir
-/// and netns are out of its scope. Run once at startup by every path that boots a VM, the CLI's
-/// subcommands and the daemon alike, which is why it takes `metrics` (`None` off the daemon) rather
-/// than living beside either caller. Best-effort and conservative: [`sweep_orphans`] only reclaims
-/// this euid's dead-pid dirs, so it never touches a concurrent run's live sandbox.
+/// and netns are out of its scope. Run at startup by every path that boots a VM, the CLI's
+/// subcommands and the daemon alike, which is why it takes `metrics` (`None` off the daemon).
+/// [`sweep_orphans`] reclaims only this euid's dead-pid dirs, never a concurrent run's live
+/// sandbox.
 fn sweep_vm_residue(scratch: &std::path::Path, metrics: Option<&metrics::Metrics>) {
     match sweep_orphans(scratch) {
         Ok(r) => {
@@ -437,8 +430,8 @@ fn sweep_vm_residue(scratch: &std::path::Path, metrics: Option<&metrics::Metrics
                 );
             }
         }
-        // The scratch base is `/tmp` unless an operator named one, so an unreadable base is a real
-        // condition (a wrong `BSX_SCRATCH_DIR`, or permissions) and leaves residue unreclaimed.
+        // An unreadable base (a wrong `BSX_SCRATCH_DIR`, or permissions) leaves residue
+        // unreclaimed.
         Err(e) => {
             tracing::warn!(error = %e, "startup orphan sweep failed; residue is left in place")
         }
@@ -446,33 +439,30 @@ fn sweep_vm_residue(scratch: &std::path::Path, metrics: Option<&metrics::Metrics
 }
 
 /// The env+file-layered base config, `env > project file > user file > defaults`, over which each
-/// subcommand applies its flags. Composes a single lookup that prefers the real environment, then
-/// each `.bsx.toml` layer, then (inside [`BootConfig::from_env_with`]) the pinned default, so the
-/// lower layers stay one vocabulary keyed by the `BSX_*` names.
+/// subcommand applies its flags. One lookup, so the lower layers stay one vocabulary keyed by the
+/// `BSX_*` names.
 fn base_config(sources: &config::Sources) -> BootConfig {
     BootConfig::from_env_with(sources.boot_lookup())
 }
 
-/// Fold the shared posture into `config`: the launch shape these entry points own (the shared
-/// read-only base) plus the flag layer over what env/file already set. `--require-limits` only
-/// *strengthens* (an env/file `true` survives an absent flag, never forced `false`), and
-/// `--jail-uid`/`--jail-gid` overlay the folded ids. Shared by `run`, `shell`, and `serve` so the
-/// three cannot drift on which layer wins. An unjailed boot drops the whole `Jail` later, so
-/// setting ids for one is inert rather than wrong, and the require_limits/unjailed contradiction is
-/// owned by the engine (`LimitsUnavailable`, before any VMM); `serve` alone pre-checks it, because
-/// a daemon must fail at startup rather than refuse every session.
+/// Fold the shared posture into `config`: the launch shape these entry points own plus the flag
+/// layer over what env/file already set. `--require-limits` only *strengthens* (an env/file `true`
+/// survives an absent flag, never forced `false`), and `--jail-uid`/`--jail-gid` overlay the folded
+/// ids. Shared by `run`, `shell`, and `serve` so the three cannot drift on which layer wins. The
+/// require_limits/unjailed contradiction is the engine's (`LimitsUnavailable`, before any VMM);
+/// `serve` alone pre-checks it, because a daemon must fail at startup rather than refuse every
+/// session.
 fn apply_posture(
     config: &mut BootConfig,
     require_limits: bool,
     jail_uid: Option<u32>,
     jail_gid: Option<u32>,
 ) {
-    // The CLI and the daemon boot the agent image, so they boot it as one shared read-only base
-    // under a per-run tmpfs overlay instead of copying the base per VM (the copy costs 48 ms/boot
-    // of the 352 ms p50, exec-01, 2026-08-12). Set here, not in `BootConfig::default()`: the
-    // engine default must boot any rootfs, and the overlay path hands PID 1 to
-    // `bsx_channel::GUEST_OVERLAY_INIT`, which panics an image that lacks it; these entry points
-    // know which image they ship. There is deliberately no flag, env, or file key for it.
+    // The CLI and the daemon boot the agent image as one shared read-only base under a per-run
+    // tmpfs overlay rather than copying the base per VM (the copy costs 48 ms/boot of the 352 ms
+    // p50, exec-01, 2026-08-12). Set here, not in `BootConfig::default()`: the engine default must
+    // boot any rootfs, and the overlay path hands PID 1 to `bsx_channel::GUEST_OVERLAY_INIT`, which
+    // panics an image that lacks it. There is deliberately no flag, env, or file key for it.
     config.read_only_root = true;
     if require_limits {
         config.require_limits = true;
@@ -490,14 +480,14 @@ fn apply_posture(
 /// sandbox is still alive, close, then report. The record has three faces: the `--trace` human trail,
 /// the `--record` full JSON, and the `--record-summary` model-legible projection.
 fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
-    // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
-    // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
-    // ties these log lines to the audit record and the host's own process table.
+    // The run's root span: boot, exec, and the audit-record events nest under it. `vmm_pid` is
+    // recorded once the sandbox is up, the id tying these lines to the audit record and the host's
+    // own process table.
     let span = tracing::info_span!("run", vmm_pid = tracing::field::Empty);
     let _span = span.enter();
-    // Resolve the caller's knobs against the operator's policy. For the CLI this is a
-    // guardrail rather than a boundary (a local caller owns the config file, and `docs/security.md`
-    // trusts them), but it keeps a host's defaults and ceilings consistent across both entry points.
+    // For the CLI this is a guardrail rather than a boundary (a local caller owns the config file,
+    // and `docs/security.md` trusts them), but it keeps defaults and ceilings consistent across
+    // both entry points.
     let host_policy = config::policy_of(sources);
     let limits = host_policy.resolve(&Requested {
         vcpus: args.vcpus,
@@ -507,17 +497,16 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     })?;
     host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
     host_policy.check_net(args.net)?;
-    // The effective signed-record destination: an explicit `--record` wins; otherwise the
-    // operator's `records_dir` records every run there by default (which is also how a
-    // `require_record` host is satisfied without callers remembering a flag).
+    // The effective signed-record destination: an explicit `--record` wins, else the operator's
+    // `records_dir` records every run there, which is how a `require_record` host is satisfied
+    // without callers remembering a flag.
     let record_path: Option<PathBuf> = args
         .record
         .clone()
         .or_else(|| host_policy.records_dir.as_deref().map(default_record_path));
-    // `--record-summary` does not count: the summary is an unsigned *projection* of the record
-    // (its own flag doc), so a summary-only run leaves nothing verifiable, exactly what
-    // `require_record` exists to refuse ("refuses any run that would leave no audit record",
-    // docs/cli-config.md). `require_record_refuses_a_run_that_would_leave_no_audit_record` pins it.
+    // `--record-summary` does not count: the summary is an unsigned *projection*, so a summary-only
+    // run leaves nothing verifiable, which is what `require_record` refuses
+    // (`require_record_refuses_a_run_that_would_leave_no_audit_record` pins it).
     host_policy.check_record(record_path.is_some())?;
 
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
@@ -528,10 +517,9 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 .to_string(),
         ));
     }
-    // Build the egress policy from `--allow` (clap already required `--net`). Enforcement needs the
-    // eBPF probes, so refuse up front on a host that plainly can't load them, before paying a boot,
-    // and never degrading to an unenforced run (the tap-attach cap check `attach` does catches the
-    // residual CAP_NET_ADMIN case that this cheap pre-flight can't).
+    // Enforcement needs the eBPF probes, so a host that plainly cannot load them is refused up
+    // front rather than degraded to an unenforced run. `attach`'s tap cap check catches the
+    // residual CAP_NET_ADMIN case this cheap pre-flight cannot.
     let egress = if args.allow.is_empty() {
         None
     } else {
@@ -547,14 +535,14 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
         host_policy.check_egress(pol)?;
     }
 
-    // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
-    // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
+    // Read the local `--put` files *before* the boot: a bad path is a cheap stat failure, not worth
+    // a full boot and teardown.
     let files_in = read_put_files(&args.put)?;
 
-    // Resolve the signing key **before** booting: the signing path rejects a group- or world-readable key
-    // file, and learning that after the guest ran would throw the record away with the work already done.
-    // Last of the pre-flight checks, because it is the only one that *creates* something, which a run a
-    // cheaper check rejects should not do. Loading is idempotent.
+    // Resolve the signing key **before** booting: the signing path rejects a group- or
+    // world-readable key file, and learning that after the guest ran would throw the record away
+    // with the work done. Last of the pre-flight checks, because it is the only one that *creates*
+    // something. Loading is idempotent.
     if record_path.is_some() {
         let key_path = config::signing_key_path(sources);
         bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
@@ -566,8 +554,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     }
     let mut config = base_config(sources).with_limits(limits);
     config.enable_network = args.net;
-    // Flags win over the `BSX_GATEWAY`/`BSX_RESOLVER` + file layers `base_config` already resolved,
-    // so a run can override the host's uplink without editing its config.
+    // Flags win over the `BSX_GATEWAY`/`BSX_RESOLVER` + file layers `base_config` already resolved.
     if let Some(gateway) = args.gateway {
         let mut egress = bsx_engine::GuestEgress::via(gateway);
         if let Some(resolver) = args.resolver {
@@ -587,8 +574,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     let mut sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
-        // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
-        // it panics on a closed pipe (`bsx run … | head -0`).
+        // Not `println!`: it panics on a closed pipe (`bsx run … | head -0`).
         let _ = writeln!(
             std::io::stdout(),
             "booted microVM to userspace in {} ms",
@@ -600,11 +586,9 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
             .map_err(CliError::from);
     }
 
-    // The audit surface, when a flag asked for it (a plain `bsx run` pays nothing): load the shared
-    // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
-    // `bsx-probes-loader` documents, composed here in the caller. `--allow` enforces (arming the tap before
-    // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
-    // enforcement is a typed refusal (`attach`).
+    // The audit surface, only when a flag asked for it (a plain `bsx run` pays nothing). `--allow`
+    // pulls the bundle in without an observation flag, since it arms the tap before it goes live.
+    // Observation is fail-open; enforcement is a typed refusal (`attach`).
     let observing = args.trace
         || record_path.is_some()
         || args.record_summary.is_some()
@@ -621,15 +605,14 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     let vmm_pid = sandbox.vmm_pid();
     let stdin = piped_stdin()?;
     let (sandbox, result) = if args.watch {
-        // Exec on a worker thread that owns the sandbox; the main thread runs the live view off
-        // non-destructive probe snapshots until the worker flags completion.
+        // The worker owns the sandbox; the main thread draws the live view off non-destructive
+        // probe snapshots until the worker flags completion.
         let done = Arc::new(AtomicBool::new(false));
         let worker_done = Arc::clone(&done);
         let (argv, env, get) = (args.argv.clone(), args.env.clone(), args.get.clone());
         let worker = std::thread::spawn(move || {
-            // Drop-based, not a plain store after the call: a panicking exec must still flag
-            // completion on unwind, or the view shows "running" forever and only `q` closes it
-            // (the panic itself still surfaces through `worker.join()` below).
+            // Drop-based, not a store after the call: a panicking exec must still flag completion
+            // on unwind, or the view shows "running" forever and only `q` closes it.
             struct DoneOnExit(Arc<AtomicBool>);
             impl Drop for DoneOnExit {
                 fn drop(&mut self) {
@@ -646,8 +629,8 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 boot: boot_latency,
                 command: args.argv.join(" "),
             };
-            // A broken live view must not fail a working run: log it and let the exec finish
-            // headless. (The terminal is restored by the view's own guard either way.)
+            // A broken live view must not fail a working run; the view's own guard restores the
+            // terminal either way.
             if let Err(e) = watch::live(p, &meta, &done) {
                 tracing::warn!(error = %e, "live view failed; run continues headless");
             }
@@ -672,19 +655,16 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     // must not lose the record for exactly the misbehaving-guest run whose audit you want.
     let record = probes.map(|p| p.collect(Timing::new(boot_latency, result.metrics.wall)));
     write_artifacts(&result.files, &args.get)?;
-    // Teardown is best-effort: a shutdown error must not mask the run's real result (its exit code,
-    // streams, and the record just collected). Log and continue, as `shell`'s teardown already does.
+    // Teardown is best-effort: a shutdown error must not mask the run's real result.
     if let Err(e) = sandbox.shutdown() {
         tracing::warn!(error = %e, "sandbox shutdown reported an error after the run");
     }
 
     if args.json {
-        // The structured run result, one JSON object on stdout, the machine-readable form of the
-        // pipe-clean convention (stderr already carries the logs). Byte streams are lossy UTF-8
-        // here; exact bytes ride the artifact files, which are on disk by now.
+        // Byte streams are lossy UTF-8 here; exact bytes ride the artifact files, on disk by now.
         let structured = serde_json::json!({
-            // Versions the run-result contract (distinct from the audit record's own `schema`).
-            // Additive changes keep this integer; a rename/removal bumps it, see docs/cli.md.
+            // The run-result contract, distinct from the audit record's own `schema`. Additive
+            // changes keep this integer; a rename/removal bumps it (docs/cli.md).
             "schema": RUN_RESULT_SCHEMA,
             "exit_code": result.exit_code,
             "stdout": String::from_utf8_lossy(&result.stdout),
@@ -698,8 +678,8 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 "boot_ms": session::ms(boot_latency),
                 "exec_wall_ms": session::ms(result.metrics.wall),
             },
-            // The effective limits this run actually booted with, the flag values folded onto the
-            // defaults, echoed back so a `--json` caller sees what it got, not just what it asked.
+            // The limits this run booted with, echoed back so a `--json` caller sees what it got
+            // and not just what it asked.
             "limits": {
                 "vcpus": limits.vcpus.get(),
                 "mem_mib": limits.mem_mib.get(),
@@ -707,33 +687,30 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 "output_cap_bytes": limits.output_cap,
             },
         });
-        // The structured result is the machine surface a `--json` caller consumes, so a failed write
-        // (a full disk) is a real failure, not to be swallowed like the guest-output relay below (the
-        // `--record` file writes are treated the same). A downstream-closed pipe is still not our
-        // fault, so BrokenPipe is the one exception.
+        // The machine surface a `--json` caller consumes, so a failed write (a full disk) is a real
+        // failure rather than swallowed like the guest-output relay below. A downstream-closed pipe
+        // is not our fault, so BrokenPipe is the one exception.
         if let Err(e) = writeln!(std::io::stdout(), "{structured}")
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
             return Err(VmmError::Artifact(format!("write --json result to stdout: {e}")).into());
         }
     } else {
-        // Relay the guest's output on our own stdout/stderr, the whole point of `exec`. Ignore
-        // write errors (a closed pipe is not our failure); the guest exit code is what we return.
+        // Relay the guest's output. Write errors are ignored (a closed pipe is not our failure);
+        // the guest exit code is what this returns.
         let _ = std::io::stdout().write_all(&result.stdout);
         let _ = std::io::stderr().write_all(&result.stderr);
     }
     if let Some(record) = record {
         if args.trace {
-            // The human-readable audit trail, after the guest's own output: a requested run
-            // result, so it belongs on stdout like the rest (never mixed with `--json`, clap
-            // makes the two conflict; machine consumers take `--record`).
+            // A requested run result, so it goes on stdout after the guest's own output. Clap makes
+            // this conflict with `--json`; machine consumers take `--record`.
             let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
         }
         if let Some(path) = &record_path {
-            // The machine surface, one line, byte-stable: the deterministic record wrapped in an
-            // `ed25519` signature envelope, so a consumer detects post-hoc alteration
-            // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
-            // the config-resolved path.
+            // One byte-stable line: the deterministic record inside an `ed25519` signature
+            // envelope, so a consumer detects post-hoc alteration off-host. The signing key is
+            // host-side (the guest never sees it), loaded or generated at the config-resolved path.
             let source = if args.record.is_some() {
                 "--record"
             } else {
@@ -755,7 +732,6 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
             tracing::info!(path = %path.display(), key_id = %key.key_id(), "wrote signed audit record");
         }
         if let Some(path) = &args.record_summary {
-            // The model-legible projection, a compact, byte-stable view of the same record.
             std::fs::write(path, record.to_summary_json() + "\n").map_err(|e| {
                 VmmError::Artifact(format!("--record-summary {}: {e}", path.display()))
             })?;
@@ -765,10 +741,10 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
 
-/// `bsx shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
-/// (every exec shares the guest's session working directory, so files persist across lines;
-/// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
-/// command output to stdout, so a piped script of lines stays clean.
+/// `bsx shell`: one sandbox held open, one `sh -c` exec per input line, sharing the guest's session
+/// working directory so files persist across lines (process state like `cd` and shell variables
+/// does not). Prompt and diagnostics on stderr, command output on stdout, so a piped script stays
+/// clean.
 fn shell(args: ShellArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
     let limits = shell_policy(&args, &config::policy_of(sources))?;
     let mut config = base_config(sources).with_limits(limits);
@@ -815,9 +791,8 @@ fn shell(args: ShellArgs, sources: &config::Sources) -> Result<ExitCode, CliErro
                     let _ = writeln!(err_out, "[exit {}]", result.exit_code);
                 }
             }
-            // A guest fault (a timeout, a flooded cap, an unrunnable command) belongs to that one
-            // line; the session survives it. Infra/transport means the VM itself is gone, end the
-            // session with the typed error.
+            // A guest fault belongs to that one line and the session survives it; infra/transport
+            // means the VM is gone, so end the session with the typed error.
             Err(e) if e.kind() == ErrorKind::Guest => {
                 let _ = writeln!(err_out, "bsx: {e}");
             }
@@ -875,9 +850,8 @@ fn default_record_path(dir: &Path) -> PathBuf {
 
 /// Resolve `bsx shell`'s limits and posture against the operator policy: the same boundary
 /// `run_command` enforces, so switching subcommand cannot bypass a ceiling, `require_jail`, or
-/// `require_record`. Operator *defaults* apply too: an unset `--vcpus`/`--mem` takes the host's
-/// default profile, not the bare engine default. Shell has no `--net`, so the net/egress checks
-/// have nothing to check.
+/// `require_record`. Operator *defaults* apply too, so an unset `--vcpus`/`--mem` takes the host's
+/// profile. Shell has no `--net`, so the net/egress checks have nothing to check.
 fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliError> {
     let limits = host_policy.resolve(&Requested {
         vcpus: args.vcpus,
@@ -886,8 +860,7 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
         output_cap: None,
     })?;
     host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
-    // A shell session writes no audit record, so a record-requiring host refuses it outright
-    // rather than hosting an unauditable execution path.
+    // A shell session writes no audit record, so a record-requiring host refuses it outright.
     host_policy
         .check_record(false)
         .map_err(|e| CliError::Cli(format!("{e} (an interactive shell writes no audit record)")))?;
@@ -909,11 +882,10 @@ fn parse_jail_id(s: &str) -> Result<u32, String> {
     }
 }
 
-/// Parse `--vcpus` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing straight into the non-zero type
-/// rejects `0` (and any non-number / u8 overflow); [`vcpus_supported`] rejects the rest of what the
-/// pinned VMM won't boot, an over-32 count or an odd one above 1. Either way it is a **typed CLI
-/// error, never a silent clamp**: the value is refused at parse, not narrowed behind the caller's
-/// back or surfaced as a late boot error.
+/// Parse `--vcpus` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing straight into the non-zero
+/// type rejects `0` (and any non-number / u8 overflow); [`vcpus_supported`] rejects the rest of
+/// what the pinned VMM won't boot, an over-32 count or an odd one above 1. Either way a **typed CLI
+/// error, never a silent clamp**.
 fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     let vcpus: NonZeroU8 = s
         .parse()
@@ -924,17 +896,15 @@ fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     Ok(vcpus)
 }
 
-/// Parse `--mem`: guest memory in whole MiB into the [`Limits::mem_mib`] [`NonZeroU32`]. Parsing
-/// straight into the non-zero type rejects `0` (and any non-number / overflow) as a typed CLI error,
-/// never a silent clamp.
+/// Parse `--mem`: guest memory in whole MiB into the [`Limits::mem_mib`] [`NonZeroU32`], where the
+/// non-zero type rejects `0` (and any non-number / overflow) as a typed CLI error, never a clamp.
 fn parse_mem_mib(s: &str) -> Result<NonZeroU32, String> {
     s.parse()
         .map_err(|_| format!("expected guest memory in whole MiB (at least 1), got {s:?}"))
 }
 
-/// Parse `--output-cap`: the captured-output budget in whole bytes. `0` is refused for the reason
-/// every sibling knob refuses it: there is no "no limit" spelling here, so a zero read as one would
-/// be the opposite of what it says, and read literally it is a run that can capture nothing.
+/// Parse `--output-cap`: the captured-output budget in whole bytes. `0` is refused because there is
+/// no "no limit" spelling here, so reading it as one would invert the flag.
 fn parse_output_cap(s: &str) -> Result<usize, String> {
     match s.parse() {
         Ok(0) | Err(_) => Err(format!(
@@ -972,13 +942,11 @@ fn read_put_files(puts: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, VmmError> 
         .collect()
 }
 
-/// Write the guest's returned artifacts under the current directory, refusing anything the run
-/// didn't explicitly ask for. Deny-by-default: the operator's `--get` set is
-/// the *only* allowance, so a returned path that wasn't requested (a planted `.git/config`,
-/// `Makefile`) is refused, never written. The exec API already guarantees each path is relative and
-/// non-climbing (`run_exec`); here we additionally resolve every component without following a
-/// symlink, so a pre-existing symlinked directory in the cwd (`out -> /etc`) can't turn a
-/// `Normal`-component path into an escape the string check alone is blind to.
+/// Write the guest's returned artifacts under the current directory. Deny-by-default: the
+/// operator's `--get` set is the *only* allowance, so a returned path that was not requested (a
+/// planted `.git/config`, `Makefile`) is refused, never written. `run_exec` already guarantees each
+/// path is relative and non-climbing; every component is additionally resolved without following a
+/// symlink, so a pre-existing symlinked directory in the cwd (`out -> /etc`) is not an escape.
 fn write_artifacts(files: &[Artifact], requested: &[String]) -> Result<(), CliError> {
     let cwd = std::env::current_dir()
         .map_err(|e| CliError::Cli(format!("resolve current directory: {e}")))?;
@@ -993,9 +961,8 @@ fn write_artifacts_in(
     requested: &[String],
 ) -> Result<(), CliError> {
     for Artifact { path, data, .. } in files {
-        // Deny-by-default: the guest doesn't get to choose what lands on the host, only a name the
-        // operator requested with `--get` is eligible. An honest guest only ever returns requested
-        // paths (it echoes the request's artifact list), so a mismatch is a misbehaving guest.
+        // An honest guest returns only requested paths (it echoes the request's artifact list), so
+        // a mismatch is a misbehaving guest.
         if !requested.iter().any(|r| r == path) {
             return Err(CliError::Cli(format!(
                 "refusing artifact {path:?}: not requested with --get"
@@ -1022,9 +989,8 @@ fn write_artifacts_in(
 
 /// Resolve `rel` (already checked relative and non-climbing) against `base` into an absolute
 /// destination, creating intermediate directories but **refusing to follow a symlink** at any
-/// component. `symlink_metadata` is `lstat` (no traversal), so a pre-existing symlinked directory,
-/// or a symlinked final name, is rejected rather than written through, closing the
-/// `out -> /etc` escape that a string-only check misses.
+/// component. `symlink_metadata` is `lstat` (no traversal), so a symlinked directory or final name
+/// is rejected rather than written through, closing the `out -> /etc` escape a string check misses.
 fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
     let names: Vec<_> = rel
         .components()
@@ -1043,8 +1009,8 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
                     "refusing to write artifact through the symlink {cur:?}"
                 )));
             }
-            // The final component may already be a regular file (a legitimate overwrite), but not a
-            // directory we'd clobber; an intermediate component must be a real directory to descend.
+            // The final component may already be a regular file (a legitimate overwrite) but not a
+            // directory; an intermediate component must be a real directory to descend.
             Ok(m) if last && m.is_dir() => {
                 return Err(CliError::Cli(format!(
                     "refusing to write artifact over the directory {cur:?}"
@@ -1070,21 +1036,20 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
 }
 
 /// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `bsx run`
-/// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
-/// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless, reading it all first would let `cat 10GB.bin | bsx run …` balloon host RAM before
-/// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
-/// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
+/// shouldn't block waiting for EOF). Bounded at **one frame + 1 byte**: the exec request is a
+/// single frame, so anything past the channel's cap is a typed `PayloadTooLarge` regardless, and
+/// reading it all first would let `cat 10GB.bin | bsx run …` balloon host RAM before the same
+/// error. The `+ 1` overshoots the cap so the oversize case is caught rather than truncated to
+/// exactly the cap.
 fn piped_stdin() -> Result<Vec<u8>, CliError> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return Ok(Vec::new());
     }
     let mut buf = Vec::new();
-    // A failed read is a hard error, never a shrug: proceeding with whatever arrived would run
-    // the guest on silently truncated input and sign a record that calls it complete. The one
-    // exception is a *closed* fd 0 (`bsx run … 0<&-`), which is not a truncated read but no
-    // stdin at all, the same thing a terminal means here.
+    // A failed read is a hard error: proceeding with whatever arrived would run the guest on
+    // silently truncated input and sign a record calling it complete. The one exception is a
+    // *closed* fd 0 (`bsx run … 0<&-`), which is no stdin at all rather than a truncated read.
     /// `EBADF`. Named because `io::ErrorKind` has no stable variant for it (it arrives as
     /// `Uncategorized`), so the raw errno is the only way to tell "fd 0 is closed" from a real
     /// read failure.
@@ -1102,13 +1067,13 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
     Ok(buf)
 }
 
-/// Installs the stderr subscriber for an **already-resolved** `filter`, optionally as one JSON object
-/// per line. The CLI and the daemon share this; each resolves its own precedence and default first,
+/// Installs the stderr subscriber for an **already-resolved** `filter`, optionally as one JSON
+/// object per line. The CLI and the daemon share this and each resolves its own precedence first,
 /// because they read different layers (`bsx serve` dispatches before project-file discovery).
 ///
-/// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives a
-/// mistyped key. What this cannot police is `EnvFilter`'s own grammar, where a bare unknown ident parses as
-/// a *target* name, so only what the parser itself rejects is refused. `try_init` absorbs a double-init.
+/// A filter `tracing` cannot parse is a **typed refusal**. What this cannot police is `EnvFilter`'s
+/// own grammar, where a bare unknown ident parses as a *target* name, so only what the parser
+/// itself rejects is refused. `try_init` absorbs a double-init.
 ///
 /// # Errors
 /// A message naming the unparseable filter and the two spellings that would work.
@@ -1142,9 +1107,9 @@ mod tests {
     use bsx_test_support::ScratchDir;
     use clap::CommandFactory;
 
-    /// The CLI and the daemon reclaim crashed-run residue through the same sweep, and the only
-    /// thing that differs is whether a metrics registry is there to charge: `None` off the daemon.
-    /// A registry that stops being charged is a gauge that reads zero on a host that is leaking.
+    /// The CLI and the daemon reclaim crashed-run residue through the same sweep, differing only in
+    /// whether a metrics registry is there to charge. A registry that stops being charged is a
+    /// gauge reading zero on a host that is leaking.
     #[test]
     fn the_daemon_sweep_charges_its_registry_and_the_cli_sweep_needs_none() {
         let scratch = ScratchDir::created("sweep-seam");
@@ -1167,9 +1132,8 @@ mod tests {
         assert!(!dead(1).exists(), "no registry must not mean no sweep");
     }
 
-    /// The `--vcpus` refusal is the shared rule, named for the flag. Anchored to the helper rather
-    /// than to a copy of the sentence, so the wire's and the config file's refusals cannot drift
-    /// away from this one.
+    /// The `--vcpus` refusal is the shared rule, anchored to the helper rather than a copy of the
+    /// sentence, so the wire's and the config file's refusals cannot drift away from it.
     #[test]
     fn the_flag_refuses_an_unbootable_count_with_the_shared_rule() {
         assert_eq!(
@@ -1180,14 +1144,12 @@ mod tests {
     }
 
     /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
-    /// real terminal width. Clap wraps nothing unless the `wrap_help` feature is on, and it was not:
-    /// `bsx run -h` printed 19 lines past 80 columns, running off the edge of any normal terminal.
-    /// Rendering every subcommand narrow is what catches that, because the overflow is invisible at
-    /// the width a developer happens to be using.
+    /// real terminal width, and clap wraps nothing unless the `wrap_help` feature is on. Rendering
+    /// every subcommand narrow is what catches an overflow invisible at a developer's own width.
     #[test]
     fn help_wraps_to_the_terminal_instead_of_running_off_it() {
-        // Not narrower than 80: clap cannot wrap below its own option column, so a 60
-        // would fail on `serve`'s long flag names for a reason no terminal ever presents.
+        // Not narrower than 80: clap cannot wrap below its own option column, so 60 would fail on
+        // `serve`'s long flag names for a reason no terminal ever presents.
         for width in [80usize, 100, 120] {
             let mut root = Cli::command();
             // Every subcommand, not just the root: the long help lives on `run`'s and `serve`'s
@@ -1252,8 +1214,7 @@ mod tests {
         assert!(parse_vcpus("").is_err());
         assert!(parse_vcpus("two").is_err());
         // The parity half of Firecracker's domain: an odd count above 1 is refused here rather than
-        // reaching `PUT /machine-config` and failing after a VMM has been spawned. 1 is the
-        // deliberate exception, and it is the default.
+        // reaching `PUT /machine-config` after a VMM has been spawned. 1 is the exception.
         for odd in ["3", "5", "31"] {
             assert!(
                 parse_vcpus(odd).is_err(),
@@ -1271,8 +1232,8 @@ mod tests {
     #[test]
     fn a_jail_id_flag_refuses_root_and_wins_over_the_env_and_file_layer() {
         assert_eq!(parse_jail_id("20001"), Ok(20001));
-        // Root is the id the jail exists to leave, so a flag naming it is a typed refusal here
-        // rather than a boot that jails into a chroot and drops nothing.
+        // Root is the id the jail exists to leave, so a flag naming it is a typed refusal rather
+        // than a boot that jails into a chroot and drops nothing.
         let err = parse_jail_id("0").expect_err("0 is root");
         assert!(err.contains("root"), "the refusal must say why: {err}");
         assert!(parse_jail_id("-1").is_err());
@@ -1299,9 +1260,8 @@ mod tests {
 
     #[test]
     fn the_shared_posture_boots_the_read_only_base() {
-        // `run`, `shell`, and `serve` all fold their config through `apply_posture`, so this is
-        // the one place the launch shape turns the shared base on; a per-command set would let the
-        // three drift apart.
+        // `run`, `shell`, and `serve` fold their config through `apply_posture`, so this is the one
+        // place the launch shape turns the shared base on; a per-command set could drift.
         let mut config = bsx_engine::BootConfig::from_env_with(|_| None);
         assert!(
             !config.read_only_root,
@@ -1401,9 +1361,8 @@ mod tests {
     fn an_unparseable_log_filter_names_the_filter_and_both_spellings_that_work() {
         // The CLI and the daemon share this refusal, so the advice cannot differ between them.
         // `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` drives both entry points but
-        // asserts only that the filter is named; the hint is what an operator acts on, so pin it
-        // where it is now written once. The error path installs no global subscriber, so this is
-        // safe to call from a test.
+        // asserts only that the filter is named; the hint is what an operator acts on. The error
+        // path installs no global subscriber, so this is safe to call from a test.
         let err = super::init_tracing("bsx=notalevel", false).expect_err("unparseable directive");
         assert!(err.contains("bsx=notalevel"), "names the filter: {err}");
         assert!(
@@ -1418,9 +1377,9 @@ mod tests {
 
     #[test]
     fn an_allow_refusal_quotes_the_whole_rule_not_the_address_slice() {
-        // `--allow` shares the config file's CIDR parser, which is handed only the address slice.
-        // The locus travels separately for this reason: quoting the slice would send the reader
-        // looking for `"1.1.1.1/33"` in a line where they wrote the port and protocol too.
+        // `--allow` shares the config file's CIDR parser, which is handed only the address slice,
+        // so the locus travels separately: quoting the slice would send the reader looking for
+        // `"1.1.1.1/33"` in a line where they wrote the port and protocol too.
         for rule in ["1.1.1.1/33:443/tcp", "999.1.1.1:80", "1.1.1.1/x:80/udp"] {
             let err = parse_allow(rule).expect_err("malformed");
             assert!(
@@ -1472,8 +1431,8 @@ mod tests {
 
     #[test]
     fn shell_enforces_the_same_operator_policy_as_run() {
-        // The bypass this closes: `require_jail`/ceilings must bind `shell` exactly as they bind
-        // `run`; switching subcommand is not an opt-out.
+        // `require_jail` and the ceilings bind `shell` exactly as they bind `run`: switching
+        // subcommand is not an opt-out.
         let policy = Policy {
             max_mem_mib: NonZeroU32::new(512),
             require_jail: true,
@@ -1520,9 +1479,9 @@ mod tests {
 
     #[test]
     fn artifact_writes_refuse_escaping_paths() {
-        // Absolute and climbing paths are refused (backstopping the public API); the error names the path
-        // (allowed) and carries none of the data. Requested here so the escape check, not the
-        // deny-by-default check, is what fires.
+        // Absolute and climbing paths are refused (backstopping the public API); the error names
+        // the path and carries none of the data. Requested here so the escape check fires, not the
+        // deny-by-default one.
         let base = ScratchDir::created("escape");
         for bad in ["/etc/owned", "../escape.txt", "a/../../b"] {
             let err = write_artifacts_in(base.path(), &artifact(bad, b"data"), &[bad.to_string()])
@@ -1538,8 +1497,8 @@ mod tests {
 
     #[test]
     fn unrequested_artifacts_are_refused() {
-        // Deny-by-default: a guest returning a file the operator never asked for is refused, even
-        // though the name itself is a harmless relative path.
+        // A guest returning a file the operator never asked for is refused, even though the name
+        // itself is a harmless relative path.
         let base = ScratchDir::created("unrequested");
         let err = write_artifacts_in(base.path(), &artifact("Makefile", b"pwn"), &[])
             .expect_err("an unrequested artifact must be refused");
@@ -1550,11 +1509,10 @@ mod tests {
 
     #[test]
     fn symlinked_component_cannot_escape_the_base() {
-        // A pre-existing symlinked directory in the cwd must not let a `Normal`-component path be
-        // written through it, the string check can't see the on-disk symlink, `confined_dest` can.
+        // The string check cannot see an on-disk symlink; `confined_dest` can. `out -> <outside>`,
+        // so a requested `out/x.txt` would land in `outside` if followed.
         let base = ScratchDir::created("symlink");
         let outside = ScratchDir::created("symlink-outside");
-        // `out -> <outside>`, then a requested `out/x.txt` would land in `outside` if followed.
         std::os::unix::fs::symlink(outside.path(), base.path().join("out")).expect("symlink");
         let err = write_artifacts_in(
             base.path(),
@@ -1569,8 +1527,6 @@ mod tests {
 
     #[test]
     fn requested_nested_artifact_is_written() {
-        // The happy path: a requested nested name is written under the base, with the intermediate
-        // directory created.
         let base = ScratchDir::created("write");
         write_artifacts_in(
             base.path(),

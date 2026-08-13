@@ -3,14 +3,11 @@
 //! The smallest complete host application that runs untrusted code the way an embedder should:
 //! configure a sandbox, load the host-side observers, boot it (hardware-isolated, jailed), run the
 //! code, then read back **both** what the code produced and the host-observed audit record, and
-//! close. This is the launch sequence the driver (`bsx`) and the loader (`bsx-probes-loader`)
-//! document, composed **by the caller**. The model/agent, if any, is always the caller here, never
-//! in the host path.
+//! close. The model/agent, if any, is always the caller here, never in the host path.
 //!
 //! The two halves bridge only by the plain values `Sandbox` exposes (`vmm_pid`, `netns`, `tap_name`,
-//! `boot_latency`), so the driver never gains a dependency on the eBPF loader;
-//! that is why this reference lives in the loader crate, which dev-depends on the driver, not the
-//! other way round.
+//! `boot_latency`), so the driver never gains a dependency on the eBPF loader, which is why this
+//! reference lives in the loader crate (it dev-depends on the driver, not the other way round).
 //!
 //! Requirements to *run* it (it compiles anywhere): a KVM host, real root + the `jailer` binary (the
 //! confined default; swap to `Sandbox::open_unjailed` on a dev box without root), the built guest
@@ -38,15 +35,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let argv = workload_from_args();
     println!("# workload: {}", argv.join(" "));
 
-    // 1. Load the host-side observers ONCE. A long-lived host (the daemon) shares these across many
-    //    sandboxes; a single run uses them once. Needs CAP_BPF+CAP_PERFMON and the eBPF object.
+    // 1. Load the host-side observers ONCE: a long-lived host shares these across many sandboxes.
+    //    Needs CAP_BPF+CAP_PERFMON and the eBPF object.
     let tracer = SharedTracer::load()?;
     let meter = SharedMeter::load()?;
 
     // 2. Configure the run. `from_env` layers flags/env/`.bsx.toml`/defaults for the artifact
-    //    paths; `Limits` is the per-run resource budget. Conservative defaults, with
-    //    the whole-run wall-clock budget raised for this demo; `vcpus`/`mem_mib` are `NonZero` knobs
-    //    on the same struct.
+    //    paths; `Limits` is the per-run resource budget, with the wall-clock budget raised here.
     let mut limits = Limits::default();
     limits.wall = Duration::from_secs(20);
     let config = BootConfig::from_env().with_limits(limits);
@@ -60,11 +55,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         sandbox.boot_latency().as_millis()
     );
 
-    // 4. Attach the observers to THIS sandbox by the plain values it exposes, carried in
-    //    `AttachParams`: `egress` left `None` = deny-by-default networking, observe-only
-    //    (`Some(&policy)` would enforce a per-VM allow-list at the tap), `gateway` left `None`
-    //    because these boots configure none, so the record says so rather than leaving it unread.
-    //    Each axis that can't attach degrades to a recorded coverage gap.
+    // 4. Attach the observers to THIS sandbox by the plain values it exposes: `egress` left `None`
+    //    is deny-by-default networking, observe-only (`Some(&policy)` would enforce a per-VM
+    //    allow-list at the tap), and `gateway` left `None` because these boots configure none, so
+    //    the record says so. Each axis that can't attach degrades to a recorded coverage gap.
     let mut params = AttachParams::new(sandbox.vmm_pid());
     params.nic = match (sandbox.netns(), sandbox.tap_name()) {
         (Some(netns), Some(tap)) => Some(Nic { netns, tap }),
@@ -77,10 +71,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let run = sandbox.exec(&argv, b"")?;
 
     // 6. Finalize the host-observed record **while the sandbox is still alive** (it reads the live
-    //    cgroup + maps), then close. Timing enters as plain `Duration`s, so the record never depends
-    //    on the driver type.
-    //    The subject names *which* sandbox and *when*: a signature proves a record is authentic,
-    //    never what it describes, so an embedder archiving records supplies both here.
+    //    cgroup + maps), then close. The subject names *which* sandbox and *when*: a signature
+    //    proves a record is authentic, never what it describes.
     let record = probes.collect(
         RecordSubject::new(sandbox.name().to_string(), unix_nanos_now()),
         Timing::new(sandbox.boot_latency(), run.metrics.wall),
@@ -99,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The workload argv: the tokens after a `--`, or a default compute so a bare run still does something.
+/// The workload argv: the tokens after a `--`, or a default compute so a bare run still does work.
 fn workload_from_args() -> Vec<String> {
     let after: Vec<String> = std::env::args().skip_while(|a| a != "--").skip(1).collect();
     if after.is_empty() {
@@ -113,11 +105,9 @@ fn workload_from_args() -> Vec<String> {
 }
 
 /// Wall-clock now, nanoseconds since the Unix epoch; `0` if the host clock is unreadable, which a
-/// record carries as "unstamped" rather than refusing the run.
-///
-/// Deliberately a second copy of `crates/cli/src/audit.rs`'s: an example compiles as a foreign
-/// crate and cannot see a binary's private helper, the same reason the record bench keeps its own
-/// event builder.
+/// record carries as "unstamped" rather than refusing the run. Deliberately a second copy of
+/// `crates/cli/src/audit.rs`'s, because an example compiles as a foreign crate and cannot see a
+/// binary's private helper.
 fn unix_nanos_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

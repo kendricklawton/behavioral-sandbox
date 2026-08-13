@@ -1,12 +1,11 @@
 //! The shared aya-object plumbing: the map and program opens, the load-and-attach, the toggle
 //! write, and the per-cgroup target registration and removal, each in one place.
 //!
-//! - **An absent key is the intended outcome, any other failure is not.** Teardown is idempotent:
-//!   removing a cgroup that was never registered, or that a previous close already removed, must
-//!   read as success. Every other syscall error (a permission or fd fault) must surface, because a
-//!   removal that silently "succeeded" leaves the cgroup registered in the map while the caller
-//!   believes it is gone, and the probes go on charging and emitting for it. The kernel recycles
-//!   cgroup ids, so the next sandbox handed that id inherits the attribution in its signed record.
+//! - **An absent key is the intended outcome, any other failure is not.** Removing a cgroup that
+//!   was never registered, or that a previous close already removed, reads as success. Every other
+//!   syscall error must surface: a removal that silently "succeeded" leaves the cgroup registered
+//!   and the probes charging for it, and the kernel recycles cgroup ids, so the next sandbox handed
+//!   that id inherits the attribution in its signed record.
 
 use aya::maps::{Array, HashMap as AyaHashMap, Map, MapData, MapError};
 use aya::programs::{Program, ProgramError, SchedClassifier, TracePoint};
@@ -126,13 +125,12 @@ pub(crate) fn attach_tracepoint(
     Ok(())
 }
 
-/// The value stored for a registered cgroup in a target set. The set is a map, so the value is a
-/// marker the kernel side only tests for presence.
+/// The value stored for a registered cgroup: the set is a map, so this is a marker the kernel side
+/// only tests for presence.
 const TARGET_PRESENT: u8 = 1;
 
-/// Register `cgroup_id` in a per-cgroup target set. `what` is the whole phrase naming the
-/// registration, matching [`remove_cgroup_key`]'s. Re-registering an already-present cgroup is
-/// harmless.
+/// Register `cgroup_id` in a per-cgroup target set; `what` is the whole phrase naming the
+/// registration. Re-registering an already-present cgroup is harmless.
 ///
 /// # Errors
 /// [`ProbeError::Map`] if the write fails.
@@ -162,10 +160,8 @@ pub(crate) fn remove_cgroup_key<V: Pod>(
     }
 }
 
-/// Whether a map error is the kernel saying the key was not there (`ENOENT`).
-///
-/// Split out so the one clause that decides what gets swallowed is testable without a loaded eBPF
-/// object: constructing the error takes no privilege, removing from a real map takes `CAP_BPF`.
+/// Whether a map error is the kernel saying the key was not there (`ENOENT`), split out so the one
+/// clause that decides what gets swallowed is testable without `CAP_BPF` and a loaded object.
 fn is_absent_key(e: &MapError) -> bool {
     matches!(e, MapError::SyscallError(e) if e.io_error.kind() == std::io::ErrorKind::NotFound)
 }
@@ -181,10 +177,8 @@ mod tests {
         })
     }
 
-    /// Only `ENOENT` is swallowed, and only from a syscall failure.
-    ///
-    /// The widening this guards against reads as a tidy-up (`Err(_) => Ok(())`), and its cost is a
-    /// teardown that reports success while the cgroup stays registered.
+    /// Only `ENOENT` is swallowed, and only from a syscall failure: the widening this guards
+    /// against reads as a tidy-up (`Err(_) => Ok(())`).
     #[test]
     fn an_absent_key_is_the_only_failure_a_removal_treats_as_success() {
         assert!(is_absent_key(&syscall_err(std::io::ErrorKind::NotFound)));

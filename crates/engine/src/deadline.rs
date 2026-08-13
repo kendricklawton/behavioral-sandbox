@@ -1,18 +1,16 @@
 //! A unix socket bounded by one **absolute deadline** instead of a per-syscall timeout.
 //!
-//! - **The threat is the slow drip, not the silent peer.** `SO_RCVTIMEO`/`SO_SNDTIMEO` are re-armed
-//!   by the kernel on every syscall, so a peer that never pauses a full timeout's worth is never cut
-//!   off: the option bounds one syscall, and `read_exact` of an `N`-byte frame makes `N` of them.
-//!   Shrinking the option to the budget left before one absolute deadline makes the sum of them
-//!   honour a single wall clock, which is what turns a dribbling peer from a host hang into a typed
-//!   `TimedOut`. Writes are bounded the same way, and additionally **capped per syscall**
-//!   ([`WRITE_CHUNK`]), because `sendmsg` loops inside the kernel until the whole buffer is gone and
-//!   would otherwise stretch one `write` past the deadline while a guest drains it slowly.
-//! - **A spent budget is refused, never armed.** The kernel reads a zero timeout as "block forever",
-//!   so arming one is the hang this exists to prevent.
+//! - **The threat is the slow drip, not the silent peer.** The kernel re-arms
+//!   `SO_RCVTIMEO`/`SO_SNDTIMEO` on every syscall, and `read_exact` of an `N`-byte frame makes `N`
+//!   of them, so a peer that never pauses a full timeout's worth is never cut off. Shrinking the
+//!   option to the budget left before one absolute deadline makes their sum honour a single wall
+//!   clock. Writes are additionally **capped per syscall** ([`WRITE_CHUNK`]), because `sendmsg`
+//!   loops inside the kernel until the whole buffer is gone.
+//! - **A spent budget is refused, never armed.** The kernel reads a zero timeout as "block
+//!   forever", so arming one is the hang this exists to prevent.
 //!
 //! `crates/cli` holds its own copy for the daemon's sockets and cannot share this type across the
-//! crate boundary; `every_deadline_bounded_socket_refuses_a_spent_budget` pins each copy to the same
+//! crate boundary; `every_deadline_bounded_socket_refuses_a_spent_budget` pins both to the same
 //! invariant.
 
 use std::borrow::Borrow;
@@ -20,10 +18,9 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// A socket whose every read and write is bounded by one absolute `deadline`.
-///
-/// Generic over how the socket is held so the Firecracker API path can borrow one it keeps using
-/// afterwards (`&UnixStream`) while the exec path owns its own (`UnixStream`).
+/// A socket whose every read and write is bounded by one absolute `deadline`. Generic over how the
+/// socket is held so the Firecracker API path can borrow one it keeps using afterwards
+/// (`&UnixStream`) while the exec path owns its own (`UnixStream`).
 pub(crate) struct DeadlineStream<S> {
     stream: S,
     deadline: Instant,
@@ -61,13 +58,11 @@ impl<S: Borrow<UnixStream>> Read for DeadlineStream<S> {
     }
 }
 
-/// The most one bounded `write` hands the kernel at a time.
-///
-/// **The deadline is checked between syscalls, so the syscalls have to be small.** A unix socket's
-/// `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent, re-applying
-/// `SO_SNDTIMEO` to each internal wait, so a whole frame in one `write` is one syscall that a slowly
-/// draining peer stretches with no check in between. Reads need no such cap: `recvmsg` returns what
-/// is available rather than filling the buffer, so `read_exact` already makes one syscall per chunk.
+/// The most one bounded `write` hands the kernel at a time, because the deadline is checked
+/// between syscalls: `sendmsg` loops *inside the kernel* until the caller's whole buffer is sent,
+/// re-applying `SO_SNDTIMEO` to each internal wait, so a whole frame in one `write` is one syscall
+/// a slowly draining peer stretches. Reads need no such cap, since `recvmsg` returns what is
+/// available rather than filling the buffer.
 const WRITE_CHUNK: usize = 64 * 1024;
 
 impl<S: Borrow<UnixStream>> Write for DeadlineStream<S> {
