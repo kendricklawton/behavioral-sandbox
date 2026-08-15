@@ -937,8 +937,10 @@ fn privileged_preflight() -> Result<()> {
     // The in-VM exec test boots a rootfs with the agent baked in, build it here (not from inside a
     // `#[test]`, which mustn't shell out to a musl `cargo build`). Idempotent: the Alpine base is
     // cached by sha256, so this is a rebuild of the agent + the image, not a re-download. `--verify`
-    // makes this the reproducibility gate: it builds twice, asserts byte-identical, and fails on
-    // package-closure drift from the lockfile.
+    // makes this the reproducibility gate: it builds twice and asserts byte-identical. Closure drift
+    // from the lockfile is reported, not fatal: the image is resolved fresh from the Alpine branch
+    // either way, so failing here would forfeit the whole run's test results without buying a
+    // reviewed image. `.github/workflows/rootfs-packages.yml` is what demands the re-pin.
     rootfs::build_rootfs(true, false)?;
     // The runtime-agnostic test injects a static native binary; build it here (musl), like the
     // agent, the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
