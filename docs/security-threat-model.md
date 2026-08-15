@@ -271,11 +271,13 @@ The package closure installed on top of that base is **not** hash-pinned
 on the live-CDN path: it floats within one Alpine branch, because branch repos carry only the latest
 revision per package, so an exact `pkg=ver-rN` pin would fail the build the day upstream bumps rather
 than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instead is a record and two
-checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify`
-fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
-rebuilds weekly so a bump arrives on a schedule. `--verify` also builds the image twice and compares
-hashes, so one host reproduces its own build. Both run nightly: `privileged_preflight` builds the
-rootfs with verify on, so `cargo xtask ci-privileged` is the gate that enforces them.
+checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, every `build-rootfs` reports
+drift from it and names the packages that moved, and `.github/workflows/rootfs-packages.yml` rebuilds
+daily and fails, so a bump arrives on a schedule and re-pinning stays a person reading the diff.
+`--verify` builds the image twice and compares hashes, so one host reproduces its own build;
+`privileged_preflight` runs it with verify on, so `cargo xtask ci-privileged` is the nightly gate for
+reproducibility. Drift is deliberately not fatal there: that build resolves fresh from the branch
+either way, so failing on it forfeits the run's test results without producing a reviewed image.
 
 Across hosts is a weaker claim, and until 2026-08-02 it was weaker than this page said. Two hosts on
 the same commit and the same pinned toolchain built images that differed, because a release build

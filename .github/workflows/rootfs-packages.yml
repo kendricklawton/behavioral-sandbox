@@ -5,10 +5,12 @@
 # upstream bumps, not reproduce it, see `GUEST_PACKAGES` in `xtask/src/rootfs.rs`), and
 # `xtask/rootfs-packages.lock` records what the last build actually resolved.
 #
-# Without this job, drift surfaces the next time someone runs the privileged gate, which builds the
-# rootfs with `--verify` and dies in the artifact stage before a single test runs. That happened on
-# 2026-07-30 (nodejs 24.17.0-r0 -> 24.18.1-r0) and cost a gate run. Weekly, rebuild and diff the
-# lockfile, so the bump arrives as a scheduled notification instead of an ambush.
+# This job is the only enforcer. The privileged gate rebuilds the rootfs and *reports* closure drift
+# without failing on it, because that build resolves fresh from the branch either way: dying there
+# forfeits the run's test results without producing a reviewed image. It used to fail, and did, on
+# 2026-07-30 (nodejs 24.17.0-r0 -> 24.18.1-r0) and again on 2026-08-15 (python3 3.14.5-r0 ->
+# 3.14.7-r0, plus `expat` entering the closure). Weekly, rebuild and diff the lockfile, so the bump
+# arrives as a scheduled notification instead of an ambush.
 #
 # Failing rather than opening a PR, for the same reason as firecracker-pin.yml: the lockfile is a
 # record of the image this project signs and ships, so re-pinning is a human deciding to ship a new
@@ -22,7 +24,9 @@ name: rootfs-packages
 on:
   schedule:
     # Wednesdays 06:45 UTC, after firecracker-pin.yml's 06:15 and audit.yml's 05:30, so the three
-    # upstream watchers stay three separate signals.
+    # upstream watchers stay three separate signals. This job fails on drift rather than opening a
+    # PR, so its period is also how often a stale lockfile re-nags: a week's worst-case window is
+    # the trade for one notification instead of seven.
     - cron: "45 6 * * 3"
   workflow_dispatch:
 

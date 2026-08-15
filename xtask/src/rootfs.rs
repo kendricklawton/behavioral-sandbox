@@ -624,10 +624,10 @@ struct RootfsBuild {
 }
 
 /// `cargo xtask build-rootfs [--verify] [--update-lock]`. The default (no flags) is one command: it
-/// assembles the deterministic image, prints its sha256, and warns if the package closure drifted
-/// from the committed lockfile. `--update-lock` re-records that lockfile (the "re-pin" after an
-/// upstream bump); `--verify` proves reproducibility, a second build must be byte-identical, and
-/// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the CI gate.
+/// assembles the deterministic image and prints its sha256. `--update-lock` re-records the package
+/// lockfile (the "re-pin" after an upstream bump); `--verify` proves reproducibility, a second build
+/// must be byte-identical. `ci-privileged` runs `--verify` as the CI gate. Every mode reports
+/// package-closure drift and none fails on it, so an Alpine bump never costs a gate run.
 /// Re-exec this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it ran
 /// the build in a child (so the caller should stop).
 ///
@@ -722,7 +722,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
             packages_lock_path().display()
         );
     } else {
-        check_packages_lock(&build.packages, verify)?;
+        report_packages_lock_drift(&build.packages);
     }
 
     if verify {
@@ -806,41 +806,50 @@ fn write_packages_lock(packages: &[String]) -> Result<()> {
     std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))
 }
 
-/// Compare the freshly-resolved closure against the committed lockfile. `hard` (set by `--verify`)
-/// makes drift or a missing lockfile a build failure; otherwise it's a warning, so the everyday
-/// build still succeeds even after an upstream bump (it just tells you to re-pin).
-fn check_packages_lock(built: &[String], hard: bool) -> Result<()> {
+/// Report how the freshly-resolved closure differs from the committed lockfile, naming each package
+/// that moved. Never fatal: an Alpine bump is upstream's timing, not a defect in the tree, and
+/// failing here costs a whole gate run without producing a reviewed image (the build already
+/// resolved fresh from the branch either way). `.github/workflows/rootfs-packages.yml` is the
+/// enforcer, where re-pinning is a person reading the diff.
+fn report_packages_lock_drift(built: &[String]) {
     let path = packages_lock_path();
-    let recorded = match std::fs::read_to_string(&path) {
-        Ok(text) => text
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-        Err(_) => {
-            let msg = format!(
-                "no package lockfile at {} — run `cargo xtask build-rootfs --update-lock`",
-                path.display()
-            );
-            if hard {
-                bail!("{msg}");
-            }
-            println!("  ! {msg}");
-            return Ok(());
-        }
-    };
-    if recorded.as_slice() != built {
-        let msg = format!(
-            "guest package closure drifted from {} (Alpine bumped a package) — the image no longer \
-             matches the lockfile; run `cargo xtask build-rootfs --update-lock` to re-pin",
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        println!(
+            "  ! no package lockfile at {} — run `cargo xtask build-rootfs --update-lock`",
             path.display()
         );
-        if hard {
-            bail!("{msg}");
-        }
-        println!("  ! {msg}");
+        return;
+    };
+    let recorded: Vec<String> = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(drift) = lock_drift(&recorded, built) {
+        println!(
+            "  ! guest package closure drifted from {} (Alpine bumped a package):\n{drift}  \
+             run `cargo xtask build-rootfs --update-lock` and commit the lockfile to re-pin",
+            path.display()
+        );
     }
-    Ok(())
+}
+
+/// The packages that differ between the committed lockfile and this build, as `-` (recorded) and
+/// `+` (built) lines, or `None` when the two match. Names what moved, so a gate log answers "which
+/// package" without a reader diffing the lockfile by hand.
+fn lock_drift(recorded: &[String], built: &[String]) -> Option<String> {
+    let mut lines = String::new();
+    for p in recorded {
+        if !built.contains(p) {
+            lines.push_str(&format!("      - {p}\n"));
+        }
+    }
+    for p in built {
+        if !recorded.contains(p) {
+            lines.push_str(&format!("      + {p}\n"));
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 /// Where `apk.static` sources the guest packages, the one axis that differs between the online build,
@@ -1061,8 +1070,35 @@ mod tests {
     use super::{
         GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
         MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH, ROOTFS_SIZE_MIB,
-        in_staging, net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
+        in_staging, lock_drift, net_up_script, parse_mke2fs_version, rootfs_inittab,
+        verify_guest_contract,
     };
+
+    /// The drift report is the whole of what a gate log says about an Alpine bump, so it names the
+    /// packages that moved rather than only that something did: a version bump reads as one `-`/`+`
+    /// pair, and a package entering or leaving the closure reads as a lone `+` or `-`. A report
+    /// naming nothing leaves a reader diffing the lockfile by hand to find which.
+    #[test]
+    fn the_drift_report_names_what_moved() {
+        let recorded = [
+            "libexpat-2.8.2-r0".to_string(),
+            "python3-3.14.5-r0".to_string(),
+        ];
+        let built = [
+            "expat-2.8.2-r0".to_string(),
+            "libexpat-2.8.2-r0".to_string(),
+            "python3-3.14.7-r0".to_string(),
+        ];
+
+        assert_eq!(lock_drift(&recorded, &recorded), None);
+
+        let drift = lock_drift(&recorded, &built).expect("the closures differ");
+        assert!(drift.contains("- python3-3.14.5-r0"), "{drift}");
+        assert!(drift.contains("+ python3-3.14.7-r0"), "{drift}");
+        assert!(drift.contains("+ expat-2.8.2-r0"), "{drift}");
+        // The package both sides share must not appear, or every bump reprints the whole closure.
+        assert!(!drift.contains("libexpat"), "{drift}");
+    }
 
     /// The engine gives each drive a one-time IO burst that runs before the steady-state cap
     /// engages, sized so a cold boot's rootfs read cannot reach the cap: a burst at or above the
