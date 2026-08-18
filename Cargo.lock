@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "bsx"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-client",
  "bsx-engine",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-channel"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-test-support",
  "zeroize",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-client"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-protocol",
  "serde_json",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-engine"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-channel",
  "bsx-guest-agent",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-guest-agent"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-channel",
  "bsx-test-support",
@@ -262,11 +262,11 @@ dependencies = [
 
 [[package]]
 name = "bsx-probes-common"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "bsx-probes-loader"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aya",
  "bsx-engine",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-protocol"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-test-support",
  "serde",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-record"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-probes-common",
  "bsx-test-support",
@@ -300,7 +300,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-test-support"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-probes-common",
  "tracing",
@@ -2624,7 +2624,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xtask"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "bsx-channel",

@@ -5,7 +5,7 @@
 # `cargo xtask fuzz` (or `cargo fuzz run <target>`).
 [package]
 name = "fuzz"
-version = "0.0.3"
+version = "0.0.4"
 publish = false
 edition = "2024"
 

@@ -47,6 +47,55 @@ tag would freeze.
 
 ---
 
+## v0.0.4 (2026-08-18, checkpoint)
+
+The boot-budget checkpoint: cold boot is measured on a host that can boot, and the first benchmark
+table returns from withdrawal. Still not a supported release; pin a git rev.
+
+### Changed
+- **`quiet` in the guest's boot arguments**, which is the whole of the boot win. Measured on
+  exec-01 (bare metal, Xeon E-2176G, Linux 7.0.0-28-generic, Firecracker v1.16.1, release build,
+  load average 0.02, n=100 per arm, 2026-08-16), against the same binary and guest image with the
+  one token removed:
+
+  | p50, read-only shared base | without `quiet` | with `quiet` |
+  |---|---|---|
+  | wall (`Vm::boot`) | 304 ms | **100 ms** |
+  | guest boot | 294 ms | **91 ms** |
+  | host staging | 9 ms | **9 ms** |
+
+  Host staging does not move on either rootfs path, which is what says the win is guest-side rather
+  than asserting it. Through the jailed CLI the same posture measures 88 ms p50 (n=20), so the
+  jailer costs nothing measurable on this clock. Full tables, including the read-write copy path and
+  the counterfactual arm, are in [docs/benchmarks.md](docs/benchmarks.md).
+- **The CLI and the daemon boot the shared read-only base** (`apply_posture`), so a one-shot
+  `bsx run` no longer duplicates the 132 MiB base per boot. That copy costs 49 ms of a 149 ms p50
+  cold boot on the same host. `BootConfig::default()` stays on the copy path, which boots any
+  rootfs; the overlay path needs the agent image's overlay init.
+- **`bench-boot` reports three series per rootfs path** (wall, guest boot, host staging), the
+  staging one subtracted per boot rather than per percentile, so a staging percentile is a real
+  boot's staging.
+- **Guest package closure drift is reported, not fatal, in the privileged gate.** That build
+  resolves fresh from the Alpine branch either way, so failing on drift forfeited a whole run's test
+  results without producing a reviewed image. `.github/workflows/rootfs-packages.yml` remains the
+  enforcer, weekly, where re-pinning is a person reading the diff.
+- **The guest package closure is re-pinned**: `python3` 3.14.5-r0 to 3.14.7-r1 (with `pyc`,
+  `python3-pyc`, `python3-pycache-pyc0` alongside it). Boot did not move across that change, which
+  the counterfactual arm above establishes on the same host.
+
+### Documentation
+- **The cold-boot tables are published** with their host and date, after being withdrawn since
+  2026-07-29. Every other table stays withdrawn: two reporting defects are open against the suite
+  (`bench-all` does not record the scratch filesystem three of its sections argue from, and
+  `bench-meter` does not separate its conditions), and neither reaches `bench-boot`. The boot run
+  recorded its scratch filesystem by hand.
+
+### Fixed
+- A stale kernel count in `README.md` (two, now three: the development laptop, the CI runner, and
+  exec-01) and a stale example range in `doctor.rs`'s `supported_range` doc comment.
+
+---
+
 ## v0.0.3 (2026-08-07, checkpoint)
 
 The rename checkpoint: the crates, the binary, and the configuration surface are `bsx`. Still not a
