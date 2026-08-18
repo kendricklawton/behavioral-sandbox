@@ -273,7 +273,7 @@ revision per package, so an exact `pkg=ver-rN` pin would fail the build the day 
 than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instead is a record and two
 checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, every `build-rootfs` reports
 drift from it and names the packages that moved, and `.github/workflows/rootfs-packages.yml` rebuilds
-daily and fails, so a bump arrives on a schedule and re-pinning stays a person reading the diff.
+weekly and fails, so a bump arrives on a schedule and re-pinning stays a person reading the diff.
 `--verify` builds the image twice and compares hashes, so one host reproduces its own build;
 `privileged_preflight` runs it with verify on, so `cargo xtask ci-privileged` is the nightly gate for
 reproducibility. Drift is deliberately not fatal there: that build resolves fresh from the branch

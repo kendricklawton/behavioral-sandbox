@@ -96,8 +96,8 @@ of two ways. With `read_only_root` off (the engine default) each VM gets its **o
 of that base in its workdir, reclaimed with the workdir at teardown; that path boots any rootfs. A
 `read_only_root` boot instead hands Firecracker the base `O_RDONLY` and lets every sandbox share it,
 with the guest's writable layer supplied by a per-run `tmpfs` overlay: one base image serves many
-concurrent VMs, and nothing pays to duplicate it (the copy costs 48 ms of a 352 ms p50 boot,
-exec-01, 2026-08-12). It requires an image that carries the overlay init, so the callers that know
+concurrent VMs, and nothing pays to duplicate it (the copy costs 49 ms of a 149 ms p50 boot,
+exec-01, 2026-08-16). It requires an image that carries the overlay init, so the callers that know
 their image set it: the CLI and the daemon boot the agent image and turn it on in their shared
 posture fold (`apply_posture`), and an embedder sets it on the `BootConfig` a snapshot source or a
 pool boots from. Either way, nothing a run changes outlives it unless explicitly collected. Bulk

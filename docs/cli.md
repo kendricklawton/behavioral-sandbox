@@ -72,7 +72,7 @@ differs is the operational shape — a long-lived process with its own flags, po
   (`BootConfig::read_only_root`: the agent image served `O_RDONLY`, `/` made writable by a per-run
   tmpfs overlay capped at half the guest's RAM), set in the one posture fold `run`, `shell`, and
   `serve` share. A one-shot `bsx run` gains no cross-VM sharing from it, but it skips duplicating
-  the base image per boot (48 ms of a 352 ms p50 cold boot, exec-01, 2026-08-12). There is no flag
+  the base image per boot (49 ms of a 149 ms p50 cold boot, exec-01, 2026-08-16). There is no flag
   to change the shape: the field stays an embedder's decision on `BootConfig`, and the overlay
   needs the agent image's overlay init, so a `rootfs` override pointing at a foreign image fails at
   boot rather than booting unshared.

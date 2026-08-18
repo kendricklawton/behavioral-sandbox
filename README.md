@@ -25,11 +25,11 @@
 
 ## Warning
 
-Behavioral Sandbox (**BSX**) is pre-release and unaudited. Version `0.0.3` is a checkpoint that
+Behavioral Sandbox (**BSX**) is pre-release and unaudited. Version `0.0.4` is a checkpoint that
 exercises the release path, not a supported release: one maintainer, no external review, and no
 outside users. The API changes without notice, so if you build on it, pin a git rev. It has been
-run on two kernels, neither of them enterprise. Benchmark numbers are withdrawn pending
-re-measurement.
+run on three kernels, none of them enterprise. Cold boot latency is published with its host and
+date; every other benchmark number is withdrawn pending re-measurement.
 
 **Use it only if you are willing to read the code you are trusting.** That is the honest bar for a
 sandbox at this stage, and everything below is written to make that possible.
@@ -158,13 +158,14 @@ the mechanism serving it; the full text is [docs/architecture.md](docs/architect
   channel surfaces as a typed error. The rule the code is written against and the confinement suite
   exercises; an aim, not a proven property.
 * **[Measure rather than assert][benchmarks]**: percentiles with the host and date, and a number
-  that cannot be defended is withdrawn. Which is why the tables are withdrawn right now.
+  that cannot be defended is withdrawn. Cold boot is measured and published; the rest of the tables
+  are still withdrawn.
 
 The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate but the eBPF
 one. Those programs build for `bpfel-unknown-none` and carry BTF, which is what CO-RE relocation
 needs; no program reads kernel struct fields yet, so no field relocations are in play and the
 portability is so far a property of the toolchain rather than something exercised. It has been
-loaded on two kernels.
+loaded on three kernels.
 
 [probes]: docs/probes.md
 [embedding]: docs/embedding.md

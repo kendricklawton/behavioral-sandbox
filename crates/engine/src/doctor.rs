@@ -332,8 +332,8 @@ fn command_on_path(bin: &str) -> bool {
     resolve_binary_path(bin).is_some()
 }
 
-/// The supported Firecracker range as an operator-facing string (`v1.14..=v1.16`), rendered from
-/// the two constants so the report can never name a range the driver does not actually accept.
+/// The supported Firecracker range as an operator-facing string, rendered from the two constants
+/// so the report can never name a range the driver does not actually accept.
 fn supported_range() -> String {
     let (lo_maj, lo_min) = crate::spawn::MIN_SUPPORTED_FC_VERSION;
     let (hi_maj, hi_min) = crate::spawn::PINNED_FC_VERSION;

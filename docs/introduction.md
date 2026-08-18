@@ -61,8 +61,8 @@ is a runtime plus a clean driver API you self-host, and the model driving an age
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each pinned by a privileged test.
-- **[Benchmarks](./benchmarks.md)**, why no numbers are published at present and what a returning
-  number must carry.
+- **[Benchmarks](./benchmarks.md)**, the published cold-boot numbers with their host and date, why
+  the other tables stay withdrawn, and what a returning number must carry.
 - **[Threat model](./security-threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
