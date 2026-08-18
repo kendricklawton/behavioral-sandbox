@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "bsx"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-engine",
  "bsx-probes-loader",
@@ -217,14 +217,14 @@ dependencies = [
 
 [[package]]
 name = "bsx-channel"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "bsx-engine"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-channel",
  "ext4-view",
@@ -237,11 +237,11 @@ dependencies = [
 
 [[package]]
 name = "bsx-probes-common"
-version = "0.0.3"
+version = "0.0.4"
 
 [[package]]
 name = "bsx-probes-loader"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aya",
  "bsx-probes-common",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-protocol"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bsx-record"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx-probes-common",
  "ed25519-dalek",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "fuzz"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bsx",
  "bsx-channel",

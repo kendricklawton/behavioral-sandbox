@@ -5,7 +5,7 @@
 # is built separately by `cargo xtask build-probes`.
 [package]
 name = "bsx-probes"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 
 # Excluded from the workspace (builds for `bpfel-unknown-none`, not the host triple), so its package

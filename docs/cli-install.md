@@ -1,7 +1,7 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container), which `v0.0.3` publishes as a
+install a packaged release (tarball / `install.sh` / container), which `v0.0.4` publishes as a
 checkpoint rather than as a supported release; `cargo xtask setup` (or `bsx doctor` once installed)
 tells you what your host is missing at every step.
 
@@ -188,7 +188,7 @@ from-source concern rather than a runtime one.
 
 ## Install from a release package
 
-> **`v0.0.3` is a checkpoint, not a supported release.** It is tagged to exercise the release path
+> **`v0.0.4` is a checkpoint, not a supported release.** It is tagged to exercise the release path
 > end to end, so the URLs in this section resolve and the signature checks below are real once its
 > assets are published. Nothing about the API, the CLI, or the artifact layout is stable until
 > v0.1.0.
@@ -223,7 +223,7 @@ For manual inspection, or to check the signature yourself before anything runs. 
 version you want:
 
 ```console
-VER=0.0.3
+VER=0.0.4
 
 # Download release tarball, checksum manifest, and its detached signature
 curl -LO "https://github.com/kendricklawton/behavioral-sandbox/releases/download/v$VER/bsx-$VER-x86_64-linux.tar.gz"
