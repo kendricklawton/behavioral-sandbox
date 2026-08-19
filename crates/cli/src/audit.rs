@@ -383,6 +383,129 @@ mod tests {
         assert_eq!(record.timing, timing, "timing rides through regardless");
     }
 
+    /// `load` is the only place a probe that will not load becomes a recorded absence, and the
+    /// correspondence has to hold in both directions: an axis whose probe is missing must carry a
+    /// gap, and an axis that loaded must not invent one. Asserted against a real `load` on whatever
+    /// host runs it, so a capability-less box exercises the failure half and a privileged one
+    /// exercises the success half.
+    #[test]
+    fn every_probe_that_did_not_load_is_named_by_a_gap() {
+        let obs = Observability::load();
+
+        let syscall_gap = obs
+            .load_gaps
+            .iter()
+            .any(|g| matches!(g, AxisGap::HostSyscalls(_)));
+        assert_eq!(
+            obs.tracer.is_none(),
+            syscall_gap,
+            "a tracer that did not load is a gap, and one that did is not: \
+             tracer={:?} gaps={:?}",
+            obs.tracer.is_some(),
+            obs.load_gaps
+        );
+
+        let cpu_gap = obs.load_gaps.iter().any(|g| matches!(g, AxisGap::Cpu(_)));
+        assert_eq!(
+            obs.meter.is_none(),
+            cpu_gap,
+            "same for the meter: meter={:?} gaps={:?}",
+            obs.meter.is_some(),
+            obs.load_gaps
+        );
+
+        // Loading is never itself a failure: a host with no eBPF still runs sandboxes.
+        assert!(
+            obs.load_gaps.len() <= 2,
+            "at most one gap per shared probe: {:?}",
+            obs.load_gaps
+        );
+    }
+
+    /// The fail-open path end to end through the **real** `attach`, rather than a hand-built
+    /// `RunProbes`: a host whose shared probes did not load still yields a record, and every axis
+    /// that never bound is named in its coverage. The NIC is the one that is easy to lose, since
+    /// nothing about an unloaded tracer mentions it.
+    #[test]
+    fn an_unloadable_probe_set_records_every_axis_it_could_not_bind() {
+        let obs = Observability {
+            tracer: None,
+            meter: None,
+            load_gaps: vec![
+                AxisGap::HostSyscalls("load shared tracer: no BTF".into()),
+                AxisGap::Cpu("load shared meter: no BTF".into()),
+            ],
+        };
+        let mut params = AttachParams::new(4242);
+        params.nic = Some(Nic {
+            netns: "bsx-test-ns",
+            tap: "fc0",
+        });
+
+        let probes = obs
+            .attach("bsx-4242-0", params)
+            .expect("observe-only attach never refuses a run");
+        let record = probes.collect(Timing::new(
+            Duration::from_millis(100),
+            Duration::from_millis(5),
+        ));
+
+        assert!(
+            record
+                .coverage
+                .iter()
+                .any(|g| matches!(g, AxisGap::HostSyscalls(_))),
+            "the syscall axis is named: {:?}",
+            record.coverage
+        );
+        assert!(
+            record.coverage.iter().any(|g| matches!(g, AxisGap::Cpu(_))),
+            "the cpu axis is named: {:?}",
+            record.coverage
+        );
+        assert!(
+            record
+                .coverage
+                .iter()
+                .any(|g| matches!(g, AxisGap::Network(_))),
+            "a NIC that never got a tap monitor is a gap, not silence: {:?}",
+            record.coverage
+        );
+        assert!(record.network.is_none(), "nothing was observed to report");
+    }
+
+    /// Egress is a security control, not an observation, so the one thing that must **not**
+    /// fail open is a policy that could not be armed. A host that cannot load the probes has to
+    /// refuse the run rather than proceed with an unenforced allow-list.
+    #[test]
+    fn a_policy_that_cannot_be_armed_refuses_the_run() {
+        let obs = Observability {
+            tracer: None,
+            meter: None,
+            load_gaps: vec![AxisGap::HostSyscalls("load shared tracer: no BTF".into())],
+        };
+        let policy = EgressPolicy::default();
+        let mut params = AttachParams::new(4242);
+        params.nic = Some(Nic {
+            netns: "bsx-test-ns",
+            tap: "fc0",
+        });
+        params.egress = Some(&policy);
+
+        // `RunProbes` holds live probe handles and so carries no `Debug`; take the error side by
+        // hand rather than `expect_err`, which would require one.
+        let refusal = obs.attach("bsx-4242-0", params).err();
+        assert!(
+            refusal.is_some(),
+            "an unarmable policy must refuse, never degrade to observe-only"
+        );
+        let msg = refusal.map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            msg.contains("egress enforcement"),
+            "the refusal names what it refused: {msg}"
+        );
+    }
+
     #[test]
     fn only_a_network_gap_arms_the_enforcement_refusal() {
         // The enforcement check keys on the *network* axis alone: a syscall/CPU gap is fail-open
