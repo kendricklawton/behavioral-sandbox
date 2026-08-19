@@ -25,6 +25,12 @@ pub(crate) struct Mount<'a> {
     /// Whether an optional tag marks this mount **shared** (`shared:N`), the one propagation type
     /// that carries a bind made under it into another namespace (the jailer's slave one).
     pub(crate) shared: bool,
+    /// The filesystem type, the first field after the `-` separator. `tmpfs` here means a write
+    /// charged to host RAM rather than to a disk, which is why a benchmark records it. Read by the
+    /// consumers that compile this module in by `#[path]` rather than by the driver, so the driver's
+    /// own build sees it unused.
+    #[allow(dead_code)]
+    pub(crate) fstype: &'a str,
 }
 
 /// Every parseable line of `mountinfo`. A line too short to carry a mount point and its options is
@@ -63,14 +69,22 @@ fn parse_line(line: &str) -> Option<Mount<'_>> {
     let point = fields.nth(4).map(unescape_octal)?;
     let options = fields.next()?;
     // The optional tags run from here to a standalone `-`; everything past it is the fstype triple,
-    // where a `shared:` substring would be a device name, not a propagation tag.
-    let shared = fields
-        .take_while(|f| *f != "-")
-        .any(|f| f.starts_with("shared:"));
+    // where a `shared:` substring would be a device name, not a propagation tag. Scanned to the
+    // separator rather than short-circuited on the first match, so `fields` is left positioned on
+    // the fstype whether or not a propagation tag was found.
+    let mut shared = false;
+    for field in fields.by_ref() {
+        if field == "-" {
+            break;
+        }
+        shared |= field.starts_with("shared:");
+    }
+    let fstype = fields.next()?;
     Some(Mount {
         point,
         options,
         shared,
+        fstype,
     })
 }
 
@@ -172,6 +186,23 @@ mod tests {
         assert_eq!(mounts("garbage line with too few").count(), 0);
         assert_eq!(mounts("").count(), 0);
         assert_eq!(mounts("\n\n").count(), 0);
+    }
+
+    /// The fstype sits past the variable-length optional tags, so it can only be read by scanning
+    /// to the `-` separator. A scan that short-circuits on a propagation tag leaves the iterator
+    /// mid-tags and reads one of them as the filesystem.
+    #[test]
+    fn the_fstype_is_read_past_the_optional_tags() {
+        let plain = "40 21 0:30 / /mnt rw,noexec - ext4 /dev/sdb rw";
+        assert_eq!(parse_line(plain).expect("parses").fstype, "ext4");
+
+        let tagged = "41 21 0:31 / /scratch rw shared:22 master:7 - tmpfs tmpfs rw,size=1G";
+        let mount = parse_line(tagged).expect("parses");
+        assert_eq!(mount.fstype, "tmpfs", "not a propagation tag");
+        assert!(mount.shared, "and the tag is still seen");
+
+        // No fields past the separator is a truncated line, skipped like any other short one.
+        assert!(parse_line("40 21 0:30 / /mnt rw -").is_none());
     }
 
     #[test]

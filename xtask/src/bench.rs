@@ -15,6 +15,15 @@ use bsx_probes_loader::{ResourceMeter, SyscallTracer};
 
 use crate::{guest_rootfs_path, kernel_path};
 
+/// The driver's own mountinfo parser, compiled in rather than restated: the banner names the mount
+/// holding the scratch dir by the same selection rule the boot path uses, so the two cannot
+/// disagree about which filesystem a run staged onto.
+// The module's own rustdoc links point at items beside it in `bsx-engine`, where they resolve; a
+// binary crate's doc graph does not carry them, so the links read as broken only here.
+#[allow(dead_code, rustdoc::broken_intra_doc_links)]
+#[path = "../../crates/engine/src/mountinfo.rs"]
+mod mountinfo;
+
 /// Real (non-sparse) bytes an image occupies, the base's actual footprint, matching `du`. The ext4
 /// carries free space, but `mke2fs`/`truncate` leave it unallocated, so allocated blocks ≈ the used
 /// payload.
@@ -914,10 +923,17 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
         ns_per_switch(ROUNDS)?;
     }
 
-    // 1. Baseline: nothing attached.
+    // 1. Baseline: nothing attached, measured **twice**. Two runs of one condition differ only by
+    // the measurement's own jitter, so the gap between them is the floor a real delta has to clear.
+    // Without it this bench has reported metering as *cheaper* than not-metering, which is not a
+    // result: it is a delta smaller than the noise, printed as though it were a number.
     let mut baseline = Vec::with_capacity(runs);
     for _ in 0..runs {
         baseline.push(ns_per_switch(ROUNDS)?);
+    }
+    let mut control = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        control.push(ns_per_switch(ROUNDS)?);
     }
 
     // Attach the meter once; the two remaining conditions differ only in whether our cgroup is a target.
@@ -954,14 +970,24 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
 
     // Deltas from the p50s, the same [`nearest_p50`] rule the columns above used, one shared
     // definition (the vecs are already sorted, so its re-sort is a no-op).
-    // Signed (see `bench_trace`): a value at or below zero means within baseline noise, not a real speedup.
     let base = nearest_p50(&mut baseline) as i64;
+    let noise = (nearest_p50(&mut control) as i64 - base).abs();
     let untargeted_cost = nearest_p50(&mut untargeted) as i64 - base;
     let targeted_cost = nearest_p50(&mut targeted) as i64 - base;
+    report_percentiles(
+        "baseline control (nothing attached)",
+        &mut control,
+        "ns/ctx-switch",
+    );
     println!(
-        "\nAdded cost per context switch (p50 vs baseline): not-metering-us {untargeted_cost:+} ns, \
-         metering-us {targeted_cost:+} ns. The meter charged {charged:?} of CPU to our cgroup while \
-         targeted."
+        "\nNoise floor: {noise} ns, the p50 gap between two runs of the *same* unattached condition.\n\
+         A delta at or under it is not a measurement of the meter."
+    );
+    println!(
+        "Added cost per context switch (p50 vs baseline): not-metering-us {}, metering-us {}. \
+         The meter charged {charged:?} of CPU to our cgroup while targeted.",
+        against_noise(untargeted_cost, noise),
+        against_noise(targeted_cost, noise)
     );
     println!(
         "One shared program is attached to the global `sched_switch`, so the per-switch cost is a single\n\
@@ -969,6 +995,20 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
          concurrent sandboxes (each is one more entry in the target set, not one more attached program)."
     );
     Ok(())
+}
+
+/// A delta rendered against the noise floor that has to be cleared before it means anything.
+///
+/// The reason this bench needs it: a delta smaller than the measurement's own run-to-run spread
+/// reads as a number while carrying no information, and the failure is not subtle when it happens
+/// (metering has measured *cheaper* than not-metering here, a negative cost for doing more work).
+/// Naming the floor turns that from a published figure into a stated non-result.
+fn against_noise(delta: i64, noise: i64) -> String {
+    if delta.abs() <= noise {
+        format!("{delta:+} ns (below the {noise} ns noise floor, no result)")
+    } else {
+        format!("{delta:+} ns")
+    }
 }
 
 /// The nearest-rank p50 of `samples`, sorting in place, sharing the rank *formula*
@@ -1234,6 +1274,30 @@ fn loadavg_1m() -> f64 {
 /// `CAP_BPF`+`CAP_PERFMON` + the built object) is **skipped with the reason**, never silently dropped,
 /// so the report says exactly what it did and didn't measure. `runs` sizes the percentile benches; the
 /// concurrency benches use fixed cohort sizes (a bigger sweep is the dedicated command's job).
+/// The scratch dir every KVM section stages into, and the filesystem holding it, for the banner.
+///
+/// Three sections argue from this and none of them could name it: a rootfs copy onto a `tmpfs`
+/// scratch is charged to host RAM rather than to a disk, so the same suite on the same box reports
+/// different boot and footprint numbers depending on a mount the report never mentioned. The
+/// covering-mount rule is the driver's own ([`mountinfo::covering`]), compiled in rather than
+/// restated, so this banner and the boot path agree on which mount holds a path.
+fn scratch_line() -> String {
+    let dir = BootConfig::from_env().scratch_dir;
+    let Some(text) = mountinfo::self_text() else {
+        return format!("{} (mount table unreadable)", dir.display());
+    };
+    match mountinfo::covering(&text, &dir) {
+        Some(m) => format!(
+            "{} on {} ({}, {})",
+            dir.display(),
+            m.point.display(),
+            m.fstype,
+            m.options
+        ),
+        None => format!("{} (no covering mount)", dir.display()),
+    }
+}
+
 pub(crate) fn bench_all(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
@@ -1282,6 +1346,7 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     let load = loadavg_1m();
     println!("bench-all: the full benchmark suite, one report.");
     println!("  host: Linux {kernel_rel}, {cpus} CPUs, {mem_gib} GiB RAM, load average {load:.2}");
+    println!("  scratch: {}", scratch_line());
     // Up front, not in the footer: this suite runs for many minutes, and a reader of the published
     // table has no way to tell a quiet host from a busy one after the fact. The absolute numbers are
     // the ones at risk; the back-to-back comparisons (restore vs cold boot, Pss vs Rss, probe on vs
@@ -1462,6 +1527,44 @@ fn run_section(name: &str, skip: Option<&str>, f: impl FnOnce() -> Result<()>) -
 
 #[cfg(test)]
 mod tests {
+
+    /// `against_noise` is the whole of what stops `bench-meter` publishing a non-result, so its
+    /// boundary is worth pinning: at or under the floor the delta is labelled, above it the number
+    /// stands alone. The negative case is the one that motivated it, a "cost" of doing more work
+    /// that came out below zero.
+    #[test]
+    fn a_delta_inside_the_noise_floor_is_labelled_not_published() {
+        assert!(super::against_noise(3, 12).contains("no result"), "under");
+        assert!(
+            super::against_noise(12, 12).contains("no result"),
+            "at the floor"
+        );
+        assert!(
+            super::against_noise(-9, 12).contains("no result"),
+            "a negative cost is the shape that exposed this"
+        );
+
+        let real = super::against_noise(40, 12);
+        assert!(!real.contains("no result"), "clear of the floor: {real}");
+        assert_eq!(real, "+40 ns");
+
+        // A floor of zero must not swallow a zero delta silently: it is still no result.
+        assert!(super::against_noise(0, 0).contains("no result"));
+    }
+
+    /// The banner must name a real mount, not fall through to one of its own error strings: a line
+    /// reading "(no covering mount)" is the report failing to record the thing this exists to record.
+    #[test]
+    fn the_scratch_line_names_a_covering_mount() {
+        let line = super::scratch_line();
+        assert!(
+            !line.contains("no covering mount") && !line.contains("unreadable"),
+            "the scratch dir must resolve to a mount: {line}"
+        );
+        assert!(line.contains(" on "), "names the mount point: {line}");
+        eprintln!("scratch banner: {line}");
+    }
+
     use super::*;
 
     #[test]
