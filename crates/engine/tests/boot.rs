@@ -9,6 +9,13 @@
 
 mod common;
 
+/// The engine's own mountinfo parser, compiled into this test rather than hand-rolled beside it:
+/// the mount-point assertions below are negative ones, and a raw field split would report a mount
+/// carrying an octal escape as absent, passing the very leak they exist to catch.
+#[allow(dead_code)]
+#[path = "../src/mountinfo.rs"]
+mod mountinfo;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -362,8 +369,9 @@ struct BaseMount {
 }
 
 /// The read-only base bind mount **this test's** jailed overlay boot staged into its chroot,
-/// located in `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point
-/// (field 5). The per-mount options (field 6) carry `ro` for a read-only mount.
+/// located in `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point.
+/// The per-mount options carry `ro` for a read-only mount. Read through the engine's own parser,
+/// so the mount point is compared with the kernel's octal escapes decoded rather than raw.
 ///
 /// Scoped to this process's own workdir (`/bsx-<ourpid>-`), not the first shape-matching line
 /// host-wide: mountinfo is host-global, and a bind mount leaked by an earlier killed run satisfies
@@ -372,36 +380,55 @@ struct BaseMount {
 fn jailed_base_mount() -> Option<BaseMount> {
     let ours = format!("/bsx-{}-", std::process::id());
     let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    for line in info.lines() {
-        let fields: Vec<&str> = line.split(' ').collect();
-        if fields.len() < 7 {
-            continue;
-        }
-        let mount_point = fields[4];
-        if !(mount_point.contains(&ours)
-            && mount_point.contains("/firecracker/")
-            && mount_point.ends_with("/root/rootfs.ext4"))
+    for mount in mountinfo::mounts(&info) {
+        let point = mount.point.to_string_lossy();
+        if !(point.contains(&ours)
+            && point.contains("/firecracker/")
+            && point.ends_with("/root/rootfs.ext4"))
         {
             continue;
         }
-        let read_only = fields[5].split(',').any(|o| o == "ro");
+        let read_only = mount.options.split(',').any(|o| o == "ro");
         return Some(BaseMount {
-            mount_point: PathBuf::from(mount_point),
+            mount_point: mount.point.clone(),
             read_only,
         });
     }
     None
 }
 
-/// Whether `path` is currently a mount point (its exact path appears as field 5 of a
-/// `/proc/self/mountinfo` line). Used to assert teardown detached the base bind mount.
+/// Whether `path` is currently a mount point, compared against the same decoded mount points
+/// `sweep` walks. Used to assert teardown detached the base bind mount, which is a *negative*
+/// assertion: a raw comparison would miss an escaped path and report "not mounted" for a leak.
 fn path_is_mounted(path: &Path) -> bool {
-    let Some(target) = path.to_str() else {
-        return false;
-    };
     std::fs::read_to_string("/proc/self/mountinfo")
-        .map(|info| info.lines().any(|l| l.split(' ').nth(4) == Some(target)))
+        .map(|info| mountinfo_has_point(&info, path))
         .unwrap_or(false)
+}
+
+/// Whether `info` lists `path` as a mount point, escapes decoded. Split from the `/proc` read so
+/// the escaped case is testable against a fixture: creating a real mount whose path holds a space
+/// needs root, which is exactly why this comparison went unexercised while it was hand-rolled.
+fn mountinfo_has_point(info: &str, path: &Path) -> bool {
+    mountinfo::mounts(info).any(|m| m.point == path)
+}
+
+/// The mount-point comparison behind every "teardown detached it" assertion here, on the input
+/// that separates a decoded read from a raw one. Negative assertions carry the risk: a raw field
+/// split reports an escaped path as *not* mounted, so a leaked bind mount under a scratch dir with
+/// a space in its name would read as a clean teardown.
+#[test]
+fn a_mount_point_carrying_an_escape_is_found_not_missed() {
+    let info = "40 21 0:30 / /mnt/my\\040scratch rw,noexec - ext4 /dev/sdb rw\n";
+    assert!(
+        mountinfo_has_point(info, Path::new("/mnt/my scratch")),
+        "the kernel writes the space as \\040, so a decoded read is what finds it"
+    );
+    assert!(
+        !mountinfo_has_point(info, Path::new("/mnt/my\\040scratch")),
+        "and the raw spelling is not itself a mount point"
+    );
+    assert!(!mountinfo_has_point(info, Path::new("/mnt/absent")));
 }
 
 /// Per-VM network namespaces this process owns that are currently present (`/run/netns/bsx-<pid>-*`),
