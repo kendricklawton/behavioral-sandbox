@@ -1062,6 +1062,43 @@ mod tests {
         );
     }
 
+    /// The shape that took `ci-privileged` red on exec-01, pinned at the layer that decides it.
+    /// The identity rule dedups the project walk against `$HOME`, so it holds only while those two
+    /// coordinates agree. Split them, which is what a test harness redirecting `HOME` for
+    /// hermeticity does while leaving the spawned cwd on a checkout under the operator's real home,
+    /// and the operator's own `~/.bsx.toml` is reached by the walk, fails `same_file`, and is
+    /// judged as a project file: its user-only keys are refused and the run dies in preflight.
+    ///
+    /// That refusal is the trust split behaving as specified, since a file above cwd at a
+    /// non-`$HOME` path is indistinguishable from one that arrived with a clone. It is pinned here
+    /// rather than fixed because the defect is in the harness, which controls only one coordinate.
+    /// `a_project_file_at_the_user_path_is_read_once_as_the_user_file` cannot see this shape: it
+    /// runs with `$HOME` intact and equal to the walk destination.
+    #[test]
+    fn a_user_file_reached_by_the_walk_but_not_at_home_is_refused_as_a_project_file() {
+        // The operator's real home, holding the file `install.sh` and `cargo xtask self-host` write.
+        let (home_tree, checkout) = tree("cfg-split-home", &[("", "kernel = \"/real/vmlinux\"\n")]);
+        // `HOME` redirected somewhere else entirely, the hermeticity move.
+        let elsewhere = ScratchDir::created("cfg-split-elsewhere");
+
+        let err = Sources::discover_with(&checkout, Some(elsewhere.path().to_path_buf()))
+            .expect_err("a user-only key from a file the walk found is refused");
+        assert!(
+            matches!(&err, ConfigError::UserOnlyKeys { keys, .. } if keys.contains(&"kernel")),
+            "expected UserOnlyKeys naming `kernel`, got {err:?}"
+        );
+
+        // The same tree with the two coordinates agreeing is the ordinary case, and is accepted:
+        // the walk lands on the user's own file, so it keeps its full authority.
+        let sources = Sources::discover_with(&checkout, Some(home_tree.path().to_path_buf()))
+            .expect("the user's own file is not a project file");
+        assert_eq!(
+            sources.boot_lookup()("BSX_KERNEL"),
+            Some(OsString::from("/real/vmlinux")),
+            "and its user-only key is honoured"
+        );
+    }
+
     #[test]
     fn a_project_file_at_the_user_path_is_read_once_as_the_user_file() {
         // Working inside `$HOME` is the ordinary case: the walk up lands on the user's own file,
