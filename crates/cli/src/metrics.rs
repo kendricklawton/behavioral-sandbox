@@ -49,51 +49,49 @@ const BUCKET_BOUNDS: [(f64, &str); 11] = [
     (10.0, "10"),
 ];
 
-/// The wire verbs a session serves after `open`, as low-cardinality counter labels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verb {
-    Exec,
-    Put,
-    Get,
-    Snapshot,
-    Trace,
-    TraceSummary,
+/// Declares [`Verb`] and everything indexed by it from one list, so a new verb cannot reach the
+/// counter array without a slot. Written as a macro because the three things that must agree, the
+/// variants, the label strings, and the fixed order, cannot be derived from each other: `name` and
+/// `index` are exhaustive matches the compiler already checks, but a hand-written `ALL` is just an
+/// array, and one short by a variant sizes `requests` short while `index` still hands it that
+/// variant's slot.
+macro_rules! verbs {
+    ($($variant:ident => $label:literal),+ $(,)?) => {
+        /// The wire verbs a session serves after `open`, as low-cardinality counter labels.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Verb {
+            $($variant),+
+        }
+
+        impl Verb {
+            /// Every verb, in the fixed order the counter array and the rendering share. Generated
+            /// from the same list as the variants, so it cannot be missing one.
+            const ALL: &'static [Verb] = &[$(Verb::$variant),+];
+
+            /// The `verb` label value.
+            fn name(self) -> &'static str {
+                match self {
+                    $(Verb::$variant => $label),+
+                }
+            }
+
+            /// This verb's slot in the counter array: its discriminant, which for a fieldless enum
+            /// with no explicit values is its position in the declaration above, and so in
+            /// [`Self::ALL`]. `every_verb_indexes_its_own_slot` holds the two together.
+            fn index(self) -> usize {
+                self as usize
+            }
+        }
+    };
 }
 
-impl Verb {
-    /// Every verb, in the fixed order the counter array and the rendering share.
-    const ALL: [Verb; 6] = [
-        Verb::Exec,
-        Verb::Put,
-        Verb::Get,
-        Verb::Snapshot,
-        Verb::Trace,
-        Verb::TraceSummary,
-    ];
-
-    /// The `verb` label value.
-    fn name(self) -> &'static str {
-        match self {
-            Verb::Exec => "exec",
-            Verb::Put => "put",
-            Verb::Get => "get",
-            Verb::Snapshot => "snapshot",
-            Verb::Trace => "trace",
-            Verb::TraceSummary => "trace_summary",
-        }
-    }
-
-    /// This verb's slot in the counter array.
-    fn index(self) -> usize {
-        match self {
-            Verb::Exec => 0,
-            Verb::Put => 1,
-            Verb::Get => 2,
-            Verb::Snapshot => 3,
-            Verb::Trace => 4,
-            Verb::TraceSummary => 5,
-        }
-    }
+verbs! {
+    Exec => "exec",
+    Put => "put",
+    Get => "get",
+    Snapshot => "snapshot",
+    Trace => "trace",
+    TraceSummary => "trace_summary",
 }
 
 /// A fixed-bucket histogram of durations, all-atomic so many session threads observe concurrently
@@ -390,7 +388,7 @@ impl Metrics {
             "Requests served after open, by wire verb.",
             "counter",
         );
-        for verb in Verb::ALL {
+        for verb in Verb::ALL.iter().copied() {
             sample(
                 &mut out,
                 "bsx_requests_total",
@@ -655,6 +653,35 @@ fn is_get_metrics(head: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// `index` is a discriminant and `ALL` is a list, and the counter array is sized by one and
+    /// subscripted by the other. Adding a variant with an explicit discriminant, or reordering one
+    /// of the two, silently points a verb at another verb's counter or past the end of the array.
+    #[test]
+    fn every_verb_indexes_its_own_slot() {
+        for (slot, verb) in Verb::ALL.iter().copied().enumerate() {
+            assert_eq!(
+                verb.index(),
+                slot,
+                "{verb:?} is at slot {slot} of ALL but indexes {}",
+                verb.index()
+            );
+        }
+        // The bound the counter array is built from: every index must address it.
+        for verb in Verb::ALL.iter().copied() {
+            assert!(
+                verb.index() < Verb::ALL.len(),
+                "{verb:?} indexes past the {} counters ALL sizes",
+                Verb::ALL.len()
+            );
+        }
+        // Distinct labels, since two verbs sharing one would merge their counters in the scrape.
+        let mut labels: Vec<&str> = Verb::ALL.iter().copied().map(Verb::name).collect();
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(before, labels.len(), "two verbs share a label: {labels:?}");
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpStream;
