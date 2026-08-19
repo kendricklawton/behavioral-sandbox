@@ -722,6 +722,52 @@ fn kill_handle_unblocks_a_wedged_exec() {
 }
 
 #[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn a_channel_broken_mid_stream_is_an_error_not_a_truncated_success() {
+    // The failure class `kill_handle_unblocks_a_wedged_exec` does not reach: there, the exec is
+    // killed having produced *nothing*, so any non-empty result is obviously wrong. Here the guest
+    // emits a frame first and is then killed mid-stream, which is the shape that can pass for
+    // success: the driver holds real stdout, the peer closes cleanly, and a reader that treats EOF
+    // as end-of-output returns `Ok` with a prefix of what the command would have printed. A caller
+    // cannot tell that from a command that simply printed less, so a truncated run must be a typed
+    // error rather than a short `Ok`.
+    let mut vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
+    let handle = vm.kill_handle();
+
+    let killer = std::thread::spawn(move || {
+        // Long enough that the first `echo` has crossed the channel, short enough to stay well
+        // inside the command's own 30 s.
+        std::thread::sleep(Duration::from_secs(3));
+        handle.kill().expect("kill handle should reach the VMM");
+    });
+
+    let started = Instant::now();
+    let cmd = ["sh", "-c", "echo FIRST_CHUNK; sleep 30; echo NEVER"].map(String::from);
+    let result = vm.exec(&cmd, b"");
+    let elapsed = started.elapsed();
+    killer.join().expect("killer thread");
+
+    match result {
+        Err(_) => {}
+        Ok(out) => panic!(
+            "a stream cut mid-command must be a typed error, not a short success \
+             (exit={:?} stdout={:?})",
+            out.exit_code,
+            String::from_utf8_lossy(&out.stdout)
+        ),
+    }
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "the exec must have been mid-stream when the kill fired ({elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the break must surface well before the command's own 30 s ({elapsed:?})"
+    );
+    drop(vm);
+}
+
+#[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_mem_hog_is_bounded_by_the_cgroup() {
     // Memory half: a guest allocating everything it can reach pushes the VMM's host memory
