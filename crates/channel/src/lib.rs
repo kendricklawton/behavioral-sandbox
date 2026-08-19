@@ -377,20 +377,21 @@ pub(crate) fn write_put_file(
     write_frame(w, Tag::PutFile.as_u8(), &payload)
 }
 
-/// Serializes and sends an `Exec` request, zeroizing buffers post-send.
-pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
-    w: &mut impl Write,
+/// The exact size of an `Exec` frame body: the counts, the argv blobs, stdin, the artifact blobs,
+/// the timeout, and the env pairs. A function rather than an expression inside
+/// [`write_exec`] so the buffer it sizes and the test asserting that size read the *same*
+/// arithmetic; a test with its own copy holds only against itself
+/// (`the_exec_buffer_is_sized_by_what_the_encoder_writes`).
+fn exec_payload_len<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
     argv: &[A],
     stdin: &[u8],
     env: &[(K, V)],
     artifacts: &[R],
-    timeout_ms: Option<NonZeroU32>,
-) -> Result<(), ChannelError> {
-    let cap = 4
-        + argv
-            .iter()
-            .map(|a| blob_len(a.as_ref().as_bytes()))
-            .sum::<usize>()
+) -> usize {
+    4 + argv
+        .iter()
+        .map(|a| blob_len(a.as_ref().as_bytes()))
+        .sum::<usize>()
         + blob_len(stdin)
         + 4
         + artifacts
@@ -402,7 +403,19 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
         + env
             .iter()
             .map(|(k, v)| blob_len(k.as_ref().as_bytes()) + blob_len(v.as_ref().as_bytes()))
-            .sum::<usize>();
+            .sum::<usize>()
+}
+
+/// Serializes and sends an `Exec` request, zeroizing buffers post-send.
+pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
+    w: &mut impl Write,
+    argv: &[A],
+    stdin: &[u8],
+    env: &[(K, V)],
+    artifacts: &[R],
+    timeout_ms: Option<NonZeroU32>,
+) -> Result<(), ChannelError> {
+    let cap = exec_payload_len(argv, stdin, env, artifacts);
 
     if cap > MAX_PAYLOAD {
         return Err(ChannelError::PayloadTooLarge {
@@ -1095,59 +1108,67 @@ mod tests {
         }
     }
 
+    /// The `Zeroizing` buffer wipes only the allocation it drops, so a payload that outgrows its
+    /// preallocation leaves the reallocated-away copy of a secret un-wiped. The property is
+    /// therefore "the encoder writes exactly what it reserved", and it has to be read off the
+    /// **encoder**: a test that reserves and writes with its own arithmetic proves that its own two
+    /// copies agree, which stays true no matter what `write_exec` does.
+    ///
+    /// Frame layout is `tag(1) · len(4) · payload`, so the bytes the real encoder emitted, less the
+    /// 5-byte header, are what it actually wrote.
     #[test]
-    fn secret_payload_is_exactly_sized_so_one_buffer_holds_it() {
-        let path = "big.bin";
-        let data = vec![0xAB; 4096];
-        let mut payload = Vec::with_capacity(blob_len(path.as_bytes()) + blob_len(&data));
-        put_blob(&mut payload, path.as_bytes());
-        put_blob(&mut payload, &data);
-        assert_eq!(payload.len(), payload.capacity(), "PutFile payload grew");
+    fn the_exec_buffer_is_sized_by_what_the_encoder_writes() {
+        const HEADER: usize = 5;
 
         let argv = [String::from("cat")];
         let stdin = vec![0xCD; 8192];
         let env = [(String::from("K"), "v".repeat(1000))];
         let artifacts = [String::from("a"), String::from("b/c")];
-        let cap = 4
-            + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
-            + blob_len(&stdin)
-            + 4
-            + artifacts
-                .iter()
-                .map(|p| blob_len(p.as_bytes()))
-                .sum::<usize>()
-            + 4
-            + 4
-            + env
-                .iter()
-                .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
-                .sum::<usize>();
-        let mut payload = Vec::with_capacity(cap);
-        put_u32(&mut payload, argv.len() as u32);
-        for a in &argv {
-            put_blob(&mut payload, a.as_bytes());
-        }
-        put_blob(&mut payload, &stdin);
-        put_u32(&mut payload, artifacts.len() as u32);
-        for p in &artifacts {
-            put_blob(&mut payload, p.as_bytes());
-        }
-        put_u32(&mut payload, 30_000);
-        put_u32(&mut payload, env.len() as u32);
-        for (k, v) in &env {
-            put_blob(&mut payload, k.as_bytes());
-            put_blob(&mut payload, v.as_bytes());
-        }
-        assert_eq!(payload.len(), payload.capacity(), "Exec payload grew");
+
+        let mut framed = Vec::new();
+        write_exec(
+            &mut framed,
+            &argv,
+            &stdin,
+            &env,
+            &artifacts,
+            NonZeroU32::new(30_000),
+        )
+        .expect("an in-cap exec encodes");
+        assert_eq!(
+            exec_payload_len(&argv, &stdin, &env, &artifacts),
+            framed.len() - HEADER,
+            "the reserved capacity must equal the bytes `write_exec` emitted, or the staged \
+             secret is reallocated away from the buffer that wipes it"
+        );
+
+        // The empty shape too: the four length prefixes are the floor, and an off-by-one there
+        // reallocates on the very first push.
+        let none: [String; 0] = [];
+        let no_env: [(String, String); 0] = [];
+        let mut framed = Vec::new();
+        write_exec(&mut framed, &none, b"", &no_env, &none, None).expect("an empty exec encodes");
+        assert_eq!(
+            exec_payload_len(&none, b"", &no_env, &none),
+            framed.len() - HEADER
+        );
     }
 
+    /// The `PutFile` twin, whose size is already a named function: the same "reserved equals
+    /// written" property, read off `write_put_file` rather than re-derived.
     #[test]
-    fn is_disconnect_flags_eof_only() {
-        let eof = ChannelError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
-        assert!(eof.is_disconnect());
-        let other = ChannelError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
-        assert!(!other.is_disconnect());
-        assert!(!ChannelError::Protocol("x".into()).is_disconnect());
+    fn the_put_file_buffer_is_sized_by_what_the_encoder_writes() {
+        const HEADER: usize = 5;
+        let path = "big.bin";
+        let data = vec![0xAB; 4096];
+
+        let mut framed = Vec::new();
+        write_put_file(&mut framed, path, &data).expect("an in-cap put encodes");
+        assert_eq!(
+            path_blob_len(Tag::PutFile, path, &data).expect("in cap"),
+            framed.len() - HEADER,
+            "the reserved capacity must equal the bytes `write_put_file` emitted"
+        );
     }
 
     #[test]

@@ -371,13 +371,11 @@ fn a_jailed_vmm_killed_mid_boot_leaves_no_mounts_behind() {
 
     let base = scratch.path().to_string_lossy().to_string();
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let leaked: Vec<_> = mounts
-        .lines()
-        .filter(|l| {
-            l.split(' ')
-                .nth(4)
-                .is_some_and(|target| target.starts_with(&base))
-        })
+    // Decoded, like the cleanup above and like `sweep` itself: a raw field split reports a mount
+    // point holding an octal escape as absent, which is this assertion passing on a real leak.
+    let leaked: Vec<_> = mountinfo::mounts(&mounts)
+        .filter(|m| m.point.to_string_lossy().starts_with(&base))
+        .map(|m| m.point.to_string_lossy().into_owned())
         .collect();
     assert!(
         leaked.is_empty(),
