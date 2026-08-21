@@ -70,10 +70,11 @@ pub fn launch_daemon_opts(
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
     cmd.args(extra_args);
-    // A `$HOME` with no `.bsx.toml`: the user file is read whatever the cwd is, so without this
-    // the developer's own config would supply artifact paths and ceilings to the daemon under test.
-    cmd.env("HOME", &dir)
-        .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+    // Both discovery coordinates on the socket dir: the user file comes from `$HOME` and the
+    // project file from walking up the cwd, so pinning only the first leaves the developer's own
+    // config supplying artifact paths and ceilings to the daemon under test.
+    bsx_test_support::seal_config_discovery(&mut cmd, &dir);
+    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
         .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.

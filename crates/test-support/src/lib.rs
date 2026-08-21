@@ -609,6 +609,28 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
     u64::from_str_radix(low64, 16).ok()
 }
 
+/// Seal config discovery for a spawned `bsx`: point **both** `$HOME` and the working directory at
+/// `dir`, and leave an empty `.bsx.toml` there for the walk to stop on.
+///
+/// Pinning only `$HOME` is not enough, and the gap is not hypothetical: the project-file walk climbs
+/// from the working directory, so a checkout under the operator's own home reaches their real
+/// `~/.bsx.toml`, which no longer matches the redirected `$HOME` and is therefore judged a *project*
+/// file. Its user-only keys (`kernel`, `rootfs`, `scratch_dir`) are then refused and the run dies in
+/// preflight, which is how `ci-privileged` went red on a configured host. With both coordinates on
+/// one directory the walk finds this sentinel first, the identity rule folds it into the user slot,
+/// and nothing above it is read.
+///
+/// # Panics
+/// If the sentinel cannot be written, since a test that silently kept reading the developer's own
+/// config would pass or fail on host state rather than on its subject.
+pub fn seal_config_discovery(cmd: &mut std::process::Command, dir: &Path) {
+    let sentinel = dir.join(".bsx.toml");
+    if let Err(e) = std::fs::write(&sentinel, "") {
+        panic!("write the config sentinel {}: {e}", sentinel.display());
+    }
+    cmd.current_dir(dir).env("HOME", dir);
+}
+
 /// Whether this process is real root (effective uid 0), the gate for putting a VMM under a test
 /// cgroup. A privileged test skips rather than fails when this is false.
 #[must_use]

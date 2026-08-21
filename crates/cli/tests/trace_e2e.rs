@@ -15,7 +15,7 @@
 use std::process::Command;
 
 use bsx_test_support::ScratchDir;
-use bsx_test_support::{vm_skip_reason, workspace_root};
+use bsx_test_support::{seal_config_discovery, vm_skip_reason, workspace_root};
 
 /// Why this host can't run the test (a skip reason), or `None` when it can: the loader's own probe
 /// gate, then the VM prerequisites.
@@ -39,9 +39,9 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let signing_key = scratch.path().join("signing.key");
-    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(&root)
-        .env("HOME", root.join("target"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    seal_config_discovery(&mut cmd, scratch.path());
+    let out = cmd
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         // Keep the generated host signing key inside the scratch dir, not the real default path.
@@ -116,9 +116,9 @@ fn run_with_trace_and_record_yields_trail_and_json() {
 
     // The verify round-trip: `bsx verify` accepts the untouched record, and rejects it after one flipped
     // byte, trusting the same host key that signed it (resolved from BSX_SIGNING_KEY).
-    let verify_ok = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(&root)
-        .env("HOME", root.join("target"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    seal_config_discovery(&mut cmd, scratch.path());
+    let verify_ok = cmd
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&record_path)
@@ -144,9 +144,9 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         serde_json::to_string(&tampered).expect("reserialize") + "\n",
     )
     .expect("write tampered record");
-    let verify_bad = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(&root)
-        .env("HOME", root.join("target"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    seal_config_discovery(&mut cmd, scratch.path());
+    let verify_bad = cmd
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&tampered_path)
@@ -223,9 +223,9 @@ for _ in range(5):
         pass
 print('p14-9b-egress')
 ";
-    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(&root)
-        .env("HOME", root.join("target"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    seal_config_discovery(&mut cmd, scratch.path());
+    let out = cmd
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([
@@ -334,9 +334,11 @@ open('result.txt', 'w').write(data + '|' + put)
 socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('10.200.0.1', 9999))
 print('p14-9f-complete')
 ";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(scratch.path()) // --get writes result.txt here
-        .env("HOME", scratch.path()) // a $HOME with no user config
+    let mut spawn_cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    // cwd stays the scratch dir because `--get` writes result.txt here; the seal adds the sentinel
+    // and the matching `$HOME` so discovery stops there too.
+    seal_config_discovery(&mut spawn_cmd, scratch.path());
+    let mut child = spawn_cmd
         .envs(env.iter().cloned())
         .args([
             "run",
@@ -428,9 +430,9 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // Allow only the `search-index` tool (10.200.0.1:9000/udp); the `exfil-webhook` (:9100) is
     // deny-by-default. `--record` + `--record-summary` capture both faces of the one host-observed
     // record.
-    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .current_dir(&root)
-        .env("HOME", root.join("target"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    seal_config_discovery(&mut cmd, scratch.path());
+    let out = cmd
         .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([

@@ -43,12 +43,12 @@ fn chain_of_three(key: &HostKey) -> [String; 3] {
 
 /// Run `bsx verify <file> --key <hex>` from `dir`, returning `(exit_code, stdout, stderr)`.
 fn verify_in(dir: &ChainDir, file: &Path, key_hex: &str) -> (Option<i32>, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    bsx_test_support::seal_config_discovery(&mut cmd, dir.path());
+    let out = cmd
         .arg("verify")
         .arg(file)
         .args(["--key", key_hex])
-        .current_dir(dir.path())
-        .env("HOME", dir.path())
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx verify: {e}"));
     (
