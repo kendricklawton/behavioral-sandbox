@@ -1062,18 +1062,15 @@ mod tests {
         );
     }
 
-    /// The shape that took `ci-privileged` red on exec-01, pinned at the layer that decides it.
     /// The identity rule dedups the project walk against `$HOME`, so it holds only while those two
-    /// coordinates agree. Split them, which is what a test harness redirecting `HOME` for
-    /// hermeticity does while leaving the spawned cwd on a checkout under the operator's real home,
-    /// and the operator's own `~/.bsx.toml` is reached by the walk, fails `same_file`, and is
-    /// judged as a project file: its user-only keys are refused and the run dies in preflight.
+    /// coordinates agree. Split them (a process whose `$HOME` is redirected while its cwd sits
+    /// under the operator's real home), and the operator's own `~/.bsx.toml` is reached by the
+    /// walk, fails `same_file`, and is refused as a project file naming user-only keys.
     ///
-    /// That refusal is the trust split behaving as specified, since a file above cwd at a
-    /// non-`$HOME` path is indistinguishable from one that arrived with a clone. It is pinned here
-    /// rather than fixed because the defect is in the harness, which controls only one coordinate.
-    /// `a_project_file_at_the_user_path_is_read_once_as_the_user_file` cannot see this shape: it
-    /// runs with `$HOME` intact and equal to the walk destination.
+    /// That refusal is the trust split as specified: a file above cwd at a non-`$HOME` path is
+    /// indistinguishable from one that arrived with a clone, so this pins the refusal rather than
+    /// softening it. `a_project_file_at_the_user_path_is_read_once_as_the_user_file` cannot see
+    /// this shape, since it runs with `$HOME` intact and equal to the walk destination.
     #[test]
     fn a_user_file_reached_by_the_walk_but_not_at_home_is_refused_as_a_project_file() {
         // The operator's real home, holding the file `install.sh` and `cargo xtask self-host` write.

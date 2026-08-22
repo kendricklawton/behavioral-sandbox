@@ -924,9 +924,9 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     }
 
     // 1. Baseline: nothing attached, measured **twice**. Two runs of one condition differ only by
-    // the measurement's own jitter, so the gap between them is the floor a real delta has to clear.
-    // Without it this bench has reported metering as *cheaper* than not-metering, which is not a
-    // result: it is a delta smaller than the noise, printed as though it were a number.
+    // the measurement's own jitter, so the gap between them is the floor a real delta has to
+    // clear; without it a sub-noise delta (metering "cheaper" than not-metering) prints as a
+    // number while carrying none.
     let mut baseline = Vec::with_capacity(runs);
     for _ in 0..runs {
         baseline.push(ns_per_switch(ROUNDS)?);
@@ -997,12 +997,9 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// A delta rendered against the noise floor that has to be cleared before it means anything.
-///
-/// The reason this bench needs it: a delta smaller than the measurement's own run-to-run spread
-/// reads as a number while carrying no information, and the failure is not subtle when it happens
-/// (metering has measured *cheaper* than not-metering here, a negative cost for doing more work).
-/// Naming the floor turns that from a published figure into a stated non-result.
+/// Renders a delta with the noise floor it must clear: at or under the floor it is labelled a
+/// non-result, since a sub-noise delta (a negative cost for doing more work, say) reads as a
+/// number while carrying none.
 fn against_noise(delta: i64, noise: i64) -> String {
     if delta.abs() <= noise {
         format!("{delta:+} ns (below the {noise} ns noise floor, no result)")
@@ -1274,13 +1271,11 @@ fn loadavg_1m() -> f64 {
 /// `CAP_BPF`+`CAP_PERFMON` + the built object) is **skipped with the reason**, never silently dropped,
 /// so the report says exactly what it did and didn't measure. `runs` sizes the percentile benches; the
 /// concurrency benches use fixed cohort sizes (a bigger sweep is the dedicated command's job).
-/// The scratch dir every KVM section stages into, and the filesystem holding it, for the banner.
-///
-/// Three sections argue from this and none of them could name it: a rootfs copy onto a `tmpfs`
-/// scratch is charged to host RAM rather than to a disk, so the same suite on the same box reports
-/// different boot and footprint numbers depending on a mount the report never mentioned. The
-/// covering-mount rule is the driver's own ([`mountinfo::covering`]), compiled in rather than
-/// restated, so this banner and the boot path agree on which mount holds a path.
+/// The scratch dir every KVM section stages into, and the mount holding it, for the banner: a
+/// rootfs copy onto a `tmpfs` scratch is charged to host RAM rather than to a disk, so boot and
+/// footprint numbers move with a mount the report must therefore name. The covering-mount rule is
+/// the driver's own ([`mountinfo::covering`]), compiled in rather than restated, so the banner and
+/// the boot path agree on which mount holds a path.
 fn scratch_line() -> String {
     let dir = BootConfig::from_env().scratch_dir;
     let Some(text) = mountinfo::self_text() else {

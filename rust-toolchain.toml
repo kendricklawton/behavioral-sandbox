@@ -1,7 +1,7 @@
 # Pin the whole workspace to an exact stable Rust so a local build and CI run the identical compiler
 # and clippy: a lint that passes locally can then never surprise CI. Floating `channel = "stable"`
-# only holds that if every dev's installed stable is current, which is exactly the drift that bit us
-# (a stale local stable passing a lint a newer CI stable rejects). Bump this deliberately when moving
+# only holds that if every dev's installed stable is current; a stale local stable can pass a lint
+# a newer CI stable rejects. Bump this deliberately when moving
 # to a newer Rust, and keep `rust-version` in Cargo.toml in step (that is the downstream MSRV floor;
 # the policy tracks current stable, with no back-support of older toolchains yet).
 # No nightly here (see AGENTS.md); the eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which

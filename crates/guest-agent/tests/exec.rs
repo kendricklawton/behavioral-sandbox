@@ -268,10 +268,6 @@ fn put_file_rejects_path_traversal() {
 }
 
 /// Every stream the command wrote reaches the caller, and only the artifacts it asked for.
-///
-/// The drain loops this replaced disagreed about which frames were legal: a `Stderr` chunk was a
-/// hard panic in some and ignored in others, so "what a run carries" was a property of whichever
-/// loop a test happened to copy rather than of the agent.
 #[test]
 fn a_run_carries_both_streams_and_only_the_requested_artifacts() {
     let run = Agent::run(Exec::new(&[

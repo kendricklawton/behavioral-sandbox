@@ -612,13 +612,12 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
 /// Seal config discovery for a spawned `bsx`: point **both** `$HOME` and the working directory at
 /// `dir`, and leave an empty `.bsx.toml` there for the walk to stop on.
 ///
-/// Pinning only `$HOME` is not enough, and the gap is not hypothetical: the project-file walk climbs
-/// from the working directory, so a checkout under the operator's own home reaches their real
-/// `~/.bsx.toml`, which no longer matches the redirected `$HOME` and is therefore judged a *project*
-/// file. Its user-only keys (`kernel`, `rootfs`, `scratch_dir`) are then refused and the run dies in
-/// preflight, which is how `ci-privileged` went red on a configured host. With both coordinates on
-/// one directory the walk finds this sentinel first, the identity rule folds it into the user slot,
-/// and nothing above it is read.
+/// Pinning only `$HOME` is not enough: the project-file walk climbs from the working directory, so
+/// a checkout under the operator's own home reaches their real `~/.bsx.toml`, which fails the
+/// identity dedup against the redirected `$HOME` and is judged a *project* file, its user-only keys
+/// (`kernel`, `rootfs`, `scratch_dir`) refused before any boot. With both coordinates on one
+/// directory the walk finds this sentinel first, the identity rule folds it into the user slot, and
+/// nothing above it is read.
 ///
 /// # Panics
 /// If the sentinel cannot be written, since a test that silently kept reading the developer's own
