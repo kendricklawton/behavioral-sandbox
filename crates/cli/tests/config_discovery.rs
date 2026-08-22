@@ -30,8 +30,8 @@ fn run_from(cwd: &Path, home: &Path) -> String {
 
 /// The failure this seal exists for, reproduced against the real binary: an ancestor of the working
 /// directory holds a `.bsx.toml` naming user-only keys, `$HOME` points elsewhere, and the run dies
-/// in preflight. On a configured host that ancestor is the operator's own home and the file is the
-/// one `install.sh` wrote, which is how `ci-privileged` went red without any test being wrong.
+/// in preflight. On a configured host that ancestor is the operator's own home, holding the file
+/// `install.sh` writes.
 #[test]
 fn an_unsealed_spawn_reads_a_config_from_above_the_working_directory() {
     let tree = ScratchDir::created("cfg-unsealed");

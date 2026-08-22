@@ -1,13 +1,8 @@
 //! The host side of an agent connection, shared by the agent's test binaries.
 //!
-//! Each test used to spell the whole scaffold itself: a socketpair, `serve` on a thread, the
-//! handshake, an `Exec` literal with all five fields, and a response loop.
-//!
-//! - **One drain, one answer about which frames are legal.** The hand-written loops disagreed: some
-//!   panicked on a `Stderr` chunk, some ignored it, some read an `Error` as a terminal frame and
-//!   some as a bug. [`Agent::drain`] accepts every frame the protocol defines and reports the
-//!   terminal one as an [`Outcome`], so a test says what it means in an assertion rather than in
-//!   which match arm panics.
+//! - **One drain, one answer about which frames are legal.** [`Agent::drain`] accepts every frame
+//!   the protocol defines and reports the terminal one as an [`Outcome`], so a test says what it
+//!   means in an assertion rather than in which match arm panics.
 //! - **`test-support` cannot hold this.** It dev-depends the other way round, so this lives in the
 //!   test binaries' own `common` module.
 

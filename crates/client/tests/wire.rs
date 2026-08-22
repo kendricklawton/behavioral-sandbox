@@ -137,12 +137,10 @@ fn connect(path: &SocketPath) -> Client {
     Client::connect(path.as_path()).unwrap_or_else(|e| panic!("connect to the fake daemon: {e}"))
 }
 
-/// The fake daemon's socket path, unlinked when this is dropped.
-///
-/// Every test used to repeat the unlink as its own last line, after the assertions, so a failing
-/// one left the socket in `/tmp`. `bsx-client` carries no `[dev-dependencies]` by decision (the
-/// point of the reference client is that a caller needs nothing but the wire contract), so this is
-/// a local guard rather than the `test-support` edge.
+/// The fake daemon's socket path, unlinked when this is dropped, so a failing assertion cannot
+/// leave the socket in `/tmp`. `bsx-client` carries no `[dev-dependencies]` by decision (the point
+/// of the reference client is that a caller needs nothing but the wire contract), so this is a
+/// local guard rather than the `test-support` edge.
 struct SocketPath(PathBuf);
 
 impl SocketPath {
