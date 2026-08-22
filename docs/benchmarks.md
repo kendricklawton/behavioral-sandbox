@@ -11,11 +11,14 @@ average) were added *afterwards*. The numbers may well have been roughly right; 
 nobody can tell. Publishing a number nobody can defend is worse than publishing none, so they are
 parked until a re-run on a host whose quiet state is verified.
 
-Why cold boot returns ahead of them: two reporting defects are open against the suite, and neither
-one reaches `bench-boot`. `bench-all` does not record the scratch directory or its filesystem though
-three other sections argue from it, which the run below covers by recording it by hand. And
-`bench-meter` does not separate its conditions. The remaining tables return when those land and the
-suite re-runs on this host.
+Why cold boot returned ahead of them: two reporting defects sat between the rest of the suite and a
+defensible table, and neither reached `bench-boot`. Both are now closed in the code. `bench-all`
+records the scratch directory and the mount holding it (`scratch_line` in `xtask/src/bench.rs`,
+through the driver's own mountinfo parser), where the boot run below had to record it by hand. And
+`bench-meter` measures its unattached baseline twice and reports any delta inside that spread as
+below its noise floor rather than as a number. The remaining tables return when the suite re-runs on
+the measurement host, which is also what first exercises the meter's control on a host with the eBPF
+capabilities it needs.
 
 The suite lives in [`xtask`](https://github.com/kendricklawton/behavioral-sandbox/tree/main/xtask)
 and runs via `cargo xtask bench-all`. Run it on your own host; that result is about your host, which
@@ -39,7 +42,8 @@ is the only thing a benchmark ever tells you.
 
   The KVM benches need `/dev/kvm` + the built BSX rootfs; the eBPF benches need
   `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM). `bench-all` records the host it ran
-  on and skips any section it can't run, with the reason, so a report says exactly what it measured.
+  on, including the mount holding its scratch directory, and skips any section it can't run, with
+  the reason, so a report says exactly what it measured.
 
 The withdrawn figures were taken on the development host, with the guest at 256 MiB and 1 vCPU on a
 132 MiB rootfs. When numbers return, they return with the machine and date they were taken on.
@@ -197,6 +201,8 @@ Two checks, both added after a run was silently invalidated by a busy host:
   which no internal control can detect. `bench-all` and `bench-scale` record the 1-minute load
   average so a reader can judge the conditions.
 
-`bench-all` also records the host it ran on and skips any section whose prerequisite is missing,
-naming the reason, so a report states what it actually measured.
+`bench-all` also records the host it ran on, the mount holding its scratch directory included (a
+tmpfs scratch charges the rootfs copy to host RAM, which moves the boot and footprint numbers), and
+skips any section whose prerequisite is missing, naming the reason, so a report states what it
+actually measured.
 
