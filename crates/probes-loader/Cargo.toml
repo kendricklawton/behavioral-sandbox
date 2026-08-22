@@ -28,7 +28,7 @@ bsx-record = { path = "../record" }
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
 # Pinned to the same 0.31 the workspace already carries (via `vsock` under `bsx`) so the build
 # links one copy of nix, not two.
-nix = { version = "0.31", default-features = false, features = ["sched"] }
+nix = { workspace = true, features = ["sched"] }
 
 [dev-dependencies]
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach

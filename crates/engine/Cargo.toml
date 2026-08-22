@@ -30,7 +30,7 @@ bsx-channel = { path = "../channel" }
 # loop needs no thread, and nix's socket calls are *safe* functions, so the driver stays
 # `#![forbid(unsafe_code)]` (the same reasoning that put nix in `bsx-probes-loader` for `setns`).
 # Pinned to the 0.31 the workspace already carries so the build links one copy.
-nix = { version = "0.31", default-features = false, features = ["socket"] }
+nix = { workspace = true, features = ["socket"] }
 
 [features]
 # Exposes the output-image geometry bound to `cargo xtask fuzz output_image`, so the target checks

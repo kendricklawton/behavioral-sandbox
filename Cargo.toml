@@ -76,6 +76,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # in the same memory-safety class as the rest of the driver. Its journal support replays a dirty
 # image, the case a hard-killed guest leaves behind.
 ext4-view = { version = "0.9", features = ["std"] }
+# Thin safe wrappers over libc calls the std library does not expose: `recv(MSG_PEEK)` for the
+# daemon's non-destructive readability check, a bounded `connect`, and `setns` for the tap monitor.
+# Single-sourced here because three crates want it and a per-crate version string is three things to
+# bump; each names its own `features`, which is the part that legitimately differs.
+nix = { version = "0.31", default-features = false }
 
 # No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`
