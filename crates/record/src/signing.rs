@@ -181,6 +181,10 @@ impl HostKey {
 
     /// Signs already-canonical record bytes, unchained. The signed message is `canonical` verbatim, which
     /// verification re-reads from the envelope's `record` string.
+    ///
+    /// `canonical` must carry no raw newline, which [`crate::RunRecord::to_json`] holds by escaping
+    /// every captured byte. A newline is what separates `prev` from the record in a chained
+    /// signature, so one inside `canonical` leaves the signed bytes readable as either framing.
     #[must_use]
     pub fn sign_canonical(&self, canonical: &str) -> String {
         self.sign_canonical_chained(canonical, None)
@@ -192,6 +196,7 @@ impl HostKey {
     ///
     /// `prev` must be a [`record_hash`] of the previous record. Anything else produces an envelope
     /// [`verify`] refuses, since the 64-hex shape is what frames the two halves of the signed message.
+    /// `canonical` carries the same no-raw-newline requirement as [`sign_canonical`](Self::sign_canonical).
     #[must_use]
     pub fn sign_canonical_chained(&self, canonical: &str, prev: Option<&str>) -> String {
         let signature: Signature = match prev {
@@ -1006,6 +1011,37 @@ mod tests {
                 Err(VerifyError::Malformed(_))
             ),
             "a non-hash prev is malformed, not merely escaped"
+        );
+    }
+
+    /// [`link_message`] is single-valued only while a canonical record carries no raw newline, and
+    /// that is held in another module: [`crate::RunRecord::to_json`]'s escaper. Pinned here, beside
+    /// the code that depends on it, because the failure is not local to JSON rendering.
+    ///
+    /// If a record ever did emit a raw newline, an *unchained* signature over `<64 hex>\n<rest>`
+    /// would also verify as a *chained* envelope splitting there, and [`verify`] would hand back
+    /// `<rest>` as authentic canonical bytes at an attacker-chosen chain position. The 64-hex shape
+    /// check closes the mirror case (a re-framed `prev`); this closes the one the shape check cannot
+    /// see, because there the framing is legal and the *record* is what carries the separator.
+    #[test]
+    fn a_canonical_record_can_never_carry_the_frame_separator() {
+        let record = RunRecord::from_parts(
+            crate::RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
+            None,
+            crate::ResourceSummary::default(),
+            crate::SyscallFootprint::default(),
+            crate::Timing::new(std::time::Duration::ZERO, std::time::Duration::ZERO),
+            // The separator, planted in a field that carries captured bytes verbatim.
+            vec![crate::AxisGap::Network("a\nb\r\nc".into())],
+        );
+        let canonical = record.to_json();
+        assert!(
+            !canonical.contains('\n') && !canonical.contains('\r'),
+            "a raw separator in the canonical bytes makes the signed framing ambiguous: {canonical}"
+        );
+        assert!(
+            canonical.contains("a\\nb\\r\\nc"),
+            "the bytes are still recorded, escaped: {canonical}"
         );
     }
 
