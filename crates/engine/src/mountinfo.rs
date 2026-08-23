@@ -89,7 +89,8 @@ fn parse_line(line: &str) -> Option<Mount<'_>> {
 }
 
 /// Decode a mountinfo path's octal escapes (`\040` space, `\011` tab, `\012` newline, `\134`
-/// backslash) so a mount point with a space still prefix-matches correctly.
+/// backslash) so a mount point with a space still prefix-matches correctly. Total over any `&str`,
+/// so a caller that hands this something `/proc` did not write gets a path back, not a panic.
 fn unescape_octal(s: &str) -> PathBuf {
     if !s.contains('\\') {
         return PathBuf::from(s);
@@ -98,10 +99,7 @@ fn unescape_octal(s: &str) -> PathBuf {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8)
-        {
+        if let Some(byte) = octal_escape_at(bytes, i) {
             out.push(byte);
             i += 4;
             continue;
@@ -110,6 +108,20 @@ fn unescape_octal(s: &str) -> PathBuf {
         i += 1;
     }
     PathBuf::from(OsString::from_vec(out))
+}
+
+/// The byte a `\ooo` escape at `i` encodes, or `None` when nothing there is one. Reads the three
+/// digits as **bytes**: `i + 4` can land inside a multi-byte character, and slicing a `str` at an
+/// index that is not a char boundary panics. Rejects a sign, which `from_str_radix` would accept
+/// and the format does not.
+fn octal_escape_at(bytes: &[u8], i: usize) -> Option<u8> {
+    if bytes[i] != b'\\' {
+        return None;
+    }
+    bytes.get(i + 1..i + 4)?.iter().try_fold(0u8, |acc, d| {
+        let digit = d.checked_sub(b'0').filter(|d| *d < 8)?;
+        acc.checked_mul(8)?.checked_add(digit)
+    })
 }
 
 #[cfg(test)]
@@ -222,5 +234,17 @@ mod tests {
         assert_eq!(unescape_octal("/a\\040b\\011c"), Path::new("/a b\tc"));
         // A trailing backslash cannot be a complete escape, so it survives as itself.
         assert_eq!(unescape_octal("/a\\"), Path::new("/a\\"));
+    }
+
+    /// A backslash that starts no escape is copied through, whatever follows it. The three digits
+    /// are read as bytes for this: taking them as a `&str` slice puts the end index inside the
+    /// multi-byte character below, and slicing a `str` off a char boundary panics.
+    #[test]
+    fn a_backslash_that_starts_no_escape_is_copied_through_not_a_panic() {
+        assert_eq!(unescape_octal("/x\\a\u{20AC}"), Path::new("/x\\a\u{20AC}"));
+        // A sign is not an octal digit, though `from_str_radix` reads one.
+        assert_eq!(unescape_octal("/x\\+12"), Path::new("/x\\+12"));
+        // Past `\377` there is no byte to decode to, so the escape is not one.
+        assert_eq!(unescape_octal("/x\\400"), Path::new("/x\\400"));
     }
 }

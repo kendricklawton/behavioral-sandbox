@@ -49,6 +49,10 @@ const NOT_CHECKED_NO_FIRECRACKER: &str =
     "not checked: no firecracker binary found (fix the missing row above first)";
 
 /// The outcome of one host [`Check`].
+///
+/// Deliberately not `#[non_exhaustive]`, for [`ErrorKind`](crate::ErrorKind)'s reason: the three
+/// severities are the stable contract and a new host check slots into one of them, so a consumer's
+/// wildcard-free match is what would force a decision if a fourth ever landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
     /// The prerequisite is present.
@@ -60,7 +64,9 @@ pub enum CheckStatus {
 }
 
 /// One host prerequisite: a human label, its [`CheckStatus`], and a note on what its absence costs.
+/// Built through [`row`](Check::row), the seam a caller appends its own rows through.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Check {
     /// What was checked, e.g. "`/dev/kvm` present".
     pub label: String,
@@ -71,19 +77,29 @@ pub struct Check {
 }
 
 impl Check {
-    fn new(label: &str, ok: bool, warn_not_fail: bool, note: &str) -> Self {
-        let status = if ok {
-            CheckStatus::Ok
-        } else if warn_not_fail {
-            CheckStatus::Warn
-        } else {
-            CheckStatus::Fail
-        };
+    /// One row from an already-decided verdict, and the only place a [`Check`] is built. Public so
+    /// a caller can append rows of its own beside [`checks`]: the CLI's eBPF-capability and
+    /// config-layer rows are two. `note` is what the row's absence costs, rendered when `status` is
+    /// not [`Ok`](CheckStatus::Ok).
+    #[must_use]
+    pub fn row(label: impl Into<String>, status: CheckStatus, note: Option<String>) -> Self {
         Check {
-            label: label.to_string(),
+            label: label.into(),
             status,
-            note: (status != CheckStatus::Ok).then(|| note.to_string()),
+            note,
         }
+    }
+
+    /// A row from a predicate: `ok` reads [`Ok`](CheckStatus::Ok), and absence reads `when_absent`
+    /// carrying `note`. The verdict is typed rather than a second `bool`, because two adjacent bare
+    /// booleans are swappable at a call site with nothing to catch it.
+    fn new(label: &str, ok: bool, when_absent: CheckStatus, note: &str) -> Self {
+        let status = if ok { CheckStatus::Ok } else { when_absent };
+        Check::row(
+            label,
+            status,
+            (status != CheckStatus::Ok).then(|| note.to_string()),
+        )
     }
 }
 
@@ -101,7 +117,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             &format!("architecture is {} (x86_64)", std::env::consts::ARCH),
             SUPPORTED_ARCHES.contains(&std::env::consts::ARCH),
-            false,
+            CheckStatus::Fail,
             "unsupported architecture: the engine is built and tested only for x86_64",
         ),
         Check::new(
@@ -113,7 +129,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
                 ),
             },
             kernel_verdict(Path::new(SYS_CGROUP_ROOT)) != KernelVerdict::Unqualified,
-            false,
+            CheckStatus::Fail,
             &format!(
                 "unsupported kernel: no cgroup.kill (the crash-safe teardown primitive, kernel \
                  5.14+) and below the {}.{} fallback floor. Note this checks capability, not patch \
@@ -125,13 +141,13 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "/dev/kvm present",
             Path::new("/dev/kvm").exists(),
-            false,
+            CheckStatus::Fail,
             "every boot fails (NoKvm): isolation is hardware, there is no software fallback",
         ),
         Check::new(
             "/dev/kvm writable (kvm group or root)",
             kvm_writable(),
-            false,
+            CheckStatus::Fail,
             "every boot fails (NoKvm): join the `kvm` group (`sudo usermod -aG kvm $USER`, then a \
              fresh login) or run as root; already in the group? check the device mode \
              (`ls -l /dev/kvm`)",
@@ -140,19 +156,19 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "guest kernel present (BSX_KERNEL)",
             config.kernel.is_file(),
-            false,
+            CheckStatus::Fail,
             "no kernel to boot: `cargo xtask fetch-artifacts`, or point BSX_KERNEL at one",
         ),
         Check::new(
             "guest rootfs present (BSX_ROOTFS)",
             config.rootfs.is_file(),
-            false,
+            CheckStatus::Fail,
             "no rootfs to boot: build one (`cargo xtask build-rootfs`) or set BSX_ROOTFS",
         ),
         Check::new(
             &format!("firecracker on PATH ({fc})"),
             fc_present,
-            false,
+            CheckStatus::Fail,
             &format!(
                 "no VMM to launch: install firecracker + jailer ({}) from \
                  https://github.com/firecracker-microvm/firecracker/releases, or set \
@@ -169,7 +185,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
                     (crate::spawn::MIN_SUPPORTED_FC_VERSION..=crate::spawn::PINNED_FC_VERSION)
                         .contains(&v)
                 }),
-            true,
+            CheckStatus::Warn,
             if fc_present {
                 "boots continue with a warning; outside this range request bodies and snapshot \
                  semantics are untested, and below it upstream no longer ships security patches"
@@ -180,7 +196,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "firecracker binary sha256 matches pinned release",
             fc_present && firecracker_hash_matches(&fc),
-            true,
+            CheckStatus::Warn,
             if fc_present {
                 "custom or unpinned Firecracker binary on host; verify binary provenance out of band"
             } else {
@@ -191,19 +207,19 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "real root (euid 0: the jailer mknod's device nodes)",
             crate::sweep::own_euid() == Some(0),
-            true,
+            CheckStatus::Warn,
             "jailed chroot boot requires root (sudo); `--unjailed` mode runs unconfined using hardware KVM isolation",
         ),
         Check::new(
             "jailer on PATH",
             command_on_path("jailer"),
-            true,
+            CheckStatus::Warn,
             "jailed boot requires jailer binary; `--unjailed` mode runs unconfined using hardware KVM isolation",
         ),
         Check::new(
             "cgroup v2 cpu+memory delegated (jailer resource caps)",
             cgroup_controllers_delegated(),
-            true,
+            CheckStatus::Warn,
             "jailed VMs run WITHOUT cpu/memory caps: a fail-open DoS mitigation",
         ),
         // Informational, never a warning: a MAC is the normal posture. It earns a row because its
@@ -215,7 +231,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
                 None => "mandatory access control: none loaded".to_string(),
             },
             true,
-            true,
+            CheckStatus::Warn,
             "",
         ),
         // Systemd hosts mount /tmp `nodev` by default, so this catches a jailed boot that would
@@ -223,27 +239,27 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "scratch dir is not nodev/noexec (the jailer's chroot /dev/kvm and VMM binary live there)",
             !scratch_mount_flags(&config.scratch_dir).is_some_and(MountFlags::blocks_jail),
-            true,
+            CheckStatus::Warn,
             "jailed boot fails: scratch filesystem is mounted `nodev` or `noexec`; use default `/var/tmp` or `--unjailed`",
         ),
         // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
         Check::new(
             "ip (iproute2: the per-VM tap for --net)",
             command_on_path("ip"),
-            true,
+            CheckStatus::Warn,
             "a `--net` run fails to build its tap; runs without networking are unaffected",
         ),
         Check::new(
             "mke2fs (e2fsprogs: bulk input device / rootfs build)",
             command_on_path("mke2fs"),
-            true,
+            CheckStatus::Warn,
             "bulk `input_dir` and `cargo xtask build-rootfs` fail; per-frame files are unaffected",
         ),
         // Host hardening, advisory: the multi-tenant baseline is `docs/security-threat-model.md`.
         Check::new(
             "CPU vulnerability mitigations in effect",
             exposed.is_empty(),
-            true,
+            CheckStatus::Warn,
             &format!(
                 "exposed: {}; co-resident guests can probe unmitigated CPU side channels; do not \
                  boot with mitigations=off, and keep microcode current",
@@ -253,21 +269,21 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         Check::new(
             "SMT off (cross-thread side channels)",
             !sys_toggle_at(Path::new(SYS_SMT_ACTIVE)),
-            true,
+            CheckStatus::Warn,
             "sibling hyperthreads share micro-architectural state: multi-tenant recommendation; \
              for mutually-distrusting tenants, disable SMT or use core scheduling",
         ),
         Check::new(
             "KSM off (cross-VM page merging)",
             !sys_toggle_at(Path::new(SYS_KSM_RUN)),
-            true,
+            CheckStatus::Warn,
             "kernel same-page merging across guests is a timing side channel the engine does not \
              need: cross-clone memory sharing already comes from the snapshot COW",
         ),
         Check::new(
             "yama ptrace_scope restricts same-uid ptrace",
             ptrace_scope_restricts_at(Path::new(PROC_YAMA_PTRACE_SCOPE)),
-            true,
+            CheckStatus::Warn,
             "concurrent sandboxes share one jail uid, so a guest that escapes into its own VMM \
              could attach to a co-resident sandbox's VMM and read its guest memory: \
              `sysctl -w kernel.yama.ptrace_scope=1`. Signalling between them is not gated by this \
@@ -567,6 +583,7 @@ fn cgroup_controllers_delegated() -> bool {
 /// jailer's chroot `/dev/kvm` inert, `noexec` makes its firecracker copy unrunnable. One probe for
 /// both, since they share a mountinfo field and fail the same boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MountFlags {
     pub nodev: bool,
     pub noexec: bool,
@@ -582,7 +599,7 @@ impl MountFlags {
 
 /// The jail-relevant [`MountFlags`] of the filesystem holding `dir`, or `None` when they can't be
 /// determined, so "unknown" reads as "assume fine" rather than a false alarm. Public for the guided
-/// install; a diagnostic helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
+/// install.
 pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     // The scratch dir may not exist yet, and its nearest existing ancestor is on the same
     // filesystem the chroot will be created on, since mkdir does not cross a mount.
@@ -769,12 +786,12 @@ mod tests {
 
     #[test]
     fn status_classifies_hard_vs_degradation() {
-        let hard = Check::new("kvm", false, false, "no boot");
+        let hard = Check::new("kvm", false, CheckStatus::Fail, "no boot");
         assert_eq!(hard.status, CheckStatus::Fail);
         assert_eq!(hard.note.as_deref(), Some("no boot"));
-        let soft = Check::new("jailer", false, true, "unjailed still runs");
+        let soft = Check::new("jailer", false, CheckStatus::Warn, "unjailed still runs");
         assert_eq!(soft.status, CheckStatus::Warn);
-        let good = Check::new("ip", true, true, "n/a");
+        let good = Check::new("ip", true, CheckStatus::Warn, "n/a");
         assert_eq!(good.status, CheckStatus::Ok);
         assert_eq!(good.note, None, "a satisfied check carries no note");
     }
@@ -782,11 +799,11 @@ mod tests {
     #[test]
     fn can_boot_is_false_only_on_a_hard_miss() {
         let ok = vec![
-            Check::new("a", true, false, ""),
-            Check::new("b", false, true, ""),
+            Check::new("a", true, CheckStatus::Fail, ""),
+            Check::new("b", false, CheckStatus::Warn, ""),
         ];
         assert!(can_boot(&ok), "a degradation still boots");
-        let bad = vec![Check::new("kvm", false, false, "")];
+        let bad = vec![Check::new("kvm", false, CheckStatus::Fail, "")];
         assert!(!can_boot(&bad), "a hard miss cannot boot");
     }
 

@@ -244,13 +244,13 @@ fn ebpf_check() -> Check {
             )),
         ),
     };
-    Check {
-        // One label for both outcomes: an operator greps a `--json` row by name, and a row that
-        // renamed itself on failure is one their filter stops matching exactly when it fires.
-        label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
+    // One label for both outcomes: an operator greps a `--json` row by name, and a row that
+    // renamed itself on failure is one their filter stops matching exactly when it fires.
+    Check::row(
+        "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
         status,
         note,
-    }
+    )
 }
 
 /// Which `.bsx.toml` layers this run read. Always `Ok`: a project file reaching for a user-only key
@@ -270,11 +270,11 @@ fn config_check(sources: &crate::config::Sources) -> Check {
         ),
         None => "no project file above the working directory".to_string(),
     };
-    Check {
-        label: "config (user file, project file)".to_string(),
-        status: CheckStatus::Ok,
-        note: Some(format!("{user}, {project}")),
-    }
+    Check::row(
+        "config (user file, project file)",
+        CheckStatus::Ok,
+        Some(format!("{user}, {project}")),
+    )
 }
 
 #[cfg(test)]
@@ -301,11 +301,7 @@ mod tests {
 
     #[test]
     fn a_clean_host_tallies_without_zero_rows() {
-        let row = |status| Check {
-            label: String::new(),
-            status,
-            note: None,
-        };
+        let row = |status| Check::row("", status, None);
         let plain = Paint(false);
 
         // The point of dropping empty categories: an all-ok host must not read as if it had
@@ -342,21 +338,13 @@ mod tests {
     #[test]
     fn json_reports_every_row_with_its_status() {
         let rows = [
-            Check {
-                label: "kvm".to_string(),
-                status: CheckStatus::Ok,
-                note: None,
-            },
-            Check {
-                label: "jailer".to_string(),
-                status: CheckStatus::Warn,
-                note: Some("needs \"root\"".to_string()),
-            },
-            Check {
-                label: "arch".to_string(),
-                status: CheckStatus::Fail,
-                note: Some("unsupported".to_string()),
-            },
+            Check::row("kvm", CheckStatus::Ok, None),
+            Check::row(
+                "jailer",
+                CheckStatus::Warn,
+                Some("needs \"root\"".to_string()),
+            ),
+            Check::row("arch", CheckStatus::Fail, Some("unsupported".to_string())),
         ];
         let json = checks_as_json(&rows);
 

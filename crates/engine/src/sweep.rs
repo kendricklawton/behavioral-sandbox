@@ -23,14 +23,17 @@ use crate::jail::unmount_base;
 use crate::net::{netns_del, netns_exists};
 use crate::spawn::VM_DIR_PREFIX;
 
-/// What a [`sweep_orphans`] pass reclaimed and what it deliberately left alone.
+/// What a [`sweep_orphans`] pass reclaimed and what it deliberately left alone. `#[non_exhaustive]`
+/// so a later pass can report a new count without breaking a caller reading these.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SweepReport {
     /// Dead drivers' scratch dirs removed.
     pub dirs_reclaimed: usize,
     /// Orphaned per-VM network namespaces deleted (each cascading its tap away).
     pub netns_reclaimed: usize,
-    /// Scratch dirs skipped because their owner pid is alive (a live driver or a recycled pid).
+    /// Scratch dirs left alone because something in them was still live: the owner pid (a live
+    /// driver, or one whose pid was recycled), or, under a dead owner pid, its VMM process.
     pub live_skipped: usize,
     /// Dead-pid dirs whose removal was deferred because a restore is staging a disk into them right
     /// now, witnessed by a live stager's pid in the dir's `RESTORE_STAGING_MARKER` file.
