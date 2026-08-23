@@ -15,7 +15,9 @@
 use std::process::Command;
 
 use bsx_test_support::ScratchDir;
-use bsx_test_support::{seal_config_discovery, vm_skip_reason, workspace_root};
+use bsx_test_support::{
+    boot_artifact_env, seal_boot_inputs, seal_config_discovery, vm_skip_reason, workspace_root,
+};
 
 /// Why this host can't run the test (a skip reason), or `None` when it can: the loader's own probe
 /// gate, then the VM prerequisites.
@@ -30,7 +32,6 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         eprintln!("skipping run_with_trace_and_record_yields_trail_and_json: {why}");
         return;
     }
-    let root = workspace_root();
     let scratch = ScratchDir::created("trace-e2e");
     let record_path = scratch.path().join("record.json");
     let summary_path = scratch.path().join("summary.json");
@@ -40,10 +41,8 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let signing_key = scratch.path().join("signing.key");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    seal_config_discovery(&mut cmd, scratch.path());
+    seal_boot_inputs(&mut cmd, scratch.path());
     let out = cmd
-        .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         // Keep the generated host signing key inside the scratch dir, not the real default path.
         .env("BSX_SIGNING_KEY", &signing_key)
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
@@ -203,7 +202,6 @@ fn allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial() 
         );
         return;
     }
-    let root = workspace_root();
     let scratch = ScratchDir::created("trace-e2e");
     let record_path = scratch.path().join("record.json");
 
@@ -224,10 +222,8 @@ for _ in range(5):
 print('p14-9b-egress')
 ";
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    seal_config_discovery(&mut cmd, scratch.path());
+    seal_boot_inputs(&mut cmd, scratch.path());
     let out = cmd
-        .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([
             "run",
             "--unjailed",
@@ -284,19 +280,6 @@ print('p14-9b-egress')
     );
 }
 
-/// The absolute artifact paths, so every spawned `bsx` finds the kernel/rootfs regardless of the
-/// working directory (`--get` writes relative to the cwd, so the run itself uses a scratch cwd).
-fn artifact_env() -> [(String, std::path::PathBuf); 2] {
-    let root = workspace_root();
-    [
-        ("BSX_KERNEL".to_string(), root.join("artifacts/vmlinux")),
-        (
-            "BSX_ROOTFS".to_string(),
-            root.join("artifacts/rootfs-guest.ext4"),
-        ),
-    ]
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn doctor_passes_then_one_run_drives_every_projection_at_once() {
@@ -305,11 +288,10 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
         return;
     }
     let scratch = ScratchDir::created("trace-e2e");
-    let env = artifact_env();
 
     // 1) `bsx doctor` on a capable host reports ready (exit 0): the gate an operator runs first.
     let doc = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .envs(env.iter().cloned())
+        .envs(boot_artifact_env())
         .arg("doctor")
         .output()
         .expect("run bsx doctor");
@@ -335,11 +317,10 @@ socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('10.200.0.1', 999
 print('p14-9f-complete')
 ";
     let mut spawn_cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    // cwd stays the scratch dir because `--get` writes result.txt here; the seal adds the sentinel
-    // and the matching `$HOME` so discovery stops there too.
-    seal_config_discovery(&mut spawn_cmd, scratch.path());
+    // cwd stays the scratch dir because `--get` writes result.txt here; the seal adds the sentinel,
+    // the matching `$HOME`, and the artifact paths that cwd no longer resolves.
+    seal_boot_inputs(&mut spawn_cmd, scratch.path());
     let mut child = spawn_cmd
-        .envs(env.iter().cloned())
         .args([
             "run",
             "--unjailed",
@@ -431,10 +412,8 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // deny-by-default. `--record` + `--record-summary` capture both faces of the one host-observed
     // record.
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
-    seal_config_discovery(&mut cmd, scratch.path());
+    seal_boot_inputs(&mut cmd, scratch.path());
     let out = cmd
-        .env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         .args([
             "run",
             "--unjailed",

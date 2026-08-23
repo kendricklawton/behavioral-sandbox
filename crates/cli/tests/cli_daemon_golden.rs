@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use bsx_client::{Client, OpenParams};
-use bsx_test_support::{ScratchDir, seal_config_discovery, vm_skip_reason, workspace_root};
+use bsx_test_support::{ScratchDir, seal_boot_inputs, vm_skip_reason};
 
 /// A run result reduced to the three fields both faces render, the golden comparison surface.
 #[derive(Debug, PartialEq, Eq)]
@@ -75,30 +75,24 @@ fn cases() -> Vec<(Vec<String>, String, RunOutcome)> {
 
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
-fn shared_env(cmd: &mut Command, root: &std::path::Path, seal: &std::path::Path) {
-    // Both discovery coordinates on one scratch dir: the user file is read from `$HOME` and the
-    // project file by walking up from the cwd, so pinning only the first leaves the developer's own
-    // config supplying artifact paths and ceilings to a golden-output test.
-    seal_config_discovery(cmd, seal);
-    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
-        // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
-        .env("BSX_LOG", "warn");
-    if std::env::var_os("BSX_KERNEL").is_none() {
-        cmd.env("BSX_KERNEL", root.join("artifacts/vmlinux"));
-    }
+fn shared_env(cmd: &mut Command, seal: &std::path::Path) {
+    // Both discovery coordinates on one scratch dir, and the artifact paths that cwd then stops
+    // resolving: the user file is read from `$HOME` and the project file by walking up from the
+    // cwd, so pinning only the first leaves the developer's own config supplying artifact paths and
+    // ceilings to a golden-output test.
+    seal_boot_inputs(cmd, seal);
+    cmd.env("BSX_LOG", "warn");
 }
 
 /// Run one command through the **CLI** face: `bsx run --unjailed --json -- <argv>`, feeding
 /// `stdin`, and read the structured result off stdout (stderr carries only logs, so stdout is the one
 /// JSON object).
 fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
-    let root = workspace_root();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
     cmd.arg("run").arg("--unjailed").arg("--json").arg("--");
     cmd.args(argv);
     let seal = ScratchDir::created("golden-seal");
-    shared_env(&mut cmd, &root, seal.path());
+    shared_env(&mut cmd, seal.path());
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -157,7 +151,6 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
         eprintln!("skipping a_closed_stdin_is_no_stdin_not_a_failed_run: {why}");
         return;
     }
-    let root = workspace_root();
     let mut cmd = Command::new("sh");
     // No `current_dir` here: `shared_env` seals both discovery coordinates onto its own scratch
     // dir, and the `bsx` path below is absolute, so nothing needs the checkout as a cwd.
@@ -166,7 +159,7 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
         env!("CARGO_BIN_EXE_bsx")
     ));
     let seal = ScratchDir::created("golden-seal");
-    shared_env(&mut cmd, &root, seal.path());
+    shared_env(&mut cmd, seal.path());
     let out = cmd.output().unwrap_or_else(|e| panic!("spawn sh: {e}"));
 
     let stdout = String::from_utf8_lossy(&out.stdout);

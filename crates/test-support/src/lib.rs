@@ -619,6 +619,9 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
 /// directory the walk finds this sentinel first, the identity rule folds it into the user slot, and
 /// nothing above it is read.
 ///
+/// A test that **boots** wants [`seal_boot_inputs`] instead: moving the working directory here also
+/// moves where `BootConfig`'s relative artifact defaults resolve.
+///
 /// # Panics
 /// If the sentinel cannot be written, since a test that silently kept reading the developer's own
 /// config would pass or fail on host state rather than on its subject.
@@ -628,6 +631,32 @@ pub fn seal_config_discovery(cmd: &mut std::process::Command, dir: &Path) {
         panic!("write the config sentinel {}: {e}", sentinel.display());
     }
     cmd.current_dir(dir).env("HOME", dir);
+}
+
+/// The built guest kernel and rootfs as **absolute** paths, for a spawned `bsx` whose working
+/// directory is not the checkout. `BootConfig`'s defaults for both are relative
+/// (`artifacts/vmlinux`, `artifacts/rootfs-guest.ext4`), so they follow the cwd wherever it goes.
+/// Set unconditionally rather than deferring to an inherited `BSX_KERNEL`/`BSX_ROOTFS`, so a
+/// developer's exported environment cannot decide what a test booted.
+#[must_use]
+pub fn boot_artifact_env() -> [(&'static str, std::path::PathBuf); 2] {
+    let root = workspace_root();
+    [
+        ("BSX_KERNEL", root.join("artifacts/vmlinux")),
+        ("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4")),
+    ]
+}
+
+/// Pin every input the working directory would otherwise decide, for a test that spawns a `bsx`
+/// that boots: [`seal_config_discovery`]'s two config coordinates, plus [`boot_artifact_env`],
+/// because the seal makes `dir` the cwd and the artifact defaults resolve against it. Sealing
+/// without pinning is the shape that looks for `artifacts/vmlinux` under the scratch dir.
+///
+/// # Panics
+/// As [`seal_config_discovery`].
+pub fn seal_boot_inputs(cmd: &mut std::process::Command, dir: &Path) {
+    seal_config_discovery(cmd, dir);
+    cmd.envs(boot_artifact_env());
 }
 
 /// Whether this process is real root (effective uid 0), the gate for putting a VMM under a test
@@ -714,6 +743,36 @@ pub fn syscall_event(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> Sy
 
 #[cfg(test)]
 mod tests {
+    /// The seal moves the working directory, and `BootConfig` resolves its kernel and rootfs
+    /// defaults against it, so a sealed booting command that does not also carry absolute artifact
+    /// paths looks for `artifacts/vmlinux` under the scratch dir. Read off the command the helper
+    /// built, so the two halves cannot come apart without this failing.
+    #[test]
+    fn a_sealed_boot_command_carries_the_paths_its_cwd_no_longer_resolves() {
+        use std::ffi::OsStr;
+
+        let dir = super::ScratchDir::created("seal-boot-inputs");
+        let mut cmd = std::process::Command::new("true");
+        super::seal_boot_inputs(&mut cmd, dir.path());
+
+        assert_eq!(
+            cmd.get_current_dir(),
+            Some(dir.path()),
+            "the seal moves the cwd, which is what makes the rest load-bearing"
+        );
+        for key in ["BSX_KERNEL", "BSX_ROOTFS"] {
+            let value = cmd
+                .get_envs()
+                .find(|(k, _)| *k == OsStr::new(key))
+                .and_then(|(_, v)| v)
+                .unwrap_or_else(|| panic!("{key} must be set on a sealed booting command"));
+            assert!(
+                std::path::Path::new(value).is_absolute(),
+                "{key} must be absolute, not resolved against the sealed cwd: {value:?}"
+            );
+        }
+    }
+
     use super::{
         CAP_NET_ADMIN, Rng, ScratchDir, leaf_holds_the_limits, mountinfo_escape, names_mount_point,
         parse_cap_eff, parse_proc_state, process_state, process_threads, serial_requested,
