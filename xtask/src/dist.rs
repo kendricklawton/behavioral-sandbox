@@ -1841,7 +1841,7 @@ mod tests {
             ("crates/cli/src/trace.rs", "is_bidi_control"),
             ("crates/engine/src/console.rs", "is_bidi_control"),
         ];
-        // The Unicode `Bidi_Control` property, as the two predicates spell it.
+        // The Unicode `Bidi_Control` property, as the predicates spell it.
         let required = [
             r"'\u{061C}'",
             r"'\u{200E}'",

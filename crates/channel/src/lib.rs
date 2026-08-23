@@ -545,25 +545,39 @@ fn handshake<S: Read + Write>(stream: &mut S) -> Result<(), ChannelError> {
 }
 
 /// Host-side connection handle for issuing requests and consuming response streams.
+///
+/// **A send error retires the connection.** A frame is a header followed by its payload, so a write
+/// that fails between them leaves the peer mid-frame: the next frame sent on the same stream is
+/// read as the unfinished one's payload, and the send that spliced it still reports `Ok`
+/// (`a_send_error_leaves_the_stream_mid_frame`). [`ChannelError::PayloadTooLarge`] is the one
+/// exception, raised before a byte is written.
 #[derive(Debug)]
 pub struct ClientConnection<S> {
     stream: S,
 }
 
 impl<S: Read + Write> ClientConnection<S> {
+    /// Opens the host side: sends this build's handshake header and validates the peer's.
     pub fn connect(mut stream: S) -> Result<Self, ChannelError> {
         handshake(&mut stream)?;
         Ok(Self { stream })
     }
 
+    /// Sends one already-built request. [`send_exec`](Self::send_exec) and
+    /// [`send_put_file`](Self::send_put_file) reach the same wire bytes from the caller's own
+    /// slices, so they stage no second copy of a secret.
     pub fn send_request(&mut self, req: &Request) -> Result<(), ChannelError> {
         write_request(&mut self.stream, req)
     }
 
+    /// Stages `data` at `path` in the guest's working directory, serialized straight from the
+    /// caller's slice into a buffer wiped on every scope exit.
     pub fn send_put_file(&mut self, path: &str, data: &[u8]) -> Result<(), ChannelError> {
         write_put_file(&mut self.stream, path, data)
     }
 
+    /// Sends the exec request, serialized straight from the caller's slices into a buffer wiped on
+    /// every scope exit. `timeout_ms` of `None` asks for the agent's own ceiling.
     pub fn send_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
         &mut self,
         argv: &[A],
@@ -575,27 +589,37 @@ impl<S: Read + Write> ClientConnection<S> {
         write_exec(&mut self.stream, argv, stdin, env, artifacts, timeout_ms)
     }
 
+    /// Reads one response frame. A guest [`Error`](Response::Error) arrives escaped and
+    /// length-capped, because it reaches the operator's terminal unquoted.
     pub fn recv_response(&mut self) -> Result<Response, ChannelError> {
         read_response(&mut self.stream)
     }
 }
 
 /// Guest-side connection handle for serving requests and emitting responses.
+///
+/// Retire it on a send error, for [`ClientConnection`]'s reason: the framing tears the same way in
+/// this direction.
 #[derive(Debug)]
 pub struct ServerConnection<S> {
     stream: S,
 }
 
 impl<S: Read + Write> ServerConnection<S> {
+    /// Opens the guest side: sends this build's handshake header and validates the peer's.
     pub fn accept(mut stream: S) -> Result<Self, ChannelError> {
         handshake(&mut stream)?;
         Ok(Self { stream })
     }
 
+    /// Reads one request frame. A tag this build does not know arrives as
+    /// [`Request::Unknown`] rather than an error, so a host that added a request type does not
+    /// drop the link.
     pub fn recv_request(&mut self) -> Result<Request, ChannelError> {
         read_request(&mut self.stream)
     }
 
+    /// Sends one response frame.
     pub fn send_response(&mut self, resp: &Response) -> Result<(), ChannelError> {
         write_response(&mut self.stream, resp)
     }
@@ -654,32 +678,44 @@ impl<'a> Body<'a> {
     }
 }
 
+/// The internal decoders, exposed to the `cargo fuzz` targets in `fuzz/` behind the off-by-default
+/// `fuzzing` feature so a target drives the shipped parser rather than a copy of it. Each entry
+/// discards its result: the property under test is that the decoder returns at all.
+///
+/// The `_wellformed` pair wraps its input in a valid `tag · len · payload` header, so a target
+/// spends its budget inside the body parsers instead of bouncing off the length check.
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
     use super::{MAGIC, read_frame, read_handshake, read_request, read_response};
 
+    /// Decodes arbitrary bytes as a request frame.
     pub fn decode_request(mut data: &[u8]) {
         let _ = read_request(&mut data);
     }
 
+    /// Decodes arbitrary bytes as a response frame.
     pub fn decode_response(mut data: &[u8]) {
         let _ = read_response(&mut data);
     }
 
+    /// Decodes arbitrary bytes as a bare frame header plus payload.
     pub fn decode_frame(mut data: &[u8]) {
         let _ = read_frame(&mut data);
     }
 
+    /// Decodes arbitrary bytes as a handshake header.
     pub fn decode_handshake(mut data: &[u8]) {
         let _ = read_handshake(&mut data);
     }
 
+    /// Decodes an arbitrary body as a request, past a valid frame header.
     pub fn decode_request_wellformed(data: &[u8]) {
         frame_and(data, |mut framed| {
             let _ = read_request(&mut framed);
         });
     }
 
+    /// Decodes an arbitrary body as a response, past a valid frame header.
     pub fn decode_response_wellformed(data: &[u8]) {
         frame_and(data, |mut framed| {
             let _ = read_response(&mut framed);
@@ -700,12 +736,14 @@ pub mod fuzz {
         f(framed.as_slice());
     }
 
+    /// Decodes an arbitrary body as a frame, past a valid frame header.
     pub fn decode_frame_wellformed(data: &[u8]) {
         frame_and(data, |mut framed| {
             let _ = read_frame(&mut framed);
         });
     }
 
+    /// Decodes arbitrary bytes as the version half of a handshake, past the magic.
     pub fn decode_handshake_after_magic(data: &[u8]) {
         let mut framed = Vec::with_capacity(MAGIC.len() + data.len());
         framed.extend_from_slice(&MAGIC);
@@ -1168,6 +1206,70 @@ mod tests {
             path_blob_len(Tag::PutFile, path, &data).expect("in cap"),
             framed.len() - HEADER,
             "the reserved capacity must equal the bytes `write_put_file` emitted"
+        );
+    }
+
+    /// A write that fails between a frame's header and its payload leaves the peer mid-frame, and
+    /// the *next* send reports `Ok` while its bytes are read as the unfinished frame's payload.
+    /// This is what the connection types' retire-on-send-error contract rests on: nothing in the
+    /// type refuses the reuse, so the caller has to drop the connection.
+    #[test]
+    fn a_send_error_leaves_the_stream_mid_frame() {
+        /// Accepts every write but the second, which is the one carrying a frame's payload.
+        /// Failing by call index rather than by byte count keeps the tear on the payload write even
+        /// if the header's own write is ever resized.
+        struct TearOnce {
+            sink: Vec<u8>,
+            calls: usize,
+        }
+
+        impl Read for TearOnce {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+        }
+
+        impl Write for TearOnce {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 2 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "tear"));
+                }
+                self.sink.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut conn = ClientConnection {
+            stream: TearOnce {
+                sink: Vec::new(),
+                calls: 0,
+            },
+        };
+        assert!(
+            matches!(conn.send_put_file("a", b"SECRET"), Err(ChannelError::Io(_))),
+            "the torn send must surface"
+        );
+        // The premise: the header did reach the peer. Without this the encode never tore and
+        // everything below would pass against nothing.
+        assert_eq!(
+            conn.stream.sink.len(),
+            5,
+            "the header must be on the wire for the peer to be mid-frame"
+        );
+
+        conn.send_put_file("b", b"ok")
+            .expect("the stream accepts the second frame, and the send reports success");
+
+        // But the peer cannot read it: the first header's length claim runs across the second
+        // frame's own header, so the tags and lengths after the tear are payload bytes.
+        let sent = conn.stream.sink;
+        assert!(
+            read_request(&mut sent.as_slice()).is_err(),
+            "a frame sent after a tear must not decode as itself: {sent:?}"
         );
     }
 

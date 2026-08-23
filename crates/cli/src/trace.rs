@@ -159,9 +159,9 @@ fn denial_line(out: &mut String, dst: impl std::fmt::Display, proto: u8, count: 
 
 /// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
 /// [`char::is_control`] is category `Cc` only and returns `false` for every one of them, so a path or
-/// `comm` carrying an override reorders the trail line around it (the Trojan-Source class). The twin
-/// of `bsx_channel`'s predicate of the same name, which guards the other guest-authored string that
-/// reaches this terminal; `the_terminal_escapers_agree_on_the_bidi_controls` pins the pair.
+/// `comm` carrying an override reorders the trail line around it (the Trojan-Source class). One of
+/// the predicates of this name that guard a guest-authored string on its way to this terminal;
+/// `the_terminal_escapers_agree_on_the_bidi_controls` holds every one of them to the same set.
 fn is_bidi_control(c: char) -> bool {
     matches!(c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
