@@ -36,7 +36,7 @@ use bsx_protocol::{
     read_request, write_response,
 };
 
-use crate::metrics::{Metrics, Verb};
+use crate::metrics::{Fault, Metrics, Refusal, Verb};
 use crate::serve::{
     AT_CAPACITY_RETRY_MS, ResourceReservation, Server, pool_clone_limits, release_pool_clones,
     reserve_pool_clones,
@@ -112,7 +112,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     ) {
         Some(reservation) => reservation,
         None => {
-            server.metrics.open_refused(true);
+            server.metrics.open_refused(Refusal::Resources);
             tracing::warn!(
                 mem_mib = limits.mem_mib.get(),
                 vcpus = limits.vcpus.get(),
@@ -175,7 +175,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         .session_opened(pooled, boot, vm.sentinel_degraded());
     tracing::info!(vmm_pid = vm.vmm_pid(), boot_ms, pooled, "session opened");
     if !send(&mut writer, &Response::opened(boot_ms, pooled)) {
-        end_session(server, vm, probes, pooled); // client gone before we could serve
+        end_session(server, vm, probes); // client gone before we could serve
         return;
     }
 
@@ -223,7 +223,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     // real `cancel`, since a hang-up has nobody to read the reply. Rearmed because
                     // this awaits a *new* message and the in-flight budget was armed when the exec
                     // request arrived (`a_cancel_after_the_idle_deadline_still_gets_its_ack`).
-                    server.metrics.request_failed(false);
+                    server.metrics.request_failed(Fault::Infra);
                     reader.get_mut().rearm();
                     if matches!(read_request(&mut reader), Ok(Some(Request::Cancel))) {
                         let _ = reply(&mut writer, &Response::Cancelled);
@@ -233,10 +233,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 if !serve_run(
                     &mut writer,
                     &server.metrics,
+                    Verb::Exec,
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
-                    true, // a real guest command
                     |r| {
                         Response::result(
                             r.exit_code,
@@ -275,10 +275,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 if !serve_run(
                     &mut writer,
                     &server.metrics,
+                    Verb::Put,
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
-                    false, // put rides a no-op `true`, not a guest command
                     |_| Response::put(path.clone()),
                 ) {
                     break;
@@ -297,10 +297,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 if !serve_run(
                     &mut writer,
                     &server.metrics,
+                    Verb::Get,
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
-                    false, // get rides a no-op `true`, not a guest command
                     |r| {
                         let found = r.files.iter().find(|a| a.path == path);
                         Response::got(
@@ -323,7 +323,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 let resp = match do_snapshot(server, &mut vm) {
                     Ok(dir) => Response::snapshotted(dir),
                     Err(e) => {
-                        server.metrics.request_failed(true);
+                        server.metrics.request_failed(e.fault());
                         nonfatal(e.message(), e.kind())
                     }
                 };
@@ -348,7 +348,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         Response::trace(record_to_value(&envelope))
                     }
                     None => {
-                        server.metrics.request_failed(true);
+                        server.metrics.request_failed(Fault::Refused);
                         nonfatal(
                             "audit probes are not attached for this session",
                             FaultKind::Refused,
@@ -369,7 +369,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         &p.live_record(timing).to_summary_json(),
                     )),
                     None => {
-                        server.metrics.request_failed(true);
+                        server.metrics.request_failed(Fault::Refused);
                         nonfatal(
                             "audit probes are not attached for this session",
                             FaultKind::Refused,
@@ -427,7 +427,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     }
     tracing::info!("session closed");
-    end_session(server, vm, probes, pooled);
+    end_session(server, vm, probes);
 }
 
 /// Reply to a verb that ran a guest command (`exec`/`put`/`get`): on success accumulate the exec
@@ -437,16 +437,16 @@ pub fn serve(stream: UnixStream, server: &Server) {
 fn serve_run(
     w: &mut DeadlineStream<UnixStream>,
     metrics: &Metrics,
+    verb: Verb,
     result: Result<bsx_engine::RunResult, VmmError>,
     wall: Duration,
     total_exec_wall: &mut Duration,
-    is_command: bool,
     to_response: impl FnOnce(&bsx_engine::RunResult) -> Response,
 ) -> bool {
-    // Only a real `exec` counts as a guest command: `put`/`get` ride a no-op `true` to carry a
-    // file, so folding their wall in would dilute the latency signal with file-transfer overhead.
+    // Taken from the verb rather than a flag beside it, so the two cannot disagree at a call site.
     // The **host-measured** wall accumulates on failure too, since a timed-out or capped exec still
     // consumed time up to the whole budget.
+    let is_command = verb.is_guest_command();
     if is_command {
         *total_exec_wall += wall;
     }
@@ -458,16 +458,17 @@ fn serve_run(
             send(w, &to_response(&run))
         }
         Err(e) => {
-            let session_survives = e.kind() == ErrorKind::Guest;
-            metrics.request_failed(session_survives);
+            let fault = Fault::of(e.kind());
+            metrics.request_failed(fault);
             // Logged host-side too: the error reply reaches only the one client, and an operator
             // diagnosing a failed request does not own that client.
-            tracing::warn!(error = %e, fatal = !session_survives, "request failed");
-            let sent = send(
-                w,
-                &error(e.to_string(), !session_survives, wire_kind(e.kind())),
-            );
-            sent && session_survives
+            tracing::warn!(error = %e, fatal = !fault.session_survives(), "request failed");
+            let reply = if fault.session_survives() {
+                nonfatal(e.to_string(), wire_kind(e.kind()))
+            } else {
+                fatal(e.to_string(), wire_kind(e.kind()))
+            };
+            send(w, &reply) && fault.session_survives()
         }
     }
 }
@@ -529,6 +530,7 @@ fn boot_session_vm(
 /// Why a `snapshot` produced no bundle, split by fault: a disk ceiling is retryable once a bundle
 /// is removed, an engine refusal (a jailed session) never is, and an unreadable bundle directory is
 /// the daemon's own problem.
+#[derive(Debug)]
 enum SnapshotRefusal {
     /// The daemon already holds `--max-snapshots` bundles.
     AtCeiling { held: usize },
@@ -559,6 +561,17 @@ impl SnapshotRefusal {
             Self::AtCeiling { .. } => FaultKind::Refused,
             Self::Unverifiable(_) => FaultKind::Infra,
             Self::Engine(e) => wire_kind(e.kind()),
+        }
+    }
+
+    /// The metric bucket this refusal is charged to, the counter-side twin of [`kind`](Self::kind):
+    /// the two are written apart because one is a wire value and one is a counter slot, and
+    /// `a_snapshot_refusal_is_counted_as_the_fault_it_reports` holds them to the same fault.
+    fn fault(&self) -> Fault {
+        match self {
+            Self::AtCeiling { .. } => Fault::Refused,
+            Self::Unverifiable(_) => Fault::Infra,
+            Self::Engine(e) => Fault::of(e.kind()),
         }
     }
 }
@@ -596,7 +609,7 @@ fn do_snapshot(server: &Server, vm: &mut RunningVm) -> Result<String, SnapshotRe
 /// The refill is **best-effort and non-blocking** (`try_lock`, skip if contended), so a burst of
 /// closes cannot queue behind one another's restore. A bare `open` that meanwhile finds the pool
 /// dry cold-boots.
-fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
+fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>) {
     server.metrics.session_closed(vm.sentinel_degraded());
     drop(probes); // detach from the shared tracer/meter (its own `Drop`)
     if let Err(e) = vm.shutdown() {
@@ -966,23 +979,18 @@ fn client_spoke(socket: &UnixStream, buffered: bool) -> bool {
 
 /// A session-ending error response.
 fn fatal(message: String, kind: FaultKind) -> Response {
-    error(message, true, kind)
+    Response::error(message, true, kind)
 }
 
 /// A per-request error response the session survives.
 fn nonfatal(message: impl Into<String>, kind: FaultKind) -> Response {
-    error(message.into(), false, kind)
-}
-
-/// Build a typed error response.
-fn error(message: String, fatal: bool, kind: FaultKind) -> Response {
-    Response::error(message, fatal, kind)
+    Response::error(message.into(), false, kind)
 }
 
 /// The engine's pinned error taxonomy, as the wire's. Kept a total, wildcard-free match so a new
 /// `ErrorKind` variant fails the build here instead of silently becoming the wrong wire kind;
 /// `a_vmm_error_kind_maps_onto_the_wire_kind` pins it.
-fn wire_kind(kind: ErrorKind) -> FaultKind {
+pub(crate) fn wire_kind(kind: ErrorKind) -> FaultKind {
     match kind {
         ErrorKind::Infra => FaultKind::Infra,
         ErrorKind::Transport => FaultKind::Transport,
@@ -1621,6 +1629,31 @@ mod tests {
         assert_eq!(wire_kind(ErrorKind::Infra), FaultKind::Infra);
         assert_eq!(wire_kind(ErrorKind::Transport), FaultKind::Transport);
         assert_eq!(wire_kind(ErrorKind::Guest), FaultKind::Guest);
+    }
+
+    /// A `snapshot` refusal reports one fault to the client and charges another to the counter
+    /// through a separate match, so the two are held to the same answer here. Charging a
+    /// `--max-snapshots` refusal to `guest` was the drift this pins against: the operator set that
+    /// ceiling, and no sandboxed command can reach it.
+    #[test]
+    fn a_snapshot_refusal_is_counted_as_the_fault_it_reports() {
+        let refusals = [
+            SnapshotRefusal::AtCeiling { held: 16 },
+            SnapshotRefusal::Unverifiable(std::io::Error::other("no bundle dir")),
+            SnapshotRefusal::Engine(VmmError::Vmm("jailed session".into())),
+        ];
+        for refusal in &refusals {
+            assert_eq!(
+                refusal.fault().wire(),
+                refusal.kind(),
+                "{refusal:?} is counted under one fault and reported under another"
+            );
+        }
+        assert_eq!(
+            refusals[0].fault(),
+            Fault::Refused,
+            "an operator ceiling is a refusal, not the run's fault"
+        );
     }
 
     #[test]

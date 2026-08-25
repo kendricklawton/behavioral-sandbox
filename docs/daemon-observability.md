@@ -40,7 +40,7 @@ convention of base units: **seconds**, never milliseconds.
 | `bsx_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
 | `bsx_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
 | `bsx_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
-| `bsx_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `bsx_request_errors_total{kind=…}` | counter | Errored requests, by the same fault kind the client was told: `guest` (the run), `refused` (the daemon declined: an operator ceiling, or a capability this session lacks), `transport`/`infra` (the sandbox is gone). A rising `refused` is this host's posture or capabilities, not a misbehaving command. |
 | `bsx_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
 | `bsx_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `bsx_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |

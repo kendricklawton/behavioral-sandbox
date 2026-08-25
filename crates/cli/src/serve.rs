@@ -37,7 +37,7 @@ use crate::audit::Observability;
 use crate::policy::Policy;
 use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError};
 
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, Refusal};
 
 use crate::EXIT_OPERATIONAL;
 
@@ -697,7 +697,7 @@ pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 /// [`bsx_protocol::Response::AtCapacity`], then drop it. The write is timeout-bounded so a stalled
 /// client cannot park the accept loop, and best-effort, so a refusal cannot take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
-    server.metrics.open_refused(false);
+    server.metrics.open_refused(Refusal::Sessions);
     tracing::warn!(
         max_sessions = server.max_sessions,
         "refusing a connection: at the session ceiling"

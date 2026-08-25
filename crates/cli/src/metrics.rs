@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use bsx_engine::SweepReport;
+use bsx_engine::{ErrorKind, SweepReport};
+use bsx_protocol::FaultKind;
 
 use crate::deadline::DeadlineStream;
 
@@ -92,6 +93,94 @@ verbs! {
     Snapshot => "snapshot",
     Trace => "trace",
     TraceSummary => "trace_summary",
+}
+
+impl Verb {
+    /// Whether a request of this verb runs a **guest command**, i.e. one whose wall time is the
+    /// session's exec latency. `put`/`get` ride a no-op `true` to carry a file, so their wall is
+    /// transfer overhead rather than a command's, and the record verbs run no guest command at all.
+    /// Wildcard-free, so a new verb is classified here or the build fails.
+    pub fn is_guest_command(self) -> bool {
+        match self {
+            Self::Exec => true,
+            Self::Put | Self::Get | Self::Snapshot | Self::Trace | Self::TraceSummary => false,
+        }
+    }
+}
+
+/// Which fault answered a request: the `kind` label on `bsx_request_errors_total`, and **the same
+/// word the client was told** in the reply's `kind` field ([`FaultKind`]), so a counter an operator
+/// watches and an error a caller reads name one taxonomy rather than two.
+///
+/// Whose fault it was, not whether the session survived. The two coincide for an engine error but
+/// not for a [`Refused`](Self::Refused): a `trace` on a host without the eBPF capabilities is a
+/// per-request refusal that the session survives, and charging it to `guest` would read on a
+/// dashboard as the sandboxed command misbehaving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The run is at fault: the command could not spawn, outran its budget, or flooded output.
+    Guest,
+    /// The daemon understood the request and declined: an operator posture, or a capability this
+    /// session lacks. Per-request, and no guest did it.
+    Refused,
+    /// The exec channel to the guest broke. The sandbox is gone.
+    Transport,
+    /// The host failed. The sandbox is gone.
+    Infra,
+}
+
+impl Fault {
+    /// Every bucket, in the fixed order the counter array and the rendering share.
+    const ALL: &'static [Fault] = &[Self::Guest, Self::Refused, Self::Transport, Self::Infra];
+
+    /// The bucket an engine error lands in, one-to-one with [`ErrorKind`] so a failed request is
+    /// counted under the same name the client is handed. Wildcard-free, so a new `ErrorKind` fails
+    /// the build here rather than defaulting into `infra`. [`Refused`](Self::Refused) has no
+    /// `ErrorKind`: it is the daemon's own answer, raised where the refusal is written.
+    pub fn of(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::Guest => Self::Guest,
+            ErrorKind::Transport => Self::Transport,
+            ErrorKind::Infra => Self::Infra,
+        }
+    }
+
+    /// The wire fault this bucket counts. The `kind` label is rendered from it rather than written
+    /// out, so the counter cannot drift from the reply;
+    /// `every_fault_bucket_is_labelled_as_its_wire_kind` pins the pairing.
+    pub(crate) fn wire(self) -> FaultKind {
+        match self {
+            Self::Guest => FaultKind::Guest,
+            Self::Refused => FaultKind::Refused,
+            Self::Transport => FaultKind::Transport,
+            Self::Infra => FaultKind::Infra,
+        }
+    }
+
+    /// This bucket's slot in the counter array: its position in [`ALL`](Self::ALL).
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Whether a session survives a fault of this kind. A refusal is an answer, not a broken
+    /// sandbox, so it survives like a guest fault does.
+    pub fn session_survives(self) -> bool {
+        match self {
+            Self::Guest | Self::Refused => true,
+            Self::Transport | Self::Infra => false,
+        }
+    }
+}
+
+/// Which ceiling refused an `open`, the split `bsx_open_refusals_total`'s `reason` label carries.
+/// Typed for the same reason as [`Fault`]: the two refusals are raised in different files, and a
+/// saturated daemon that charges the wrong one scrapes as if the other ceiling were the tight one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The `--max-sessions` count. Rendered `reason="sessions"`.
+    Sessions,
+    /// An aggregate `--max-committed-*` resource ceiling. Rendered `reason="resources"`.
+    Resources,
 }
 
 /// A fixed-bucket histogram of durations, all-atomic so many session threads observe concurrently
@@ -172,10 +261,9 @@ pub struct Metrics {
     sweep_netns_reclaimed: AtomicU64,
     /// Requests served, one slot per [`Verb`].
     requests: [AtomicU64; Verb::ALL.len()],
-    /// Requests answered with an error, split by the fault taxonomy: `guest` (per-request, the
-    /// session survives) vs `infra` (session-ending, the VM is gone).
-    errors_guest: AtomicU64,
-    errors_infra: AtomicU64,
+    /// Requests answered with an error, one slot per [`Fault`], labelled with the wire kind the
+    /// client was told.
+    errors: [AtomicU64; Fault::ALL.len()],
     /// Lines that failed to decode (malformed, oversize, wrong schema).
     protocol_errors: AtomicU64,
     /// Boot-to-serving latency of session sandboxes (a warm pop or a cold boot).
@@ -204,14 +292,12 @@ impl Metrics {
         self.open_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A connection or `open` refused with `at_capacity`: `resource_ceiling` distinguishes an
-    /// aggregate committed-resource refusal from the session-count ceiling.
-    pub fn open_refused(&self, resource_ceiling: bool) {
-        if resource_ceiling {
-            self.refused_resources.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.refused_sessions.fetch_add(1, Ordering::Relaxed);
-        }
+    /// A connection or `open` refused with `at_capacity`, charged to the ceiling that refused it.
+    pub fn open_refused(&self, refusal: Refusal) {
+        match refusal {
+            Refusal::Resources => self.refused_resources.fetch_add(1, Ordering::Relaxed),
+            Refusal::Sessions => self.refused_sessions.fetch_add(1, Ordering::Relaxed),
+        };
     }
 
     /// A live session ended (any path: `close`, EOF, a fatal fault). Paired with
@@ -246,13 +332,10 @@ impl Metrics {
         self.requests[verb.index()].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A request was answered with an error; `guest_fault` follows the session fault taxonomy.
-    pub fn request_failed(&self, guest_fault: bool) {
-        if guest_fault {
-            self.errors_guest.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.errors_infra.fetch_add(1, Ordering::Relaxed);
-        }
+    /// A request was answered with an error, charged to the bucket for the fault the client was
+    /// told about.
+    pub fn request_failed(&self, fault: Fault) {
+        self.errors[fault.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     /// A line that failed to decode (malformed JSON, over the cap, wrong wire schema).
@@ -400,22 +483,18 @@ impl Metrics {
         family(
             &mut out,
             "bsx_request_errors_total",
-            "Requests answered with an error, by fault kind (guest faults are per-request; infra \
-             faults end the session).",
+            "Requests answered with an error, by the fault kind the client was told: guest (the \
+             run), refused (the daemon declined), transport/infra (the sandbox is gone).",
             "counter",
         );
-        sample(
-            &mut out,
-            "bsx_request_errors_total",
-            "{kind=\"guest\"}",
-            self.errors_guest.load(Ordering::Relaxed),
-        );
-        sample(
-            &mut out,
-            "bsx_request_errors_total",
-            "{kind=\"infra\"}",
-            self.errors_infra.load(Ordering::Relaxed),
-        );
+        for fault in Fault::ALL.iter().copied() {
+            sample(
+                &mut out,
+                "bsx_request_errors_total",
+                &format!("{{kind=\"{}\"}}", fault.wire()),
+                self.errors[fault.index()].load(Ordering::Relaxed),
+            );
+        }
 
         family(
             &mut out,
@@ -682,6 +761,58 @@ mod tests {
         labels.dedup();
         assert_eq!(before, labels.len(), "two verbs share a label: {labels:?}");
     }
+
+    /// The `kind` label is the wire spelling of the fault the client was told, so an operator
+    /// grepping a dashboard and a client branching on the reply use one vocabulary. Renders through
+    /// `FaultKind`'s `Display`, which is the same literal `contract.json` publishes.
+    #[test]
+    fn every_fault_bucket_is_labelled_as_its_wire_kind() {
+        let labels: Vec<String> = Fault::ALL
+            .iter()
+            .copied()
+            .map(|f| f.wire().to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            ["guest", "refused", "transport", "infra"],
+            "a bucket renders a label the wire does not use"
+        );
+        // Distinct slots, or two buckets would share a counter and a label.
+        for (slot, fault) in Fault::ALL.iter().copied().enumerate() {
+            assert_eq!(fault.index(), slot, "{fault:?} indexes the wrong counter");
+        }
+    }
+
+    /// Every `ErrorKind` reaches a bucket whose label is the wire kind that same error is sent as,
+    /// so `Fault::of` and `wire_kind` cannot disagree about one failure.
+    #[test]
+    fn an_engine_error_is_counted_as_the_fault_it_is_reported_as() {
+        for kind in [ErrorKind::Guest, ErrorKind::Transport, ErrorKind::Infra] {
+            assert_eq!(
+                Fault::of(kind).wire().to_string(),
+                crate::session::wire_kind(kind).to_string(),
+                "{kind:?} is counted under one name and reported under another"
+            );
+        }
+    }
+
+    /// `exec` alone runs a guest command, which is what `bsx_guest_command_seconds` and a session's
+    /// accumulated exec wall are about. `put`/`get` ride a no-op `true` to carry a file, so counting
+    /// their wall would mix file-transfer overhead into the command-latency signal, and the record
+    /// verbs run nothing in the guest at all.
+    #[test]
+    fn only_exec_counts_as_a_guest_command() {
+        let commands: Vec<Verb> = Verb::ALL
+            .iter()
+            .copied()
+            .filter(|v| v.is_guest_command())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![Verb::Exec],
+            "a verb that carries a file or reads the record is not a guest command"
+        );
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -742,14 +873,14 @@ mod tests {
         m.session_opened(false, Duration::from_millis(100), true);
         m.session_closed(true);
         m.open_failed();
-        m.open_refused(false);
-        m.open_refused(true);
-        m.open_refused(true);
+        m.open_refused(Refusal::Sessions);
+        m.open_refused(Refusal::Resources);
+        m.open_refused(Refusal::Resources);
         m.request(Verb::Exec);
         m.request(Verb::Trace);
         m.guest_command(Duration::from_millis(7));
-        m.request_failed(true);
-        m.request_failed(false);
+        m.request_failed(Fault::Guest);
+        m.request_failed(Fault::Infra);
         m.protocol_error();
 
         let text = m.render(&CapacitySample::pool(Some(2)));
@@ -914,7 +1045,11 @@ mod tests {
                     2 => Verb::Get,
                     _ => Verb::Trace,
                 }),
-                4 => m.request_failed(next() % 2 == 0),
+                4 => m.request_failed(if next() % 2 == 0 {
+                    Fault::Guest
+                } else {
+                    Fault::Infra
+                }),
                 5 => m.protocol_error(),
                 6 => m.guest_command(Duration::from_millis(next() % 10_000)),
                 _ => {} // a render-only step: sampling must not perturb anything either
