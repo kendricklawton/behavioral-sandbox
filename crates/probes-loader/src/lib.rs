@@ -66,8 +66,8 @@ pub use bsx_record::{
     EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError, MAX_ENVELOPE_BYTES, MAX_NOTABLE,
     NetSection, NetStats, NotableSyscall, RecordSubject, ResourceSummary, RunRecord,
     SIGNED_RECORD_SCHEMA_VERSION, SUMMARY_SCHEMA_VERSION, SyscallCounts, SyscallFold,
-    SyscallFootprint, Timing, TrustedKey, VerifyError, default_key_path, record_hash, verify,
-    verify_chain,
+    SyscallFootprint, Timing, TrustedKey, VerifiedEntry, VerifyError, default_key_path,
+    record_hash, verify, verify_chain, verify_entry,
 };
 
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where

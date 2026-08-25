@@ -134,9 +134,10 @@ policy it audits is worse than no scope at all:
 - The **`bsx-channel`** host↔guest wire framing protocol
 - The daemon's **`bsx-protocol`** wire types, the newline-JSON contract at `schema: 1`
   ([Wire protocol](./daemon-protocol.md)), which a non-Rust client couples to instead of the library
-- The **`bsx-record`** signed-envelope surface (`verify`, `verify_chain`, `record_hash`, and the
-  record's schema versions): the one contract whose breakage reaches *backwards*, invalidating
-  records that already sit on disk, so it pins with the wire protocols rather than the library
+- The **`bsx-record`** signed-envelope surface (`verify`, `verify_entry`, `verify_chain`,
+  `record_hash`, and the record's schema versions): the one contract whose breakage reaches
+  *backwards*, invalidating records that already sit on disk, so it pins with the wire protocols
+  rather than the library
 
 The list above names the headline types; the enforced boundary is wider and mechanical: **every
 public item of the four crates `cargo xtask semver-check` names** (`bsx-engine`, `bsx-channel`,

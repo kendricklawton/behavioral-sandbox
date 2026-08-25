@@ -112,6 +112,47 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
 }
 
 #[test]
+fn a_chain_truncated_to_one_link_is_refused_not_reported_verified() {
+    // The file's *shape* picks the check, so whoever relays a session picks it too by deleting
+    // lines. Every link past the first commits to a predecessor's hash; a file holding no
+    // predecessor cannot check that commitment, and reporting it as `verified` would let a
+    // fragment read as a whole record.
+    let key = HostKey::from_seed([7u8; 32]);
+    let hex = key.key_id();
+    let dir = ChainDir::new("truncated");
+    let [e0, e1, e2] = chain_of_three(&key);
+
+    for (name, envelope) in [("second.json", &e1), ("third.json", &e2)] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("{envelope}\n")).unwrap_or_else(|e| panic!("write: {e}"));
+        let (code, stdout, stderr) = verify_in(&dir, &path, &hex);
+        assert_eq!(
+            code,
+            Some(1),
+            "{name} is one link of a chain, not a record: {stdout}{stderr}"
+        );
+        assert!(
+            stderr.contains("one link of a session chain"),
+            "the refusal says why a good signature is not enough here: {stderr}"
+        );
+    }
+
+    // The residual, asserted so nobody reads more into this than it gives: a chain's own anchor is
+    // unchained, so a chain truncated to its *first* record is indistinguishable from a one-off
+    // `--record` file and still verifies. Only an anchor kept outside the file could tell them
+    // apart.
+    let anchor = dir.path().join("anchor.json");
+    std::fs::write(&anchor, format!("{e0}\n")).unwrap_or_else(|e| panic!("write: {e}"));
+    let (code, stdout, stderr) = verify_in(&dir, &anchor, &hex);
+    assert_eq!(
+        code,
+        Some(0),
+        "an unchained anchor cannot be told from a single record: {stderr}"
+    );
+    assert!(stdout.contains("verified"), "{stdout}");
+}
+
+#[test]
 fn a_single_envelope_file_still_verifies_as_before() {
     // One line stays single-record verification, byte for byte the same code path a `--record`
     // file takes.

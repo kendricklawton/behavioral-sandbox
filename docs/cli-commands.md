@@ -129,9 +129,15 @@ inserted, or dropped record fails even though every envelope alone carries a val
 
 A chain is verified **from its anchor**: the first line must be the session's unchained first
 record. That is what makes a dropped *head* detectable, and it is also why a mid-session slice (a
-rotated log, the last N replies kept) cannot be checked as a chain, only envelope by envelope, which
-keeps each record's authenticity and loses the ordering property. Dropping the *tail* stays
-undetectable either way without an external anchor.
+rotated log, the last N replies kept) cannot be checked as a chain. Such a slice is refused, not
+downgraded: since the file's shape picks the check, whoever relays a session would otherwise pick
+the weaker one by deleting lines. A slice of several lines fails the anchor check above, and a file
+holding a **single** envelope that commits to a predecessor is refused by name, saying it is one
+link of a chain the file does not hold
+(`a_chain_truncated_to_one_link_is_refused_not_reported_verified` pins both). What this leaves: the
+anchor itself is unchained by construction, so a chain cut down to its *first* record cannot be told
+from a one-off `--record` file. Dropping the *tail* stays undetectable either way without an
+external anchor.
 
 ```console
 bsx verify run.json                      # trusts this host's own signing key

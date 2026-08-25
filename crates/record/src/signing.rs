@@ -465,15 +465,29 @@ pub fn default_key_path() -> PathBuf {
 /// # Errors
 /// [`VerifyError`] on a malformed envelope, an untrusted `key_id`, or a bad signature.
 pub fn verify(envelope: &str, trusted: &[TrustedKey]) -> Result<String, VerifyError> {
-    verify_entry(envelope, trusted).map(|(record, _prev)| record)
+    verify_entry(envelope, trusted).map(|entry| entry.record)
 }
 
-/// Verifies one envelope and returns `(canonical record, prev)`, where `prev` is the chain link or `None`
-/// if unchained. The signed message covers `prev`, so the link can't be rewritten.
-fn verify_entry(
-    envelope: &str,
-    trusted: &[TrustedKey],
-) -> Result<(String, Option<String>), VerifyError> {
+/// One verified envelope: the canonical record the signature covers, and the chain link it commits to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerifiedEntry {
+    /// The exact canonical record bytes the signature covers.
+    pub record: String,
+    /// The previous record's [`record_hash`] when this envelope is a **chain link**, `None` when it is
+    /// unchained: a one-off record, or a chain's first entry.
+    pub prev: Option<String>,
+}
+
+/// Verifies one envelope, returning its record **and its chain link**, so a caller holding a single
+/// envelope can tell a whole record from one link of a sequence it does not have. [`verify`] is this
+/// without the link, for a caller with no chain to place it in.
+///
+/// The signed message covers `prev`, so the link can't be rewritten.
+///
+/// # Errors
+/// As [`verify`].
+pub fn verify_entry(envelope: &str, trusted: &[TrustedKey]) -> Result<VerifiedEntry, VerifyError> {
     if envelope.len() > MAX_ENVELOPE_BYTES {
         return Err(VerifyError::TooLarge {
             len: envelope.len(),
@@ -533,7 +547,7 @@ fn verify_entry(
     key.0
         .verify_strict(message.as_bytes(), &signature)
         .map_err(|_| VerifyError::BadSignature)?;
-    Ok((record, prev))
+    Ok(VerifiedEntry { record, prev })
 }
 
 /// Verifies a **sequence** of signed record envelopes as a hash chain, returning the canonical records in
@@ -555,7 +569,7 @@ pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<St
     let mut records = Vec::with_capacity(envelopes.len());
     let mut expected_prev: Option<String> = None;
     for (index, envelope) in envelopes.iter().enumerate() {
-        let (record, prev) = verify_entry(envelope, trusted)
+        let VerifiedEntry { record, prev } = verify_entry(envelope, trusted)
             .map_err(|source| ChainError::Entry { index, source })?;
         if prev.as_deref() != expected_prev.as_deref() {
             return Err(ChainError::BrokenLink { index });

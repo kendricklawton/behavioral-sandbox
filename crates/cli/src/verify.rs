@@ -9,13 +9,19 @@
 //! chain**, one envelope per line in order, each committing to the previous one's hash, so
 //! [`verify_chain`] also rejects a reordered, inserted, or dropped record. Per-envelope signatures
 //! cannot: every record in a reordered chain still carries a valid signature.
+//!
+//! Because the shape picks the check, whoever relays a file picks it too. A single envelope that
+//! **commits to a predecessor** is one link of a chain the file does not hold, so it is refused
+//! rather than reported verified ([`ORPHANED_LINK`]). What that leaves: a chain's first record is
+//! unchained by construction, so a chain cut down to its anchor cannot be told from a one-off
+//! `--record` file, and telling them apart needs an anchor kept outside the file.
 
 use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use bsx_record::{HostKey, MAX_ENVELOPE_BYTES, TrustedKey, verify, verify_chain};
+use bsx_record::{HostKey, MAX_ENVELOPE_BYTES, TrustedKey, verify_chain, verify_entry};
 
 use crate::CliError;
 use crate::config;
@@ -46,9 +52,12 @@ pub fn run(args: VerifyArgs, sources: &config::Sources) -> Result<ExitCode, CliE
         .collect();
     let outcome: Result<String, String> = match envelopes.as_slice() {
         [] => Err("empty file; not a signed record".to_string()),
-        [one] => verify(one, &trusted)
-            .map(|_record| "verified".to_string())
-            .map_err(|e| e.to_string()),
+        [one] => verify_entry(one, &trusted)
+            .map_err(|e| e.to_string())
+            .and_then(|entry| match entry.prev {
+                None => Ok("verified".to_string()),
+                Some(_) => Err(ORPHANED_LINK.to_string()),
+            }),
         chain => verify_chain(chain, &trusted)
             .map(|records| format!("verified: {} records, unbroken chain", records.len()))
             .map_err(|e| e.to_string()),
@@ -66,6 +75,16 @@ pub fn run(args: VerifyArgs, sources: &config::Sources) -> Result<ExitCode, CliE
         }
     }
 }
+
+/// What a file holding **one link of a chain and nothing else** is refused with. The signature on
+/// that envelope checks; what cannot be checked is the sequence it commits to, and a caller who saw
+/// only `ok: … verified` would read a fragment as a whole record. Since the file's shape is what
+/// picks the check ([`verify_chain`] for several lines, a single envelope for one), leaving this to
+/// pass would let whoever relays a session choose the weaker one by deleting lines.
+const ORPHANED_LINK: &str = "this record commits to a previous record's hash, so it is one link of \
+                             a session chain, and the file holds nothing to check that link \
+                             against; verify the whole chain file, one envelope per line, in the \
+                             order the session wrote them";
 
 /// The most bytes this reads from a record **file**, as distinct from [`MAX_ENVELOPE_BYTES`], which
 /// bounds **one** envelope: a session chain is one envelope per line, so a long session

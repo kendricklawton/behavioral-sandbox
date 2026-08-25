@@ -53,7 +53,8 @@ pub use record::{
 };
 pub use signing::{
     ChainError, HostKey, KeyError, MAX_ENVELOPE_BYTES, SIGNED_RECORD_SCHEMA_VERSION, TrustedKey,
-    VerifyError, data_dir, default_key_path, record_hash, verify, verify_chain,
+    VerifiedEntry, VerifyError, data_dir, default_key_path, record_hash, verify, verify_chain,
+    verify_entry,
 };
 pub use stats::{CgroupStats, NetStats, ResourceSummary};
 pub use summary::SUMMARY_SCHEMA_VERSION;
