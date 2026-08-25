@@ -1348,6 +1348,35 @@ mod tests {
         assert_eq!(core::mem::align_of::<SyscallEvent>(), 8);
     }
 
+    /// Asserts a record ends exactly where its last field does, i.e. `#[repr(C)]` added no
+    /// **trailing** padding.
+    ///
+    /// The `*_offsets_are_the_wire_contract` tests below cover internal padding, since any inserted
+    /// byte shifts a later offset. Trailing padding is the case they cannot see: trimming an
+    /// explicit `_pad` by one byte leaves every offset *and* `size_of` unchanged, and the byte the
+    /// compiler supplies in its place is one nobody initializes. In a byte-compared BPF hash-map
+    /// key that splits one logical flow across map entries and thins the audit record with nothing
+    /// erroring.
+    ///
+    /// The last field's width is read off the field itself, never restated: a second copy of it
+    /// would pass whenever the two changed together in compensating directions, which is exactly
+    /// the edit this is here to catch.
+    macro_rules! assert_no_trailing_padding {
+        ($t:ty, $last:ident) => {{
+            let v = <$t>::default();
+            assert_eq!(
+                core::mem::offset_of!($t, $last) + core::mem::size_of_val(&v.$last),
+                core::mem::size_of::<$t>(),
+                concat!(
+                    stringify!($t),
+                    " has trailing padding: `",
+                    stringify!($last),
+                    "` no longer runs to the end of the record"
+                )
+            );
+        }};
+    }
+
     #[test]
     fn layout_offsets_are_the_wire_contract() {
         // The eBPF object is built separately from the loader, so this layout *is* the wire format
@@ -1359,6 +1388,13 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallEvent, detail_len), 20);
         assert_eq!(core::mem::offset_of!(SyscallEvent, comm), 24);
         assert_eq!(core::mem::offset_of!(SyscallEvent, detail), 40);
+        // The tail check, in the form the missing `Default` allows: `DETAIL_CAP` is the very const
+        // the field is declared with, so this restates nothing.
+        assert_eq!(
+            core::mem::offset_of!(SyscallEvent, detail) + DETAIL_CAP,
+            EVENT_SIZE,
+            "SyscallEvent has trailing padding: `detail` no longer runs to the end of the record"
+        );
     }
 
     // Each record below carries the same contract. The codecs read their offsets from the struct,
@@ -1375,6 +1411,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(FlowKey, dst_port), 10);
         assert_eq!(core::mem::offset_of!(FlowKey, proto), 12);
         assert_eq!(core::mem::offset_of!(FlowKey, _pad), 13);
+        assert_no_trailing_padding!(FlowKey, _pad);
     }
 
     #[test]
@@ -1383,6 +1420,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(FlowCounts, ingress_bytes), 8);
         assert_eq!(core::mem::offset_of!(FlowCounts, egress_packets), 16);
         assert_eq!(core::mem::offset_of!(FlowCounts, egress_bytes), 24);
+        assert_no_trailing_padding!(FlowCounts, egress_bytes);
     }
 
     #[test]
@@ -1393,6 +1431,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(FlowKey6, dst_port), 34);
         assert_eq!(core::mem::offset_of!(FlowKey6, proto), 36);
         assert_eq!(core::mem::offset_of!(FlowKey6, _pad), 37);
+        assert_no_trailing_padding!(FlowKey6, _pad);
     }
 
     #[test]
@@ -1406,6 +1445,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(PolicyRule, proto), 7);
         assert_eq!(core::mem::offset_of!(PolicyRule, active), 8);
         assert_eq!(core::mem::offset_of!(PolicyRule, _pad), 9);
+        assert_no_trailing_padding!(PolicyRule, _pad);
     }
 
     #[test]
@@ -1416,6 +1456,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(PolicyRule6, proto), 19);
         assert_eq!(core::mem::offset_of!(PolicyRule6, active), 20);
         assert_eq!(core::mem::offset_of!(PolicyRule6, _pad), 21);
+        assert_no_trailing_padding!(PolicyRule6, _pad);
     }
 
     #[test]
