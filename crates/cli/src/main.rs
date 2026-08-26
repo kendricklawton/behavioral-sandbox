@@ -459,8 +459,8 @@ fn apply_posture(
     jail_gid: Option<u32>,
 ) {
     // The CLI and the daemon boot the agent image as one shared read-only base under a per-run
-    // tmpfs overlay rather than copying the base per VM (the copy costs 48 ms/boot of the 352 ms
-    // p50, exec-01, 2026-08-12). Set here, not in `BootConfig::default()`: the engine default must
+    // tmpfs overlay rather than copying the base per VM (the copy costs 49 ms/boot of the 149 ms
+    // p50, exec-01, 2026-08-16). Set here, not in `BootConfig::default()`: the engine default must
     // boot any rootfs, and the overlay path hands PID 1 to `bsx_channel::GUEST_OVERLAY_INIT`, which
     // panics an image that lacks it. There is deliberately no flag, env, or file key for it.
     config.read_only_root = true;

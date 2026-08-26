@@ -214,9 +214,12 @@ broken guest image is easier to defend than trusting a repair pass over attacker
 the CLI nor the daemon set it: every `bsx run` copied the base image into its workdir and booted the
 copy read-write. The recorded reason was that sharing pays off across concurrent sandboxes, which a
 one-shot CLI does not have. That reason was incomplete. The copy has a second cost the argument
-never priced: duplicating the 132 MiB base is 48 ms of a 352 ms p50 cold boot (exec-01,
-2026-08-12), and a one-shot `bsx run` pays it in full, every time, for a disk that is discarded
-seconds later.
+never priced: duplicating the 132 MiB base is 49 ms of a 149 ms p50 cold boot
+([exec-01, 2026-08-16](./benchmarks.md#boot-by-rootfs-path-n100-per-series)), and a one-shot
+`bsx run` pays it in full, every time, for a disk that is discarded seconds later. The decision was
+taken on a measurement of the same trade-off from 2026-08-12, which is withdrawn and not quoted
+here: it was taken before `quiet` entered the boot arguments, so its denominator was a 352 ms boot
+rather than this one.
 
 **`run`, `shell`, and `serve` now set `read_only_root` in their shared posture fold**
 (`apply_posture`), so every CLI- and daemon-launched VM boots the agent image `O_RDONLY` with its
