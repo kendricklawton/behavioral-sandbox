@@ -16,9 +16,14 @@ defensible table, and neither reached `bench-boot`. Both are now closed in the c
 records the scratch directory and the mount holding it (`scratch_line` in `xtask/src/bench.rs`,
 through the driver's own mountinfo parser), where the boot run below had to record it by hand. And
 `bench-meter` measures its unattached baseline twice and reports any delta inside that spread as
-below its noise floor rather than as a number. The remaining tables return when the suite re-runs on
-the measurement host, which is also what first exercises the meter's control on a host with the eBPF
-capabilities it needs.
+below its noise floor rather than as a number.
+
+The meter's noise floor has now run on a host with the eBPF capabilities it needs (the development
+laptop, 2026-08-26) and it did refuse a sub-floor delta rather than print it, which is what it was
+added for. It did **not** produce a meter cost worth publishing: the two back-to-back unattached
+baselines differed by 983 ns at p50, a 29% move on an unchanged condition, so on that host the floor
+sits above the effect being measured. What the meter costs per context switch is still unmeasured,
+and where the remaining tables return is the open question in the reference-host section below.
 
 The suite lives in [`xtask`](https://github.com/kendricklawton/behavioral-sandbox/tree/main/xtask)
 and runs via `cargo xtask bench-all`. Run it on your own host; that result is about your host, which
@@ -192,11 +197,20 @@ The KVM benches need `/dev/kvm` and the built BSX rootfs; the eBPF benches need
 
 ## How the suite guards against measuring nothing
 
-Two checks, both added after a run was silently invalidated by a busy host:
+Three checks, added after a run was silently invalidated by a busy host. They re-measure an
+unchanged condition, but they answer different questions and are not interchangeable:
 
-- **A control column.** Each sweep re-measures its opening condition at the end. If that control has
-  moved more than 15%, the host drifted during the run and the verdict is reported as INCONCLUSIVE
-  rather than as a result. A growth check alone would not catch this, because it is one-sided.
+- **A control column** (`bench-scale`). The sweep re-measures its opening condition **at the end**.
+  If that control has moved more than 15%, the host drifted across the run and the verdict is
+  reported as INCONCLUSIVE rather than as a result. A growth check alone would not catch this,
+  because it is one-sided.
+- **A noise floor** (`bench-meter`). The unattached baseline is measured **twice, back to back**,
+  before anything attaches, and the p50 gap between the two is the floor a delta has to clear; a
+  delta inside it is reported as no result rather than as a number. This bounds the measurement's
+  own jitter, which is a narrower question than the control column's: back-to-back runs cannot see
+  drift that arrives later in the sweep, so a `bench-meter` delta measured against the *first*
+  baseline still carries whatever the host did afterwards. Read the reported cost against the
+  floor, and prefer comparing conditions that ran adjacent in time.
 - **A recorded load average.** A host under *uniform* load holds perfectly still at the wrong number,
   which no internal control can detect. `bench-all` and `bench-scale` record the 1-minute load
   average so a reader can judge the conditions.
