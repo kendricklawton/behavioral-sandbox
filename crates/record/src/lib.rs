@@ -47,8 +47,8 @@ mod testutil;
 pub use ids::HostIds;
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use record::{
-    AxisGap, DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, MAX_NOTABLE,
-    NetSection, NotableSyscall, RecordSubject, RunRecord, SyscallCounts, SyscallFold,
+    AxisGap, DenialRecord, DenialRecord6, EgressPosture, EnforcementMode, FlowRecord, FlowRecord6,
+    MAX_NOTABLE, NetSection, NotableSyscall, RecordSubject, RunRecord, SyscallCounts, SyscallFold,
     SyscallFootprint, Timing,
 };
 pub use signing::{

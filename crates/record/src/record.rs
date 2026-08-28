@@ -124,6 +124,25 @@ pub struct NetSection {
     pub posture: Option<EgressPosture>,
 }
 
+/// Enforcement mode of the tap's network egress classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum EnforcementMode {
+    /// Observe-only mode: packets pass regardless of rule evaluation.
+    #[default]
+    ObserveOnly,
+    /// Active enforcement: packets matching no allow rule are dropped.
+    Enforcing,
+}
+
+impl EnforcementMode {
+    /// Returns `true` if this mode is actively enforcing policy drops.
+    #[must_use]
+    pub const fn is_enforcing(self) -> bool {
+        matches!(self, Self::Enforcing)
+    }
+}
+
 /// What the tap was enforcing, and whether the guest had a route to test it with. Read back from
 /// the kernel maps after attach rather than restated from the caller's request, so a policy that
 /// never reached the map reads as absent here instead of as applied.
@@ -141,6 +160,18 @@ pub struct EgressPosture {
     /// the guest addresses nothing beyond the host end of its link and an allowance naming anything
     /// further has nothing to act on.
     pub gateway: Option<Ipv4Addr>,
+}
+
+impl EgressPosture {
+    /// The [`EnforcementMode`] of the classifier.
+    #[must_use]
+    pub fn mode(&self) -> EnforcementMode {
+        if self.enforcing {
+            EnforcementMode::Enforcing
+        } else {
+            EnforcementMode::ObserveOnly
+        }
+    }
 }
 
 impl NetSection {
