@@ -93,7 +93,7 @@ two unrelated boots.
 | Scratch filesystem | root filesystem, no separate `/tmp` mount; 436 GB, 5% used |
 | 1-minute load average | 0.02 at the start of the run |
 | `bsx doctor` | 20 ok, 2 degraded (SMT enabled, `gather_data_sampling` exposed) |
-| Commit | `dc6315b` |
+| Commit | `fa0f86e` |
 
 `cargo xtask ci-privileged` ran green on this host immediately before the measurement.
 
@@ -166,10 +166,10 @@ which `boot_latency()` does not span.
 
 ### Reproducing this
 
-The commit is `dc6315b`. `xtask/rootfs-packages.lock` was re-pinned on the measurement host to the
+The commit is `fa0f86e`. `xtask/rootfs-packages.lock` was re-pinned on the measurement host to the
 closure recorded above, which does not change the image: the lockfile is compared against the
 resolved closure after a build and is never an input to it, so the binaries and the guest image at
-`dc6315b` are the ones measured. The second arm is `dc6315b` with the token `quiet` deleted from
+`fa0f86e` are the ones measured. The second arm is `fa0f86e` with the token `quiet` deleted from
 `DEFAULT_BOOT_ARGS` in `crates/engine/src/vm.rs` and nothing else changed.
 
 ```console
