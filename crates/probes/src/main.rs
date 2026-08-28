@@ -175,9 +175,9 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
 fn record(
     ctx: &TracePointContext,
     kind: Syscall,
-    arg_off: usize,
+    arg_off: u16,
     path_like: bool,
-    len_off: usize,
+    len_off: u16,
 ) -> u32 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
@@ -201,7 +201,7 @@ fn record(
 
     // SAFETY: `read_at` reads the tracepoint's own argument area at a constant offset, which
     // `check_tracepoint_abi` compared against this kernel's `format` file before the attach.
-    if let Ok(arg) = unsafe { ctx.read_at::<u64>(arg_off) } {
+    if let Ok(arg) = unsafe { ctx.read_at::<u64>(usize::from(arg_off)) } {
         let src = arg as *const u8;
         if path_like {
             // SAFETY: copies a user-space C string into the fixed 128-byte buffer; the helper bounds
@@ -219,7 +219,7 @@ fn record(
             // `i32` first, because `connect`'s `addrlen` is an `int`: the raw register can carry
             // dirty upper bits or a negative the kernel truncates, and reading it as a full `u64`
             // would let a caller name a huge length and pull the 28-byte arm over a 16-byte buffer.
-            let raw = unsafe { ctx.read_at::<u64>(len_off) }.unwrap_or(0);
+            let raw = unsafe { ctx.read_at::<u64>(usize::from(len_off)) }.unwrap_or(0);
             let addrlen = (raw as i32).max(0) as usize;
             if addrlen >= SOCKADDR_SNAP {
                 // SAFETY: constant-size copy from user space, bounded by the destination slice;

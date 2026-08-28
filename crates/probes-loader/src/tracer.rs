@@ -147,7 +147,7 @@ fn check_tracepoint_abi() -> Result<(), ProbeError> {
                     arg.field
                 ))
             })?;
-            if (offset, size) != (arg.offset, ARG_SLOT) {
+            if (offset, size) != (usize::from(arg.offset), ARG_SLOT) {
                 return Err(ProbeError::Unsupported(format!(
                     "{TP_SYSCALLS}/{event} puts `{}` at offset {offset} size {size} on this kernel, \
                      but the probe reads an {ARG_SLOT}-byte argument at offset {}: the traced paths \
@@ -492,7 +492,7 @@ mod tests {
         for arg in TRACEPOINT_ARGS {
             assert_eq!(
                 field_layout(&format_body(arg.event), arg.field),
-                Some((arg.offset, ARG_SLOT)),
+                Some((usize::from(arg.offset), ARG_SLOT)),
                 "{}/{} must be read at the offset the kernel declares for it",
                 arg.event,
                 arg.field

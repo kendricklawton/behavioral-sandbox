@@ -247,7 +247,7 @@ pub struct TracepointArg {
     /// The field name as `events/syscalls/<event>/format` spells it.
     pub field: &'static str,
     /// Byte offset from the start of the tracepoint record.
-    pub offset: usize,
+    pub offset: u16,
 }
 
 /// The width of one syscall-argument slot in a `sys_enter_*` record, which is what
