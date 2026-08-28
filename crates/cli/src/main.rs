@@ -113,6 +113,22 @@ impl From<policy::PolicyError> for CliError {
     }
 }
 
+/// Output format options for CLI commands.
+#[derive(
+    clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    /// Human-readable text format.
+    Text,
+    /// JSON result format.
+    Json,
+    /// Signed audit record format.
+    Record,
+    /// Compact model-legible summary format.
+    RecordSummary,
+}
+
 #[derive(Parser)]
 #[command(
     name = "bsx",
