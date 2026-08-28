@@ -299,12 +299,23 @@ pub const FDS_PER_VM: usize = 8;
 pub const MAX_VCPUS: u8 = 32;
 
 /// Whether `vcpus` is a count the pinned Firecracker will boot: `[1, MAX_VCPUS]` and either 1 or
+/// even.
+#[must_use]
+pub const fn vcpus_supported_nz(vcpus: NonZeroU8) -> bool {
+    let n = vcpus.get();
+    n <= MAX_VCPUS && (n == 1 || n.is_multiple_of(2))
+}
+
+/// Whether `vcpus` is a count the pinned Firecracker will boot: `[1, MAX_VCPUS]` and either 1 or
 /// even, so `3` and `64` are out and only `0` is unrepresentable in [`Limits::vcpus`]. Exposed so an
 /// embedder can check a user-supplied count before building a [`Limits`]; [`Vm::boot`] applies the
 /// same predicate, so this is a convenience, never the enforcement.
 #[must_use]
 pub const fn vcpus_supported(vcpus: u8) -> bool {
-    vcpus != 0 && vcpus <= MAX_VCPUS && (vcpus == 1 || vcpus.is_multiple_of(2))
+    match NonZeroU8::new(vcpus) {
+        Some(nz) => vcpus_supported_nz(nz),
+        None => false,
+    }
 }
 
 /// A per-sandbox resource budget: quantities (vCPUs, memory, deadlines, an output cap), never
