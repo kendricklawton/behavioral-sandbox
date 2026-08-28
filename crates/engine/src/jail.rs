@@ -95,6 +95,16 @@ pub struct Jail {
     pub ids: Option<JailIds>,
 }
 
+/// How a jailed sandbox allocates its host UID and GID.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum JailIdentity {
+    /// A fixed host UID/GID pair shared by sandboxes.
+    Fixed { uid: u32, gid: u32 },
+    /// A range of host UID/GID pairs leased per sandbox.
+    Pooled(JailIds),
+}
+
 impl Jail {
     /// A jail with the pinned defaults ([`DEFAULT_JAIL_UID`]/[`DEFAULT_JAIL_GID`], `jailer` on
     /// `PATH`).
@@ -103,17 +113,29 @@ impl Jail {
         Self::default()
     }
 
+    /// The host UID/GID identity allocation strategy for this jail.
+    #[must_use]
+    pub fn identity(&self) -> JailIdentity {
+        match &self.ids {
+            Some(ids) => JailIdentity::Pooled(ids.clone()),
+            None => JailIdentity::Fixed {
+                uid: self.uid,
+                gid: self.gid,
+            },
+        }
+    }
+
     /// Lease the uid/gid this boot runs under: one pair from [`ids`](Jail::ids) when a span is set,
     /// else the fixed [`uid`](Jail::uid)/[`gid`](Jail::gid) shared by every sandbox.
     ///
     /// # Errors
     /// [`VmmError::Vmm`] when a span is set and every pair in it is already leased.
     pub(crate) fn lease(&self) -> Result<JailLease, VmmError> {
-        match &self.ids {
-            Some(ids) => ids.lease(),
-            None => Ok(JailLease {
-                uid: self.uid,
-                gid: self.gid,
+        match self.identity() {
+            JailIdentity::Pooled(ids) => ids.lease(),
+            JailIdentity::Fixed { uid, gid } => Ok(JailLease {
+                uid,
+                gid,
                 span: None,
                 withheld: std::sync::atomic::AtomicBool::new(false),
             }),
