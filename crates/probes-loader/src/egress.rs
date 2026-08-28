@@ -25,9 +25,9 @@ pub enum PolicyError {
     /// More allow-rules than the kernel `POLICY` map holds: the requested count and the cap.
     TooManyRules {
         /// The number of rules the caller supplied.
-        got: usize,
+        got: u8,
         /// The fixed cap ([`crate::MAX_POLICY_RULES`]).
-        max: usize,
+        max: u8,
     },
 }
 
