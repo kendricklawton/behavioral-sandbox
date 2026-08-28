@@ -523,14 +523,22 @@ impl Drop for ExecCgroup {
 /// Names the next per-run working dir uniquely within this agent process.
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// The persistence mode of a run's working directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunDirMode {
+    /// A fresh per-run directory, removed on drop.
+    EphemeralTemp,
+    /// A stable session directory, preserved across runs.
+    PersistentSession,
+}
+
 /// The run's working directory. Injected files are written in and artifacts read out through
 /// path-checked helpers, so a host path cannot escape the directory. A [`fresh`](RunDir::fresh) one
 /// is private to its run and removed on drop; an [`at`](RunDir::at) one is the caller's stable
 /// **session** dir, created if missing and kept.
 struct RunDir {
     path: PathBuf,
-    /// `false` for a fresh per-run dir (removed on drop); `true` for a session dir (kept).
-    keep: bool,
+    mode: RunDirMode,
 }
 
 impl RunDir {
@@ -538,7 +546,10 @@ impl RunDir {
     fn fresh() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(unique_name("run", &RUN_SEQ));
         std::fs::create_dir_all(&path)?;
-        Ok(Self { path, keep: false })
+        Ok(Self {
+            path,
+            mode: RunDirMode::EphemeralTemp,
+        })
     }
 
     /// The caller's stable session dir: created if missing, never removed by this handle.
@@ -546,7 +557,7 @@ impl RunDir {
         std::fs::create_dir_all(dir)?;
         Ok(Self {
             path: dir.to_path_buf(),
-            keep: true,
+            mode: RunDirMode::PersistentSession,
         })
     }
 
@@ -615,7 +626,7 @@ impl RunDir {
 
 impl Drop for RunDir {
     fn drop(&mut self) {
-        if !self.keep {
+        if self.mode == RunDirMode::EphemeralTemp {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
