@@ -737,10 +737,32 @@ fn read_delegated() -> Delegated {
     let subtree =
         std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control").unwrap_or_default();
     let toks: Vec<&str> = subtree.split_whitespace().collect();
+    let has = |c: Controller| toks.contains(&c.token());
     Delegated {
-        cpu: toks.contains(&"cpu"),
-        memory: toks.contains(&"memory"),
-        pids: toks.contains(&"pids"),
+        cpu: has(Controller::Cpu),
+        memory: has(Controller::Memory),
+        pids: has(Controller::Pids),
+    }
+}
+
+/// One cgroup v2 controller this code cares about. Exists so the field it fills and the token
+/// `cgroup.subtree_control` spells it with are written once together: a `cpu: toks.contains(&"memory")`
+/// slip reads as plausible and would silently drop the CPU cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Controller {
+    Cpu,
+    Memory,
+    Pids,
+}
+
+impl Controller {
+    /// The token `cgroup.subtree_control` lists this controller under.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Pids => "pids",
+        }
     }
 }
 
