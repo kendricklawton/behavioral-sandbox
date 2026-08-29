@@ -36,11 +36,18 @@ where
     M::try_from(map).map_err(|e| ProbeError::Map(format!("open `{name}` as {noun}: {e}")))
 }
 
-/// Write `on` into `slot` of the named single-`u32` toggle array.
-pub(crate) fn set_flag(ebpf: &mut Ebpf, name: &str, slot: u32, on: bool) -> Result<(), ProbeError> {
+/// Write `value` into `slot` of the named single-`u32` toggle array. Takes the `u32` the map
+/// actually holds rather than a `bool`, so each caller converts from the enum that names what the
+/// slot *means* ([`crate::tracer::Filter`], `EnforcementMode`) instead of passing a bare literal.
+pub(crate) fn set_flag(
+    ebpf: &mut Ebpf,
+    name: &str,
+    slot: u32,
+    value: u32,
+) -> Result<(), ProbeError> {
     let mut toggle: Array<_, u32> = open_mut(ebpf, name, "an array")?;
     toggle
-        .set(slot, u32::from(on), 0)
+        .set(slot, value, 0)
         .map_err(|e| ProbeError::Map(format!("write `{name}`: {e}")))
 }
 

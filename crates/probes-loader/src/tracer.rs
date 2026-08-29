@@ -24,6 +24,32 @@ const TP_SYSCALLS: &str = "syscalls";
 /// The event the counter program hooks: `syscalls/sys_enter_execve`.
 const TP_NAME: &str = "sys_enter_execve";
 
+/// Which map the tracepoints consult to decide whether an event passes: the single-target `FILTER`
+/// array, or the `TRACE_TARGETS` set. The two filter models are mutually exclusive, so every setter
+/// writes this alongside the filter it configures and neither model can half-apply.
+///
+/// Typed rather than a `bool` because the wrong value fails **silently and wide**: the program falls
+/// back to its all-zero `FILTER`, which passes every process on the host, and nothing errors or
+/// counts a drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Filter {
+    /// The single-target `FILTER` array, keyed by tgid and cgroup id.
+    SingleTarget,
+    /// The `TRACE_TARGETS` set, one entry per registered sandbox.
+    TargetSet,
+}
+
+impl Filter {
+    /// The value the `TRACE_SET` toggle slot holds for this mode. Wildcard-free, so a third filter
+    /// model has to choose its encoding here rather than inherit one.
+    const fn as_u32(self) -> u32 {
+        match self {
+            Self::SingleTarget => 0,
+            Self::TargetSet => 1,
+        }
+    }
+}
+
 /// A loaded, attached `sys_enter_execve` counter. Owns the aya [`Ebpf`] and pins nothing, so
 /// dropping it detaches; read the running total with [`count`](ExecveCounter::count).
 #[must_use = "dropping an ExecveCounter detaches the probe"]
@@ -272,7 +298,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_pid(&mut self, pid: u32) -> Result<(), ProbeError> {
-        self.set_mode(false)?;
+        self.set_mode(Filter::SingleTarget)?;
         self.set_filter(FILTER_TGID, u64::from(pid))
     }
 
@@ -283,7 +309,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_cgroup(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        self.set_mode(false)?;
+        self.set_mode(Filter::SingleTarget)?;
         self.set_filter(FILTER_CGROUP, cgroup_id)
     }
 
@@ -293,7 +319,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_all(&mut self) -> Result<(), ProbeError> {
-        self.set_mode(false)?;
+        self.set_mode(Filter::SingleTarget)?;
         self.set_filter(FILTER_TGID, 0)?;
         self.set_filter(FILTER_CGROUP, 0)
     }
@@ -307,7 +333,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the mode map is missing or unwritable.
     pub fn use_target_set(&mut self) -> Result<(), ProbeError> {
-        self.set_mode(true)
+        self.set_mode(Filter::TargetSet)
     }
 
     /// Events the kernel **dropped** because the ring buffer was full, summed across CPUs and
@@ -336,7 +362,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the target/mode map is missing or the write fails.
     pub fn add_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
-        self.set_mode(true)?;
+        self.set_mode(Filter::TargetSet)?;
         add_cgroup_key(
             &mut self.trace_targets()?,
             cgroup_id,
@@ -358,10 +384,14 @@ impl SyscallTracer {
         )
     }
 
-    /// Write the filter-mode toggle: `true` = the [`TRACE_TARGETS_MAP`] set, `false` = the single
-    /// [`FILTER_MAP`].
-    fn set_mode(&mut self, set_mode: bool) -> Result<(), ProbeError> {
-        crate::maps::set_flag(&mut self.ebpf, TRACE_SET_MAP, FILTER_MODE_SLOT, set_mode)
+    /// Write the filter-mode toggle, selecting which map the tracepoints consult.
+    fn set_mode(&mut self, filter: Filter) -> Result<(), ProbeError> {
+        crate::maps::set_flag(
+            &mut self.ebpf,
+            TRACE_SET_MAP,
+            FILTER_MODE_SLOT,
+            filter.as_u32(),
+        )
     }
 
     /// The writable `TRACE_TARGETS` set handle.
@@ -445,8 +475,22 @@ fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> 
 #[cfg(test)]
 mod tests {
     // Host-safe: raw-byte decode and the `format` parse, no aya and no readable tracefs.
-    use super::{decode_or_count, field_layout};
+    use super::{Filter, decode_or_count, field_layout};
     use bsx_probes_common::{ARG_SLOT, EVENT_SIZE, TRACEPOINT_ARGS};
+
+    /// The filter-mode encoding the kernel program reads, pinned host-safe because every path that
+    /// exercises it for real needs `CAP_BPF`. `0` is the load-time default and must stay
+    /// `SingleTarget`: a swapped pair would leave a set-mode tracer on its all-zero `FILTER`, which
+    /// passes every process on the host and reports no error and no drop.
+    #[test]
+    fn the_filter_mode_encoding_matches_what_the_program_reads() {
+        assert_eq!(
+            Filter::SingleTarget.as_u32(),
+            0,
+            "zero is the observe-all default"
+        );
+        assert_eq!(Filter::TargetSet.as_u32(), 1);
+    }
 
     /// A transcript of `events/syscalls/<event>/format` for the three traced events, as an
     /// `x86_64` kernel writes it: the four `common_*` header fields, then one 8-byte slot per

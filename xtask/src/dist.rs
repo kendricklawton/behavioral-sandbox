@@ -1441,7 +1441,7 @@ mod tests {
             );
             found.expect("asserted present just above")
         };
-        let armed = at("set_enforce(ebpf, true)");
+        let armed = at("set_enforce(ebpf, EnforcementMode::Enforcing)");
         let denied = at("write_policy(ebpf, &[])");
         let granted = at("write_policy(ebpf, rules)");
         assert!(

@@ -14,7 +14,7 @@ use bsx_probes_common::{
     MAX_POLICY_RULES, POLICY_RULE_SIZE, POLICY_RULE6_SIZE, PolicyRule, PolicyRule6,
 };
 
-use bsx_record::{EgressPosture, NetStats};
+use bsx_record::{EgressPosture, EnforcementMode, NetStats};
 
 use crate::egress::{EgressPolicy, PolicyError};
 use crate::tracer::per_cpu_sum;
@@ -326,7 +326,7 @@ fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError
         }
         .into());
     }
-    set_enforce(ebpf, true)?;
+    set_enforce(ebpf, EnforcementMode::Enforcing)?;
     // Deny everything before granting anything: an empty rule list zeroes every slot, and a zeroed
     // slot is `active == 0`.
     write_policy(ebpf, &[])?;
@@ -348,9 +348,13 @@ fn write_policy6(ebpf: &mut Ebpf, rules: &[PolicyRule6]) -> Result<(), ProbeErro
     write_rules::<POLICY_RULE6_SIZE, PolicyRule6>(ebpf, POLICY6_MAP, rules)
 }
 
-/// Set the `ENFORCE` toggle (slot 0): `true` = deny-by-default egress, `false` = observe-only.
-fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
-    crate::maps::set_flag(ebpf, ENFORCE_MAP, 0, on)
+/// Set the `ENFORCE` toggle (slot 0), the gate deciding whether an unmatched packet is dropped.
+///
+/// Takes the same [`EnforcementMode`] the record reports, so the value written to the kernel and the
+/// value an auditor reads back are one vocabulary; `a_replaced_policy_leaves_no_revoked_rule_behind`
+/// and `observe_only_passes_every_frame_enforcement_would_drop` cover both settings.
+fn set_enforce(ebpf: &mut Ebpf, mode: EnforcementMode) -> Result<(), ProbeError> {
+    crate::maps::set_flag(ebpf, ENFORCE_MAP, 0, u32::from(mode.is_enforcing()))
 }
 
 /// A fixed-size record of a tap map, tying a key/rule type to its `N`-byte codec so the v4 and v6
