@@ -261,46 +261,9 @@ pub const ARG_SLOT: usize = 8;
 /// writes them: if the two disagreed, `watch_cgroup` would put a cgroup inode in the tgid slot,
 /// `passes_filter` would compare it against a tgid and never match, and the run would report an
 /// empty footprint with no error and no drop counted.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterAxis {
-    /// Slot of target tgid (userspace pid).
-    Tgid = 0,
-    /// Slot of target cgroup id.
-    Cgroup = 1,
-}
-
-impl FilterAxis {
-    /// The map array index as a `u32`.
-    #[inline]
-    #[must_use]
-    pub const fn index(self) -> u32 {
-        self as u32
-    }
-}
-
-/// Filter mode in the `TRACE_SET` BPF map array.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterMode {
-    /// Single target filter (`FILTER` map).
-    SingleTarget = 0,
-    /// Target set filter (`TRACE_TARGETS` map).
-    TargetSet = 1,
-}
-
-impl FilterMode {
-    /// The map value as a `u32`.
-    #[inline]
-    #[must_use]
-    pub const fn value(self) -> u32 {
-        self as u32
-    }
-}
-
-pub const FILTER_TGID: u32 = FilterAxis::Tgid.index();
+pub const FILTER_TGID: u32 = 0;
 /// See [`FILTER_TGID`].
-pub const FILTER_CGROUP: u32 = FilterAxis::Cgroup.index();
+pub const FILTER_CGROUP: u32 = 1;
 
 /// Slot of the filter-mode toggle in the `TRACE_SET` array: `0` (the load-time default) selects the
 /// single-target `FILTER`, `1` selects the `TRACE_TARGETS` set. Single-sourced for the same reason
@@ -606,46 +569,6 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
 /// How many egress allow-rules a sandbox's policy holds, fixed because the tc program scans the whole
 /// array in a bounded loop (the verifier needs a compile-time cap) and BPF maps are sized at load.
 pub const MAX_POLICY_RULES: usize = 16;
-
-/// Status of a policy rule slot in fixed BPF maps.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleStatus {
-    /// Slot is empty / unallocated.
-    Inactive = 0,
-    /// Slot holds an active policy rule.
-    Active = 1,
-}
-
-impl RuleStatus {
-    /// Converts to the raw `u8` map byte.
-    #[inline]
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-}
-
-/// Transport protocol match condition in policy rules.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleProtocol {
-    /// Match any transport protocol (`0`).
-    Any = 0,
-    /// Match TCP (`6`).
-    Tcp = 6,
-    /// Match UDP (`17`).
-    Udp = 17,
-}
-
-impl RuleProtocol {
-    /// Converts to the raw `u8` IP protocol number.
-    #[inline]
-    #[must_use]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-}
 
 /// One entry in a sandbox's egress allow-list: a destination **CIDR** plus optional port and protocol.
 /// A guest-sent IPv4 packet is allowed if its destination matches **any** `active` rule, and

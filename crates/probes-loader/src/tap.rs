@@ -314,15 +314,15 @@ fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError
     let rules6 = policy.rules6();
     if rules.len() > MAX_POLICY_RULES {
         return Err(PolicyError::TooManyRules {
-            got: u8::try_from(rules.len()).unwrap_or(u8::MAX),
-            max: u8::try_from(MAX_POLICY_RULES).unwrap_or(16),
+            got: rules.len(),
+            max: MAX_POLICY_RULES,
         }
         .into());
     }
     if rules6.len() > MAX_POLICY_RULES {
         return Err(PolicyError::TooManyRules {
-            got: u8::try_from(rules6.len()).unwrap_or(u8::MAX),
-            max: u8::try_from(MAX_POLICY_RULES).unwrap_or(16),
+            got: rules6.len(),
+            max: MAX_POLICY_RULES,
         }
         .into());
     }
