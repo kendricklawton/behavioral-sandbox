@@ -15,8 +15,38 @@ use bsx_engine::doctor::{self, Check, CheckStatus};
 /// Gated on the stream actually being a terminal, because this report is a **stdout result** and
 /// stdout stays pipe-clean: escape sequences must never reach `bsx doctor | …` or a file. On top of
 /// that, `NO_COLOR` (any value, per the informal standard) and `TERM=dumb` both turn it off.
-fn colour_enabled(is_tty: bool, no_color: bool, term: Option<&str>) -> bool {
-    is_tty && !no_color && term != Some("dumb")
+fn colour_enabled(stream: Stream, no_color: NoColor, term: Option<&str>) -> bool {
+    stream == Stream::Terminal && no_color == NoColor::Unset && term != Some("dumb")
+}
+
+/// Whether the stream being written to is a terminal. Typed because it sits next to [`NoColor`] in
+/// [`colour_enabled`], where two bare booleans would be swappable with nothing to catch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    /// A terminal: escapes are safe to emit.
+    Terminal,
+    /// A pipe or a file: the report is a stdout result and stays clean.
+    Redirected,
+}
+
+impl Stream {
+    /// Classify from `IsTerminal`.
+    fn of(is_terminal: bool) -> Self {
+        if is_terminal {
+            Self::Terminal
+        } else {
+            Self::Redirected
+        }
+    }
+}
+
+/// Whether `NO_COLOR` is present in the environment (any value, per the informal standard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoColor {
+    /// `NO_COLOR` is set: the caller opted out.
+    Set,
+    /// `NO_COLOR` is absent.
+    Unset,
 }
 
 /// Colour for one stream, resolved once so every write agrees.
@@ -25,10 +55,15 @@ struct Paint(bool);
 
 impl Paint {
     /// Resolve from the process environment for a stream's TTY-ness.
-    fn for_stream(is_tty: bool) -> Self {
+    fn for_stream(stream: Stream) -> Self {
+        let no_color = if std::env::var_os("NO_COLOR").is_some() {
+            NoColor::Set
+        } else {
+            NoColor::Unset
+        };
         Self(colour_enabled(
-            is_tty,
-            std::env::var_os("NO_COLOR").is_some(),
+            stream,
+            no_color,
             std::env::var("TERM").ok().as_deref(),
         ))
     }
@@ -141,7 +176,7 @@ pub fn report(
         };
     }
 
-    let paint = Paint::for_stream(out.is_terminal());
+    let paint = Paint::for_stream(Stream::of(out.is_terminal()));
     let _ = writeln!(out, "{}\n", paint.wrap("1", "bsx doctor: host readiness"));
 
     for c in &checks {
@@ -198,7 +233,7 @@ pub fn report(
         // and exit non-zero so a script can gate on it. stderr gets its own TTY check: the two
         // streams are redirected independently, so stdout's answer says nothing about this one.
         let err = std::io::stderr();
-        let err_paint = Paint::for_stream(err.is_terminal());
+        let err_paint = Paint::for_stream(Stream::of(err.is_terminal()));
         let _ = writeln!(
             &err,
             "{}",
@@ -286,17 +321,29 @@ mod tests {
         // The load-bearing case: the report is a stdout result, so a redirected or piped run must
         // stay byte-clean. Everything else is a courtesy on top of that.
         assert!(
-            !colour_enabled(false, false, Some("xterm-256color")),
+            !colour_enabled(Stream::Redirected, NoColor::Unset, Some("xterm-256color")),
             "piped or redirected output never carries escapes"
         );
-        assert!(colour_enabled(true, false, Some("xterm-256color")));
+        assert!(colour_enabled(
+            Stream::Terminal,
+            NoColor::Unset,
+            Some("xterm-256color")
+        ));
 
         // NO_COLOR (any value) and TERM=dumb both opt out even on a terminal.
-        assert!(!colour_enabled(true, true, Some("xterm-256color")));
-        assert!(!colour_enabled(true, false, Some("dumb")));
+        assert!(!colour_enabled(
+            Stream::Terminal,
+            NoColor::Set,
+            Some("xterm-256color")
+        ));
+        assert!(!colour_enabled(
+            Stream::Terminal,
+            NoColor::Unset,
+            Some("dumb")
+        ));
 
         // An unset TERM is not "dumb"; a terminal that says nothing still gets colour.
-        assert!(colour_enabled(true, false, None));
+        assert!(colour_enabled(Stream::Terminal, NoColor::Unset, None));
     }
 
     #[test]

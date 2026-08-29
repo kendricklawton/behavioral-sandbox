@@ -892,6 +892,28 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Whether the session's `BufReader` already holds a line. The `peek` in [`client_spoke`] sees only
+/// the kernel receive queue, so a `cancel` that arrived coalesced with its `exec` is invisible there
+/// and this is the only thing that reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Buffered {
+    /// A line is already buffered: treat the client as having spoken.
+    Line,
+    /// Nothing buffered: the kernel queue is the whole picture.
+    Empty,
+}
+
+impl Buffered {
+    /// Classify the reader's current buffer.
+    fn of(reader: &BufReader<DeadlineStream<UnixStream>>) -> Self {
+        if reader.buffer().is_empty() {
+            Self::Empty
+        } else {
+            Self::Line
+        }
+    }
+}
+
 /// How long each readability check waits before re-testing whether the exec finished. The `peek`
 /// itself blocks for this, so the watch costs one syscall per tick rather than a spin, and it
 /// bounds only how stale a cancel can be.
@@ -926,7 +948,7 @@ fn exec_watching_for_cancel(
         let worker = scope.spawn(|| vm.exec_with_files(argv, stdin.as_bytes(), &[], env, &[]));
         let mut interrupted = false;
         while !worker.is_finished() {
-            if client_spoke(socket, !reader.buffer().is_empty()) {
+            if client_spoke(socket, Buffered::of(reader)) {
                 interrupted = true;
                 // Best-effort: a kill that cannot land leaves the exec to its own wall budget,
                 // which is the pre-cancel behavior, never a hang.
@@ -955,10 +977,10 @@ fn exec_watching_for_cancel(
 /// `buffered` short-circuits it, because the peek only ever sees the kernel receive queue. A
 /// `cancel` coalesced with its `exec` sits in the `BufReader` with the queue empty, so the peek
 /// alone would return `false` for the whole run and the kill would never land.
-fn client_spoke(socket: &UnixStream, buffered: bool) -> bool {
+fn client_spoke(socket: &UnixStream, buffered: Buffered) -> bool {
     use std::os::fd::AsRawFd as _;
 
-    if buffered {
+    if buffered == Buffered::Line {
         return true;
     }
     let restore = socket.read_timeout().ok().flatten();
@@ -1505,11 +1527,11 @@ mod tests {
         // With only the peek to go on, the watcher sees an idle socket for the whole exec and the
         // kill never lands.
         assert!(
-            !client_spoke(&peer, false),
+            !client_spoke(&peer, Buffered::Empty),
             "precondition: the peek cannot see a line the reader already took"
         );
         assert!(
-            client_spoke(&peer, !reader.buffer().is_empty()),
+            client_spoke(&peer, Buffered::of(&reader)),
             "asking the reader too is what makes a pipelined cancel land"
         );
     }
