@@ -22,7 +22,8 @@ use std::fmt::Write as _;
 
 use crate::Syscall;
 use crate::json::{
-    clamped_ns, field, field_opt_u64, json_str, proto_name, rule_port, rule_proto, syscall_name,
+    Position, clamped_ns, field, field_opt_u64, json_str, proto_name, rule_port, rule_proto,
+    syscall_name,
 };
 use crate::record::{AxisGap, NetSection, NotableSyscall, RunRecord};
 
@@ -46,16 +47,21 @@ impl RunRecord {
         out.push('{');
 
         // schema, first, so a consumer reads it before anything else.
-        field(&mut out, "schema", SUMMARY_SCHEMA_VERSION, true);
+        field(&mut out, "schema", SUMMARY_SCHEMA_VERSION, Position::First);
 
         // timing, the two durations the caller supplied, verbatim ns (no lossy rounding).
         out.push_str(",\"timing\":{");
-        field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
+        field(
+            &mut out,
+            "boot_ns",
+            clamped_ns(self.timing.boot),
+            Position::First,
+        );
         field(
             &mut out,
             "exec_ns",
             clamped_ns(self.timing.exec_wall),
-            false,
+            Position::Subsequent,
         );
         out.push('}');
 
@@ -77,25 +83,25 @@ impl RunRecord {
             &mut out,
             "cpu_ns",
             clamped_ns(self.resources.cpu_time),
-            true,
+            Position::First,
         );
         field_opt_u64(
             &mut out,
             "mem_peak_bytes",
             self.resources.cgroup.memory_peak,
-            false,
+            Position::Subsequent,
         );
         field_opt_u64(
             &mut out,
             "io_read_bytes",
             self.resources.cgroup.io_rbytes,
-            false,
+            Position::Subsequent,
         );
         field_opt_u64(
             &mut out,
             "io_write_bytes",
             self.resources.cgroup.io_wbytes,
-            false,
+            Position::Subsequent,
         );
         out.push('}');
 
@@ -183,8 +189,18 @@ fn net_summary(out: &mut String, net: &NetSection) {
     }
     out.push(']');
     // Guest-view bytes: the record's tap-view `ingress` is what the guest sent, `egress` what it received.
-    field(out, "sent_bytes", net.totals.ingress_bytes, false);
-    field(out, "recv_bytes", net.totals.egress_bytes, false);
+    field(
+        out,
+        "sent_bytes",
+        net.totals.ingress_bytes,
+        Position::Subsequent,
+    );
+    field(
+        out,
+        "recv_bytes",
+        net.totals.egress_bytes,
+        Position::Subsequent,
+    );
     // A `true` here says the kernel's flow/denial tables saturated, so `reached`/`denied` are not
     // exhaustive; the counts ride the full record.
     out.push_str(",\"truncated\":");
@@ -257,9 +273,9 @@ fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
 fn syscalls_summary(out: &mut String, record: &RunRecord) {
     let s = &record.host_syscalls;
     out.push('{');
-    field(out, "execve", s.by_kind.execve, true);
-    field(out, "openat", s.by_kind.openat, false);
-    field(out, "connect", s.by_kind.connect, false);
+    field(out, "execve", s.by_kind.execve, Position::First);
+    field(out, "openat", s.by_kind.openat, Position::Subsequent);
+    field(out, "connect", s.by_kind.connect, Position::Subsequent);
     out.push_str(",\"notable\":[");
     for (i, &idx) in notable_sample(&s.notable, SUMMARY_NOTABLE_CAP)
         .iter()

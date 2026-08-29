@@ -35,7 +35,7 @@ impl RunRecord {
         out.push('{');
 
         // schema version, first, so a consumer reads it before anything else.
-        field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
+        field(&mut out, "schema", AUDIT_SCHEMA_VERSION, Position::First);
 
         // Subject next: a consumer filing or correlating records needs both before it cares what the
         // sandbox did.
@@ -45,17 +45,22 @@ impl RunRecord {
             &mut out,
             "started_unix_ns",
             self.subject.started_unix_ns,
-            false,
+            Position::Subsequent,
         );
         out.push('}');
 
         out.push_str(",\"timing\":{");
-        field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
+        field(
+            &mut out,
+            "boot_ns",
+            clamped_ns(self.timing.boot),
+            Position::First,
+        );
         field(
             &mut out,
             "exec_wall_ns",
             clamped_ns(self.timing.exec_wall),
-            false,
+            Position::Subsequent,
         );
         out.push('}');
 
@@ -103,8 +108,18 @@ fn net_to_json(out: &mut String, net: &NetSection) {
     });
     // The kernel's drop counters plus the flag a consumer checks before trusting the flow list as
     // exhaustive; `0`/`false` is the healthy shape.
-    field(out, "dropped_flows", net.dropped_flows, false);
-    field(out, "dropped_denials", net.dropped_denials, false);
+    field(
+        out,
+        "dropped_flows",
+        net.dropped_flows,
+        Position::Subsequent,
+    );
+    field(
+        out,
+        "dropped_denials",
+        net.dropped_denials,
+        Position::Subsequent,
+    );
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
     // `null` posture says it was not read, a different claim from an empty rule list, so the two render
@@ -213,11 +228,11 @@ fn flow_to_json<K: FlowIdent>(out: &mut String, key: &K, c: &FlowCounts) {
     out.push_str("{\"src\":\"");
     src.write(out);
     out.push('"');
-    field(out, "src_port", src_port, false);
+    field(out, "src_port", src_port, Position::Subsequent);
     out.push_str(",\"dst\":\"");
     dst.write(out);
     out.push('"');
-    field(out, "dst_port", dst_port, false);
+    field(out, "dst_port", dst_port, Position::Subsequent);
     out.push_str(",\"proto\":\"");
     proto_name(out, proto);
     out.push('"');
@@ -231,11 +246,11 @@ fn denial_to_json<A: Addr>(out: &mut String, dst: A, dst_port: u16, proto: u8, p
     out.push_str("{\"dst\":\"");
     dst.write(out);
     out.push('"');
-    field(out, "dst_port", dst_port, false);
+    field(out, "dst_port", dst_port, Position::Subsequent);
     out.push_str(",\"proto\":\"");
     proto_name(out, proto);
     out.push('"');
-    field(out, "packets", packets, false);
+    field(out, "packets", packets, Position::Subsequent);
     out.push('}');
 }
 
@@ -284,23 +299,38 @@ pub(crate) fn rule_proto(proto: u8) -> Option<u8> {
 
 fn net_stats_to_json(out: &mut String, s: &NetStats) {
     out.push('{');
-    field(out, "ingress_packets", s.ingress_packets, true);
-    field(out, "ingress_bytes", s.ingress_bytes, false);
-    field(out, "egress_packets", s.egress_packets, false);
-    field(out, "egress_bytes", s.egress_bytes, false);
+    field(out, "ingress_packets", s.ingress_packets, Position::First);
+    field(out, "ingress_bytes", s.ingress_bytes, Position::Subsequent);
+    field(
+        out,
+        "egress_packets",
+        s.egress_packets,
+        Position::Subsequent,
+    );
+    field(out, "egress_bytes", s.egress_bytes, Position::Subsequent);
     out.push('}');
 }
 
 fn counts(out: &mut String, c: &FlowCounts) {
-    field(out, "ingress_packets", c.ingress_packets, false);
-    field(out, "ingress_bytes", c.ingress_bytes, false);
-    field(out, "egress_packets", c.egress_packets, false);
-    field(out, "egress_bytes", c.egress_bytes, false);
+    field(
+        out,
+        "ingress_packets",
+        c.ingress_packets,
+        Position::Subsequent,
+    );
+    field(out, "ingress_bytes", c.ingress_bytes, Position::Subsequent);
+    field(
+        out,
+        "egress_packets",
+        c.egress_packets,
+        Position::Subsequent,
+    );
+    field(out, "egress_bytes", c.egress_bytes, Position::Subsequent);
 }
 
 fn resources_to_json(out: &mut String, r: &ResourceSummary) {
     out.push('{');
-    field(out, "cpu_time_ns", clamped_ns(r.cpu_time), true);
+    field(out, "cpu_time_ns", clamped_ns(r.cpu_time), Position::First);
     out.push_str(",\"cgroup\":");
     cgroup_to_json(out, &r.cgroup);
     out.push('}');
@@ -308,22 +338,27 @@ fn resources_to_json(out: &mut String, r: &ResourceSummary) {
 
 fn cgroup_to_json(out: &mut String, c: &CgroupStats) {
     out.push('{');
-    field_opt_u64(out, "cpu_usage_usec", c.cpu_usage_usec, true);
-    field_opt_u64(out, "memory_current", c.memory_current, false);
-    field_opt_u64(out, "memory_peak", c.memory_peak, false);
-    field_opt_u64(out, "io_rbytes", c.io_rbytes, false);
-    field_opt_u64(out, "io_wbytes", c.io_wbytes, false);
+    field_opt_u64(out, "cpu_usage_usec", c.cpu_usage_usec, Position::First);
+    field_opt_u64(
+        out,
+        "memory_current",
+        c.memory_current,
+        Position::Subsequent,
+    );
+    field_opt_u64(out, "memory_peak", c.memory_peak, Position::Subsequent);
+    field_opt_u64(out, "io_rbytes", c.io_rbytes, Position::Subsequent);
+    field_opt_u64(out, "io_wbytes", c.io_wbytes, Position::Subsequent);
     out.push('}');
 }
 
 fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
     out.push('{');
-    field(out, "total", s.total, true);
+    field(out, "total", s.total, Position::First);
     out.push_str(",\"by_kind\":{");
-    field(out, "execve", s.by_kind.execve, true);
-    field(out, "openat", s.by_kind.openat, false);
-    field(out, "connect", s.by_kind.connect, false);
-    field(out, "unknown", s.by_kind.unknown, false);
+    field(out, "execve", s.by_kind.execve, Position::First);
+    field(out, "openat", s.by_kind.openat, Position::Subsequent);
+    field(out, "connect", s.by_kind.connect, Position::Subsequent);
+    field(out, "unknown", s.by_kind.unknown, Position::Subsequent);
     out.push('}');
     out.push_str(",\"notable\":");
     array(out, &s.notable, |out, n| {
@@ -333,14 +368,19 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
         json_str(out, &n.detail);
         out.push_str(",\"comm\":");
         json_str(out, &n.comm);
-        field(out, "hits", n.hits, false);
+        field(out, "hits", n.hits, Position::Subsequent);
         // Additive key (schema stays 1): a `true` `detail` is a prefix of the guest's path, not the
         // path, so a consumer treating the two alike states something that never happened.
         let _ = write!(out, ",\"truncated\":{}", n.truncated);
         out.push('}');
     });
     let _ = write!(out, ",\"notable_truncated\":{}", s.notable_truncated);
-    field(out, "overflow_events", s.overflow_events, false);
+    field(
+        out,
+        "overflow_events",
+        s.overflow_events,
+        Position::Subsequent,
+    );
     out.push('}');
 }
 
@@ -360,12 +400,31 @@ pub(crate) fn syscall_name(out: &mut String, kind: Syscall) {
     out.push_str(kind.name());
 }
 
-/// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value, the
-/// integer fields all funnel through here, one helper instead of one per width.
-pub(crate) fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
-    if !first {
-        out.push(',');
+/// Whether a field opens its JSON object or follows a sibling, which is the only thing deciding
+/// the leading comma. Typed rather than a `bool` because the record is **signed**: a wrong literal
+/// at one of these call sites emits `{,"k":1}` or `{"a":1"b":2}`, and the damage is a record no
+/// consumer can parse rather than a value that merely reads oddly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Position {
+    /// The first field in its object: no leading comma.
+    First,
+    /// A later field: separate it from the one before.
+    Subsequent,
+}
+
+impl Position {
+    /// Emit the separator this position needs.
+    fn separate(self, out: &mut String) {
+        if self == Self::Subsequent {
+            out.push(',');
+        }
     }
+}
+
+/// Write `,"key":<value>` (or `"key":<value>` at [`Position::First`]) for any unquoted-rendering
+/// value, the integer fields all funnel through here, one helper instead of one per width.
+pub(crate) fn field<T: Display>(out: &mut String, key: &str, value: T, at: Position) {
+    at.separate(out);
     let _ = write!(out, "\"{key}\":{value}");
 }
 
@@ -377,10 +436,8 @@ pub(crate) fn clamped_ns(d: Duration) -> u64 {
 
 /// Write `,"key":<n|null>`, an absent counter (a cgroup file a kernel doesn't have) renders `null`,
 /// distinct from a real `0`.
-pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, first: bool) {
-    if !first {
-        out.push(',');
-    }
+pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, at: Position) {
+    at.separate(out);
     match value {
         Some(v) => write!(out, "\"{key}\":{v}").ok(),
         None => write!(out, "\"{key}\":null").ok(),
