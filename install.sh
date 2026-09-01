@@ -233,7 +233,7 @@ main() {
     mkdir -p "$PREFIX" "$DATA"
     install -m 0755 "$STAGE/bin/bsx" "$PREFIX/bsx"
     ok "installed $PREFIX/bsx"
-    for f in vmlinux rootfs-guest.ext4 probes; do
+    for f in vmlinux rootfs-guest.ext4; do
         install -m 0644 "$STAGE/share/bsx/$f" "$DATA/$f"
         ok "installed $DATA/$f"
     done

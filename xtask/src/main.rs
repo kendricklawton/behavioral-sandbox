@@ -4,9 +4,6 @@
 //! keeps no second copy of it. Each module carries its own `//!` header; the gates and the shared
 //! plumbing (paths, `cargo` and tool runners) live here.
 //!
-//! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
-//! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
-//! the CI gate still runs on hosts without the eBPF toolchain).
 #![forbid(unsafe_code)]
 
 mod artifacts;
@@ -42,7 +39,7 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
-    /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
+    /// Privileged integration tests (KVM), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
     #[command(visible_alias = "ci-priv")]
     CiPrivileged {
         /// Run the test phase this many times (setup runs once): the release-readiness soak, so
@@ -51,9 +48,9 @@ enum Cmd {
         #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
         repeat: u32,
     },
-    /// Check the host can do KVM + eBPF; report what's missing.
+    /// Check the host can do KVM; report what's missing.
     Setup,
-    /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
+    /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image
     /// object, install the `bsx` binary, and (on a KVM host) boot one sandbox to prove
     /// it. Offline when `BSX_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
@@ -63,9 +60,7 @@ enum Cmd {
         /// Build + install only; skip the sandbox boot proof (it just prints the command).
         #[arg(long)]
         no_run: bool,
-        /// Stand the engine up without its observability half when the pinned eBPF toolchain is
-        /// absent: `--trace`/`--watch` record a gap and `--allow` enforcement refuses. Without this,
-        /// a self-host that cannot build the probe object refuses rather than reporting success.
+        /// Reserved: stand the engine up without an optional half.
         #[arg(long)]
         no_probes: bool,
     },
@@ -93,9 +88,8 @@ enum Cmd {
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
-    /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`.
-    /// Vendor-aware via `BSX_VENDOR_DIR`; the eBPF toolchain is required (a
-    /// package without the audit half is not the product).
+    /// staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`.
+    /// Vendor-aware via `BSX_VENDOR_DIR`.
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
         /// against the `v0.0.x` checkpoint line, `v` stripped.
@@ -163,7 +157,7 @@ enum Cmd {
     },
     /// Run the whole benchmark suite as one report to stdout, every section in order, with the
     /// methodology stated and the host recorded. Sections whose host prerequisite is missing
-    /// (`/dev/kvm`, or `CAP_BPF`+`CAP_PERFMON` + the built object) are skipped with the reason
+    /// (`/dev/kvm`) are skipped with the reason
     /// printed. `docs/benchmarks.md` explains why no numbers are published at present.
     #[command(visible_alias = "bench")]
     BenchAll {
@@ -173,7 +167,7 @@ enum Cmd {
         runs: usize,
     },
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the
-    /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
+    /// config parser) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
     /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
     /// `ci`. `--help` lists the targets, generated from [`FUZZ_TARGETS`] rather than restated
@@ -393,8 +387,7 @@ fn missing_cgroup_controllers(subtree: &str) -> Option<String> {
 }
 
 pub(crate) fn effective_uid() -> Result<u32> {
-    let status =
-        std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
+    let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
     status
         .lines()
         .find_map(|l| l.strip_prefix("Uid:"))
@@ -516,14 +509,12 @@ fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
 
 /// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces.
 ///
-/// `crates/probes` is the crate that matters here: it is the only one allowed `unsafe` and its object ships
+/// The detached workspaces are linted under the toolchain each one pins
 /// in the release tarball, yet a root-workspace `clippy` walks neither detached workspace.
 ///
 /// Each command runs with the cwd **inside** its workspace, so rustup honours that directory's own
-/// `rust-toolchain.toml`: `crates/probes` pins a nightly and the root pins stable, and linting the probes
-/// with the root's stable would fail on features the crate needs. Clippy on `crates/probes` skips cleanly
-/// when that nightly is absent, the same guard and reason as [`build_probes`], since the everyday gate has
-/// to run everywhere.
+/// `rust-toolchain.toml`. Clippy on a detached workspace skips cleanly when its toolchain is
+/// absent, since the everyday gate has to run everywhere.
 fn lint_detached_workspaces(root: &Path) -> Result<()> {
     let denies = workspace_clippy_denies(root)?;
     for manifest in detached_manifests(root)? {
@@ -532,7 +523,7 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
         // `fuzz` builds on whatever toolchain the caller has.
         let toolchain: Option<&str> = None;
         run_in(&dir, toolchain, &["fmt", "--check"], &shown)?;
-        // No `--all-targets`: it adds a test harness, and `crates/probes` is `no_std` for a target
+        // No `--all-targets`: it adds a test harness, and a detached crate may be `no_std` for a target
         // with no `test` crate and no panic handler, so the harness cannot build at all. The
         // default targets are the ones that ship.
         let mut args = vec!["clippy", "--", "-Dwarnings"];
@@ -546,9 +537,8 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
 ///
 /// `toolchain` names it explicitly rather than letting the `rust-toolchain.toml` in `dir` be found,
 /// because a parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN=stable` into every child and that
-/// overrides the file. [`build_probes`] hit this first and solved it the same way; the difference
-/// here is that it cost a debugging round because the command passed by hand and failed from the
-/// gate, which is the signature of an inherited variable rather than a broken command.
+/// overrides the file. A command that passes by hand and fails from the gate is the signature of
+/// an inherited variable rather than a broken command.
 fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Result<()> {
     let mut cmd = match toolchain {
         Some(t) => {
@@ -575,8 +565,8 @@ fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Re
 
 /// `cargo deny check advisories` for the workspaces the root check cannot see.
 ///
-/// `crates/probes` and `fuzz` carry their own `[workspace]` and lockfile and are excluded from the root
-/// one, so `cargo deny check` walks neither. `crates/probes` is the crate that matters, being the only one
+/// `fuzz` carries its own `[workspace]` and lockfile and is excluded from the root
+/// one, so `cargo deny check` walks it separately. It matters, being the one
 /// allowed `unsafe` and the one whose object ships in the tarball.
 ///
 /// Advisories only: bans, licenses, and sources describe the shipped dependency graph the root check
@@ -610,7 +600,7 @@ fn deny_detached_workspaces(root: &Path) -> Result<()> {
 /// Asserts `fuzz/Cargo.lock` still resolves. That workspace is **detached**, with its own `[workspace]` and
 /// lockfile, and takes the rest of the tree by path, so a dependency edit in the main workspace ages it.
 /// `cargo xtask fuzz` lets cargo repair the lockfile in place, which turns drift into a silent rewrite
-/// rather than a report. `crates/probes` is detached the same way but its build passes `--locked`, so only
+/// rather than a report. The detached workspace's build passes `--locked`, so only
 /// this one can rot unobserved.
 ///
 /// Resolution is the whole check: building the targets needs nightly plus cargo-fuzz, neither of which
@@ -702,7 +692,7 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Booting a microVM and loading/attaching eBPF need `/dev/kvm` + elevated caps, so those tests are
+/// Booting a microVM needs `/dev/kvm` + elevated caps, so those tests are
 /// `#[ignore]`d and run only here, on a machine that has them.
 fn ci_privileged(repeat: u32) -> Result<()> {
     privileged_preflight()?;
@@ -742,9 +732,8 @@ fn privileged_preflight() -> Result<()> {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
     // Every privileged test skip-guards itself, and a skipped body is a *pass* to cargo, so a gate
-    // run without the capabilities would print green while the jailer, cgroup, and eBPF halves
-    // silently test nothing. Refuse loudly instead: real root covers CAP_NET_ADMIN/CAP_BPF/
-    // CAP_PERFMON and is what the jailer tests need outright.
+    // run without the capabilities would print green while the jailer, cgroup, and network halves
+    // silently test nothing. Refuse loudly instead.
     if effective_uid()? != 0 {
         bail!(
             "cargo xtask ci-privileged needs real root (run it under sudo): without it the \
@@ -762,12 +751,6 @@ fn privileged_preflight() -> Result<()> {
              artifacts in ./target and block later non-root `cargo` builds.\n  Re-run as:\n    \
              sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" cargo xtask ci-privileged\n  \
              (if ./target is already root-owned from this attempt: sudo chown -R \"$USER:$USER\" target)"
-        );
-    }
-    if !Path::new("/sys/kernel/btf/vmlinux").exists() {
-        bail!(
-            "/sys/kernel/btf/vmlinux not present — the eBPF probe tests skip themselves without \
-             BTF, and a skipped test looks like a pass (need a CONFIG_DEBUG_INFO_BTF=y kernel)"
         );
     }
     // The cgroup-enforcement tests build their limit cgroup under /sys/fs/cgroup, and real root
@@ -863,7 +846,6 @@ fn privileged_preflight() -> Result<()> {
     // agent, the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
-    // The eBPF probe tests load the object built from `crates/probes`; build it here (the
     Ok(())
 }
 
@@ -881,17 +863,15 @@ fn setup() -> Result<()> {
         check(&c.label, ok);
     }
 
-    // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
+    // Dev-toolchain checks, only `xtask` needs these (building the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
     // the shared `bsx doctor` set.
     println!("\ndev toolchain (for building, not running):");
     // Verified, not just announced: a row that printed the pin while any version satisfied it would
     // be the same hollow-green this gate exists to refuse.
     check(
-        &format!(
-            "pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"
-        ),
-        nightly_ebpf_ready(),
+        &format!("pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"),
+        nightly_ready(),
     );
     check(
         &format!(
@@ -936,26 +916,10 @@ fn setup() -> Result<()> {
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
 
-    println!("\neBPF probes: loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
-    println!(
-        "             root: grant a loader binary just those with `setcap cap_bpf,cap_perfmon+ep`."
-    );
-    println!(
-        "             A host without kernel BTF or those caps is named by a typed error, not a"
-    );
-    println!("             cryptic verifier reject (bsx_probes_loader::check_support).");
-
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
 }
 
-/// Builds the eBPF object for `bpfel-unknown-none` via `bpf-linker`. The crate is **excluded** from the
-/// workspace and builds under its own nightly with `-Z build-std`, since rustup ships no prebuilt `core`
-/// for the BPF target, so this drives its build directly rather than through the workspace `cargo`.
-///
-/// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain it prints a
-/// note and returns `Ok` rather than failing, because the everyday host gate must not require the eBPF
-/// toolchain. This step is folded into `ci`, and `ci-privileged` builds it before the probe tests.
 /// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
 /// rule and `docs/embedding-scope.md` both name.
 /// `pinned_surface_is_named_the_same_in_every_doc` holds those two to this list, so a crate can't
@@ -1034,9 +998,9 @@ fn latest_version_tag(root: &Path) -> Result<String> {
         .context("no `v*` tag to use as a semver baseline; pass --baseline <rev>")
 }
 
-/// Whether the nightly toolchain with the `rust-src` component (needed to build `crates/probes` with
-/// `-Z build-std`) is installed, via `rustup component list --installed`. Informational, for `setup`.
-fn nightly_ebpf_ready() -> bool {
+/// Whether the pinned nightly toolchain is installed, via `rustup component list --installed`.
+/// Informational, for `setup`.
+fn nightly_ready() -> bool {
     // Resolve `rustup` the sudo-aware way too (it is also a per-user `~/.cargo/bin` tool), so a
     // `sudo cargo xtask setup` doesn't misreport the toolchain as absent, see `dev_tool_path`.
     let Some(rustup) = dev_tool_path("rustup") else {
@@ -1149,7 +1113,7 @@ fn in_path(bin: &str) -> bool {
 }
 
 /// Resolve a per-user dev-toolchain binary: `$PATH` first, then the cargo bin dirs. `cargo install`
-/// places these build-only tools (`bpf-linker`, `rustup`) in `~/.cargo/bin`, which `sudo` drops from
+/// places these build-only tools (`rustup`, `cargo-fuzz`) in `~/.cargo/bin`, which `sudo` drops from
 /// root's PATH, so the natural `sudo cargo xtask setup` (run to green the *runtime* rows) would
 /// otherwise report an installed tool as missing. Checking the cargo bin dirs, including the
 /// *invoking* user's under sudo, keeps the dev-toolchain rows honest whichever way setup is invoked.
@@ -1349,9 +1313,9 @@ mod tests {
         let manifest = r#"
 [workspace]
 members = ["crates/engine", "xtask"]
-exclude = ["crates/probes", "fuzz"]
+exclude = ["fuzz"]
 "#;
-        assert_eq!(excluded_dirs(manifest), vec!["crates/probes", "fuzz"]);
+        assert_eq!(excluded_dirs(manifest), vec!["fuzz"]);
         assert!(excluded_dirs("[workspace]\nmembers = [\"a\"]\n").is_empty());
     }
 
@@ -1408,64 +1372,9 @@ exclude = ["crates/probes", "fuzz"]
     #[test]
     fn the_gates_uid_check_reads_through_the_shared_parse() {
         // The field-index discipline (the setuid-shaped line a live read cannot produce) is
-        // pinned where the parse lives, in bsx-record's ids tests; here only the live read, so
+        // pinned where the parse lives, in the CLI's ids tests; here only the live read, so
         // format drift on this host surfaces as a loud gate refusal rather than a silent skip.
         assert!(effective_uid().is_ok());
-    }
-
-    /// A minimal valid ELF64-LE object with three sections: the null section, one named `sec1`, and
-    /// `.shstrtab`. Enough to exercise the section-name walk without pulling in an ELF crate.
-    fn tiny_elf(sec1: &str) -> Vec<u8> {
-        // Section-header string table: "\0" + sec1 + "\0" + ".shstrtab" + "\0".
-        let mut strtab = vec![0u8];
-        let sec1_name = strtab.len() as u32;
-        strtab.extend_from_slice(sec1.as_bytes());
-        strtab.push(0);
-        let shstrtab_name = strtab.len() as u32;
-        strtab.extend_from_slice(b".shstrtab");
-        strtab.push(0);
-
-        let e_shoff = 64 + strtab.len();
-        let mut buf = vec![0u8; e_shoff + 3 * 64];
-
-        buf[0..4].copy_from_slice(b"\x7fELF");
-        buf[4] = 2; // ELFCLASS64
-        buf[5] = 1; // ELFDATA2LSB
-        buf[6] = 1; // EV_CURRENT
-        buf[0x10..0x12].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
-        buf[0x12..0x14].copy_from_slice(&247u16.to_le_bytes()); // EM_BPF
-        buf[0x28..0x30].copy_from_slice(&(e_shoff as u64).to_le_bytes()); // e_shoff
-        buf[0x34..0x36].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
-        buf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
-        buf[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
-        buf[0x3e..0x40].copy_from_slice(&2u16.to_le_bytes()); // e_shstrndx (the .shstrtab index)
-
-        buf[64..64 + strtab.len()].copy_from_slice(&strtab);
-
-        // Section 1: named `sec1`.
-        let s1 = e_shoff + 64;
-        buf[s1..s1 + 4].copy_from_slice(&sec1_name.to_le_bytes());
-        // Section 2: `.shstrtab`, SHT_STRTAB, pointing at the string-table data above.
-        let s2 = e_shoff + 128;
-        buf[s2..s2 + 4].copy_from_slice(&shstrtab_name.to_le_bytes());
-        buf[s2 + 4..s2 + 8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
-        buf[s2 + 0x18..s2 + 0x20].copy_from_slice(&64u64.to_le_bytes()); // sh_offset
-        buf[s2 + 0x20..s2 + 0x28].copy_from_slice(&(strtab.len() as u64).to_le_bytes()); // sh_size
-        buf
-    }
-
-    #[test]
-    fn elf_section_scan_matches_the_exact_name() {
-        assert!(elf_has_section(&tiny_elf(".BTF"), ".BTF"));
-        assert!(elf_has_section(&tiny_elf(".BTF"), ".shstrtab")); // the string table itself is named
-    }
-
-    #[test]
-    fn elf_section_scan_rejects_near_misses_and_junk() {
-        assert!(!elf_has_section(&tiny_elf(".BTF.ext"), ".BTF")); // the substring scan's false positive
-        assert!(!elf_has_section(&tiny_elf(".text"), ".BTF")); // real sections, none named .BTF
-        assert!(!elf_has_section(b"not an elf at all", ".BTF"));
-        assert!(!elf_has_section(&[], ".BTF"));
     }
 
     /// The repo-layout table is restated in three places for three audiences: `AGENTS.md` for an
@@ -1480,10 +1389,7 @@ exclude = ["crates/probes", "fuzz"]
     fn every_layout_table_lists_every_package() {
         let root = workspace_root();
         let real: BTreeMap<String, String> = workspace_packages(root);
-        assert!(
-            real.len() >= 10,
-            "expected the full workspace, got {real:?}"
-        );
+        assert!(real.len() >= 5, "expected the full workspace, got {real:?}");
 
         for page in ["AGENTS.md", "README.md", "docs/architecture.md"] {
             let text = std::fs::read_to_string(root.join(page)).unwrap();
@@ -1541,90 +1447,10 @@ exclude = ["crates/probes", "fuzz"]
         }
     }
 
-    /// `bsx-record` exists so a consumer can parse and verify a signed record **off-host**: an
-    /// auditor's machine, a CI job, no eBPF, no root. That is only true while its dependency
-    /// closure stays free of `aya` (the eBPF loader) and `nix` (the loader's netns join), so this
-    /// walks the closure out of `Cargo.lock` and holds the line. The crate docs' "no aya, no nix"
-    /// claim points here.
-    #[test]
-    fn record_crate_is_aya_free() {
-        let lock =
-            std::fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
-        // name -> direct dependency names, from the lockfile's [[package]] blocks. A dependency
-        // entry may carry a version ("foo 1.2.3"); the name is the first token. A lockfile can
-        // hold two versions of one name; their lists are merged, so the walk over-approximates,
-        // the safe direction for a denylist.
-        let mut packages = BTreeSet::new();
-        let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut name: Option<String> = None;
-        let mut in_deps = false;
-        // A dependencies array whose package name hasn't been seen would mean entries silently
-        // dropped, an under-approximated closure, and a false pass; panic instead of skipping.
-        let owner = |name: &Option<String>| -> String {
-            name.clone()
-                .expect("Cargo.lock has a dependencies array before its package's name")
-        };
-        for line in lock.lines() {
-            let line = line.trim();
-            if line == "[[package]]" {
-                name = None;
-                in_deps = false;
-            } else if let Some(n) = line.strip_prefix("name = ") {
-                let n = n.trim_matches('"').to_string();
-                packages.insert(n.clone());
-                name = Some(n);
-            } else if line.starts_with("dependencies = [") {
-                in_deps = !line.ends_with(']');
-                if !in_deps {
-                    // single-line form: dependencies = ["a", "b"]
-                    let inner = line
-                        .trim_start_matches("dependencies = [")
-                        .trim_end_matches(']');
-                    let list = inner
-                        .split(',')
-                        .filter_map(|d| d.trim().trim_matches('"').split(' ').next())
-                        .filter(|d| !d.is_empty())
-                        .map(str::to_string);
-                    deps.entry(owner(&name)).or_default().extend(list);
-                }
-            } else if in_deps {
-                if line == "]" {
-                    in_deps = false;
-                } else {
-                    let dep = line.trim_matches(',').trim_matches('"');
-                    if let Some(first) = dep.split(' ').next().filter(|d| !d.is_empty()) {
-                        deps.entry(owner(&name))
-                            .or_default()
-                            .push(first.to_string());
-                    }
-                }
-            }
-        }
-        assert!(
-            packages.contains("bsx-record"),
-            "Cargo.lock has no bsx-record package (stale lockfile?)"
-        );
-
-        let mut queue = vec!["bsx-record".to_string()];
-        let mut closure = BTreeSet::new();
-        while let Some(pkg) = queue.pop() {
-            if closure.insert(pkg.clone()) {
-                queue.extend(deps.get(&pkg).cloned().unwrap_or_default());
-            }
-        }
-        for forbidden in ["aya", "nix"] {
-            assert!(
-                !closure.contains(forbidden),
-                "bsx-record's dependency closure contains `{forbidden}`; the crate exists so \
-                 record verification runs off-host without linking an eBPF loader"
-            );
-        }
-    }
-
     /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.
     /// Two reasons: `metadata`'s JSON repeats `"name"` for every *target* as well as every package,
     /// which is what made the first cut of this test report `exec` and `tracer` as missing packages;
-    /// and `crates/probes` is excluded from the workspace, so `metadata` never sees it while the
+    /// and `fuzz` is excluded from the workspace, so `metadata` never sees it while the
     /// layout tables rightly list it.
     fn workspace_packages(root: &Path) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
@@ -1651,16 +1477,14 @@ exclude = ["crates/probes", "fuzz"]
         map
     }
 
-    /// Every workspace crate forbids `unsafe` except `crates/probes`, which builds for the BPF
-    /// target where reading a map value means dereferencing a raw pointer the verifier has already
-    /// bounded. Two doc pages state that rule; this is what makes it a checked claim rather than a
-    /// list, after both pages spent an unknown stretch naming five of the six crates that carried
-    /// the attribute and asserting a universal ("every shipped host crate") that three crates did
-    /// not satisfy.
+    /// Every workspace crate forbids `unsafe`. Two doc pages state that rule; this is what makes it
+    /// a checked claim rather than a list.
     ///
     /// Derived from the tree, so a new crate fails here until someone decides which side it is on.
+    /// The raw libkrun bindings will be the one exception when they land, because the library is C,
+    /// and adding them means changing this assertion deliberately rather than by accident.
     #[test]
-    fn every_crate_forbids_unsafe_except_the_bpf_one() {
+    fn every_crate_forbids_unsafe() {
         let root = workspace_root();
         let mut forbids = Vec::new();
         let mut allows = Vec::new();
@@ -1692,10 +1516,9 @@ exclude = ["crates/probes", "fuzz"]
         }
         forbids.sort();
         allows.sort();
-        assert_eq!(
-            allows,
-            vec!["probes".to_string()],
-            "exactly one crate may go without `#![forbid(unsafe_code)]`, and it is the BPF one. \
+        assert!(
+            allows.is_empty(),
+            "every crate must carry `#![forbid(unsafe_code)]`; these do not: {allows:?}. \
              Forbidding: {forbids:?}"
         );
     }

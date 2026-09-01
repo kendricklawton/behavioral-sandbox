@@ -29,8 +29,7 @@ without them, `--unjailed` is the explicit, greppable opt-out, and the guest sti
 hardware boundary; only the VMM process itself runs unconfined.
 
 For more information be sure to check out [how to install the CLI](./cli-install.md), [the commands
-and options](./cli-commands.md), [observing what a run did](./cli-observe.md), and [how to configure
-the engine](./cli-config.md).
+and options](./cli-commands.md), and [how to configure the engine](./cli-config.md).
 
 ## Every engine capability, and where it lives
 
@@ -48,9 +47,6 @@ out of scope.
 | Artifact retrieval | `--get` (deny-by-default) |
 | Networking (NIC) | `--net` |
 | A route out (`GuestEgress`) | `--gateway`, `--resolver` (the hoster furnishes the uplink; [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)) |
-| Egress policy (`EgressPolicy`) | [`--allow IP[/CIDR][:PORT][/PROTO]`](./cli-observe.md#enforcing-egress-with---allow) |
-| Host-observed audit record | [`--trace`, `--record`, `--record-summary`, `--watch`](./cli-observe.md) |
-| Verify a signed record | [`bsx verify <record>`](./cli-commands.md#bsx-verify) |
 | Structured run result | `--json` |
 | Host readiness | [`bsx doctor`](./cli-commands.md#bsx-doctor) |
 | Crashed-run residue (`sweep_orphans`) | no flag: run automatically before every boot subcommand, reclaiming this euid's dead-pid scratch dirs and netns |
@@ -79,5 +75,3 @@ boots one VM, does its work, and exits.
   (design rule 4), which is what makes proposing one a design error rather than a missing feature.
   What that covers is listed in [Where the engine ends](./embedding-scope.md).
 
-Running one probe at a time, standalone, is
-[Host-side observability & enforcement](./probes.md), under *Try it*.

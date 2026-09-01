@@ -208,8 +208,6 @@ impl UserConfig {
         self.log.as_deref()
     }
 
-
-
     /// The operator policy this file declares. An absent file, or one that sets none
     /// of these keys, yields the default policy, which changes nothing.
     #[must_use]
@@ -394,7 +392,7 @@ impl std::fmt::Display for ConfigError {
                 } else {
                     ("are", "them")
                 };
-                // Name the `BSX_*` route only when every refused key has one: `records_dir` has no
+                // Name the `BSX_*` route only when every refused key has one: a key with no
                 // mirror, so a blanket "the matching variable" would send the reader to nothing.
                 let envs = keys
                     .iter()
@@ -461,7 +459,7 @@ impl Sources {
     /// As [`discover`](Self::discover).
     pub(crate) fn discover_with(cwd: &Path, home: Option<PathBuf>) -> Result<Self, ConfigError> {
         // A relative `$HOME` names a different directory depending on where the process started, so
-        // it does not identify the user's own file. Same filter `bsx_record`'s data dir applies.
+        // it does not identify the user's own file.
         let user_path = home.filter(|h| h.is_absolute()).map(|h| h.join(FILE_NAME));
         // Only the user file carries keys reaching host execution and trust, so only it goes
         // through the ownership/mode gate; gating the knobs-and-postures project file would refuse
@@ -668,22 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn signing_key_parses_from_the_file_layer() {
-        let toml =
-            UserConfig::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
-        assert_eq!(
-            toml.signing_key(),
-            Some(Path::new("/keys/host.ed25519")),
-            "the file layer carries the record-signing key path"
-        );
-        assert_eq!(
-            UserConfig::default().signing_key(),
-            None,
-            "unset falls through"
-        );
-    }
-
-    #[test]
     fn env_beats_file_beats_default_via_the_composed_lookup() {
         // The layering `BootConfig::from_env_with` sees: env wins over file, file over default. Model
         // that composition here without a real process env or a real BootConfig.
@@ -704,51 +686,6 @@ mod tests {
         assert_eq!(composed("BSX_ROOTFS"), Some(OsString::from("/file/root")));
         // marker: neither sets it → None, so the BootConfig default stands.
         assert_eq!(composed("BSX_MARKER"), None);
-    }
-
-    #[test]
-    fn malformed_egress_ceiling_is_a_typed_error_not_a_dropped_entry() {
-        // A dropped ceiling entry *widens* the ceiling (empty means unrestricted in
-        // `Policy::check_egress`), so a typo must refuse the whole file, loudly, at parse time.
-        let err = UserConfig::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
-            .expect_err("a malformed CIDR entry must fail the parse");
-        assert!(
-            err.contains("10.0.0.0-8") && err.contains("max_egress_v4"),
-            "error names the entry and the key: {err}"
-        );
-
-        let err = UserConfig::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
-            .expect_err("an out-of-range prefix must fail the parse");
-        assert!(err.contains("10.0.0.0/33"), "error names the entry: {err}");
-
-        let err = UserConfig::parse("max_egress_v6 = [\"fd00::/129\"]\n")
-            .expect_err("an out-of-range v6 prefix must fail the parse");
-        assert!(err.contains("fd00::/129"), "error names the entry: {err}");
-    }
-
-    #[test]
-    fn egress_ceilings_parse_into_the_policy_unabridged() {
-        let toml = UserConfig::parse(
-            "max_egress_v4 = [\"10.0.0.0/8\", \"192.0.2.7\"]\nmax_egress_v6 = [\"fd00::/8\"]\n",
-        )
-        .expect("valid ceilings parse");
-        let policy = toml.policy();
-        assert_eq!(
-            policy.max_egress_v4,
-            vec![
-                bsx_probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
-                bsx_probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
-            ],
-            "every entry reaches the policy: a bare host reads as /32"
-        );
-        assert_eq!(
-            policy.max_egress_v6,
-            vec![bsx_probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
-        );
-        // Absent keys stay "no restriction": the permissive default, explicitly chosen.
-        let bare = UserConfig::parse("marker = \"UP\"\n").expect("valid");
-        assert!(bare.policy().max_egress_v4.is_empty());
-        assert!(bare.policy().max_egress_v6.is_empty());
     }
 
     /// A three-level tree under a reclaimed scratch dir, with `.bsx.toml` bodies written at the
@@ -869,8 +806,7 @@ mod tests {
     #[test]
     fn project_config_drops_every_user_only_key() {
         let all = "firecracker = \"/f\"\nkernel = \"/k\"\nrootfs = \"/r\"\n\
-                   scratch_dir = \"/s\"\nsigning_key = \"/sk\"\ntrusted_keys = [\"aa\"]\n\
-                   records_dir = \"/rd\"\ngateway = \"10.0.0.1\"\nresolver = \"10.0.0.2\"\n\
+                   scratch_dir = \"/s\"\ngateway = \"10.0.0.1\"\nresolver = \"10.0.0.2\"\n\
                    jail_uid = 20001\njail_gid = 20002\nvcpus = 2\n";
         let keys = project_from(UserConfig::parse(all).expect("valid toml"))
             .expect_err("every user-only key must be refused");
@@ -881,15 +817,12 @@ mod tests {
                 "kernel",
                 "rootfs",
                 "scratch_dir",
-                "signing_key",
-                "trusted_keys",
-                "records_dir",
                 "gateway",
                 "resolver",
                 "jail_uid",
                 "jail_gid",
             ],
-            "all eleven are named, in declaration order"
+            "all eight are named, in declaration order"
         );
     }
 

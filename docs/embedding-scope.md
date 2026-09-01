@@ -104,7 +104,7 @@ embedders.
 Holding a name and shipping through it are separate things, and this project does the first and not
 the second. The names reserved on crates.io under this project are the binary (`bsx`) and the
 packages carrying a pinned surface: `bsx-engine`, `bsx-channel`, and
-`bsx-record`. Each is a **reserved placeholder**: no dependencies, no code, and a
+and `bsx-channel`. Each is a **reserved placeholder**: no dependencies, no code, and a
 description saying exactly that. They exist because the registry is a flat namespace and the
 alternative to holding a name is someone else holding it. Finding one is not evidence that this
 paragraph is stale, and its version number carries no signal: a placeholder is identified by being
@@ -127,22 +127,6 @@ all:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
 - The **`bsx-channel`** host↔guest wire framing protocol
-- The **`bsx-record`** signed-envelope surface (`verify`, `verify_entry`, `verify_chain`,
-  `record_hash`, and the record's schema versions): the one contract whose breakage reaches
-  *backwards*, invalidating records that already sit on disk, so it pins with the wire protocols
-  rather than the library
-
-The list above names the headline types; the enforced boundary is wider and mechanical: **every
-public item of the three crates `cargo xtask semver-check` names** (`bsx-engine`,
-`bsx-channel`, `bsx-record`), because that is what the tool actually checks. For `bsx-engine`
-that includes the raw `Vm`/`RunningVm` layer under `Sandbox` ([Embedding recipes](./embedding-recipes.md)), `Pool`,
-`sweep_orphans`, the `doctor` preflight module, and the jail/vsock constants: public deliberately
-(the CLI is built on those seams, and an embedder building a pool or a preflight
-needs the same ones), and pinned *because* they are public, so there is no public-but-unpinned
-tier to guess about. The `bsx` CLI package is not on the list: its library target is empty
-without the off-by-default `fuzzing` feature, so a pin of it reaches the binary and nothing else.
-
-### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).
 - **MINOR**: Additive changes (new API methods, new `#[non_exhaustive]` error variants, new optional fields).
 - **Commit Tags**: Changes touching this surface are marked with `feat(api):` or `fix(api)!:` in commit subjects for clear auditability.

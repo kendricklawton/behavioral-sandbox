@@ -2,7 +2,7 @@
 
 The four verbs: [`bsx run`](#bsx-run) for one sandbox and one command, [`bsx shell`](#bsx-shell)
 for a stateful session, [`bsx doctor`](#bsx-doctor) to check a host before the first sandbox, and
-[`bsx verify`](#bsx-verify) to check a signed audit record.
+to check a host before the first sandbox.
 
 ## `bsx run`
 
@@ -28,20 +28,13 @@ bsx run [FLAGS] -- <cmd> [args…]
 | `--output-cap BYTES` | Cap on captured stdout+stderr+artifacts (default 16 MiB). |
 | `--json` | Emit the structured run result as one JSON object on stdout (exit code, streams, artifacts, metrics, and the effective `limits`) instead of relaying the raw streams. |
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host ends of its own [dual-stack link](./architecture-host.md#networking). |
-| `--allow IP[/CIDR][:PORT][/PROTO]` | Bound what may cross the deny-by-default tap (repeatable), e.g. `10.200.0.1:9000/udp`, `10.0.0.0/8:443/tcp`. Constrains traffic rather than creating a path: without an operator-provided uplink the reachable set is the host end of the /30. Requires `--net`; semantics in [Enforcing egress](./cli-observe.md#enforcing-egress-with---allow). |
 | `--gateway IP` | Give the guest a default route via this address, which must be the host end of its /30 (the only other address on the link). An off-link value is refused up front, since the guest could not ARP it and would come up sealed. Names a path rather than creating one: the engine builds no uplink, so where nothing has furnished the netns the reachable set is unchanged. What it changes is that the attempt now crosses the tap, so `--allow` can bound it and the record can show it. Requires `--net`; see [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster). |
 | `--resolver IP` | Tell the guest to resolve names at this address. Reaching it needs an allowance like any other destination, and the engine runs no resolver. Requires `--gateway`. |
-| `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope, so alteration is detectable; check it with [`bsx verify`](#bsx-verify). |
-| `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record shaped for an agent's observe-then-act loop. |
-| `--watch` | Watch the run **live**: a full-screen view on stderr. Needs stderr on a terminal; `q` closes the view and the run continues. |
 | `--log FILTER` | Log filter for stderr (overrides [`log`](./cli-config.md#setting-log)), e.g. `info`, `debug`. |
 
 Piped stdin is forwarded to the guest command. Bulk data belongs on the block-device paths instead
 (`input_dir`/`output_dir` in the [engine API](./embedding.md)), since the exec request is a single
 bounded frame.
-
-The four observability flags are covered in [Observing a run](./cli-observe.md).
 
 ### Streams and exit codes
 
@@ -68,9 +61,6 @@ Shell *process* state (`cd`, variables) does not persist: each line is its own e
 diagnostics go to stderr and command output to stdout, so a piped script of lines stays clean.
 `--unjailed`, `--vcpus`, `--mem`, `--require-limits`, and `--jail-uid` / `--jail-gid` work the same
 as on [`run`](#bsx-run).
-
-`bsx shell` cannot record, so a host that sets
-[`require_record`](./cli-config.md#setting-require_record) refuses it.
 
 ## `bsx doctor`
 
@@ -107,56 +97,3 @@ where there is no cgroup v2 hierarchy to probe, and the Firecracker row checks t
 release range. The rationale is
 [design decision 8](./architecture-decisions.md#8-portability-is-a-capability-question-not-a-distro-question).
 
-## `bsx verify`
-
-`bsx run --record` signs the finalized record with a **host key**
-that never crosses into the guest (the key loads in the host process; only the detached `ed25519`
-signature over the canonical record bytes reaches the file), so a consumer can
-detect any alteration made *after* the producing host. The record file is a schema-2 envelope,
-`{schema, key_id, signature, record}`, with the record carried inside as a string.
-
-`bsx verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
-mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a single
-envelope is bounded at 16 MiB, and a record file (which may hold a session chain of multiple envelopes)
-is bounded at 256 MiB, rejected up front if exceeded.
-
-The file's shape picks the check. One line is a single envelope. Several lines, one envelope per
-line in order, verify as a **session chain**: signatures plus each record's commitment to its predecessor's hash, so a reordered,
-inserted, or dropped record fails even though every envelope alone carries a valid signature.
-`a_chain_file_verifies_and_a_reordered_or_tampered_one_fails` pins both directions.
-
-A chain is verified **from its anchor**: the first line must be the session's unchained first
-record. That is what makes a dropped *head* detectable, and it is also why a mid-session slice (a
-rotated log, the last N replies kept) cannot be checked as a chain. Such a slice is refused, not
-downgraded: since the file's shape picks the check, whoever relays a session would otherwise pick
-the weaker one by deleting lines. A slice of several lines fails the anchor check above, and a file
-holding a **single** envelope that commits to a predecessor is refused by name, saying it is one
-link of a chain the file does not hold
-(`a_chain_truncated_to_one_link_is_refused_not_reported_verified` pins both). What this leaves: the
-anchor itself is unchained by construction, so a chain cut down to its *first* record cannot be told
-from a one-off `--record` file. Dropping the *tail* stays undetectable either way without an
-external anchor.
-
-```console
-bsx verify run.json                      # trusts this host's own signing key
-bsx verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
-bsx verify session.jsonl                 # several lines: the session chain, order and all
-```
-
-The trust root is the host signing key. This detects post-hoc alteration; it does **not** prove a
-*compromised* producing host didn't sign a lie. Key custody and rotation are the hoster's: the key
-path resolves from [`signing_key`](./cli-config.md#setting-signing_key), generated on first use, and a
-record's `key_id` names the key that signed it.
-
-**Key rotation.** `bsx verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
-records already signed. Keep the retired public keys (their `key_id`s) listed in
-[`trusted_keys`](./cli-config.md#setting-trusted_keys), and `bsx verify` trusts that set together
-with the current signing key and any `--key` given, so old and new records both verify.
-
-**Session hash-chain.** A one-shot `bsx run --record` writes a single, unchained record. Within a
-**session**, each record additionally commits to the
-previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
-saves the records one per line can hand the file to `bsx verify` (or call the library's
-`verify_chain`) and detect a reordered, inserted, or deleted one, not just a single-record edit.
-Truncating the tail of a chain is not detectable without an external
-anchor, which is the append-only limitation.

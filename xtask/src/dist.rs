@@ -79,7 +79,6 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
     crate::rootfs::build_rootfs(false, false)?;
 
-
     println!("\n== 4/5  build the release binary (static, {DIST_TARGET}) ==");
     cargo_reproducible(&[
         "build",
@@ -136,18 +135,10 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     let sums_text = format!("{tar_sha}  {name}.tar.gz\n");
     std::fs::write(&sums, &sums_text).with_context(|| format!("write {}", sums.display()))?;
 
-    let key_id: Option<String> = None;
-
     println!("\n✓ dist assembled:");
     println!("    {}", tarball.display());
     println!("    {}  (sha256 {tar_sha})", sums.display());
-    match &key_id {
-        Some(id) => println!(
-            "    {}.sig  (detached ed25519, key_id {id})",
-            sums.display()
-        ),
-        None => println!("    (UNSIGNED: no BSX_RELEASE_SIGNING_KEY; do not publish)"),
-    }
+    println!("    (unsigned: artifact signing is not implemented)");
     println!(
         "  install it (any host):   sh {}/install.sh",
         stage.display()
@@ -294,7 +285,6 @@ fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BPF_LINKER_VERSION;
 
     /// The release tarball has to be byte-identical across builds of one tree, so a verifier on a
     /// stranger box reaches the `SHA256SUMS` the release signed. Wall-clock mtimes defeat that, and
@@ -333,36 +323,6 @@ mod tests {
                 "tar must pass {expected}, got {flags:?}"
             );
         }
-    }
-
-    #[test]
-    fn detached_manifest_signature_round_trips_and_binds_the_exact_bytes() {
-        let dir = bsx_test_support::ScratchDir::created("dist-sign-test");
-        let path = dir.path();
-
-        let sample_manifest =
-            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  test.tar.gz\n";
-        std::fs::write(path.join("SHA256SUMS"), sample_manifest).unwrap();
-
-        let key = bsx_probes_loader::HostKey::from_seed([7u8; 32]);
-        sign_manifest_bytes(path, &key).unwrap();
-
-        let sig = std::fs::read(path.join("SHA256SUMS.sig")).unwrap();
-        let sig: [u8; 64] = sig
-            .as_slice()
-            .try_into()
-            .expect("a raw detached ed25519 signature is exactly 64 bytes");
-        key.verifying_key()
-            .verify_detached(sample_manifest.as_bytes(), &sig)
-            .expect("the signature covers the manifest's exact bytes");
-
-        // A tampered manifest (what the installer's `sha256sum -c` would read) fails the check.
-        let tampered = sample_manifest.replacen('1', "2", 1);
-        assert!(
-            key.verifying_key()
-                .verify_detached(tampered.as_bytes(), &sig)
-                .is_err()
-        );
     }
 
     /// The exact shape that shipped `v0.0.1`: the pushed tag said `0.0.1`, the workspace still said
@@ -474,84 +434,6 @@ mod tests {
             install.contains(&format!("\"$DATA/{}\"", SHARE_MEMBERS[0])),
             "install.sh's starter .bsx.toml must name $DATA/{} as the kernel",
             SHARE_MEMBERS[0]
-        );
-    }
-
-    /// The same drift guard, for the guest's IPv6 link. `bsx-probes-common` needs the prefix as a
-    /// `#![no_std]` constant ([`GUEST_LINK6`]) because the in-kernel ICMPv6 spare decides on-link
-    /// versus routable without a map lookup; `crates/engine/src/net.rs` owns the addresses it
-    /// actually assigns. The engine does not depend on `probes-common`, and its address constants
-    /// are `pub(crate)`, so neither can read the other: the copies are compared here, exactly as the
-    /// Firecracker pin's are.
-    ///
-    /// Drift is a **security** defect, not an inconsistency. If the engine re-addresses the link and
-    /// the eBPF constant stays put, the spare stops covering the real host end (NUD breaks, noisily)
-    /// or, worse, keeps sparing a prefix the guest can now route off, which is the unpoliced ICMPv6
-    /// channel narrowing `fc00::/7` to this one `/64` closed.
-    #[test]
-    fn the_guest_v6_link_is_the_same_in_the_engine_and_the_probes() {
-        let repo = workspace_root();
-        let net = std::fs::read_to_string(repo.join("crates/engine/src/net.rs"))
-            .expect("crates/engine/src/net.rs");
-        let common = std::fs::read_to_string(repo.join("crates/probes-common/src/lib.rs"))
-            .expect("crates/probes-common/src/lib.rs");
-
-        // The engine writes its ends as `Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, N)`; take the
-        // first two hextets (the /32 the /64 prefix's non-zero bytes live in) plus the prefix length.
-        let hextets = |text: &str, name: &str| -> Option<(u16, u16)> {
-            let line = text
-                .lines()
-                .find(|l| l.contains(name) && l.contains("Ipv6Addr::new"))?;
-            let args = line.split("Ipv6Addr::new(").nth(1)?.split(')').next()?;
-            let mut it = args.split(',').map(str::trim);
-            let parse = |t: &str| u16::from_str_radix(t.trim_start_matches("0x"), 16).ok();
-            Some((parse(it.next()?)?, parse(it.next()?)?))
-        };
-        let host = hextets(&net, "HOST_IP6").expect("net.rs must define HOST_IP6");
-        let guest = hextets(&net, "GUEST_IP6").expect("net.rs must define GUEST_IP6");
-        assert_eq!(host, guest, "the two ends must sit on one prefix");
-        let engine_len: u8 = net
-            .lines()
-            .find(|l| l.contains("HOST_PREFIX6") && l.contains('='))
-            .and_then(|l| l.rsplit('=').next())
-            .map(|v| v.trim().trim_end_matches(';').trim())
-            .and_then(|v| v.parse().ok())
-            .expect("net.rs must define HOST_PREFIX6");
-
-        // `GUEST_LINK6` is `([u8; 16], u8)`, so the declaration ends at the tuple's `);` (not at the
-        // first `;`, which sits inside the array type). Its first four bytes carry the same two
-        // hextets the engine writes, and its trailing decimal is the prefix length.
-        let body = common
-            .split("pub const GUEST_LINK6")
-            .nth(1)
-            .and_then(|rest| rest.split(");").next())
-            .expect("probes-common must define GUEST_LINK6");
-        let bytes: Vec<u16> = body
-            .split(|c: char| !c.is_ascii_hexdigit() && c != 'x')
-            .filter(|t| t.starts_with("0x"))
-            .filter_map(|t| u16::from_str_radix(&t[2..], 16).ok())
-            .collect();
-        assert!(
-            bytes.len() >= 4,
-            "GUEST_LINK6 must spell its prefix bytes as 0x.. literals, got {bytes:?}"
-        );
-        let probes = (
-            (bytes[0] << 8) | bytes[1],
-            (bytes[2] << 8) | bytes[3],
-            body.rsplit(',')
-                .find_map(|t| t.trim().parse::<u8>().ok())
-                .expect("GUEST_LINK6 must carry a prefix length"),
-        );
-        assert_eq!(
-            (host.0, host.1, engine_len),
-            probes,
-            "the engine assigns {:x}:{:x}::/{engine_len} but the eBPF ICMPv6 spare covers \
-             {:x}:{:x}::/{}: the in-kernel policy and the real link must name one prefix",
-            host.0,
-            host.1,
-            probes.0,
-            probes.1,
-            probes.2
         );
     }
 
@@ -676,85 +558,6 @@ mod tests {
         );
     }
 
-    /// The privileged workflow gates **every** series the engine claims, not just the pinned one.
-    /// A GitHub Actions matrix cannot read `MIN_SUPPORTED_FC_VERSION`/`PINNED_FC_VERSION`, so its
-    /// lane list is a fourth copy of the range and drifts like every copy: this compares the set of
-    /// series it installs against the set the engine declares, in both directions.
-    ///
-    /// The asymmetry is what makes it worth a test. A missing lane is silent, and specifically
-    /// silent about the end of the range nobody runs by hand: the engine adapts its API requests
-    /// across the supported window (`clock_realtime` is withheld below v1.16), so a claim of
-    /// "v1.15 through v1.16" gated only at v1.16 can regress on the floor with CI fully green.
-    /// A lane for a series the engine no longer claims is the opposite failure, spending a
-    /// privileged runner on a VMM upstream has stopped patching.
-    #[test]
-    fn the_privileged_workflow_gates_every_supported_firecracker_series() {
-        let repo = workspace_root();
-        let wf = repo.join(".github/workflows/ci-privileged-hosted.yml");
-        let text = std::fs::read_to_string(&wf).expect("ci-privileged-hosted.yml");
-        let spawn =
-            std::fs::read_to_string(repo.join("crates/engine/src/spawn/fcversion.rs")).unwrap();
-
-        // `pub(crate) const NAME: (u64, u64) = (1, 15);` -> (1, 15).
-        let constant = |name: &str| -> (u64, u64) {
-            let nums = spawn
-                .lines()
-                .find(|l| l.contains(&format!("{name}: (u64, u64)")))
-                .and_then(|l| l.rsplit('(').next())
-                .map(|t| {
-                    t.split(|c: char| !c.is_ascii_digit())
-                        .filter_map(|d| d.parse::<u64>().ok())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            assert!(
-                nums.len() >= 2,
-                "spawn/fcversion.rs must declare `{name}: (u64, u64) = (major, minor)`; parsed \
-                 {nums:?}, so the declaration's shape moved and this guard reads nothing"
-            );
-            (nums[0], nums[1])
-        };
-        let (floor, pin) = (
-            constant("MIN_SUPPORTED_FC_VERSION"),
-            constant("PINNED_FC_VERSION"),
-        );
-
-        // The lanes: `- fc: vX.Y.Z` entries in the matrix, reduced to their series. A lane installs
-        // a patch release; what the engine reasons about is the series.
-        let mut lanes: Vec<(u64, u64)> = text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .filter_map(|l| l.strip_prefix("- fc: v"))
-            .map(|v| {
-                let mut it = v.split('.').filter_map(|d| d.parse::<u64>().ok());
-                (it.next().unwrap_or(0), it.next().unwrap_or(0))
-            })
-            .collect();
-        lanes.sort_unstable();
-        lanes.dedup();
-        assert!(
-            !lanes.is_empty(),
-            "no `- fc: vX.Y.Z` lanes found in {}: the matrix shape this test greps for moved, so \
-             it is asserting nothing",
-            wf.display()
-        );
-
-        // Every series from the floor through the pin, which is what the support claim names.
-        assert_eq!(
-            floor.0, pin.0,
-            "the supported range spans a major bump: {floor:?}..={pin:?}"
-        );
-        let claimed: Vec<(u64, u64)> = (floor.1..=pin.1).map(|minor| (floor.0, minor)).collect();
-        assert_eq!(
-            lanes, claimed,
-            "the privileged workflow gates {lanes:?} but the engine claims {claimed:?} \
-             (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION): every claimed series needs a lane, \
-             and a lane for an unclaimed series burns a privileged runner on a VMM the engine \
-             does not support"
-        );
-    }
-
     /// Same drift guard, for the **third** copy of the Firecracker pin: the container image's
     /// `FC_VERSION` build arg. Unchecked, it can sit below the supported floor and bundle a VMM
     /// upstream no longer patches into the image.
@@ -793,98 +596,6 @@ mod tests {
         assert!(
             sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()),
             "FC_SHA256 is not a sha256: {sha:?}"
-        );
-    }
-
-    /// Same drift guard, for the eBPF build toolchain. Unlike `aya` (a Cargo dependency, pinned by
-    /// `Cargo.lock`), the nightly compiler and `bpf-linker` are installed **out of band**, so each
-    /// needs its own pin, and each pin has copies a workflow file cannot resolve at runtime: a
-    /// GitHub Actions step cannot read `rust-toolchain.toml` or a Rust constant, so it restates the
-    /// version. This compares every copy against its single source, which is the only thing standing
-    /// between them and the drift that let the Firecracker pin sit 21 months stale.
-    ///
-    /// Both are checked together because they move together: `bpf-linker` links against the pinned
-    /// nightly's LLVM, so bumping one alone is how the pair desynchronizes.
-    #[test]
-    fn ebpf_toolchain_pins_are_single_sourced() {
-        let repo = workspace_root();
-        // The sources of truth: the toolchain file, and xtask's own constant.
-        let toolchain = std::fs::read_to_string(repo.join("crates/probes/rust-toolchain.toml"))
-            .expect("crates/probes/rust-toolchain.toml");
-        let channel = toolchain
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .find_map(|l| l.strip_prefix("channel"))
-            .and_then(|rest| rest.trim_start().strip_prefix('='))
-            .map(|v| v.trim().trim_matches('"').to_string())
-            .expect("crates/probes/rust-toolchain.toml must declare [toolchain] channel");
-        // A floating channel is the defect this test exists to prevent, not merely an inconsistency:
-        // every copy would "agree" while each machine built with a different compiler.
-        assert!(
-            channel.starts_with("nightly-") && channel.len() > "nightly-".len(),
-            "the probes toolchain must pin an exact dated nightly, got {channel:?}: a floating \
-             channel means CI builds with whatever shipped that morning"
-        );
-
-        let mut checked = 0usize;
-        for (wf, text) in workflow_texts(repo) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('#') {
-                    continue;
-                }
-                if line.contains("rustup toolchain install") && line.contains("nightly") {
-                    assert!(
-                        line.contains(&channel),
-                        "{wf} installs a nightly that is not the pinned {channel}: {line}"
-                    );
-                    checked += 1;
-                }
-                for (tool, version) in [("bpf-linker", BPF_LINKER_VERSION)] {
-                    if line.contains(&format!("cargo install {tool}")) {
-                        assert!(
-                            line.contains(&format!("--version {version}")),
-                            "{wf} installs {tool} unpinned; `--locked` locks its dependencies, not \
-                             {tool} itself, so add `--version {version}`: {line}"
-                        );
-                        checked += 1;
-                    }
-                }
-            }
-        }
-        // A rename of the install step (or a move to a composite action) would otherwise make every
-        // assertion above vacuous while the test still passed: no matches, no failures, green.
-        assert!(
-            checked > 0,
-            "no pinned toolchain/tool installs matched in .github/workflows: the patterns this \
-             test greps for have drifted from what the workflows actually run, so it is asserting \
-             nothing"
-        );
-
-        // The build instructions hand out the same commands; a reader who follows them must land on
-        // the pinned versions, not on whatever is newest.
-        const BUILDING_DOC: &str = "AGENTS.md";
-        let contributing = std::fs::read_to_string(repo.join(BUILDING_DOC)).expect(BUILDING_DOC);
-        let mut doc_checked = 0usize;
-        for line in contributing.lines() {
-            for (tool, version) in [("bpf-linker", BPF_LINKER_VERSION)] {
-                if line.contains(&format!("cargo install {tool}")) {
-                    doc_checked += 1;
-                    assert!(
-                        line.contains(&format!("--version {version}")),
-                        "{BUILDING_DOC} tells contributors to install {tool} unpinned: {line}"
-                    );
-                }
-            }
-        }
-        // Same non-vacuity guard as the workflow scan above: moving the install command to another
-        // page (or rewording it) would otherwise leave this loop matching nothing and passing green,
-        // which is how an unpinned `cargo install` gets back into the docs unnoticed.
-        assert!(
-            doc_checked > 0,
-            "no `cargo install` line matched in {BUILDING_DOC}: the setup commands moved, so this \
-             test is asserting nothing. Point it at the page that now hands them out."
         );
     }
 
@@ -935,65 +646,6 @@ mod tests {
         );
     }
 
-    /// The sharper half of the question above. A workflow that greps a constant out of a source
-    /// file depends on two things: the file existing (checked above) *and* the pattern still
-    /// matching inside it. Moving a constant out of a file that itself stays in place satisfies the
-    /// path check while the parser matches nothing. Runs each workflow's own `grep -oE` against its
-    /// own target and requires a hit, so the parser's contract is a test rather than a surprise.
-    #[test]
-    fn workflow_source_parsers_still_match() {
-        let repo = workspace_root();
-        let mut checked = 0usize;
-        let mut unreadable: Vec<String> = Vec::new();
-        for (wf, text) in workflow_texts(repo) {
-            let lines: Vec<&str> = text.lines().collect();
-            for (idx, line) in lines.iter().enumerate() {
-                let Some(after) = line.split_once("grep -oE ").map(|(_, r)| r) else {
-                    continue;
-                };
-                // The target follows the pattern, on this line or (line-continued) the next. A
-                // grep reading a pipe rather than a file has no such token and is skipped.
-                let target = [after, lines.get(idx + 1).copied().unwrap_or("")]
-                    .iter()
-                    .flat_map(|l| l.split_ascii_whitespace())
-                    .find(|t| t.starts_with("crates/") || t.starts_with("xtask/"));
-                let Some(target) = target else { continue };
-                // Shell single-quoting, so the pattern ends at the next `'`. Silently skipping an
-                // unreadable one would be the hole: this grep reads one of our files, so dropping
-                // it loses real coverage while the count below still looks healthy.
-                let Some(pattern) = after.strip_prefix('\'').and_then(|r| r.split('\'').next())
-                else {
-                    unreadable.push(format!("{wf}:{}: {target}", idx + 1));
-                    continue;
-                };
-                let out = std::process::Command::new("grep")
-                    .arg("-oE")
-                    .arg(pattern)
-                    .arg(repo.join(target))
-                    .output()
-                    .expect("run grep");
-                assert!(
-                    !out.stdout.is_empty(),
-                    "{wf}:{} greps /{pattern}/ out of {target} and matches nothing. The workflow \
-                     will fail on its next run; point it at wherever that moved.",
-                    idx + 1
-                );
-                checked += 1;
-            }
-        }
-        assert!(
-            unreadable.is_empty(),
-            "workflow grep(s) read one of our source files with a pattern this scan cannot parse \
-             (expected single quotes). Widen the parser rather than losing the check:\n  {}",
-            unreadable.join("\n  ")
-        );
-        assert!(
-            checked > 0,
-            "no source-file grep matched in .github/workflows: the workflows no longer parse \
-             constants this way, so this test is asserting nothing"
-        );
-    }
-
     /// Every workflow file with its text, in name order: discovered by reading the directory
     /// rather than a hardcoded list, because a list silently exempts whatever it omits. Both
     /// GitHub spellings, since a `.yaml` file GitHub runs but a scan skipped would be a silent
@@ -1022,40 +674,6 @@ mod tests {
             .collect()
     }
 
-    /// The two pins can never drift: the PEM `install.sh` embeds (what installers trust) must be
-    /// byte-identical to `release-key.pem` (what `sign_release_manifest` asserts the signing key
-    /// against). Extracts the heredoc between the `PIN_EOF` markers.
-    #[test]
-    fn install_sh_pinned_key_matches_release_key_pem() {
-        let repo = workspace_root();
-        let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
-        let mut lines = install.lines();
-        let mut heredoc = String::new();
-        for line in lines.by_ref() {
-            if line.trim_end().ends_with("<<'PIN_EOF'") {
-                break;
-            }
-        }
-        for line in lines {
-            if line.trim() == "PIN_EOF" {
-                break;
-            }
-            heredoc.push_str(line);
-            heredoc.push('\n');
-        }
-        assert!(
-            heredoc.contains("BEGIN PUBLIC KEY"),
-            "install.sh carries a pinned SPKI PEM heredoc (PIN_EOF markers)"
-        );
-        let pinned = std::fs::read_to_string(release_pubkey_path()).unwrap();
-        assert_eq!(
-            heredoc, pinned,
-            "install.sh's embedded key must be byte-identical to release-key.pem"
-        );
-        // And the pin is a real ed25519 SPKI key, not a placeholder.
-        bsx_probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
-    }
-
     /// The body of the first `fn <name>` in `src`, from its opening brace to the matching close.
     /// Braces inside string literals would break the count; none of the functions compared here has
     /// one, and a change that introduces one fails loudly rather than silently comparing garbage.
@@ -1078,30 +696,6 @@ mod tests {
         });
         assert!(end.is_some(), "`fn {name}`'s braces must balance");
         src[open..=open + end.expect("asserted balanced just above")].to_string()
-    }
-
-    /// `parse_cap_eff` exists twice, byte-identical, and **cannot be shared**: `bsx-test-support` is
-    /// zero-dependency by decision and is a dev-dependency of `bsx-probes-loader`, so a dependency
-    /// either way round is a cycle. The duplication is therefore deliberate; what is not deliberate
-    /// is the two drifting, and nothing but this test would notice.
-    ///
-    /// The stake is which tests *run*. The loader's copy decides whether a host can load the probes
-    /// at all; the helper's copy decides whether the privileged suites skip themselves. A field
-    /// index that moves in one and not the other reads a capable host as incapable, and a skipped
-    /// test is a pass.
-    #[test]
-    fn the_cap_eff_parse_is_the_same_in_the_loader_and_the_test_support() {
-        let repo = workspace_root();
-        let loader = std::fs::read_to_string(repo.join("crates/probes-loader/src/lib.rs"))
-            .expect("crates/probes-loader/src/lib.rs");
-        let support = std::fs::read_to_string(repo.join("crates/test-support/src/lib.rs"))
-            .expect("crates/test-support/src/lib.rs");
-        assert_eq!(
-            fn_body(&loader, "parse_cap_eff"),
-            fn_body(&support, "parse_cap_eff"),
-            "the two `parse_cap_eff` copies have drifted; they cannot share a function (the \
-             dependency would be a cycle), so they must stay identical by hand"
-        );
     }
 
     /// `WaitBackoff` (the guest agent's child-exit poll) and `PollBackoff` (the engine's
@@ -1132,20 +726,24 @@ mod tests {
         }
     }
 
-    /// The `Uid:` parse exists twice by decision (`bsx-record`'s `uids`, the engine's `euid_in`;
-    /// the two crates share no dependency edge), each documenting the other. Both must consume
-    /// the token with `strip_prefix`, the convention whose violation (a `starts_with` split
-    /// leaving `Uid:` as field 0 and shifting every index) both docs name as the trap. And the
-    /// pair stays a pair: the workspace's tooling reads its uid through `bsx_record::HostIds`
-    /// rather than growing a third spelling.
+    /// The `Uid:` parse exists three times by decision: the CLI's `uids`, the engine's `euid_in`,
+    /// and xtask's `effective_uid`, which share no dependency edge. Each must consume the token
+    /// with `strip_prefix`, the convention whose violation (a `starts_with` split leaving `Uid:`
+    /// as field 0 and shifting every index) is the trap.
     #[test]
-    fn the_uid_parse_twins_share_the_field_convention_and_stay_two() {
+    fn the_uid_parses_share_the_field_convention() {
         let repo = workspace_root();
-        let ids = std::fs::read_to_string(repo.join("crates/record/src/ids.rs"))
-            .expect("crates/record/src/ids.rs");
+        let ids = std::fs::read_to_string(repo.join("crates/cli/src/ids.rs"))
+            .expect("crates/cli/src/ids.rs");
         let sweep = std::fs::read_to_string(repo.join("crates/engine/src/sweep.rs"))
             .expect("crates/engine/src/sweep.rs");
-        for (name, src) in [("uids", &ids), ("euid_in", &sweep)] {
+        let xtask_main =
+            std::fs::read_to_string(repo.join("xtask/src/main.rs")).expect("xtask/src/main.rs");
+        for (name, src) in [
+            ("uids", &ids),
+            ("euid_in", &sweep),
+            ("effective_uid", &xtask_main),
+        ] {
             let body = fn_body(src, name);
             assert!(
                 body.contains(r#"strip_prefix("Uid:")"#),
@@ -1157,14 +755,9 @@ mod tests {
             );
         }
         assert!(
-            fn_body(&sweep, "euid_in").contains("nth(1)"),
+            fn_body(&sweep, "euid_in").contains("nth(1)")
+                && fn_body(&xtask_main, "effective_uid").contains("nth(1)"),
             "the effective uid is the second field after the consumed token"
-        );
-        let xtask_main =
-            std::fs::read_to_string(repo.join("xtask/src/main.rs")).expect("xtask/src/main.rs");
-        assert!(
-            !xtask_main.contains(r#"("Uid:")"#),
-            "xtask reads its uid through bsx_record::HostIds; a third parse spelling drifts"
         );
     }
 
@@ -1299,309 +892,6 @@ mod tests {
         );
     }
 
-    /// An egress-policy update denies before it grants.
-    ///
-    /// `POLICY` is sixteen slots written one at a time while the classifier reads them, so the
-    /// middle of an update is a posture a guest can hit. Writing the new rules straight over the old
-    /// ones leaves the rule being *revoked* live in a not-yet-overwritten slot, and a packet to the
-    /// revoked endpoint is admitted for the length of the rewrite: fail-open, on a revocation the
-    /// operator just asked for. Arming first and zeroing every slot before writing the grants makes
-    /// that window deny instead.
-    ///
-    /// The order is the whole property and it is three ordinary-looking lines, so a later tidy-up
-    /// that "removes a redundant write" restores the hazard silently. Only a live tap and a packet
-    /// timed inside the rewrite would notice, which is neither gate.
-    #[test]
-    fn an_egress_policy_update_denies_before_it_grants() {
-        let repo = workspace_root();
-        let file = "crates/probes-loader/src/tap.rs";
-        let src = std::fs::read_to_string(repo.join(file)).expect(file);
-        let body = fn_body(&src, "apply_policy");
-        let at = |needle: &str| {
-            let found = body.find(needle);
-            assert!(
-                found.is_some(),
-                "{file}'s `apply_policy` must contain {needle}"
-            );
-            found.expect("asserted present just above")
-        };
-        let armed = at("set_enforce(ebpf, EnforcementMode::Enforcing)");
-        let denied = at("write_policy(ebpf, &[])");
-        let granted = at("write_policy(ebpf, rules)");
-        assert!(
-            armed < denied,
-            "{file}'s `apply_policy` must arm before it clears, or the clear runs observe-only and \
-             the window admits everything"
-        );
-        assert!(
-            denied < granted,
-            "{file}'s `apply_policy` must zero every slot before writing the grants, or a revoked \
-             rule stays live in a higher slot for the length of the rewrite"
-        );
-    }
-
-    /// The tc teardown reads the link kind the attach reported, never a kernel version.
-    ///
-    /// A TCX `bpf_link` owns an fd and detaches netns-independently on drop; the classic netlink
-    /// clsact filter holds no fd and detaches in the *dropping thread's* netns. They demand opposite
-    /// teardown, so the loader has to know which it got, and `SchedClassifier::attach` picks by
-    /// `KernelVersion::at_least(6, 6, 0)` without saying what it picked. Re-deriving that threshold
-    /// is a copy of aya's constant, and `aya = "0.14"` is a caret requirement, so a routine
-    /// `cargo update` can move aya's side with no diff that mentions this line.
-    ///
-    /// Both ways of being wrong are silent: forgetting a TCX link leaks its fd, one per classifier
-    /// per run, walking a long-lived process toward `EMFILE`; dropping a netlink link in the wrong
-    /// netns detaches whatever that ifindex names there. So the attach asks for a named option and
-    /// reports the kind, which is also what the repo's own rule asks for: probe the capability, do
-    /// not compare a version.
-    #[test]
-    fn the_tc_teardown_does_not_predict_the_link_kind_from_a_kernel_version() {
-        let repo = workspace_root();
-        let file = "crates/probes-loader/src/tap.rs";
-        let src = std::fs::read_to_string(repo.join(file)).expect(file);
-        // Comments are stripped: naming aya's threshold in prose is how the choice is explained,
-        // and the property is about what the code branches on.
-        let code: String = src
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !code.contains("KernelVersion"),
-            "{file} must not select its teardown from a kernel version: ask for a named \
-             `TcAttachOptions` and let the attach report the kind, or the branch is a copy of aya's \
-             threshold that drifts on a bump"
-        );
-        // The positive half: the kind must come back from the attach and reach the teardown.
-        let body = fn_body(&src, "attach_classifier");
-        assert!(
-            body.contains("TcAttachOptions::TcxOrder") && body.contains("TcAttachOptions::Netlink"),
-            "{file}'s `attach_classifier` must name both link kinds, so what it returns is what the \
-             kernel gave rather than what a version implied"
-        );
-        assert!(
-            fn_body(&src, "attach_classifiers").contains("TcLink::Netlink"),
-            "{file}'s teardown must branch on the reported link kind"
-        );
-    }
-
-    /// No counter in a **shared** probe map is incremented with a plain `+=`.
-    ///
-    /// A `HashMap` value is one copy every CPU writes, so a load-add-store loses an increment
-    /// whenever two CPUs hit the same key at once, and this is the one loss in the crate that no
-    /// counter can express: the insert succeeded, the map is not full, and the value is simply lower
-    /// than the truth. `DENIALS` is keyed by destination only, so a guest flooding one blocked
-    /// endpoint from many source ports is steered across CPUs by the NIC and collapsed back onto a
-    /// single key, which is exactly the shape that maximizes it.
-    ///
-    /// A `PerCpuArray` keeps its plain `+=` and is meant to: each CPU writes its own copy. So the
-    /// pin reads the map declarations rather than a list of sites, and the next shared map inherits
-    /// it.
-    #[test]
-    fn no_shared_probe_map_is_incremented_non_atomically() {
-        let repo = workspace_root();
-        let src = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
-            .expect("crates/probes/src/main.rs");
-        let lines: Vec<&str> = src.lines().collect();
-
-        // The shared maps are the `HashMap` statics; `PerCpuArray`/`Array` are not shared this way.
-        let shared: Vec<&str> = lines
-            .iter()
-            .filter(|l| l.contains(": HashMap<"))
-            .filter_map(|l| l.split_whitespace().nth(1)?.strip_suffix(':'))
-            .collect();
-        assert!(
-            shared.len() >= 5,
-            "expected the shared maps to be found by declaration, got {shared:?}"
-        );
-
-        // The merged cores (`count_in`, `accumulate`) RMW through their map *parameter*, so those
-        // receivers join the declaration-derived list; renaming either parameter drops the site
-        // count below the floor and fails this pin by name.
-        let mut receivers: Vec<String> =
-            shared.iter().map(|m| format!("{m}.get_ptr_mut(")).collect();
-        receivers.push("flows.get_ptr_mut(".to_string());
-        receivers.push("totals.get_ptr_mut(".to_string());
-
-        let mut checked = 0;
-        for (n, line) in lines.iter().enumerate() {
-            let Some(map) = receivers.iter().find(|r| line.contains(r.as_str())) else {
-                continue;
-            };
-            // The guarded block is the `Some` arm: from the lookup to its `} else`.
-            let end = (n + 1..lines.len())
-                .find(|&i| lines[i].trim_start().starts_with("} else"))
-                .unwrap_or(lines.len());
-            let block = lines[n..end].join("\n");
-            assert!(
-                block.contains("add_shared("),
-                "`{map}` is a shared map, so its counter must be bumped through `add_shared` \
-                 (crates/probes/src/main.rs:{})",
-                n + 1
-            );
-            assert!(
-                !block.contains("+="),
-                "`{map}` is a shared map, so a `+=` on its value loses increments under \
-                 concurrency and nothing counts the loss (crates/probes/src/main.rs:{})",
-                n + 1
-            );
-            checked += 1;
-        }
-        // Not every shared map is a counter: `TRACE_TARGETS`/`METER_TARGETS` are membership sets
-        // read with `get_ptr`, which mutates nothing. This only keeps the pin from passing
-        // vacuously if the sites it checks stop matching. Two sites, since every `u64` counter map
-        // accumulates through `accumulate` and the flow pair through `count_in`.
-        assert!(
-            checked >= 2,
-            "the pin saw {checked} shared-map read-modify-write sites; it is meant to see one per \
-             merged core, and every counter map reaches one of them"
-        );
-    }
-
-    /// Every bounded map in the probes counts what a full map turned away.
-    ///
-    /// The crate's stated discipline is that best-effort loss is *visible*: the loader reads each
-    /// drop counter and a nonzero delta becomes an `AxisGap`, so a run's record is thin and says so
-    /// rather than looking complete. A discarded `insert` breaks that in the one direction nothing
-    /// else catches, since the map is not full from the reader's side and the value is simply
-    /// absent: a sandbox that never got a `CPU_NS` slot reports zero CPU, which reads as "used
-    /// none" instead of "not measured".
-    ///
-    /// Every map here is fixed-capacity (sized at load), so this holds for every one of them, and
-    /// the next map added inherits it.
-    #[test]
-    fn every_bounded_map_in_the_probes_counts_what_it_could_not_admit() {
-        let repo = workspace_root();
-        let src = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
-            .expect("crates/probes/src/main.rs");
-        let lines: Vec<&str> = src.lines().collect();
-        // Two sites: `count_in` for the v4/v6 flow pair, `accumulate` for every `u64` counter map.
-        let inserts = lines.iter().filter(|l| l.contains(".insert(")).count();
-        assert!(
-            inserts >= 2,
-            "expected an insert per merged core, found {inserts}"
-        );
-        for (n, line) in lines.iter().enumerate() {
-            if !line.contains(".insert(") {
-                continue;
-            }
-            assert!(
-                line.contains(".is_err()"),
-                "crates/probes/src/main.rs:{}: a discarded map insert is a silent loss; test it \
-                 and count the drop: {}",
-                n + 1,
-                line.trim()
-            );
-            assert!(
-                lines[n + 1].contains("count_map_drop("),
-                "crates/probes/src/main.rs:{}: a failed insert must bump a drop counter the loader \
-                 reads, or the loss reaches no record: {}",
-                n + 1,
-                line.trim()
-            );
-        }
-    }
-
-    /// Every tracepoint argument offset the probes read is on the list the loader checks.
-    ///
-    /// The offsets are an ABI assumption no relocation carries, so `check_tracepoint_abi` compares
-    /// each one against the kernel's own `format` file before attaching. That check walks
-    /// `TRACEPOINT_ARGS`, so a `TracepointArg` const that the probe reads but the array leaves out
-    /// is verified nowhere, and the failure it would let through is silent: an event recorded with
-    /// an empty or unrelated path, no error and no drop counted.
-    ///
-    /// A numeric literal passed to `record` is the same hole by a shorter route, so this holds the
-    /// read sites to the named consts too.
-    #[test]
-    fn every_tracepoint_arg_is_checked_before_the_attach() {
-        let repo = workspace_root();
-        let common = std::fs::read_to_string(repo.join("crates/probes-common/src/lib.rs"))
-            .expect("crates/probes-common/src/lib.rs");
-        let probes = std::fs::read_to_string(repo.join("crates/probes/src/main.rs"))
-            .expect("crates/probes/src/main.rs");
-
-        let declared: Vec<&str> = common
-            .lines()
-            .filter_map(|l| l.strip_prefix("pub const ")?.split(':').next())
-            .filter(|name| name.ends_with("_ARG"))
-            .collect();
-        assert!(
-            declared.len() >= 4,
-            "expected the four traced arguments to be declared, found {declared:?}"
-        );
-        let table = const_list(&common, "pub const TRACEPOINT_ARGS");
-        for name in &declared {
-            assert!(
-                table.contains(name),
-                "`{name}` is declared but missing from TRACEPOINT_ARGS, so the loader never checks \
-                 the offset it reads against the kernel's own layout"
-            );
-        }
-
-        // The tracers are what actually read an offset, so a literal in one is an unchecked offset.
-        // Every argument slot starts at 16, so "no multi-digit literal here" is the grep-able form.
-        for tracer in ["trace_execve", "trace_openat", "trace_connect"] {
-            let body = fn_body(&probes, tracer);
-            assert!(
-                body.contains("_ARG.offset"),
-                "`{tracer}` must read its offset from a TracepointArg const, so the loader checks \
-                 the same number the program reads"
-            );
-            assert!(
-                !body
-                    .as_bytes()
-                    .windows(2)
-                    .any(|w| w[0].is_ascii_digit() && w[1].is_ascii_digit()),
-                "`{tracer}` carries a multi-digit literal, which is an argument offset nothing \
-                 checks against the kernel's layout"
-            );
-        }
-    }
-
-    /// The array literal a `const` is initialized to, the [`fn_body`] shape for a declaration whose
-    /// "body" is a list rather than a block. Anchored on `= [` so the item's own array *type*
-    /// (`: [T; N]`) is not mistaken for its value.
-    fn const_list(src: &str, decl: &str) -> String {
-        let at = src.find(decl);
-        assert!(at.is_some(), "`{decl}` must be declared");
-        let at = at.expect("asserted declared just above");
-        let open = src[at..].find("= [");
-        assert!(open.is_some(), "`{decl}` must be initialized to a list");
-        let open = at + open.expect("asserted initialized just above") + 2;
-        let close = src[open..].find(']');
-        assert!(close.is_some(), "`{decl}`'s list must close");
-        src[open..=open + close.expect("asserted closed just above")].to_string()
-    }
-
-    /// Every resolution of a `/proc/<pid>/cgroup` `0::` line must refuse the **root** cgroup.
-    ///
-    /// A registered cgroup matches every process whose `bpf_get_current_cgroup_id` equals it, so the
-    /// root folds the whole host's syscalls and CPU into one sandbox's signed record. `0::/` is what
-    /// a process in the root cgroup reads, and what every process reads inside a container with the
-    /// default private cgroup namespace. `crates/probes-loader` shipped without this guard while
-    /// `crates/engine` had it, which is the drift this test exists to catch; the two crates have no
-    /// dependency edge in either direction, so a shared function is not available.
-    #[test]
-    fn the_cgroup_resolution_refuses_the_root_cgroup_everywhere() {
-        let repo = workspace_root();
-        // Each resolver, named with the file it lives in so a failure says where to look.
-        let sites = [
-            ("crates/engine/src/jail.rs", "read_cgroup_dir"),
-            ("crates/probes-loader/src/lib.rs", "cgroup_dir_in"),
-            ("crates/engine/tests/common/mod.rs", "cgroup_of"),
-        ];
-        for (file, func) in sites {
-            let src = std::fs::read_to_string(repo.join(file)).unwrap_or_default();
-            assert!(!src.is_empty(), "{file} must be readable and non-empty");
-            let body = fn_body(&src, func);
-            assert!(
-                body.contains(r#"rel == "/""#),
-                "{file}'s `{func}` must refuse the root cgroup (`rel == \"/\"`), or a sandbox's \
-                 record absorbs every process in it"
-            );
-        }
-    }
-
     /// Every readiness poll that owns a VMM fails fast when that VMM dies.
     ///
     /// `await_api_socket`, `await_userspace`, `await_guest_ready` and the snapshot resume wait each
@@ -1714,15 +1004,14 @@ mod tests {
     /// `char::is_control` is category `Cc` only, so the bidi controls pass it and a guest `Error`
     /// string, a captured `openat` path, or a boot-failure console tail can reorder the line it lands
     /// in. Three surfaces render guest-authored text to the operator's terminal and each carries its
-    /// own copy: `crates/cli` has no dependency edge to `crates/channel`, and while `crates/engine`
-    /// does, the predicate is private there and making it public would put a text utility on that
-    /// crate's pinned surface. A shared function is not available, so the set is pinned instead.
+    /// own copy: the predicate is private in `crates/engine` and making it public would put a text
+    /// utility on that crate's pinned surface. A shared function is not available, so the set is
+    /// pinned instead.
     #[test]
     fn the_terminal_escapers_agree_on_the_bidi_controls() {
         let repo = workspace_root();
         let sites = [
             ("crates/channel/src/lib.rs", "is_bidi_control"),
-            ("crates/cli/src/trace.rs", "is_bidi_control"),
             ("crates/engine/src/console.rs", "is_bidi_control"),
         ];
         // The Unicode `Bidi_Control` property, as the predicates spell it.

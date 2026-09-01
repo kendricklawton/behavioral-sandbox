@@ -40,7 +40,6 @@ is the only thing a benchmark ever tells you.
 - **Reproduce.** Two commands run the benchmarking suites:
 
   ```console
-  cargo bench -p bsx-record         # Criterion micro-benchmarks: record signing, verification, hash-chaining, JSON
   cargo xtask bench-all              # the full system suite; skips sections whose host prereq is missing
   cargo xtask bench-warm --runs 100  # or a single bench at a sharper n for publication-grade tails
   ```
@@ -64,8 +63,7 @@ Intel i5-10310U (8 vCPUs at 1.70 GHz), 15 GiB RAM, Arch Linux (rolling, kernel 7
 measured on rather than inheriting the one named here.
 
 That makes three kernels the engine has run on: this laptop, the Ubuntu 24.04 runner the privileged
-suite uses nightly, and exec-01. Three is why the portability claim in
-[Host-side observability & enforcement](./probes.md) is described as a mechanism rather than a
+suite uses nightly, and exec-01. Three is why portability is described as a mechanism rather than a
 broadly tested property.
 
 CI runs the host-safe gate on Ubuntu 24.04 `x86_64` on every change, and the privileged suite nightly

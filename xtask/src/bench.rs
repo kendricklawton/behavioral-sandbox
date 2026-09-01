@@ -880,7 +880,6 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     Ok(())
 }
 
-
 /// Run one `bench-all` section: the header, then the bench, or the skip note when `skip` names a
 /// missing host prerequisite. Returns whether the section is healthy (ran clean *or* was skipped;
 /// a skip is a stated non-measurement, not a failure). A bench that errors mid-run is reported and
@@ -905,30 +904,6 @@ fn run_section(name: &str, skip: Option<&str>, f: impl FnOnce() -> Result<()>) -
 
 #[cfg(test)]
 mod tests {
-
-    /// `against_noise` is the whole of what stops `bench-meter` publishing a non-result, so its
-    /// boundary is worth pinning: at or under the floor the delta is labelled, above it the number
-    /// stands alone. The negative case is the one that motivated it, a "cost" of doing more work
-    /// that came out below zero.
-    #[test]
-    fn a_delta_inside_the_noise_floor_is_labelled_not_published() {
-        assert!(super::against_noise(3, 12).contains("no result"), "under");
-        assert!(
-            super::against_noise(12, 12).contains("no result"),
-            "at the floor"
-        );
-        assert!(
-            super::against_noise(-9, 12).contains("no result"),
-            "a negative cost is the shape that exposed this"
-        );
-
-        let real = super::against_noise(40, 12);
-        assert!(!real.contains("no result"), "clear of the floor: {real}");
-        assert_eq!(real, "+40 ns");
-
-        // A floor of zero must not swallow a zero delta silently: it is still no result.
-        assert!(super::against_noise(0, 0).contains("no result"));
-    }
 
     /// The banner must name a real mount, not fall through to one of its own error strings: a line
     /// reading "(no covering mount)" is the report failing to record the thing this exists to record.

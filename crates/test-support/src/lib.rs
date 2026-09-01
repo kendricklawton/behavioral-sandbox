@@ -12,7 +12,6 @@
 
 use std::path::{Path, PathBuf};
 
-
 /// The workspace root, from the calling crate's manifest dir, so a test finds `artifacts/` whatever
 /// the cwd. `CARGO_MANIFEST_DIR` expands where this crate is compiled (`crates/test-support`), so
 /// the same two levels up hold for every caller.

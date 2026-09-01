@@ -24,7 +24,6 @@ network and holds minimal capability, and every allowance is explicit and record
 
 ## Record integrity (host-signed)
 
-The finalized audit record is signed with an Ed25519 host key. Verification via `bsx verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 Each record includes `sandbox_id` and `started_unix_ns` in the signed payload to correlate the audit event with host execution state.
 
@@ -61,7 +60,6 @@ Given those aims, a security bug is anything that breaks one of them:
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
 - A signed record that verifies **after** being altered, or a forged signature accepted by
-  `bsx verify` without the host key (the record-integrity aim).
 - A hostile guest causing a host panic, hang, or resource leak through the driver's public API. The engine is written against a no-panic rule on the host path; a case that breaks it is a bug worth reporting, not an expected limitation.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.

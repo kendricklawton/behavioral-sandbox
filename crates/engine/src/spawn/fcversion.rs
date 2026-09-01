@@ -10,8 +10,7 @@ use std::time::Duration;
 use super::deadline_after;
 
 /// The **oldest** Firecracker this engine supports, tracking upstream's own release-status table
-/// rather than a number of our choosing; `.github/workflows/firecracker-pin.yml` fails weekly if
-/// this drifts from it.
+/// rather than a number of our choosing.
 ///
 /// The floor rejects *unpatched* VMMs, not old ones (the argument by which `doctor` enforces a host
 /// kernel floor), so it rises only when a series leaves upstream's table, never to chase a newer

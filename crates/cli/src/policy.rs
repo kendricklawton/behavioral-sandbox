@@ -95,7 +95,6 @@ pub struct Policy {
     /// Whether a caller may attach a NIC at all. `false` refuses `--net` outright; it does not change
     /// the deny-by-default egress policy a NIC still gets.
     pub allow_net: Option<bool>,
-
 }
 
 impl Policy {
@@ -273,7 +272,6 @@ impl Policy {
         }
         Ok(())
     }
-
 }
 
 /// Resolve one knob: refuse an explicit over-ask, clamp an unasked-for default, and otherwise take
@@ -532,98 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn egress_ceiling_permits_narrowing_and_refuses_widening() {
-        use std::net::Ipv4Addr;
-
-        let ceiling = Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).unwrap();
-        let policy = Policy {
-            max_egress_v4: vec![ceiling],
-            ..Policy::default()
-        };
-
-        // Narrowing (host inside 10.0.0.0/8) is allowed
-        let allowed_rule =
-            EgressPolicy::deny_all().allow_host(Ipv4Addr::new(10, 1, 2, 3), Some(443), None);
-        assert!(
-            policy.check_egress(&allowed_rule).is_ok(),
-            "narrowed host inside 10.0.0.0/8 is permitted"
-        );
-
-        // Widening (asking for 192.168.1.1) is refused
-        let widened_rule =
-            EgressPolicy::deny_all().allow_host(Ipv4Addr::new(192, 168, 1, 1), None, None);
-        assert!(
-            matches!(
-                policy.check_egress(&widened_rule),
-                Err(PolicyError::EgressNotAllowed { .. })
-            ),
-            "asking outside 10.0.0.0/8 is refused"
-        );
-    }
-
-    /// The v6 half of the same ceiling: a `check_egress` that returned after the v4 leg passes
-    /// every other test here while a client's v6 allow-list reaches wherever it likes.
-    #[test]
-    fn the_v6_egress_ceiling_permits_narrowing_and_refuses_widening() {
-        use std::net::Ipv6Addr;
-
-        let policy = Policy {
-            max_egress_v6: vec![
-                Ipv6Cidr::new(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0), 8).expect("valid /8"),
-            ],
-            ..Policy::default()
-        };
-
-        let inside = EgressPolicy::deny_all().allow_host6(
-            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
-            Some(443),
-            None,
-        );
-        assert!(
-            policy.check_egress(&inside).is_ok(),
-            "a host inside fd00::/8 is permitted"
-        );
-
-        // RFC 3849 documentation range, provably outside `fd00::/8`.
-        let outside = EgressPolicy::deny_all().allow_host6(
-            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-            None,
-            None,
-        );
-        assert!(
-            matches!(
-                policy.check_egress(&outside),
-                Err(PolicyError::EgressNotAllowed { .. })
-            ),
-            "asking outside fd00::/8 is refused"
-        );
-
-        // A v4-only ceiling does not bound v6, and vice versa: an empty list is no ceiling, never
-        // an implicit deny, since the tap already denies by default.
-        let v4_only = Policy {
-            max_egress_v4: vec![Ipv4Cidr::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8).unwrap()],
-            ..Policy::default()
-        };
-        assert!(v4_only.check_egress(&outside).is_ok());
-    }
-
-    #[test]
-    fn record_posture_refuses_unrecorded_runs() {
-        let off = Policy::default();
-        assert!(
-            off.check_record(false).is_ok(),
-            "default permits unrecorded runs"
-        );
-
-        let on = Policy {
-            require_record: true,
-            ..Policy::default()
-        };
-        assert_eq!(on.check_record(false), Err(PolicyError::RecordRequired));
-        assert!(on.check_record(true).is_ok(), "recorded runs are permitted");
-    }
-
-    #[test]
     fn a_project_ceiling_tightens_the_user_ceiling_and_never_widens_it() {
         let user = Policy {
             max_vcpus: NonZeroU8::new(4),
@@ -666,36 +572,5 @@ mod tests {
         // A ceiling the user never set is still adopted: absent is weakest, so this only bounds.
         let adopted = Policy::default().tightened_by(&looser_project);
         assert_eq!(adopted.max_vcpus, NonZeroU8::new(64));
-    }
-
-    #[test]
-    fn a_project_egress_ceiling_does_not_replace_the_user_ceiling() {
-        let ten_16 = Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 16).unwrap();
-        let ten_8 = Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap();
-        let user = Policy {
-            max_egress_v4: vec![ten_16],
-            ..Policy::default()
-        };
-        let project = Policy {
-            max_egress_v4: vec![ten_8],
-            ..Policy::default()
-        };
-
-        let folded = user.tightened_by(&project);
-        assert_eq!(
-            folded.max_egress_v4,
-            vec![ten_16],
-            "the user's narrower ceiling still binds"
-        );
-        // The trap this guards: intersecting the two by containment yields the empty list, and an
-        // empty list means "no restriction", so the merge would have widened the ceiling.
-        assert!(
-            !folded.max_egress_v4.is_empty(),
-            "never widens to unrestricted"
-        );
-
-        // Where the user set none, the project's applies.
-        let adopted = Policy::default().tightened_by(&project);
-        assert_eq!(adopted.max_egress_v4, vec![ten_8]);
     }
 }

@@ -1,9 +1,8 @@
 //! The `bsx` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
-//! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
-//! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
+//! or hold it open as an interactive stateful session (`shell`).
 //!
 //! `tracing` logs to **stderr** and **stdout** is reserved for a run's result, so `bsx run … 2>/dev/null`
-//! stays pipe-clean; the `--watch` live view draws on stderr for the same reason. The log filter resolves
+//! stays pipe-clean. The log filter resolves
 //! flags > env (`BSX_LOG`) > file > default. Both subcommands run **jailed by default** with `--unjailed`
 //! as the explicit opt-out, and both point at the env-layered artifacts.
 #![forbid(unsafe_code)]
@@ -115,7 +114,6 @@ Getting started:
   bsx doctor                          check what this host can do
   sudo -E bsx run -- echo hello       run a command in a sandbox (jailed, the default)
   bsx run --unjailed -- echo hello    same, without the jailer (needs no root)
-  bsx run --trace -- <cmd>            run it and print the audit trail
 
 Config layers, highest first: flags, BSX_* env, .bsx.toml, defaults."
 )]
@@ -135,8 +133,7 @@ enum Cmd {
     /// Run one command in a microVM.
     ///
     /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default,
-    /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
-    /// `--trace`, `--record`, `--record-summary`, and `--watch`.
+    /// with `--unjailed` as the explicit opt-out.
     // Boxed so the whole `Cmd` enum is not sized to `run`'s flag count
     // (`clippy::large_enum_variant`).
     #[command(after_help = "\
@@ -144,8 +141,7 @@ Examples:
   bsx run -- echo hello
   bsx run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
   bsx run --put main.rs --get a.out -- rustc main.rs -o a.out
-  bsx run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
-  bsx run --record run.json -- ./untrusted && bsx verify run.json
+  bsx run --net -- curl https://1.1.1.1
 
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
@@ -154,8 +150,8 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     /// One command per line. State persists on the session's filesystem until you exit; shell
     /// process state (a `cd`, a variable) does not, because each line is its own exec.
     ///
-    /// The operator policy (`.bsx.toml` ceilings, `require_jail`, `require_record`) binds
-    /// exactly as it does for `run`.
+    /// The operator policy (`.bsx.toml` ceilings, `require_jail`) binds exactly as it does for
+    /// `run`.
     Shell(ShellArgs),
     /// Check whether this host can run the engine.
     ///
@@ -393,12 +389,10 @@ fn apply_posture(
     }
 }
 
-/// `bsx run`: open (jailed by default), attach the probes when asked (fail-open), run one exec with
-/// the flag-supplied inputs, write the requested artifacts, finalize the audit record while the
-/// sandbox is still alive, close, then report. The record has three faces: the `--trace` human trail,
-/// the `--record` full JSON, and the `--record-summary` model-legible projection.
+/// `bsx run`: open (jailed by default), run one exec with the flag-supplied inputs, write the
+/// requested artifacts, close, then report.
 fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, CliError> {
-    // The run's root span: boot, exec, and the audit-record events nest under it. `vmm_pid` is
+    // The run's root span: boot and exec nest under it. `vmm_pid` is
     // recorded once the sandbox is up, the id tying these lines to the audit record and the host's
     // own process table.
     let span = tracing::info_span!("run", vmm_pid = tracing::field::Empty);
@@ -452,8 +446,7 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
 
     let boot_latency = sandbox.boot_latency();
     let stdin = piped_stdin()?;
-    let result =
-        sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
+    let result = sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
     write_artifacts(&result.files, &args.get)?;
     // Teardown is best-effort: a shutdown error must not mask the run's real result.
     if let Err(e) = sandbox.shutdown() {
@@ -583,8 +576,8 @@ fn open(config: BootConfig, isolation: policy::IsolationMode) -> Result<Sandbox,
 }
 
 /// Resolve `bsx shell`'s limits and posture against the operator policy: the same boundary
-/// `run_command` enforces, so switching subcommand cannot bypass a ceiling, `require_jail`, or
-/// `require_record`. Operator *defaults* apply too, so an unset `--vcpus`/`--mem` takes the host's
+/// `run_command` enforces, so switching subcommand cannot bypass a ceiling or `require_jail`.
+/// Operator *defaults* apply too, so an unset `--vcpus`/`--mem` takes the host's
 /// profile. Shell has no `--net`, so the net/egress checks have nothing to check.
 fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliError> {
     let limits = host_policy.resolve(&Requested {
@@ -828,11 +821,9 @@ pub(crate) fn init_tracing(filter: &str, json: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_posture, build_egress,
-        parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_output_cap, parse_vcpus,
-        shell_policy, write_artifacts_in,
+        Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_posture, parse_env_pair, parse_jail_id,
+        parse_mem_mib, parse_output_cap, parse_vcpus, shell_policy, write_artifacts_in,
     };
-    use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use bsx_test_support::ScratchDir;
     use clap::CommandFactory;
 
@@ -877,7 +868,6 @@ mod tests {
             }
         }
     }
-    use std::net::Ipv4Addr;
     use std::num::{NonZeroU8, NonZeroU32};
 
     fn artifact(path: &str, data: &[u8]) -> Vec<Artifact> {
@@ -1005,63 +995,6 @@ mod tests {
     }
 
     #[test]
-    fn allow_parses_every_field_combination() {
-        let host = |a: [u8; 4]| Ipv4Cidr::host(Ipv4Addr::from(a));
-        // Bare host: /32, any port, any proto.
-        assert_eq!(
-            parse_allow("1.1.1.1"),
-            Ok(AllowRule {
-                cidr: host([1, 1, 1, 1]),
-                port: None,
-                proto: None
-            })
-        );
-        // CIDR only.
-        assert_eq!(
-            parse_allow("10.0.0.0/8"),
-            Ok(AllowRule {
-                cidr: Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).expect("valid /8"),
-                port: None,
-                proto: None
-            })
-        );
-        // Host + port + proto, and the full CIDR+port+proto form.
-        assert_eq!(
-            parse_allow("1.1.1.1:443/tcp"),
-            Ok(AllowRule {
-                cidr: host([1, 1, 1, 1]),
-                port: Some(443),
-                proto: Some(Protocol::Tcp)
-            })
-        );
-        assert_eq!(
-            parse_allow("10.0.0.0/8:53/udp"),
-            Ok(AllowRule {
-                cidr: Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).expect("valid /8"),
-                port: Some(53),
-                proto: Some(Protocol::Udp)
-            })
-        );
-        // Proto without a port (the `/proto` suffix is stripped before the `:port` split).
-        assert_eq!(
-            parse_allow("8.8.8.8/udp").map(|r| r.proto),
-            Ok(Some(Protocol::Udp))
-        );
-    }
-
-    #[test]
-    fn allow_rejects_malformed_fields_with_a_typed_error() {
-        // Each bad field is a typed error naming the offending token, never a dropped allowance.
-        assert!(parse_allow("999.1.1.1").is_err(), "bad octet");
-        assert!(parse_allow("1.1.1.1/33").is_err(), "CIDR prefix over 32");
-        assert!(parse_allow("1.1.1.1:70000").is_err(), "port over u16");
-        assert!(parse_allow("1.1.1.1:").is_err(), "empty port");
-        assert!(parse_allow("").is_err(), "empty");
-        // The prefix error names the offending token.
-        assert!(parse_allow("1.1.1.1/33").unwrap_err().contains("33"));
-    }
-
-    #[test]
     fn an_unparseable_log_filter_names_the_filter_and_both_spellings_that_work() {
         // `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` asserts only that the
         // filter is named; the hint is what an operator acts on. The error
@@ -1078,33 +1011,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_allow_refusal_quotes_the_whole_rule_not_the_address_slice() {
-        // `--allow` shares the config file's CIDR parser, which is handed only the address slice,
-        // so the locus travels separately: quoting the slice would send the reader looking for
-        // `"1.1.1.1/33"` in a line where they wrote the port and protocol too.
-        for rule in ["1.1.1.1/33:443/tcp", "999.1.1.1:80", "1.1.1.1/x:80/udp"] {
-            let err = parse_allow(rule).expect_err("malformed");
-            assert!(
-                err.contains(&format!("--allow {rule:?}")),
-                "the refusal quotes the whole rule: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn build_egress_denies_by_default_and_caps_the_rule_count() {
-        // No rules is still a policy, deny-everything.
-        assert!(build_egress(&[]).expect("empty is valid").is_deny_all());
-        // Each allow becomes one rule.
-        let one = parse_allow("1.1.1.1:443/tcp").expect("valid");
-        assert_eq!(build_egress(&[one]).expect("one rule").rules().len(), 1);
-        // Over the kernel-map cap is a typed refusal (not a cryptic attach-time overflow).
-        let many = vec![one; MAX_POLICY_RULES + 1];
-        let err = build_egress(&many).expect_err("over the cap must refuse");
-        assert!(format!("{err}").contains(&MAX_POLICY_RULES.to_string()));
-    }
-
     fn shell_args(vcpus: Option<u8>, mem: Option<u32>, unjailed: bool) -> ShellArgs {
         ShellArgs {
             unjailed,
@@ -1114,22 +1020,6 @@ mod tests {
             vcpus: vcpus.and_then(NonZeroU8::new),
             mem: mem.and_then(NonZeroU32::new),
         }
-    }
-
-    #[test]
-    fn default_record_path_lands_under_records_dir_with_a_unique_name() {
-        let dir = std::path::Path::new("/var/log/bsx");
-        let path = super::default_record_path(dir);
-        assert!(path.starts_with(dir), "joins under the operator's dir");
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(
-            name.starts_with("run-") && name.ends_with(".json"),
-            "{name}"
-        );
-        assert!(
-            name.contains(&std::process::id().to_string()),
-            "pid makes the name unique per process: {name}"
-        );
     }
 
     #[test]
@@ -1153,15 +1043,6 @@ mod tests {
             format!("{err}").contains("jail"),
             "refusal names the jail: {err}"
         );
-
-        // A record-requiring host refuses the unauditable interactive path outright.
-        let recording = Policy {
-            require_record: true,
-            ..Policy::default()
-        };
-        let err = shell_policy(&shell_args(None, None, false), &recording)
-            .expect_err("require_record refuses a shell");
-        assert!(format!("{err}").contains("audit record"), "{err}");
     }
 
     #[test]

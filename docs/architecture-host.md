@@ -6,41 +6,31 @@ Where the pieces sit, and which boundaries a run crosses:
 LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
 
   HOST USERSPACE
-    bsx CLI            <-------------------------------+
-        |  bsx-engine API                              |
-        v                                    ring buffer, flow and
-    Firecracker VMM (jailed, chrooted)         deny events
-        |  KVM ioctl                                   |
-        v                                              |
-  HOST KERNEL                                          |
-    Linux KVM (/dev/kvm)                    HOST-SIDE eBPF (aya)
-        |  hardware exec                      sys_enter_* tracepoints
-        |                                     tc clsact egress classifier
-        |                                     sched_switch CPU meter
-        |                                              ^
-        |                                              |
-        |                              host syscalls (the VMM's own),
-        |                              tap packets, per-sandbox cgroup
-        v                                              |
-  ================= KVM HARDWARE BOUNDARY =============|=============
-        |                                              |
-    GUEST MEMORY AND OS                                 (observed from
-      guest kernel                                       the host side)
+    bsx CLI
+        |  bsx-engine API
+        v
+    Firecracker VMM (jailed, chrooted)
+        |  KVM ioctl
+        v
+  HOST KERNEL
+    Linux KVM (/dev/kvm)
+        |  hardware exec
+        v
+  ================= KVM HARDWARE BOUNDARY ==========================
+        |
+    GUEST MEMORY AND OS
+      guest kernel
       guest-agent (static musl)  <--- vsock / channel ---> driver
         |  execve, stdio
         v
       untrusted code
 ```
 
-The eBPF programs sit on the **host** side of that boundary — they attach to host-kernel hooks and
-observe the VMM's host footprint, the guest's tap, and its cgroup, never the guest's own syscalls
-(a microVM services those in its own kernel).
-
 ## Host requirements
 
 - **OS & Kernel**: Linux host with a kernel providing `cgroup.kill`. `bsx doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
-- **Permissions**: real root (euid 0) for jailed boots, because the jailer mknod's device nodes into its chroot; `CAP_NET_ADMIN` for the per-VM netns and tap; `CAP_BPF` + `CAP_PERFMON` plus kernel BTF for the eBPF observability. `bsx doctor` renders each as its own row.
+- **Permissions**: real root (euid 0) for jailed boots, because the jailer mknod's device nodes into its chroot; `CAP_NET_ADMIN` for the per-VM netns and tap. `bsx doctor` renders each as its own row.
 
 ## Networking
 

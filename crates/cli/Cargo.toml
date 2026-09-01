@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The bsx CLI (`bsx`): drive the Firecracker + aya code-execution sandbox."
+description = "The bsx CLI (`bsx`): drive the code-execution sandbox."
 
 # One entrypoint: `bsx`, the canonical command, built from `src/main.rs`.
 [[bin]]
@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 bsx-engine = { path = "../engine" }
 clap = { workspace = true }
-# `bsx run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
+# Terminal rendering, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
 # `.bsx.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
 # denied so a config typo is a typed error, not a silent no-op.

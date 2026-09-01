@@ -10,9 +10,8 @@
 //! the operator got wrong fails loudly rather than silently not applying.
 //!
 //! **What is deliberately not checked.** Read bits: this file gates integrity, not secrecy, and its
-//! contents (paths, ceilings, postures) are already visible in `ps` and in the audit record. That is
-//! the divergence from `bsx_record`'s signing-key gate, which refuses any group or world bit because
-//! a *secret* leaks by being read. Refusing mode `0o644` here would refuse what every editor writes
+//! contents (paths, ceilings, postures) are already visible in `ps`. A secret would need the
+//! stricter rule, because it leaks by being read. Refusing mode `0o644` here would refuse what every editor writes
 //! under the default umask, teaching a `chmod` that buys nothing. Also not checked: ancestors above
 //! the immediate parent (given the owner check, an attacker-writable grandparent buys a denial of
 //! service, not a substitution), and the hard-link count (creating one needs the writable parent

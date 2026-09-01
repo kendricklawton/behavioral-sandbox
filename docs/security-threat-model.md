@@ -18,19 +18,14 @@ properties established by this document:
 2. **Every other run.** Runs should be contained from each other: no state, memory, network, or
    resource bleed between two sandboxes on one host. (*Whose* run is whose is the hoster's concern,
    not the engine's.)
-3. **The audit record's integrity.** What the host reports a run did should reflect what the host
-   observed, and a finalized record can be **host-signed** (the CLI's `--record` does sign; the
-   library hands back an unsigned record), so a consumer can detect alteration
-   made after it leaves the producing host (see [Record integrity beyond the
-   guest](#record-integrity-beyond-the-guest) for what that does and does not establish).
-4. **Deny-by-default.** A run with no explicit policy is configured to reach no network and hold
-   minimal capability, and each allowance is recorded.
+3. **Deny-by-default.** A run with no explicit configuration shares no host directory and has no
+   network, and what is shared is settled before the sandbox starts.
 
 ## The trust boundary
 
 - **Trusted** (inside the boundary): the host CPU's virtualization (KVM), the host kernel, and the
-  driver running on the host, the VMM process, the jailer, and the host-side eBPF probes. All
-  security-relevant observation and policy live here.
+  driver running on the host, the VMM process, and the jailer. All security-relevant policy lives
+  here.
 - **Not trusted** (outside): everything inside the guest. The untrusted code, the guest kernel, and
   the in-guest agent that carries exec and I/O. **The in-guest agent is a convenience, never a
   security boundary**: a hostile guest is assumed to control it, and its own guest kernel, completely.
@@ -98,8 +93,8 @@ same checks on your own host instead of asking you to take this page's word for 
 exercises is listed above; what none of them cover is in [Assumptions and residual
 risk](#assumptions-and-residual-risk).
 
-The suite is **privileged**: it boots real microVMs and attaches real probes, so it needs a host with
-`/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. From the repo root:
+The suite is **privileged**: it boots real microVMs, so it needs a host with `/dev/kvm` and real
+root. From the repo root:
 
 ```console
 sudo -E ./ci-privileged.sh
@@ -125,50 +120,6 @@ What each claim maps to:
 - **No host leak across runs** is `crates/engine/tests/boot.rs`: `repeated_boots_leave_no_leaks` (scratch
   dirs, orphan VMMs, netns, process-local fds and threads all return to baseline) and
   `fd_footprint_per_vm_stays_within_budget_and_never_leaks`.
-
-## Record integrity beyond the guest
-
-The row above (observation the guest does not address) is one half of
-"tamper-evident." The other half concerns a **different** adversary than the hostile guest this model
-otherwise assumes: a party that alters the record **after** it leaves the producing host, a
-compromised relay, an operator, or the transport a supervisor reads it over. To close that gap, a
-finalized record is **signed with a host key the guest has no path to** (an `Ed25519` detached
-signature over the canonical record bytes), and a verify path ships with it (`bsx verify`, the
-library `verify`).
-
-Signing is the *caller's* step, not the loader's: `SandboxProbes::collect` returns an unsigned
-`RunRecord`, and `HostKey` signs it in the CLI's record path. An
-embedder driving `bsx-probes-loader` directly gets no signature. A run signs when it writes a
-record at all, which is `--record` or an operator's `records_dir`.
-
-- **What a verifier establishes:** `verify_entry` fails closed on a bad signature, a malformed
-  envelope, or a `key_id` outside the trusted set, so a record it accepts was not altered after the
-  producing host signed it. That is conditional on the consumer holding the right trusted key.
-- **What it does not prove:** that a **compromised producing host** told the truth. A host that holds
-  the signing key at signing time can sign a consistent lie; the signature authenticates *"this host
-  attests to these bytes,"* not *"these bytes are true."* This is the same trust root the boundary
-  already fixes (trust the host, not the guest), now verifiable off-host, not a new anchor. Detecting a
-  lying host is the hoster's key custody and host hardening, outside this engine.
-- **Custody is the hoster's** (engine, not platform): the engine generates a host key on first use and
-  signs; tenant keys, a KMS, key distribution, and revocation are the hoster's. A record's `key_id`
-  names the signing key, so a rotated key doesn't invalidate records already signed. What the engine
-  does check is the key *file*: another local user's key, one others can read, one in a directory
-  others can write, and a non-regular file at the path are each a refusal before the boot, on the
-  same terms as the config file that names it. See
-  [Setting `signing_key`](./cli-config.md#setting-signing_key).
-- **Append-only, so tail truncation is undetectable in isolation.** Records can form a hash chain:
-  the first is an unchained anchor and each one after it commits to the prior record's hash, so
-  `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `bsx verify` runs
-  that check on a file holding the sequence one envelope per line, and the library form is
-  `verify_chain` in `bsx-record`. One limit on the chain's reach: no path in this repo writes a
-  chain, because `bsx run --record` writes one standalone record. What the chain
-  cannot catch even then is **truncation of the tail**: a
-  consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
-  link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
-  record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
-  the signing key.
-
-See [`bsx verify`](./cli-commands.md#bsx-verify) for the verify path.
 
 ## Assumptions and residual risk
 
@@ -214,10 +165,6 @@ Explicitly assumed sound, and therefore *out* of the boundary:
 
   What remains: further logic bugs in the reader or the walk, and upstream does not fuzz, so the
   coverage here is this repo's target and nothing more.
-- **Observation fails open, so a thin record is not a quiet run.** Each axis that cannot attach
-  (no BTF, no `CAP_BPF`/`CAP_PERFMON`, no object built) degrades to a recorded `AxisGap` and the run
-  proceeds, so a record can cover less than the table above implies. It says so in its own coverage
-  section, and a reader must actually check that section rather than read an empty axis as quiet.
   Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
 - **Fuzzing is nightly, not continuous.** The libFuzzer targets `FUZZ_TARGETS` in
   `xtask/src/main.rs` names cover the untrusted-input decoders (the guest channel,

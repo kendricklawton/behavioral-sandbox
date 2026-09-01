@@ -48,7 +48,6 @@ body:
       options:
         - Installing or building
         - Booting a sandbox (bsx run / bsx shell)
-        - eBPF observability (--trace / --record / --watch)
         - Networking (--net / --allow)
         - Embedding the bsx-engine library
         - Something else

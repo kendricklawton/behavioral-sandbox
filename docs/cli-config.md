@@ -44,7 +44,6 @@ Example project config:
 vcpus = 2
 mem_mib = 512
 max_wall_secs = 60
-require_record = true
 ```
 
 **What is deliberately not a knob.** The read-only base plus per-run tmpfs overlay, bulk read-only
@@ -214,49 +213,6 @@ warning naming the key, so a typo reads as a misconfiguration rather than as a b
 [`gateway`]: #setting-gateway-and-resolver
 [`resolver`]: #setting-gateway-and-resolver
 
-## Setting `signing_key`
-
-- **env**: `BSX_SIGNING_KEY`
-- **file**: `~/.bsx.toml` only
-- **type**: string (path)
-- **default**: a path under the data directory, generated on first use
-
-The host `ed25519` key that signs finalized audit records. The key stays in the host process; what
-reaches anything guest-visible is the detached signature. A record's
-`key_id` names the key that signed it, and key custody and rotation are the hoster's responsibility.
-See [`bsx verify`](./cli-commands.md#bsx-verify).
-
-The key file is gated like the config that names it, and refused when:
-
-- **it is not a regular file.** A FIFO planted at the path would block the read forever; a directory
-  or a device is not a key either. The file is stat'd before it is opened, so none of them is opened.
-- **it is owned by another local user** (or is a symlink another user owns). The same uids count as
-  you as for `~/.bsx.toml`, `SUDO_UID` included, so a key minted by a rootless `bsx` still loads
-  under `sudo -E`, and one minted under `sudo` still loads rootless.
-- **it is group- or world-accessible** (`chmod 600` it). Unlike the config file, *read* bits are
-  refused here: this file is a secret, and a secret leaks by being read.
-- **its directory is owned by another user, or is group/world-writable without the sticky bit.**
-  Checked on first-run generation too, so a key is never minted into a directory someone else can
-  write.
-
-The owner and mode are read from the opened file rather than from the path a second time.
-
-[`signing_key`]: #setting-signing_key
-
-## Setting `trusted_keys`
-
-- **env**: `BSX_TRUSTED_KEYS`
-- **file**: `~/.bsx.toml` only
-- **type**: array of 64-hex public keys in the file (`trusted_keys = ["aa..", "bb.."]`);
-  comma-separated in the environment variable
-- **default**: empty
-
-Additional public keys `bsx verify` should trust, alongside the current signing key and any `--key`
-given on the command line. Keep retired public keys listed here so rotating the host key does not
-invalidate records already signed.
-
-[`trusted_keys`]: #setting-trusted_keys
-
 ## Setting `BSX_PROBES_OBJECT`
 
 - **env**: `BSX_PROBES_OBJECT` (**environment only**, no `.bsx.toml` key)
@@ -362,34 +318,6 @@ stronger statement than the default posture: no guest networking at all.
 
 [`allow_net`]: #setting-allow_net
 
-## Setting `require_record`
-
-- **kind**: posture
-- **file**: any `.bsx.toml`
-- **type**: boolean
-- **default**: `false`
-
-Refuses any run that would leave no audit record, including [`bsx shell`](./cli-commands.md#bsx-shell),
-which cannot record. Satisfied on its own by [`records_dir`](#setting-records_dir). A
-`--record-summary` alone does not satisfy it: the summary is an unsigned projection of the record,
-not the record, so a summary-only run still refuses
-(`require_record_refuses_a_run_that_would_leave_no_audit_record` pins this).
-
-[`require_record`]: #setting-require_record
-
-## Setting `records_dir`
-
-- **kind**: default
-- **file**: `~/.bsx.toml` only
-- **type**: string (path)
-
-Every `run` writes its signed record there, as `run-<secs>-<pid>.json`, unless `--record` names a
-path.
-
-[`records_dir`]: #setting-records_dir
-
----
-
 ## Which `~/.bsx.toml` is read
 
 The user file names the binary this host executes, the images it boots, and the key it signs records
@@ -443,7 +371,7 @@ alone:
 | Key | Result |
 |---|---|
 | `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap` | the smaller of the two |
-| `require_jail`, `require_record`, `require_limits` | on if either says on |
+| `require_jail`, `require_limits` | on if either says on |
 | `allow_net` | `false` if either says `false` |
 | `max_egress_v4`, `max_egress_v6` | the user file's list binds; a project list applies only where the user set none |
 

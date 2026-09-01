@@ -50,7 +50,6 @@ fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
         .current_dir(dir.path())
         .env("HOME", dir.home())
         .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
-        .env("BSX_SIGNING_KEY", dir.path().join("signing.key"))
         .output()
         .unwrap_or_else(|e| panic!("spawn bsx: {e}"));
     (
@@ -70,40 +69,6 @@ fn require_limits_without_the_jailer_is_refused_before_any_vmm() {
     assert!(
         stderr.contains("resource limits unavailable") && stderr.contains("unjailed"),
         "the engine's typed refusal reaches the caller before any VMM is looked for: {stderr}"
-    );
-}
-
-#[test]
-fn require_record_refuses_a_run_that_would_leave_no_audit_record() {
-    // The posture's contract (docs/cli-config.md): "Refuses any run that would leave no audit
-    // record." Three shapes, one gate:
-    let dir = PolicyDir::with_toml("bare", "require_record = true\n");
-
-    // A bare run leaves nothing: refused, by the policy, before any VMM is looked for.
-    let (code, stderr) = run_in(&dir, &[]);
-    assert_eq!(code, Some(2), "a policy refusal exits 2: {stderr}");
-    assert!(
-        stderr.contains("audit record") && stderr.contains("operator policy"),
-        "the refusal names the posture, not a boot failure: {stderr}"
-    );
-
-    // A `--record-summary`-only run leaves a summary, which is an unsigned *projection* of the
-    // record, not the record: still refused. Accepting it would let a require_record host serve
-    // runs whose only trace is unverifiable.
-    let (code, stderr) = run_in(&dir, &["--record-summary", "s.json"]);
-    assert_eq!(code, Some(2), "summary-only must be a refusal: {stderr}");
-    assert!(
-        stderr.contains("audit record") && stderr.contains("operator policy"),
-        "summary-only is refused by the policy, not admitted through to a boot: {stderr}"
-    );
-
-    // `--record` satisfies the gate: the run is admitted and dies later, on the deliberately
-    // missing VMM, which is the proof the refusal above was the policy and not the environment.
-    let (code, stderr) = run_in(&dir, &["--record", "r.json"]);
-    assert_eq!(code, Some(2), "the admitted run still fails, on the VMM");
-    assert!(
-        !stderr.contains("operator policy"),
-        "--record must pass the record gate; this failure should be the missing VMM: {stderr}"
     );
 }
 
@@ -128,24 +93,6 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
     assert!(
         stderr.contains("log filter") && stderr.contains("bsx=notalevel"),
         "the refusal names the filter it could not parse: {stderr}"
-    );
-}
-
-#[test]
-fn records_dir_satisfies_require_record_on_its_own() {
-    // The book's sentence, pinned: "Satisfied on its own by records_dir." An operator who records
-    // every run by default owes their callers no flag.
-    //
-    // `records_dir` names a directory this host writes into, so it is read from the user file. The
-    // posture that needs it, `require_record`, can come from either.
-    let dir = PolicyDir::with_toml("recdir", "require_record = true\n");
-    std::fs::write(dir.home().join(".bsx.toml"), "records_dir = \"records\"\n")
-        .expect("write the user file");
-    let (code, stderr) = run_in(&dir, &[]);
-    assert_eq!(code, Some(2), "admitted, then fails on the missing VMM");
-    assert!(
-        !stderr.contains("operator policy"),
-        "records_dir alone must satisfy require_record: {stderr}"
     );
 }
 

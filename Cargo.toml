@@ -13,13 +13,9 @@ members = [
     "crates/test-support",
     "xtask",
 ]
-# `crates/probes` holds the eBPF programs. They build for `bpfel-unknown-none` (not the host
-# triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
-# test) host-only and green; the eBPF object is built separately for its own target. See
-# `AGENTS.md`.
 # `fuzz` is the `cargo fuzz` harness: nightly + libFuzzer, its own detached workspace, never part of
 # the everyday stable gate. Excluded here too so `cargo build --workspace` ignores it.
-exclude = ["crates/probes", "fuzz"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.4"
@@ -42,7 +38,7 @@ anyhow = "1"
 # terminal. That is not hypothetical here, since a `///` on a clap field *is* the user interface,
 # and `bsx run -h` ran 19 lines past 80 columns before this was set.
 clap = { version = "4", features = ["derive", "wrap_help"] }
-# The CLI's live view (`bsx run --watch`), rendered to **stderr** so stdout stays pipe-clean.
+# Terminal rendering for the CLI, drawn on **stderr** so stdout stays pipe-clean.
 # Terminal I/O rides ratatui's re-exported crossterm, so the two can't version-skew.
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }

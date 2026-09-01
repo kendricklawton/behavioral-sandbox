@@ -310,7 +310,6 @@ pub fn matrix() -> Vec<&'static str> {
         "                                  engine bug. Check the audit log first:",
         "                                  ausearch -m AVC -ts recent   (selinux)",
         "                                  dmesg | grep -i apparmor     (apparmor)",
-        "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
         "  unsupported arch / kernel    -> off the supported platform: refused",
         "  /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)",

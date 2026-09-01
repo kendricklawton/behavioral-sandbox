@@ -28,7 +28,7 @@ gets its own instance. Latency figures are withdrawn pending a re-measurement on
 see [Benchmarks](./benchmarks.md).
 
 ## 5. Host-signed audit records
-Audit records captured by `bsx-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. Whichever path persists a record signs it with a host-held ed25519 key, so alteration after the run is detectable off-host (`bsx verify`).
+Withdrawn with the observability half: nothing in the tree produces an audit record.
 
 ## 7. Synchronous engine, no async runtime
 The driver is **synchronous**: blocking I/O, one thread per sandbox, no `tokio` or

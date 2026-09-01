@@ -54,8 +54,7 @@ best-effort); `egress` additionally hands it a default route and a resolver, whi
 only when `enable_network` is set and ignored otherwise. Neither builds a path: no veth, bridge,
 forwarding, or NAT, so on a netns nothing has furnished the reachable set is unchanged and only what
 the host can *observe* widens. Attaching an uplink is the embedder's, per
-[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster);
-bounding what crosses the tap is the eBPF policy in [`bsx-probes-loader`](./probes.md).
+[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
 
 ### Exec: synchronous, bounded, faithful
 

@@ -4,8 +4,7 @@
 # a newer CI stable rejects. Bump this deliberately when moving
 # to a newer Rust, and keep `rust-version` in Cargo.toml in step (that is the downstream MSRV floor;
 # the policy tracks current stable, with no back-support of older toolchains yet).
-# No nightly here (see AGENTS.md); the eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which
-# rustup has no std for, and builds via `bpf-linker` (see AGENTS.md), so no
+# No nightly here (see AGENTS.md), so no
 # `targets` entry is needed.
 [toolchain]
 channel = "1.97.0"

@@ -22,7 +22,6 @@ diverge.
 uname -m                      # must print x86_64
 uname -r                      # informational only: `bsx doctor` probes for cgroup.kill itself
 ls -l /dev/kvm                # must exist
-ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels ship it
 ```
 
 If `/dev/kvm` is missing, stop here: there is no software isolation fallback, so nothing below will
@@ -145,9 +144,7 @@ other could not).
 |---|---|---|
 | Host kernel | `5.14.0-*.el9`, **below the 5.15 fallback floor**, so it qualifies via the probed `cgroup.kill` (present since 5.14) rather than by version | `6.12.0-*.el10`, above the fallback floor either way |
 | cgroup | v2 unified by default | v2 unified by default |
-| Kernel BTF | ships `/sys/kernel/btf/vmlinux`, so the eBPF half's CO-RE requirement is met | as RHEL 9 |
 | **SELinux** | **enforcing by default, and the largest unknown.** The jailer chroots, `mknod`s `/dev/kvm`, bind-mounts, and drops uid: each is something targeted policy has opinions about. Expect denials before expecting success | as RHEL 9 |
-| Secure Boot | with lockdown active, some BPF operations can be restricted; unverified here | as RHEL 9 |
 | Containers | `podman`, not `docker`, for the [container recipe](#run-it-as-a-container) | as RHEL 9 |
 
 RHEL 8 (`4.18.0-*.el8`, cgroup v1 hybrid by default) is **not** a target.
@@ -315,10 +312,8 @@ on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an en
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only).
 
-Building the eBPF probe object needs the pinned eBPF toolchain (`bpf-linker` and the pinned nightly,
-both listed in `AGENTS.md`). Without it there is no object to install, so `self-host` **refuses**
-rather than reporting success on an engine whose
-observability half is absent: `--trace` and `--watch` would record a gap and `--allow` enforcement
+`self-host` **refuses** rather than reporting success on an engine whose
+observability half is absent: an optional half
 would refuse. `cargo xtask setup` names what is missing. To stand the engine up without that half
 anyway, say so with `--no-probes`, and the completion line says so too.
 
@@ -382,8 +377,6 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 **Degradations** (the run still works, minus the named capability). `bsx doctor --explain` prints
 the canonical matrix; these are the ones worth knowing before you start:
 
-- No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
-  egress enforcement refuses** rather than running unenforced.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
   mitigation, not the isolation boundary).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
@@ -410,18 +403,15 @@ boot error, and are marked as such.
 | **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `BSX_SCRATCH_DIR=/var/tmp`. |
 | **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged user space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
 | **`unix socket path is too long (> 108 bytes)`** (boot error only, no doctor row) | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export BSX_SCRATCH_DIR=/var/tmp` |
-| **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v bsx)`<br>or run with `sudo -E`. |
-| **`eBPF observability` Warn** naming kernel BTF | Host kernel built without `CONFIG_DEBUG_INFO_BTF=y`, so `/sys/kernel/btf/vmlinux` is absent. | Boot a kernel built with that option (check with `ls /sys/kernel/btf/vmlinux`); most general-purpose distribution kernels enable it, custom and minimal ones often do not. |
 
 ## Prerequisites
 
 What the **engine** needs at runtime: what each dependency is for, and which are optional. For the
 commands that install them on a fresh box, see [Preparing the host](#preparing-the-host); for what
-**building from source** additionally needs (the Rust toolchain, `bpf-linker`), see `AGENTS.md`.
+**building from source** additionally needs (the Rust toolchain), see `AGENTS.md`.
 
 - **A Linux host with `/dev/kvm`** (a kernel with `cgroup.kill`, see [Supported platforms](#supported-platforms))
-  and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
-  for CO-RE eBPF, most modern distros ship it.
+  and your user in the `kvm` group (or root).
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
   `PATH` or named via `BSX_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `truncate`): the driver builds the rootfs and the
@@ -451,8 +441,6 @@ lack either names itself in `bsx doctor` or produces a typed refusal.
 | Run code, VMM unconfined | membership in the `kvm` group | this *is* the fallback: `--unjailed` |
 | **Jailed run** (the default, the supported posture) | **real root**, so `sudo`, plus a scratch dir that is not on a `nodev` or `noexec` mount | the boot fails; ask for `--unjailed` explicitly |
 | `--net`, a guest NIC | `CAP_NET_ADMIN`, to create the per-VM tap | only networked runs fail; the rest are unaffected |
-| `--trace` / `--record` / `--watch` | `CAP_BPF` + `CAP_PERFMON` + kernel BTF | the run still happens and reports its coverage gap |
-| `--allow` egress **enforcement** | the same eBPF capabilities | **refused**, rather than running unenforced |
 
 Root covers every row. To keep the eBPF half off root, grant the binary just those two capabilities:
 
@@ -478,7 +466,7 @@ sudo -E env BSX_SCRATCH_DIR="$HOME/.bsx" "$(command -v bsx)" run -- echo hello
 [Self-host in one command](#self-host-in-one-command) is the short path.
 
 To drive the individual steps instead, or to work on the engine itself, `AGENTS.md` owns the build
-toolchain (the Rust version policy, the probes crate's pinned nightly and `bpf-linker`), the
+toolchain (the Rust version policy), the
 artifact commands, and the two test gates.
 
 Once you have a binary, head to [Using the `bsx` CLI](./cli.md) to run something.

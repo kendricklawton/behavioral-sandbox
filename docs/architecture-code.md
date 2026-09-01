@@ -25,9 +25,8 @@ and the two path constraints on it).
 carries the `api` commit scope (`AGENTS.md`).
 
 Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
-Every crate in the workspace carries `#![forbid(unsafe_code)]` except `crates/probes`, so that is a
-compiler error rather than a review convention. That one exception is structural: the BPF target
-requires raw map dereferences. `every_crate_forbids_unsafe_except_the_bpf_one` holds the rule from
+Every crate in the workspace carries `#![forbid(unsafe_code)]`, so that is a compiler error rather
+than a review convention. `every_crate_forbids_unsafe` holds the rule from
 the tree rather than from a list here.
 
 The public surface is deliberately narrow. From `lib.rs`:
@@ -94,6 +93,3 @@ Some types to have in the back of your head before reading further.
   user). **The match in `kind()` is deliberately wildcard-free**, so adding a variant fails to compile
   until someone gives it a deliberate bucket. That is the mechanism keeping the contract honest.
 
-* **`SandboxProbes`** (`bsx-probes-loader`) and **`RunRecord`** (`bsx-record`) are the observation
-  half: the attach bundle for one sandbox, and the record it finalizes. See
-  [the eBPF half](./architecture-ebpf.md).

@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::{
-    cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root,
-};
+use crate::{cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root};
 
 /// The binaries a self-host installs, from the `bsx` crate.
 const BINARIES: &[&str] = &["bsx"];
@@ -247,31 +245,4 @@ fn set_executable(path: &Path) -> Result<()> {
         .permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(path, perms).with_context(|| format!("chmod +x {}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A stand-up that cannot build the probe object refuses, so no self-host reports success on an
-    /// engine whose audit half is absent. The opt-out is the only way past, which makes dropping
-    /// that half the operator's stated choice rather than a skipped step.
-    #[test]
-    fn a_self_host_without_the_probe_object_refuses_unless_the_opt_out_is_named() {
-        assert!(probe_object_required(true, false).is_ok());
-        assert!(probe_object_required(true, true).is_ok());
-        assert!(probe_object_required(false, true).is_ok());
-
-        let refusal = probe_object_required(false, false)
-            .expect_err("a missing probe object refuses")
-            .to_string();
-        assert!(
-            refusal.contains("--no-probes"),
-            "the refusal names the opt-out that gets past it: {refusal}"
-        );
-        assert!(
-            refusal.contains("cargo xtask setup"),
-            "and names what enumerates the missing toolchain: {refusal}"
-        );
-    }
 }

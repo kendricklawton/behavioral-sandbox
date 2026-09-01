@@ -551,7 +551,6 @@ mod tests {
             "10.200.0.1/30",
             "x86_64/aarch64",
             "/dev/kvm",
-            "crates/probes/target/bpfel-unknown-none/release/probes",
             "--allow 10.200.0.1:9000/udp",
             "cargo xtask ci",
             "out/x.txt",             // an illustrative artifact path, not a repo claim

@@ -1,8 +1,7 @@
 # The VMM and its jail
 
-The isolation half: how the driver talks to Firecracker, what the guest ends up holding, and what
-confines the VMM process itself. The observation half is [The eBPF half](./architecture-ebpf.md);
-this is the side that makes the boundary hardware.
+How the driver talks to Firecracker, what the guest ends up holding, and what confines the VMM
+process itself: the side that makes the boundary hardware.
 
 ## Talking to Firecracker
 

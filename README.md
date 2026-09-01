@@ -39,45 +39,26 @@ sandbox at this stage, and everything below is written to make that possible.
 ```text
                      CONSUMER ENTRY POINTS & API SURFACES
 
-    [ Rust Embedder ]                                     [ Audit Verifier ]
+    [ Rust Embedder ]                                        [ CLI user ]
             |                                                     |
-            v (In-Process)                                        v (Off-Host)
-     `bsx-engine`                                          `bsx-record`
-   (Sandbox, BootConfig, Vm)                         (Ed25519 verify/chain)
+            v (In-Process)                                        v
+     `bsx-engine`                                            `bsx` CLI
+   (Sandbox, BootConfig, Vm)                     (a thin host of the same engine)
             |                                                     |
             +----------------------------+------------------------+
                                          |
                                          v
-                                    `bsx` CLI
-                                         |
-               +-------------------------+-------------------------+
-               | (Driver / Lifecycle)                              | (Observation)
-               v                                                   v
-     Firecracker microVM                                 `bsx-probes-loader` (aya)
-   +-----------------------+                             +------------------------+
-   | KVM Hardware Isolation|                             | Attach TC / Tracepoints|
-   | In-Guest Agent        |<======(vsock channel)======>| Assemble RunRecord     |
-   +-----------------------+   (`bsx-channel` framing)   +------------------------+
-                                                                   ^
-                                                                   |
-                                                         `bsx-probes` (eBPF)
-                                                         `bsx-probes-common`
+                              Firecracker microVM
+                            +-----------------------+
+                            | KVM Hardware Isolation|
+                            | In-Guest Agent        |
+                            +-----------------------+
+                                 (`bsx-channel` framing over vsock)
 ```
 
-BSX runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
-through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
-[aya](https://aya-rs.dev/)) observes and enforces what the code does from the host side of that
-boundary — the programs are loaded by a host process and attached to host-kernel hooks, where they
-sit outside the guest's address space and outside any namespace it can enter. The network and the
-cgroup are observed directly. The syscall axis is the **VMM's host footprint**, not the guest's
-syscalls: a microVM services those in its own kernel, so host-side syscall visibility is coarse by
-construction. That trade is stated in full in [the honest
-limit](docs/probes.md#the-hardware-isolation-consequence-the-honest-limit).
-
-Every run yields a host-observed audit record of what the host was able to see: the
-network flows, the resources used, the VMM's notable host syscalls, and any egress that was denied. That record
-is the product. A run that persists one signs it with a host key (`--record`, or an operator's
-`records_dir`), and `bsx verify` checks that signature.
+BSX runs untrusted code inside a microVM, so the boundary is enforced by the CPU through hardware
+virtualization rather than by guest-side software. What a sandbox can reach is decided before it
+starts: with no explicit configuration it shares no host directory and has no network.
 
 ## Installation
 
@@ -128,46 +109,30 @@ host. In both cases the untrusted code stays behind the same KVM boundary, becau
 the CPU's, not the jailer's. A host can withdraw the opt-out entirely with `require_jail`
 ([configuration](docs/cli-config.md#setting-require_jail)).
 
-The output is the boring half. Ask instead what the code *did*:
-
-```console
-sudo -E bsx run --trace --record run.json -- python3 untrusted.py
-```
-
-`--trace` renders the run's audit trail on stdout; `--record` writes the signed machine-readable
-record for later inspection or `bsx verify`. Both attach the host-side probes and fail open: a host
-without eBPF capabilities still runs the sandbox and annotates the coverage gap in the record rather
-than presenting a thinner record as a complete one. [The CLI chapter](docs/cli.md) has the full
-surface, including `--record-summary` for an agent loop and `--watch` for a live view.
+[The CLI chapter](docs/cli.md) has the full surface.
 
 ## Design rules
 
 Six rules. A change that breaks one is a design error, not a trade-off. Each states an intent and
 the mechanism serving it; the full text is [docs/architecture.md](docs/architecture.md).
 
-* **Isolation is hardware, not software**: untrusted code runs in a KVM microVM, never behind a
-  guest-side check.
-* **[Observe and enforce from the host][probes]**: visibility and policy are host-side eBPF on
-  host-kernel hooks; the in-guest agent carries exec and IO, never containment.
-* **Deny by default**: no explicit policy means no route out and minimal capability, and every
-  allowance lands in the record.
-* **Engine, not platform**: a runtime and a driver API. The unit of isolation is the sandbox, not
-  the tenant, so a hoster maps tenants onto sandboxes and owns tenancy, billing, and scheduling: a
-  recorded [non-goal][embedding], not a gap.
-* **No panic, hang, or leak on the host path**: a hostile guest, a failed probe, or a broken
-  channel surfaces as a typed error. The rule the code is written against and the confinement suite
-  exercises; an aim, not a proven property.
+* **Isolation is hardware, not software**: untrusted code runs in a VM under KVM or
+  Hypervisor.framework, never behind a guest-side check.
+* **Local-first**: no account, no telemetry, no control plane. A feature that cannot work with the
+  network off belongs to a different product.
+* **Deny by default**: no explicit configuration means no shared directory and no network. What is
+  shared *is* the policy, settled before the VM starts.
+* **An application, not a platform**: a program on one person's machine. There is no tenant, no
+  account, and no fleet: a recorded [non-goal][embedding], not a gap.
+* **No panic, hang, or leak on the host path**: a hostile guest or a dead helper surfaces as a typed
+  error. The rule the code is written against and the confinement suite exercises; an aim, not a
+  proven property.
 * **[Measure rather than assert][benchmarks]**: percentiles with the host and date, and a number
-  that cannot be defended is withdrawn. Cold boot is measured and published; the rest of the tables
-  are still withdrawn.
+  that cannot be defended is withdrawn.
 
-The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate but the eBPF
-one. Those programs build for `bpfel-unknown-none` and carry BTF, which is what CO-RE relocation
-needs; no program reads kernel struct fields yet, so no field relocations are in play and the
-portability is so far a property of the toolchain rather than something exercised. It has been
-loaded on three kernels.
+The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate and checked by
+`every_crate_forbids_unsafe` in the gate.
 
-[probes]: docs/probes.md
 [embedding]: docs/embedding.md
 [embedding-scope]: docs/embedding-scope.md
 [benchmarks]: docs/benchmarks.md
@@ -196,9 +161,6 @@ Run `mdbook serve docs` to read it locally, or read the Markdown in place.
   rationale.
 - **[Using the `bsx` CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
-- **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
-  per-VM network flows, in-kernel egress enforcement, resource accounting, each pinned by a
-  privileged test.
 - **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
 - **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
 
@@ -230,10 +192,6 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/engine` | `bsx-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | `bsx-channel` | The host↔guest wire protocol: nearly dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by driver + agent. |
 | `crates/guest-agent` | `bsx-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
-| `crates/probes` | `bsx-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
-| `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
-| `crates/probes-loader` | `bsx-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
-| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and Ed25519 signing/verification. No aya, so a record verifies off-host. |
 | `crates/cli` | `bsx` | The `bsx` CLI: `run`, `shell`, `doctor`, `verify`. The binary on `PATH` is `bsx`. |
 | `crates/test-support` | `bsx-test-support` | Shared test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
@@ -241,12 +199,9 @@ types. `cargo … -p` takes the package, a path takes the directory.
 
 ## Verified on
 
-The host-safe gate (`cargo xtask ci`: build, tests, lints, docs, dependency audit, eBPF object
-build) runs in CI on Ubuntu 24.04 `x86_64` on every change. The privileged path (microVM boot, the
-jailer, the eBPF probes, the integration suite) needs `/dev/kvm` and real root: it runs nightly on a
-GitHub-hosted Ubuntu 24.04 runner under nested KVM, and is hand-verified on Arch Linux during
-development. `x86_64` is the only supported architecture; aarch64 returns only with hardware and a
-privileged CI lane behind it. `bsx doctor` reports your own host's readiness, and
+The gate (`cargo xtask ci`: build, tests, lints, docs, dependency audit) runs in CI on Ubuntu 24.04
+`x86_64` on every change and needs no privilege. Anything that boots a microVM needs `/dev/kvm`, so
+it is skipped where the device is absent and hand-verified on Arch Linux during development. `bsx doctor` reports your own host's readiness, and
 [Supported platforms](docs/cli-install.md#supported-platforms) records which hosts have actually
 been run.
 

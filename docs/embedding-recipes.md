@@ -125,10 +125,8 @@ ceiling with headroom above the observed cost, not the cost itself.
 ## A minimal reference integration
 
 For the whole lifecycle in one small file, embedding the engine end to end (load the host-side
-observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record,
-`shutdown`, then print both the `RunResult` and the JSON record), see the runnable example
-[`crates/probes-loader/examples/reference_integration.rs`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/crates/probes-loader/examples/reference_integration.rs).
-It composes the driver and the loader the way a downstream host application would.
+observers, `open` a jailed sandbox, `exec`, `shutdown`, then print the `RunResult`), compose the
+driver the way a downstream host application would.
 
 ## The CLI is the reference embedder
 
