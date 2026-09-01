@@ -137,6 +137,38 @@ fn c_bytes(what: &'static str, s: &OsStr) -> Result<CString, Error> {
     CString::new(s.as_bytes()).map_err(|_: NulError| Error::InteriorNul { what })
 }
 
+/// The DAX SHM window size passed with every virtiofs device here: none.
+///
+/// `krun_set_root` was the whole root surface until [`Context::root`] moved to the long form, and
+/// it takes no window, so zero is what the tree has always run. Sizing one is a performance
+/// question with its own measurement, not something to change while changing the access mode.
+const NO_DAX_WINDOW: u64 = 0;
+
+/// What a guest may do to a virtiofs tree: the `read_only` flag `krun_add_virtiofs3` takes.
+///
+/// An enum rather than the header's `bool`, so `root(path, ReadOnly)` says at the call site what
+/// `root(path, true)` would not. Deliberately this crate's own type and not a re-export of a
+/// posture from higher up: this one is a device flag, and the product's posture is
+/// `bsx_supervisor`'s business.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FsAccess {
+    /// Writes fail with `EROFS` at the device. Default here for the same reason the supervisor's
+    /// posture defaults to it: the safe answer should be the one a caller gets for saying nothing.
+    #[default]
+    ReadOnly,
+    /// Writes go through to the host tree.
+    ReadWrite,
+}
+
+impl FsAccess {
+    /// The `read_only` argument for this access mode. Private-facing: the boolean exists at the
+    /// FFI boundary and nowhere above it.
+    fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+}
+
 /// The context id, freed on drop.
 ///
 /// `PhantomData<*const ()>` makes every handle `!Send` and `!Sync`. libkrun documents no
@@ -193,14 +225,27 @@ impl Context {
         Ok(self)
     }
 
-    /// Serves `path`, a host directory, as the guest's root over virtiofs, and moves on to the
-    /// stage where the rest of the machine is configured.
-    pub fn root(mut self, path: &Path) -> Result<Machine, Error> {
-        let c = c_path("the root path", path)?;
-        check("krun_set_root", unsafe {
-            sys::krun_set_root(self.ctx.id, c.as_ptr())
+    /// Serves `path`, a host directory, as the guest's root over virtiofs under `access`, and
+    /// moves on to the stage where the rest of the machine is configured.
+    ///
+    /// `krun_add_virtiofs3` with [`KRUN_FS_ROOT_TAG`] rather than `krun_set_root`, because the
+    /// header names it as the way to get the read-only flag; the two are otherwise the same
+    /// device. [`FsAccess::ReadOnly`] is enforced by the device, so a guest write fails with
+    /// `EROFS` and nothing reaches the host tree (measured, 2026-09-01, libkrun 1.19.4).
+    pub fn root(mut self, path: &Path, access: FsAccess) -> Result<Machine, Error> {
+        let c_tag = c_bytes("the root tag", OsStr::new(sys::KRUN_FS_ROOT_TAG))?;
+        let c_dir = c_path("the root path", path)?;
+        check("krun_add_virtiofs3", unsafe {
+            sys::krun_add_virtiofs3(
+                self.ctx.id,
+                c_tag.as_ptr(),
+                c_dir.as_ptr(),
+                NO_DAX_WINDOW,
+                access.is_read_only(),
+            )
         })?;
-        self.retained.push(c);
+        self.retained.push(c_tag);
+        self.retained.push(c_dir);
         Ok(Machine {
             ctx: self.ctx,
             retained: std::mem::take(&mut self.retained),
@@ -435,6 +480,15 @@ mod tests {
 
     /// The C arrays libkrun reads are NULL-terminated, not length-carrying, so the terminator is
     /// load-bearing: without it libkrun walks off the end of the array.
+    /// The device flag is an enum so a call site reads as a posture, and the default is the safe
+    /// one: a caller that says nothing gets a root it cannot write.
+    #[test]
+    fn the_root_access_default_is_read_only() {
+        assert_eq!(FsAccess::default(), FsAccess::ReadOnly);
+        assert!(FsAccess::ReadOnly.is_read_only());
+        assert!(!FsAccess::ReadWrite.is_read_only());
+    }
+
     #[test]
     fn a_pointer_array_carries_its_null_terminator() {
         let items = vec![

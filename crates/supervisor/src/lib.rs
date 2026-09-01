@@ -61,6 +61,36 @@ impl Net {
     }
 }
 
+/// What the guest may do to the image tree its root filesystem comes from.
+///
+/// [`ReadOnly`](Self::ReadOnly) is the default because the image is **shared**: one tree boots
+/// every sandbox, so a guest that can write it edits what every later guest starts from. Enforced
+/// at the virtiofs device, so it is not a guest-side setting a guest can undo, and invisible to the
+/// guest: `/proc/mounts` still reports `rw` and only an attempted write reports the truth
+/// (measured 2026-09-01, libkrun 1.19.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RootFs {
+    /// The guest's writes to its root fail with `EROFS`. Writable state comes from a
+    /// [`mount`](VmConfig::mounts), which is the caller saying which host directory it meant.
+    #[default]
+    ReadOnly,
+    /// The guest writes through to the shared image tree, and its edits outlive the VM.
+    Writable,
+}
+
+impl RootFs {
+    /// The `--rootfs` value the helper parses. One definition, checked against the parser by
+    /// `the_helper_flags_match_the_parser` like every other flag spelling.
+    #[must_use]
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Writable => "writable",
+        }
+    }
+}
+
 /// What a caller asks for when it starts a VM.
 ///
 /// Deliberately not a builder with a typestate: unlike libkrun's own API there is no ordering to
@@ -96,6 +126,9 @@ pub struct VmConfig {
     /// The network posture. [`Net::None`] by default, because libkrun's default is not: it adds
     /// an implicit vsock whose TSI hijacking proxies the guest's sockets onto the host.
     pub net: Net,
+    /// What the guest may do to the image tree its root comes from. [`RootFs::ReadOnly`] by
+    /// default, because the tree is shared by every sandbox this host boots.
+    pub rootfs: RootFs,
     /// What the guest's console (the helper's stdin and stdout) is attached to.
     pub console: Console,
 }
@@ -143,6 +176,7 @@ impl VmConfig {
             mounts: Vec::new(),
             vsock: None,
             net: Net::None,
+            rootfs: RootFs::ReadOnly,
             console: Console::Inherited,
         }
     }
@@ -189,6 +223,8 @@ impl VmConfig {
         }
         argv.push("--net".into());
         argv.push(self.net.as_flag().into());
+        argv.push("--rootfs".into());
+        argv.push(self.rootfs.as_flag().into());
         for (guest, host) in &self.mounts {
             argv.push("--mount".into());
             let mut spec = OsString::from(guest);
@@ -735,6 +771,7 @@ mod tests {
         c.mounts = vec![(PathBuf::from("/project"), PathBuf::from("/srv/code"))];
         c.vsock = Some((1024, PathBuf::from("/run/agent.sock")));
         c.net = Net::Tsi;
+        c.rootfs = RootFs::Writable;
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -773,6 +810,8 @@ mod tests {
             "1024=/run/agent.sock",
             "--net",
             "tsi",
+            "--rootfs",
+            "writable",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),
@@ -783,6 +822,25 @@ mod tests {
 
     /// An absent option contributes no flag at all, rather than an empty one the parser would then
     /// have to interpret.
+    /// The safe posture is what a caller gets for saying nothing, and it travels on the argv
+    /// *explicitly*: a helper that inferred the default from a missing flag would be a second
+    /// place the default is written, and the two could disagree.
+    #[test]
+    fn a_config_nobody_configured_asks_for_a_read_only_root() {
+        assert_eq!(RootFs::default(), RootFs::ReadOnly);
+        assert_eq!(cfg().rootfs, RootFs::ReadOnly);
+        let argv: Vec<String> = cfg()
+            .helper_argv("vm-under-test")
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = argv
+            .iter()
+            .position(|a| a == "--rootfs")
+            .expect("the posture is always on the argv");
+        assert_eq!(argv.get(at + 1).map(String::as_str), Some("read-only"));
+    }
+
     #[test]
     fn an_unset_option_contributes_no_flag() {
         let argv = cfg().helper_argv("plain");

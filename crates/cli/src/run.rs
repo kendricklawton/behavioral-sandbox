@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bsx_supervisor::{Exit, Net, Vm, VmConfig};
+use bsx_supervisor::{Exit, Net, RootFs, Vm, VmConfig};
 
 use crate::EXIT_OPERATIONAL;
 
@@ -37,6 +37,27 @@ impl NetArg {
         match self {
             Self::None => Net::None,
             Self::Tsi => Net::Tsi,
+        }
+    }
+}
+
+/// The filesystem-posture flag, shared by `run` and `shell`. A CLI-side mirror of
+/// [`bsx_supervisor::RootFs`], for [`NetArg`]'s reason, with [`into_rootfs`](Self::into_rootfs)
+/// as the single crossing point.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum RootFsArg {
+    /// The guest cannot write its root. The default: one image tree boots every sandbox.
+    #[default]
+    ReadOnly,
+    /// The guest writes through to the shared image tree, and its edits outlive the VM.
+    Writable,
+}
+
+impl RootFsArg {
+    pub(crate) fn into_rootfs(self) -> RootFs {
+        match self {
+            Self::ReadOnly => RootFs::ReadOnly,
+            Self::Writable => RootFs::Writable,
         }
     }
 }
@@ -68,12 +89,18 @@ pub(crate) struct RunArgs {
     /// The network posture: `none` (default) or `tsi`. See [`NetArg`].
     #[arg(long, value_name = "POSTURE", default_value = "none")]
     pub(crate) net: NetArg,
+    /// What the guest may do to its root: `read-only` (default) or `writable`. See [`RootFsArg`].
+    #[arg(long, value_name = "POSTURE", default_value = "read-only")]
+    pub(crate) rootfs: RootFsArg,
     /// A `KEY=VALUE` entry for the guest environment. Repeatable.
     #[arg(long = "env", value_name = "KEY=VALUE")]
     pub(crate) env: Vec<String>,
     /// The VM's name while it runs, visible to discovery. Defaults to `run-<pid>`.
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
+    /// Print what this sandbox would share and exit, without booting anything.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// The command, after `--`. The first word is resolved by the guest (its `PATH`, not the
     /// host's), so `echo` runs the guest's `echo`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
@@ -99,9 +126,54 @@ fn execute(args: &RunArgs) -> Result<u8, String> {
         .clone()
         .unwrap_or_else(|| format!("run-{}", std::process::id()));
 
+    if args.dry_run {
+        print_posture(&name, &cfg, &mut std::io::stdout()).map_err(|e| e.to_string())?;
+        return Ok(0);
+    }
     let vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
     let exit = vm.wait().map_err(|e| e.to_string())?;
     Ok(exit_code_of(exit))
+}
+
+/// Writes what this sandbox shares, one element to a line, in the order the guest meets them.
+///
+/// Design rule 3 says the set of virtiofs tags and the network backend are settled before the VM
+/// starts and are visible to the person starting it; this is the second half. To stdout, because
+/// it is a run's structured result, and the terse `key value...` shape is for `grep`.
+pub(crate) fn print_posture(
+    name: &str,
+    cfg: &VmConfig,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    writeln!(out, "name     {name}")?;
+    writeln!(
+        out,
+        "root     {} {}",
+        cfg.root.display(),
+        cfg.rootfs.as_flag()
+    )?;
+    for (guest, host) in &cfg.mounts {
+        writeln!(
+            out,
+            "mount    {} <- {} writable",
+            guest.display(),
+            host.display()
+        )?;
+    }
+    for (tag, host) in &cfg.shares {
+        writeln!(out, "share    {tag} <- {} writable", host.display())?;
+    }
+    if let Some((port, path)) = &cfg.vsock {
+        writeln!(out, "channel  guest vsock {port} <- {}", path.display())?;
+    }
+    writeln!(out, "network  {}", cfg.net.as_flag())?;
+    writeln!(
+        out,
+        "limits   {} vcpu, {} MiB",
+        cfg.vcpus.get(),
+        cfg.mem_mib.get()
+    )?;
+    writeln!(out, "exec     {}", cfg.exec.display())
 }
 
 /// The guest root: the flag, else `$BSX_GUEST_ROOT`, else the per-user data directory. The same
@@ -193,6 +265,7 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
     };
     let mut cfg = VmConfig::new(root, program);
     cfg.net = args.net.into_net();
+    cfg.rootfs = args.rootfs.into_rootfs();
     if let Some(v) = resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
@@ -368,6 +441,61 @@ mod tests {
             panic!("run must parse");
         };
         assert_eq!(args.net, NetArg::None, "no --net means no network");
+    }
+
+    /// The CLI's filesystem posture maps onto the supervisor's, and the default is read-only:
+    /// one image tree boots every sandbox on the host, so "say nothing" must not mean "edit it".
+    #[test]
+    fn the_root_posture_defaults_to_read_only_and_maps_across() {
+        assert_eq!(RootFsArg::default(), RootFsArg::ReadOnly);
+        assert_eq!(RootFsArg::ReadOnly.into_rootfs(), RootFs::ReadOnly);
+        assert_eq!(RootFsArg::Writable.into_rootfs(), RootFs::Writable);
+        let cli = Cli::parse_from(["bsx", "run", "--", "true"]);
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("run must parse");
+        };
+        assert_eq!(args.rootfs, RootFsArg::ReadOnly);
+        let cfg = to_config(&args, PathBuf::from("/r")).expect("a well-formed config");
+        assert_eq!(cfg.rootfs, RootFs::ReadOnly);
+    }
+
+    /// The posture print names every way into and out of the sandbox, each with its direction,
+    /// and the root line carries the posture rather than only the path: a reader must be able to
+    /// tell a writable image tree from a read-only one without booting it.
+    #[test]
+    fn the_posture_print_names_every_shared_thing_and_its_direction() {
+        let cli = Cli::parse_from([
+            "bsx",
+            "run",
+            "--rootfs",
+            "writable",
+            "--mount",
+            "/mnt=/srv/code",
+            "--share",
+            "data=/srv/data",
+            "--net",
+            "tsi",
+            "--",
+            "true",
+        ]);
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("run must parse");
+        };
+        let cfg = to_config(&args, PathBuf::from("/root-tree")).expect("a well-formed config");
+        let mut out = Vec::new();
+        print_posture("vm-under-test", &cfg, &mut out).expect("a Vec never fails to write");
+        let text = String::from_utf8(out).expect("the printer writes UTF-8");
+        for line in [
+            "name     vm-under-test",
+            "root     /root-tree writable",
+            "mount    /mnt <- /srv/code writable",
+            "share    data <- /srv/data writable",
+            "network  tsi",
+            "limits   1 vcpu, 512 MiB",
+            "exec     true",
+        ] {
+            assert!(text.contains(line), "{line:?} missing from:\n{text}");
+        }
     }
 
     /// A malformed share is refused here, before a VM is spawned to die on it.

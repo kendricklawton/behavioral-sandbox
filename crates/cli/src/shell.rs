@@ -64,9 +64,15 @@ pub(crate) struct ShellArgs {
     /// The network posture: `none` (default) or `tsi`.
     #[arg(long, value_name = "POSTURE", default_value = "none")]
     pub(crate) net: crate::run::NetArg,
+    /// What the guest may do to its root: `read-only` (default) or `writable`.
+    #[arg(long, value_name = "POSTURE", default_value = "read-only")]
+    pub(crate) rootfs: crate::run::RootFsArg,
     /// The VM's name while it runs. Defaults to `shell-<pid>`.
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
+    /// Print what this sandbox would share and exit, without booting anything.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     /// The command to run on the pty, after `--`. Defaults to `/bin/sh`.
     #[arg(last = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -103,6 +109,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
     cfg.vsock = Some((VSOCK_PORT, channel_sock.clone()));
     cfg.console = Console::Detached;
     cfg.net = args.net.into_net();
+    cfg.rootfs = args.rootfs.into_rootfs();
     if let Some(v) = crate::run::resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
@@ -128,6 +135,11 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         .clone()
         .unwrap_or_else(|| format!("shell-{}", std::process::id()));
 
+    if args.dry_run {
+        crate::run::print_posture(&name, &cfg, &mut std::io::stdout())
+            .map_err(|e| e.to_string())?;
+        return Ok(0);
+    }
     let mut vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
     let (mut reader, stream) = dial(&channel_sock, &mut vm)?;
 

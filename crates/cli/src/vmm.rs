@@ -88,6 +88,27 @@ pub(crate) struct VmmArgs {
     /// hijacking) is not.
     #[arg(long, value_name = "POSTURE", default_value = "none")]
     pub(crate) net: NetPosture,
+    /// What the guest may do to the image tree it boots from: `read-only` (default) or
+    /// `writable`. The tree is shared by every sandbox on this host, so a writable root is a
+    /// guest editing what the next guest starts from.
+    #[arg(long, value_name = "POSTURE", default_value = "read-only")]
+    pub(crate) rootfs: RootFsPosture,
+}
+
+/// What the guest may do to its root filesystem. The default is
+/// [`ReadOnly`](RootFsPosture::ReadOnly) because one image tree boots every sandbox: a guest that
+/// can write it is a guest editing what every later guest starts from.
+///
+/// Enforced by the virtiofs device rather than by a guest mount option, so the guest cannot undo
+/// it and cannot see it either: `/proc/mounts` still reports the root `rw`, and only an attempted
+/// write reports the truth (measured 2026-09-01, libkrun 1.19.4).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum RootFsPosture {
+    /// Guest writes to the root fail with `EROFS`. Writable state comes from a `--mount`.
+    #[default]
+    ReadOnly,
+    /// Guest writes go through to the shared image tree and outlive the VM.
+    Writable,
 }
 
 /// What the guest's network reaches. The default is [`None`](NetPosture::None) because libkrun's
@@ -128,15 +149,30 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
 /// survives. The guest path must be absolute (it names a mount point inside the guest, and a
-/// relative one would mean "relative to wherever init happens to be") and must not be `/`
-/// itself: mounting over the guest root mid-boot shadows the running system, which is never
-/// what a project mount meant.
+/// relative one would mean "relative to wherever init happens to be"), must not be `/` itself
+/// (mounting over the guest root mid-boot shadows the running system, which is never what a
+/// project mount meant), and must carry no `..` component, since [`mount_point_in_image`]
+/// resolves it against the host's image tree.
 pub(crate) fn split_mount(spec: &str) -> Option<(&Path, &Path)> {
     let (guest, host) = spec.split_once('=')?;
     if !guest.starts_with('/') || guest == "/" || host.is_empty() {
         return None;
     }
-    Some((Path::new(guest), Path::new(host)))
+    let guest = Path::new(guest);
+    if guest
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return None;
+    }
+    Some((guest, Path::new(host)))
+}
+
+/// Where a `--mount`'s guest path lands in the host's image tree, which is the same tree the VM
+/// serves as the guest's root. Used to check the mount point exists before boot; the guest path
+/// is absolute and `..`-free by [`split_mount`], so this stays inside `root`.
+fn mount_point_in_image(root: &Path, guest: &Path) -> PathBuf {
+    root.join(guest.strip_prefix("/").unwrap_or(guest))
 }
 
 /// `s` as a single-quoted shell word, safe to splice into the mount preamble: the one byte a
@@ -163,12 +199,14 @@ fn mount_tag(i: usize) -> String {
 /// carrying single-quoted spans intact. So: one line, no double quote anywhere, every path and
 /// command word through [`sh_quote`], and the usual `exec "$0" "$@"` tail replaced by splicing.
 ///
-/// `mkdir -p` writes the mount point through the root virtiofs, so an empty directory lands in
-/// the shared image tree on the host and survives the VM; `build-rootfs --verify` reads that as
-/// drift, which is the honest report. `krun_fs_add_overlay_dir` was the way to avoid it and is
-/// unusable: against libkrun 1.19.4 a configuration it accepted aborts the VMM inside
-/// `krun_start_enter` (`InvalidAscii`, `src/vmm/src/builder.rs:1073`), measured 2026-09-01 with
-/// `KRUN_FEATURE_INIT_BLOB` present.
+/// `mkdir -p` on a path the image already has succeeds without writing, which is the whole of
+/// what it does under the default read-only root: [`build_and_enter`] refuses a mount point the
+/// image lacks before boot, so the guest is never asked to create one it cannot. Under
+/// `--rootfs writable` it can, and the empty directory then lands in the shared image tree and
+/// survives the VM, which `build-rootfs --verify` reports as drift. `krun_fs_add_overlay_dir`
+/// was the way to have the mount point without either, and is unusable: against libkrun 1.19.4 a
+/// configuration it accepted aborts the VMM inside `krun_start_enter` (`InvalidAscii`,
+/// `src/vmm/src/builder.rs:1073`), measured 2026-09-01 with `KRUN_FEATURE_INIT_BLOB` present.
 fn mount_preamble(mounts: &[(&Path, &Path)], exec: &Path, args: &[String]) -> String {
     let mut script = String::new();
     for (i, (guest, _)) in mounts.iter().enumerate() {
@@ -271,6 +309,15 @@ enum HelperError {
         /// The offending input, lossily rendered.
         input: String,
     },
+    /// A `--mount` whose guest path is not a directory in the image, under a read-only root the
+    /// guest cannot create it on. Refused before boot so the report names the fix, rather than
+    /// arriving as the preamble's exit 2 on a console.
+    MountPointMissing {
+        /// The guest path asked for.
+        guest: PathBuf,
+        /// Where that lands in the host's image tree.
+        in_image: PathBuf,
+    },
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -315,6 +362,15 @@ impl std::fmt::Display for HelperError {
                 f,
                 "--env {e:?} is not KEY=VALUE; the guest's environ would carry it as a string \
                  no libc parses back"
+            ),
+            Self::MountPointMissing { guest, in_image } => write!(
+                f,
+                "--mount needs {} to be a directory in the guest image ({}), and the root is \
+                 read-only, so the guest cannot create it: mount at a directory the image has \
+                 (/mnt is empty and unused), or pass --rootfs writable and let the guest write \
+                 the mount point into the shared tree",
+                guest.display(),
+                in_image.display()
             ),
             Self::Socket(e) => write!(f, "the control socket: {e}"),
             Self::Krun(e) => write!(f, "{e}"),
@@ -363,6 +419,19 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     for spec in &args.mounts {
         let (guest, host) = split_mount(spec).ok_or_else(|| HelperError::Mount(spec.clone()))?;
         require_dir("a mount", host)?;
+        // The preamble's `mkdir -p` is idempotent on a path the image already has and writes
+        // nothing, but it cannot create one through a read-only root. Checked here rather than
+        // left to the guest, because a failed mount there is an exit 2 on a console nobody is
+        // reading.
+        if args.rootfs == RootFsPosture::ReadOnly {
+            let in_image = mount_point_in_image(&args.root, guest);
+            if !in_image.is_dir() {
+                return Err(HelperError::MountPointMissing {
+                    guest: guest.to_path_buf(),
+                    in_image,
+                });
+            }
+        }
         mounts.push((guest, host));
     }
 
@@ -378,8 +447,12 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         bind_control_socket(name)?;
     }
 
+    let access = match args.rootfs {
+        RootFsPosture::ReadOnly => bsx_krun::FsAccess::ReadOnly,
+        RootFsPosture::Writable => bsx_krun::FsAccess::ReadWrite,
+    };
     let mut machine = bsx_krun::Context::new()?
-        .root(&args.root)?
+        .root(&args.root, access)?
         .vm_config(args.vcpus, args.mem)?;
 
     for (tag, path) in shares {
@@ -743,6 +816,8 @@ mod tests {
             "data=/opt/a=b",
             "--vsock",
             "1024=/run/agent.sock",
+            "--rootfs",
+            "writable",
         ];
         let parsed = Cli::parse_from(argv);
         let Cmd::Vmm(got) = parsed.cmd else {
@@ -761,5 +836,48 @@ mod tests {
         let (port, sock) =
             split_vsock(got.vsock.as_deref().expect("the vsock spec parses")).expect("well-formed");
         assert_eq!((port, sock), (1024, Path::new("/run/agent.sock")));
+        assert_eq!(got.rootfs, RootFsPosture::Writable);
+    }
+
+    /// Saying nothing about the filesystem asks for a root the guest cannot write, which is the
+    /// whole of 3.7: the shared image tree is not something a sandbox edits by default.
+    #[test]
+    fn a_helper_told_nothing_about_the_filesystem_asks_for_a_read_only_root() {
+        use clap::Parser;
+
+        let parsed = Cli::parse_from([
+            "bsx",
+            HELPER_SUBCOMMAND,
+            "--root",
+            "/srv/root",
+            "--exec",
+            "/bin/true",
+        ]);
+        let Cmd::Vmm(got) = parsed.cmd else {
+            panic!("the helper subcommand parses as itself");
+        };
+        assert_eq!(got.rootfs, RootFsPosture::ReadOnly);
+    }
+
+    /// A mount point is looked for in the same tree the VM will serve as the guest's root, and a
+    /// guest path that tried to climb out of it is not a mount spec at all.
+    #[test]
+    fn a_mount_point_resolves_inside_the_image_and_cannot_climb_out() {
+        assert_eq!(
+            mount_point_in_image(Path::new("/srv/root"), Path::new("/mnt")),
+            Path::new("/srv/root/mnt")
+        );
+        assert_eq!(
+            mount_point_in_image(Path::new("/srv/root"), Path::new("/a/b")),
+            Path::new("/srv/root/a/b")
+        );
+        assert!(
+            split_mount("/../escape=/tmp").is_none(),
+            "a .. component would resolve outside the image tree"
+        );
+        assert!(
+            split_mount("/ok/../escape=/tmp").is_none(),
+            "a .. anywhere in the path, not only at the front"
+        );
     }
 }

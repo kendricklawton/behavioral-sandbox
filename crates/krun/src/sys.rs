@@ -32,8 +32,8 @@
 use std::os::raw::{c_char, c_int};
 
 /// The virtiofs tag libkrun's init treats as the root filesystem (`KRUN_FS_ROOT_TAG`). Passing it
-/// to `krun_add_virtiofs2` is the long form of `krun_set_root`, with the DAX window under the
-/// caller's control.
+/// to `krun_add_virtiofs3` is the long form of `krun_set_root`, with the DAX window and the
+/// read-only flag under the caller's control.
 pub const KRUN_FS_ROOT_TAG: &str = "/dev/root";
 
 /// `level` values for `krun_set_log_level` and `krun_init_log`.
@@ -124,6 +124,16 @@ unsafe extern "C" {
         c_tag: *const c_char,
         c_path: *const c_char,
         shm_size: u64,
+    ) -> i32;
+    /// Adds a virtiofs share with a DAX window size and a read-only flag. With
+    /// [`KRUN_FS_ROOT_TAG`] this is the long form of `krun_set_root`, which the header names as
+    /// the way to get read-only control over the root filesystem.
+    pub fn krun_add_virtiofs3(
+        ctx_id: u32,
+        c_tag: *const c_char,
+        c_path: *const c_char,
+        shm_size: u64,
+        read_only: bool,
     ) -> i32;
     /// Overlays an empty read-only directory onto an existing virtiofs tree, for a mount point the
     /// host tree does not carry. `mode` is directory mode bits (e.g. `0o040755`).
@@ -241,9 +251,6 @@ mod stub {
     pub unsafe fn krun_disable_implicit_init(_ctx_id: u32) -> i32 {
         NOT_LINKED
     }
-    pub unsafe fn krun_set_root(_ctx_id: u32, _root_path: *const c_char) -> i32 {
-        NOT_LINKED
-    }
     pub unsafe fn krun_set_vm_config(_ctx_id: u32, _num_vcpus: u8, _ram_mib: u32) -> i32 {
         NOT_LINKED
     }
@@ -251,6 +258,15 @@ mod stub {
         _ctx_id: u32,
         _c_tag: *const c_char,
         _c_path: *const c_char,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_add_virtiofs3(
+        _ctx_id: u32,
+        _c_tag: *const c_char,
+        _c_path: *const c_char,
+        _shm_size: u64,
+        _read_only: bool,
     ) -> i32 {
         NOT_LINKED
     }
@@ -311,6 +327,7 @@ mod tests {
         ("krun_set_root", 2),
         ("krun_add_virtiofs", 3),
         ("krun_add_virtiofs2", 4),
+        ("krun_add_virtiofs3", 5),
         ("krun_fs_add_overlay_dir", 4),
         ("krun_set_exec", 4),
         ("krun_set_env", 2),

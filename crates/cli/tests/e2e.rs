@@ -7,6 +7,7 @@
 // A test binary: `expect` is the idiomatic assertion in helpers outside `#[test]`.
 #![allow(clippy::expect_used)]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -275,10 +276,10 @@ fn a_machine_larger_than_the_host_is_refused_before_boot() {
     assert!(err.contains("more RAM than this host"), "{err}");
 }
 
-/// The 3.3 contract: a host directory is read-write at the guest path, and edits land on the
-/// host. The `mkdir -p` mount point persisting in the image tree is the documented cost of
-/// libkrun's overlay-dir primitive being unusable, so it is asserted (and cleaned) rather than
-/// ignored: if it stops appearing, the mechanism changed and the docs should too.
+/// The 3.3 contract, under 3.7's read-only root: a host directory is read-write at the guest
+/// path, and edits land on the host, while the image tree the mount point lives in is untouched.
+/// `/mnt` because the image has it: the preamble's `mkdir -p` cannot make one through a
+/// read-only root, which is what `a_mount_point_the_image_lacks_is_refused_before_boot` covers.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
@@ -288,18 +289,22 @@ fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
     let dir = bsx_test_support::ScratchDir::created("e2e-mount");
     std::fs::write(dir.path().join("f"), "from-host\n").expect("stage a host file");
 
-    let mount = format!("/project={}", dir.path().display());
+    let mount = format!("/mnt={}", dir.path().display());
+    let image_top = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(guest_root())
+            .expect("the image tree")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = image_top();
     let out = bsx()
         .arg("run")
         .arg("--root")
         .arg(guest_root())
         .args(["--mount", &mount])
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "cat /project/f && echo from-guest > /project/g",
-        ])
+        .args(["--", "sh", "-c", "cat /mnt/f && echo from-guest > /mnt/g"])
         .output()
         .expect("run bsx");
     assert!(
@@ -312,12 +317,136 @@ fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
         std::fs::read_to_string(dir.path().join("g")).expect("the guest's edit reached the host"),
         "from-guest\n"
     );
-    let leftover = guest_root().join("project");
-    assert!(
-        leftover.is_dir(),
-        "the mkdir -p mount point lands in the image tree; if this stops, the mechanism changed"
+    assert_eq!(
+        image_top(),
+        before,
+        "a mounted run changed the shared image tree; 3.3 left mount points behind and 3.7's \
+         read-only root is what stops it"
     );
-    std::fs::remove_dir(&leftover).expect("tidy the documented drift");
+}
+
+/// The 3.7 contract, and the finding behind it: the image tree is shared by every sandbox this
+/// host boots, so by default a guest cannot write it. Asserted by *writing*, because the posture
+/// lives on the virtiofs device and the guest cannot see it: `/proc/mounts` still reports the
+/// root `rw` either way (measured 2026-09-01, libkrun 1.19.4).
+///
+/// Both directions, because "the write failed" alone would also be true of a guest that could
+/// not run `echo`: `--rootfs writable` must put the file in the image tree.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn the_default_guest_cannot_write_the_image_it_boots_from() {
+    if skipped("the_default_guest_cannot_write_the_image_it_boots_from") {
+        return;
+    }
+    let probe = guest_root().join("bsx-write-probe");
+    let _ = std::fs::remove_file(&probe);
+    let write = |posture: &str| -> String {
+        let out = bsx()
+            .arg("run")
+            .arg("--root")
+            .arg(guest_root())
+            .args(["--rootfs", posture])
+            .args([
+                "--",
+                "sh",
+                "-c",
+                "echo guest > /bsx-write-probe && echo WROTE || echo blocked",
+            ])
+            .output()
+            .expect("run bsx");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(
+        write("read-only"),
+        "blocked",
+        "the default root took a write"
+    );
+    assert!(
+        !probe.exists(),
+        "a refused guest write still reached the shared image tree at {}",
+        probe.display()
+    );
+
+    assert_eq!(write("writable"), "WROTE", "the opt-in must restore it");
+    assert_eq!(
+        std::fs::read_to_string(&probe).expect("the writable root's edit reached the image tree"),
+        "guest\n"
+    );
+    std::fs::remove_file(&probe).expect("tidy what --rootfs writable is for");
+}
+
+/// A mount point the image lacks is a typed refusal on the host, naming both ways forward,
+/// rather than the preamble's exit 2 on a console the caller may not be watching. No guest tree
+/// needed: the check reads the tree the VM would serve, and `/tmp` has no `/no-such-mount-point`.
+#[test]
+#[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
+fn a_mount_point_the_image_lacks_is_refused_before_boot() {
+    let out = bsx()
+        .args(["run", "--root", "/tmp"])
+        .args(["--mount", "/no-such-mount-point=/tmp"])
+        .args(["--", "true"])
+        .output()
+        .expect("run bsx");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("/no-such-mount-point"), "names it: {err}");
+    assert!(
+        err.contains("/mnt"),
+        "names a mount point that exists: {err}"
+    );
+    assert!(err.contains("--rootfs writable"), "names the opt-in: {err}");
+}
+
+/// Design rule 3's other half: what is shared is visible *before* the VM starts. `--dry-run`
+/// prints the posture and boots nothing, which is asserted through the control socket every
+/// boot leaves behind: no socket, no VM. The second half runs the same command for real, so a
+/// change that stopped the socket from appearing could not leave this passing vacuously.
+#[test]
+#[ignore = "the dry run boots nothing; the paired real run needs /dev/kvm and the guest tree"]
+fn a_dry_run_prints_the_posture_and_boots_nothing() {
+    let runtime = bsx_test_support::ScratchDir::created("e2e-dry-run");
+    std::fs::set_permissions(runtime.path(), PermissionsExt::from_mode(0o700))
+        .expect("a control-socket directory must be private");
+    let name = format!("dryrun-{}", std::process::id());
+    let socket = runtime.path().join("bsx").join(format!("{name}.sock"));
+
+    let out = bsx()
+        .arg("run")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args(["--root", "/tmp", "--name", &name, "--dry-run"])
+        .args(["--", "true"])
+        .output()
+        .expect("run bsx");
+    assert!(out.status.success(), "{}", out.status);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in ["root     /tmp read-only", "network  none", "exec     true"] {
+        assert!(stdout.contains(line), "{line:?} missing from:\n{stdout}");
+    }
+    assert!(
+        !socket.exists(),
+        "a dry run bound {}, so it booted something",
+        socket.display()
+    );
+
+    if skipped("a_dry_run_prints_the_posture_and_boots_nothing (the paired real run)") {
+        return;
+    }
+    let out = bsx()
+        .arg("run")
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args(["--root"])
+        .arg(guest_root())
+        .args(["--name", &name])
+        .args(["--", "true"])
+        .output()
+        .expect("run bsx");
+    assert!(out.status.success(), "{}", out.status);
+    assert!(
+        socket.exists(),
+        "a real run leaves its control socket at {}; without that the dry-run assertion above \
+         proves nothing",
+        socket.display()
+    );
 }
 
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
