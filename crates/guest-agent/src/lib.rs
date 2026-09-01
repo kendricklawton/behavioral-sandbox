@@ -844,7 +844,15 @@ fn serve_pty<S: SplitStream + 'static>(
         Ok(c) => c,
         Err(e) => return Err(refuse_spawn(&mut conn, program, e)),
     };
-    let child_pid = child.id();
+    // A pidfd, taken while the child is provably alive and unreaped, so the teardown below can
+    // signal it without a race: killing by numeric pid would race the pump's reap, after which
+    // the number is the kernel's to hand to a stranger. A pidfd of an exited process just
+    // answers `ESRCH`.
+    let child_fd = rustix::process::pidfd_open(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .map_err(|e| AgentError::Pty(std::io::Error::from(e)))?;
 
     let master_read = std::fs::File::from(master.try_clone().map_err(AgentError::Pty)?);
     let mut master_write = std::fs::File::from(master);
@@ -872,14 +880,10 @@ fn serve_pty<S: SplitStream + 'static>(
         }
     }
 
-    // A vanished host must not strand the command on a terminal nobody reads. Only while the pump
-    // still runs: once it has reaped, the pid is free for the kernel to reuse and must not be
-    // signalled.
-    if !pump.is_finished()
-        && let Some(pid) = rustix::process::Pid::from_raw(child_pid as i32)
-    {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-    }
+    // A vanished host must not strand the command on a terminal nobody reads. Through the pidfd,
+    // so a command the pump already reaped answers `ESRCH` instead of the signal landing on
+    // whoever holds that pid now.
+    let _ = rustix::process::pidfd_send_signal(&child_fd, rustix::process::Signal::KILL);
     pump.join().unwrap_or_else(|_| {
         Err(AgentError::Pty(std::io::Error::other(
             "the pty pump panicked",

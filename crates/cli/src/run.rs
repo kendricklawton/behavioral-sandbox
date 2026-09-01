@@ -11,12 +11,14 @@
 
 use std::ffi::OsString;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
 
 use bsx_supervisor::{Exit, Vm, VmConfig};
+
+use crate::EXIT_OPERATIONAL;
 
 /// Run one command in a fresh sandbox.
 #[derive(Args, Debug)]
@@ -49,51 +51,36 @@ pub(crate) struct RunArgs {
     pub(crate) command: Vec<String>,
 }
 
-/// Exit code for an operational failure, re-exported for the message sites here.
-use crate::EXIT_OPERATIONAL;
-
 pub(crate) fn run(args: &RunArgs) -> ExitCode {
-    let root = match resolve_root(args.root.clone()) {
-        Ok(root) => root,
+    match execute(args) {
+        Ok(code) => ExitCode::from(code),
         Err(msg) => {
             eprintln!("bsx run: {msg}");
-            return ExitCode::from(EXIT_OPERATIONAL);
-        }
-    };
-    let cfg = match to_config(args, root) {
-        Ok(cfg) => cfg,
-        Err(msg) => {
-            eprintln!("bsx run: {msg}");
-            return ExitCode::from(EXIT_OPERATIONAL);
-        }
-    };
-    let name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("run-{}", std::process::id()));
-
-    let vm = match Vm::spawn(name, &cfg) {
-        Ok(vm) => vm,
-        Err(e) => {
-            eprintln!("bsx run: {e}");
-            return ExitCode::from(EXIT_OPERATIONAL);
-        }
-    };
-    match vm.wait() {
-        Ok(exit) => ExitCode::from(exit_code_of(exit)),
-        Err(e) => {
-            eprintln!("bsx run: {e}");
             ExitCode::from(EXIT_OPERATIONAL)
         }
     }
 }
 
+/// The verb's fallible body, one error path, one printer: the same shape as `shell`'s `session`.
+fn execute(args: &RunArgs) -> Result<u8, String> {
+    let root = resolve_root(args.root.as_deref())?;
+    let cfg = to_config(args, root)?;
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("run-{}", std::process::id()));
+
+    let vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
+    let exit = vm.wait().map_err(|e| e.to_string())?;
+    Ok(exit_code_of(exit))
+}
+
 /// The guest root: the flag, else `$BSX_GUEST_ROOT`, else the per-user data directory. The same
 /// order as every other layered knob here (flag, then env, then default), with the config file
 /// layer deliberately absent until phase 3's config work decides its shape.
-pub(crate) fn resolve_root(flag: Option<PathBuf>) -> Result<PathBuf, String> {
+pub(crate) fn resolve_root(flag: Option<&Path>) -> Result<PathBuf, String> {
     resolve_root_from(
-        flag,
+        flag.map(Path::to_path_buf),
         std::env::var_os("BSX_GUEST_ROOT"),
         std::env::var_os("XDG_DATA_HOME"),
         std::env::var_os("HOME"),
@@ -167,14 +154,19 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
 /// command that returned that number are at least spelled the same way everywhere else.
 fn exit_code_of(exit: Exit) -> u8 {
     match exit {
-        // Out-of-range codes cannot come from a Unix wait status, but a lossy cast that quietly
-        // wrapped one would report a wrong code as a right one.
-        Exit::Code(code) => u8::try_from(code).unwrap_or(u8::MAX),
+        Exit::Code(code) => guest_code(code),
         Exit::Signal(sig) => 128u8.saturating_add(u8::try_from(sig).unwrap_or(u8::MAX)),
         // `Exit` is `#[non_exhaustive]`: a variant this build does not know is an operational
         // failure to report, not a guest answer to invent.
         _ => EXIT_OPERATIONAL,
     }
+}
+
+/// A guest's `i32` exit code as this process's `u8` one, shared by both verbs. Out-of-range
+/// values cannot come from a Unix wait status, but a lossy cast that quietly wrapped one would
+/// report a wrong code as a right one, so they saturate loudly instead.
+pub(crate) fn guest_code(code: i32) -> u8 {
+    u8::try_from(code).unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]
@@ -209,6 +201,8 @@ mod tests {
         let flag = Some(PathBuf::from("/tmp"));
         let env = Some(OsString::from("/nonexistent-env-root"));
         let got = resolve_root_from(flag, env.clone(), None, None).expect("the flag wins");
+        assert_eq!(got, Path::new("/tmp"));
+        let got = resolve_root(Some(Path::new("/tmp"))).expect("the borrowed form agrees");
         assert_eq!(got, Path::new("/tmp"));
 
         let err = resolve_root_from(None, env, None, None)

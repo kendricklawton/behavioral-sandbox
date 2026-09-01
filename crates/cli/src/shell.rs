@@ -75,7 +75,7 @@ pub(crate) fn run(args: &ShellArgs) -> ExitCode {
 }
 
 fn session(args: &ShellArgs) -> Result<u8, String> {
-    let root = crate::run::resolve_root(args.root.clone())?;
+    let root = crate::run::resolve_root(args.root.as_deref())?;
     for entry in &args.env {
         if !crate::vmm::well_formed_env(entry) {
             return Err(format!("--env {entry:?} is not KEY=VALUE"));
@@ -199,9 +199,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
                 stdout.write_all(&bytes).map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }
-            Ok(Response::Exit { code }) => {
-                return Ok(u8::try_from(code).unwrap_or(u8::MAX));
-            }
+            Ok(Response::Exit { code }) => return Ok(crate::run::guest_code(code)),
             Ok(Response::Error(msg)) => return Err(format!("the agent refused: {msg}")),
             Ok(_) => {}
             Err(e) => return Err(format!("the session ended abnormally: {e}")),
@@ -257,9 +255,10 @@ fn try_dial(sock: &std::path::Path) -> Result<(ClientConnection<UnixStream>, Uni
     Ok((conn, stream))
 }
 
-/// The host terminal's `(cols, rows)`, from stdout, which is the stream the session draws on.
+/// The host terminal's `(cols, rows)`, read from stdin: the fd the raw-mode guard owns, so the
+/// size follows the same terminal the keystrokes come from even when stdout is a pipe.
 fn terminal_size() -> Option<(u16, u16)> {
-    let ws = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
+    let ws = rustix::termios::tcgetwinsize(std::io::stdin()).ok()?;
     if ws.ws_col == 0 || ws.ws_row == 0 {
         return None;
     }
