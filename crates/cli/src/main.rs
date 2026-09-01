@@ -1,6 +1,7 @@
 //! The `bsx` CLI, and the hidden helper subcommand that becomes a virtual machine.
 //!
-//! `bsx run` boots a sandbox, runs one command, and exits with its status ([`run`]). Beside it
+//! `bsx run` boots a sandbox, runs one command, and exits with its status ([`run`]); `bsx shell`
+//! opens an interactive session on a guest pty ([`shell`]). Beside them
 //! sits `__vmm`, which is not a verb anyone types: it is how a VM comes into existence, and
 //! [`vmm`] explains why that has to be a whole process. The rest of the verbs arrive with
 //! `scratch/ROADMAP.md` phase 3.
@@ -10,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod run;
+mod shell;
 mod vmm;
 
 use std::process::ExitCode;
@@ -37,6 +39,8 @@ struct Cli {
 enum Cmd {
     /// Run one command in a fresh sandbox and exit with its status.
     Run(run::RunArgs),
+    /// Open an interactive shell (or any command) on a pty in a fresh sandbox.
+    Shell(shell::ShellArgs),
     /// Become a virtual machine. Not a verb: the supervisor re-executes this binary with it.
     ///
     /// Hidden rather than removed from the parser, so a boot that fails can be reproduced by hand
@@ -48,6 +52,7 @@ enum Cmd {
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Run(args) => run::run(&args),
+        Cmd::Shell(args) => shell::run(&args),
         Cmd::Vmm(args) => vmm::run(&args),
     }
 }

@@ -110,7 +110,7 @@ fn serve_incoming<S, E>(
     incoming: impl Iterator<Item = Result<S, E>>,
     set_deadlines: impl Fn(&S) -> std::io::Result<()>,
 ) where
-    S: std::io::Read + std::io::Write + Send + 'static,
+    S: bsx_guest_agent::SplitStream + 'static,
     E: std::fmt::Display,
 {
     for conn in incoming {
@@ -136,7 +136,7 @@ fn session_dir() -> std::path::PathBuf {
 
 /// Serves one connection, logging rather than propagating a failure so one bad peer never ends the
 /// loop. `serve_session` emits its own `exec` span, so only failures need a line here.
-fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
+fn serve_one<S: bsx_guest_agent::SplitStream + 'static>(stream: S) {
     // One thread per connection, so a wedged session cannot take the listener down: the whole-tree
     // reap needs cgroup v2, so on an off-spec guest a command that double-forks a daemon holds the
     // output pipes open and its `pump` never sees EOF. Served inline, that one stuck exec would

@@ -25,11 +25,10 @@ pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 /// "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
 
-/// The guest path this builder bakes the agent in at. Phase 3 decides how it is started (libkrun's
-/// init reads its workload from `/.krun_config.json`, so the Firecracker inittab, the overlay init,
-/// the by-label data mounts and the `ip=` resolver link that used to live here all went with the
-/// engine that needed them). `verify_guest_contract` reads this constant back off the staged tree.
-const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
+/// The guest path this builder bakes the agent in at, shared with the host that boots it as a
+/// VM's workload (`bsx shell`): the definition lives in `bsx-channel` beside the port they also
+/// share. `verify_guest_contract` reads it back off the staged tree.
+use bsx_channel::GUEST_AGENT_PATH;
 
 /// An absolute *guest* path resolved inside the staging tree. The leading `/` has to go, or
 /// `Path::join` would discard the staging root and address the build host's own filesystem.
@@ -283,7 +282,7 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     // The consequence travels with the check, so a failure explains itself to whoever renamed
-    // something rather than just naming a file. One entry today; phase 3 adds whatever starts it.
+    // something rather than just naming a file.
     let path = GUEST_AGENT_PATH;
     let consequence = "a guest would come up with no exec channel, so every run would hang \
                        waiting for the readiness marker";
@@ -299,6 +298,16 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
         bail!(
             "guest-image contract: {path} is mode {mode:04o}, not 0755, so the guest cannot \
              execute it ({consequence})"
+        );
+    }
+    // The agent's pty path spawns through `setsid -c`, the session/ctty step its
+    // `#![forbid(unsafe_code)]` cannot take between fork and exec. Present as a symlink into
+    // busybox on Alpine, so this asks for existence, not a file kind.
+    let setsid = "/usr/bin/setsid";
+    if !in_staging(staging, setsid).exists() {
+        bail!(
+            "guest-image contract: {setsid} is missing from the staged rootfs (the agent's pty \
+             sessions spawn through it; `bsx shell` would get a refusal for every command)"
         );
     }
     Ok(())
@@ -783,6 +792,9 @@ mod tests {
         let mut perms = std::fs::metadata(&staged).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&staged, perms).unwrap();
+        let setsid = in_staging(root, "/usr/bin/setsid");
+        std::fs::create_dir_all(setsid.parent().expect("the setsid path has a parent")).unwrap();
+        std::fs::write(&setsid, "").unwrap();
     }
 
     #[test]

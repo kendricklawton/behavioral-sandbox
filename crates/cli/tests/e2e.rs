@@ -90,6 +90,34 @@ fn run_exits_with_the_guest_commands_code() {
     assert_eq!(status.code(), Some(7));
 }
 
+/// The shell verb without a terminal: the guest command still runs on a real guest pty of the
+/// default 80x24, its output crosses the channel, and its exit code is the verb's. The
+/// interactive half (raw mode, keystrokes, live resize) needs a terminal on this side and is
+/// verified by hand through a pty driver; what this pins is the whole boot-agent-vsock-session
+/// path.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
+fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
+    if skipped("shell_runs_the_command_on_a_guest_pty_and_returns_its_exit") {
+        return;
+    }
+    let out = bsx()
+        .arg("shell")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--", "/bin/sh", "-c", "tty; stty size; exit 3"])
+        .output()
+        .expect("run bsx shell");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("/dev/pts/"),
+        "not a guest pty: {stdout:?} (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("24 80"), "not the default size: {stdout:?}");
+    assert_eq!(out.status.code(), Some(3), "the guest's code is the verb's");
+}
+
 /// A root that is not a directory is refused before any boot, with the message naming the fix.
 #[test]
 #[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]

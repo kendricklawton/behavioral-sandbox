@@ -15,9 +15,13 @@ name = "bsx"
 path = "src/main.rs"
 
 [dependencies]
+# The agent wire protocol, for the interactive shell's session over vsock.
+bsx-channel = { path = "../channel" }
 bsx-krun = { path = "../krun" }
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
+# Raw mode and window size for the interactive shell. Safe wrappers only.
+rustix = { workspace = true, features = ["termios"] }
 
 [dev-dependencies]
 # The `/dev/kvm` probe, so the end-to-end tests skip with the same message everywhere.

@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
 
 /// Wire-protocol version. Must bump on breaking framing or schema changes.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Maximum payload size for a single frame (1 MiB) to prevent unbounded allocations.
 pub const MAX_PAYLOAD: usize = 1 << 20;
@@ -65,6 +65,11 @@ pub const GUEST_READY_MARKER: &str = "GUEST-READY";
 /// The vsock port used for host↔guest agent communication.
 pub const VSOCK_PORT: u32 = 1024;
 
+/// The guest path the rootfs build bakes the agent binary in at, and the path a host boots as the
+/// VM's workload when it wants an agent to talk to. One definition, because the builder and the
+/// dialer live in different crates and a drifted copy boots a machine that runs nothing.
+pub const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
+
 /// Scheme prefix for the vsock listener spec (`vsock`).
 pub const VSOCK_SCHEME: &str = "vsock";
 
@@ -80,6 +85,9 @@ enum Tag {
     PutFile = 6,
     File = 7,
     TimedOut = 8,
+    ExecPty = 9,
+    Stdin = 10,
+    Resize = 11,
 }
 
 impl Tag {
@@ -93,6 +101,9 @@ impl Tag {
             6 => Some(Self::PutFile),
             7 => Some(Self::File),
             8 => Some(Self::TimedOut),
+            9 => Some(Self::ExecPty),
+            10 => Some(Self::Stdin),
+            11 => Some(Self::Resize),
             _ => None,
         }
     }
@@ -116,6 +127,19 @@ pub enum Request {
         artifacts: Vec<String>,
         timeout_ms: Option<NonZeroU32>,
     },
+    /// Execute a command on a pseudo-terminal in the guest and stream it interactively: output
+    /// arrives as [`Response::Stdout`] (a pty has one stream, the terminal), input as
+    /// [`Request::Stdin`], size changes as [`Request::Resize`], and the end as [`Response::Exit`].
+    ExecPty {
+        argv: Vec<String>,
+        env: Vec<(String, String)>,
+        cols: u16,
+        rows: u16,
+    },
+    /// Bytes for the running pty command's input: keystrokes, so redacted in logs.
+    Stdin(Vec<u8>),
+    /// The host terminal changed size; the guest pty follows it.
+    Resize { cols: u16, rows: u16 },
     /// Unrecognized request tag from a newer host; handled gracefully by the guest agent.
     Unknown { tag: u8 },
 }
@@ -150,6 +174,32 @@ impl std::fmt::Debug for Request {
                     .field("timeout_ms", timeout_ms)
                     .finish()
             }
+            Self::ExecPty {
+                argv,
+                env,
+                cols,
+                rows,
+            } => {
+                let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+                f.debug_struct("ExecPty")
+                    .field("argv", argv)
+                    .field(
+                        "env",
+                        &format_args!("<{} var(s), values redacted; keys: {keys:?}>", env.len()),
+                    )
+                    .field("cols", cols)
+                    .field("rows", rows)
+                    .finish()
+            }
+            Self::Stdin(bytes) => f
+                .debug_tuple("Stdin")
+                .field(&format_args!("<redacted; {} byte(s)>", bytes.len()))
+                .finish(),
+            Self::Resize { cols, rows } => f
+                .debug_struct("Resize")
+                .field("cols", cols)
+                .field("rows", rows)
+                .finish(),
             Self::Unknown { tag } => f.debug_struct("Unknown").field("tag", tag).finish(),
         }
     }
@@ -345,10 +395,74 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
             artifacts,
             timeout_ms,
         } => write_exec(w, argv, stdin, env, artifacts, *timeout_ms),
+        Request::ExecPty {
+            argv,
+            env,
+            cols,
+            rows,
+        } => write_exec_pty(w, argv, env, *cols, *rows),
+        Request::Stdin(bytes) => write_stdin(w, bytes),
+        Request::Resize { cols, rows } => {
+            let mut payload = [0u8; 4];
+            payload[..2].copy_from_slice(&cols.to_le_bytes());
+            payload[2..].copy_from_slice(&rows.to_le_bytes());
+            write_frame(w, Tag::Resize.as_u8(), &payload)
+        }
         Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
             "Request::Unknown (tag {tag}) is read-only and cannot be sent"
         ))),
     }
+}
+
+/// Serializes and sends an `ExecPty` request. The env values travel in a wiped buffer for
+/// [`write_exec`]'s reason: they are secrets by presumption.
+fn write_exec_pty(
+    w: &mut impl Write,
+    argv: &[String],
+    env: &[(String, String)],
+    cols: u16,
+    rows: u16,
+) -> Result<(), ChannelError> {
+    let cap = 4
+        + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
+        + 4
+        + env
+            .iter()
+            .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
+            .sum::<usize>()
+        + 4;
+    if cap > MAX_PAYLOAD {
+        return Err(ChannelError::PayloadTooLarge {
+            tag: Tag::ExecPty.as_u8(),
+            len: cap,
+        });
+    }
+    let mut payload = Zeroizing::new(Vec::with_capacity(cap));
+    put_u32(&mut payload, argv.len() as u32);
+    for arg in argv {
+        put_blob(&mut payload, arg.as_bytes());
+    }
+    put_u32(&mut payload, env.len() as u32);
+    for (key, value) in env {
+        put_blob(&mut payload, key.as_bytes());
+        put_blob(&mut payload, value.as_bytes());
+    }
+    payload.extend_from_slice(&cols.to_le_bytes());
+    payload.extend_from_slice(&rows.to_le_bytes());
+    write_frame(w, Tag::ExecPty.as_u8(), &payload)
+}
+
+/// Serializes and sends a `Stdin` frame from the caller's slice, staged in a wiped buffer:
+/// keystrokes are what passwords are typed as.
+fn write_stdin(w: &mut impl Write, bytes: &[u8]) -> Result<(), ChannelError> {
+    if bytes.len() > MAX_PAYLOAD {
+        return Err(ChannelError::PayloadTooLarge {
+            tag: Tag::Stdin.as_u8(),
+            len: bytes.len(),
+        });
+    }
+    let payload = Zeroizing::new(bytes.to_vec());
+    write_frame(w, Tag::Stdin.as_u8(), &payload)
 }
 
 /// Serializes and sends a `PutFile` request, wiping the secret-bearing payload on every exit.
@@ -468,6 +582,35 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             let (path, data) = read_path_blob(&payload)?;
             Ok(Request::PutFile { path, data })
         }
+        Some(Tag::ExecPty) => {
+            let argc = body.u32()? as usize;
+            let mut argv = Vec::new();
+            for _ in 0..argc {
+                argv.push(body.string()?);
+            }
+            let envc = body.u32()? as usize;
+            let mut env = Vec::new();
+            for _ in 0..envc {
+                env.push((body.string()?, body.string()?));
+            }
+            let cols = body.u16()?;
+            let rows = body.u16()?;
+            body.finish()?;
+            Ok(Request::ExecPty {
+                argv,
+                env,
+                cols,
+                rows,
+            })
+        }
+        Some(Tag::Stdin) => Ok(Request::Stdin(payload)),
+        Some(Tag::Resize) => {
+            let mut body = Body::new(&payload);
+            let cols = body.u16()?;
+            let rows = body.u16()?;
+            body.finish()?;
+            Ok(Request::Resize { cols, rows })
+        }
         _ => Ok(Request::Unknown { tag }),
     }
 }
@@ -583,6 +726,14 @@ impl<S: Read + Write> ClientConnection<S> {
     pub fn recv_response(&mut self) -> Result<Response, ChannelError> {
         read_response(&mut self.stream)
     }
+
+    /// Wraps a stream **without a handshake**, for the second half of a duplicated connection: an
+    /// interactive session sends input and reads output concurrently, which takes one handle per
+    /// direction over one already-handshaken stream. On a fresh stream this skips the version
+    /// check that [`connect`](Self::connect) exists to make.
+    pub fn resume(stream: S) -> Self {
+        Self { stream }
+    }
 }
 
 /// Guest-side connection handle for serving requests and emitting responses.
@@ -612,6 +763,12 @@ impl<S: Read + Write> ServerConnection<S> {
     pub fn send_response(&mut self, resp: &Response) -> Result<(), ChannelError> {
         write_response(&mut self.stream, resp)
     }
+
+    /// Wraps a stream **without a handshake**, for [`ClientConnection::resume`]'s reason on the
+    /// guest side: the pty session's output pump writes responses while the request loop reads.
+    pub fn resume(stream: S) -> Self {
+        Self { stream }
+    }
 }
 
 /// Bounds-checked payload deserialization cursor.
@@ -628,6 +785,11 @@ impl<'a> Body<'a> {
     fn u32(&mut self) -> Result<u32, ChannelError> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn u16(&mut self) -> Result<u16, ChannelError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
     fn blob(&mut self) -> Result<&'a [u8], ChannelError> {
@@ -821,6 +983,74 @@ mod tests {
         ));
     }
 
+    /// The interactive frames: an `ExecPty` with everything set, an empty-env one, keystrokes
+    /// with every byte value's worth of shape, and a resize. Exactness matters double here: a
+    /// mis-framed `Stdin` byte lands inside a shell as a keystroke nobody typed.
+    #[test]
+    fn interactive_requests_round_trip() {
+        for req in [
+            Request::ExecPty {
+                argv: vec!["/bin/sh".into()],
+                env: vec![("TERM".into(), "xterm-256color".into())],
+                cols: 120,
+                rows: 40,
+            },
+            Request::ExecPty {
+                argv: vec!["top".into(), "-d".into(), "1".into()],
+                env: vec![],
+                cols: 80,
+                rows: 24,
+            },
+            Request::Stdin(b"ls -la\r".to_vec()),
+            Request::Stdin(vec![0u8, 3, 4, 27, 255]),
+            Request::Stdin(vec![]),
+            Request::Resize { cols: 1, rows: 1 },
+            Request::Resize {
+                cols: u16::MAX,
+                rows: u16::MAX,
+            },
+        ] {
+            let mut buf = Vec::new();
+            write_request(&mut buf, &req).unwrap();
+            assert_eq!(read_request(&mut buf.as_slice()).unwrap(), req);
+        }
+    }
+
+    /// Keystrokes are what passwords are typed as, so `Stdin`'s debug form must never carry the
+    /// bytes; `ExecPty` redacts its env values for `Exec`'s reason.
+    #[test]
+    fn interactive_secrets_are_redacted_in_debug() {
+        let dbg = format!("{:?}", Request::Stdin(b"hunter2".to_vec()));
+        assert!(!dbg.contains("hunter2"), "{dbg}");
+        assert!(dbg.contains("7 byte(s)"), "{dbg}");
+
+        let dbg = format!(
+            "{:?}",
+            Request::ExecPty {
+                argv: vec!["sh".into()],
+                env: vec![("API_KEY".into(), "s3cr3t".into())],
+                cols: 80,
+                rows: 24,
+            }
+        );
+        assert!(!dbg.contains("s3cr3t"), "{dbg}");
+        assert!(dbg.contains("API_KEY"), "keys stay visible: {dbg}");
+    }
+
+    /// A resize frame with trailing bytes is refused, not read: the trailing byte is the next
+    /// frame's header being eaten.
+    #[test]
+    fn a_resize_frame_with_trailing_bytes_is_refused() {
+        let mut buf = Vec::new();
+        write_request(&mut buf, &Request::Resize { cols: 80, rows: 24 }).unwrap();
+        buf.push(0);
+        // Rebuild the length prefix to cover the extra byte, so the frame reads but the body
+        // does not parse.
+        let len = (buf.len() - 5) as u32;
+        buf[1..5].copy_from_slice(&len.to_le_bytes());
+        assert!(read_request(&mut buf.as_slice()).is_err());
+    }
+
     #[test]
     fn request_round_trips_including_unicode_and_empty() {
         for req in [
@@ -875,12 +1105,15 @@ mod tests {
             (Tag::PutFile, 6),
             (Tag::File, 7),
             (Tag::TimedOut, 8),
+            (Tag::ExecPty, 9),
+            (Tag::Stdin, 10),
+            (Tag::Resize, 11),
         ] {
             assert_eq!(tag.as_u8(), wire, "{tag:?} moved on the wire");
             assert_eq!(Tag::from_u8(wire), Some(tag), "{wire} no longer decodes");
         }
         assert_eq!(Tag::from_u8(0), None);
-        assert_eq!(Tag::from_u8(9), None);
+        assert_eq!(Tag::from_u8(12), None);
         assert_eq!(Tag::from_u8(255), None);
     }
 

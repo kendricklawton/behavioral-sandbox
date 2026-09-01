@@ -74,6 +74,10 @@ pub(crate) struct VmmArgs {
     /// invisible to `ls`, which is the right default for a helper run by hand.
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
+    /// A vsock mapping as `PORT=HOSTSOCKET`: the guest listens on the vsock port, and a host
+    /// process reaches it by connecting to the unix socket.
+    #[arg(long, value_name = "PORT=HOSTSOCKET")]
+    pub(crate) vsock: Option<String>,
 }
 
 /// A `TAG=HOSTPATH` share split at its **first** `=`, so a host path containing `=` survives.
@@ -85,6 +89,16 @@ pub(crate) fn split_share(spec: &str) -> Option<(&str, &Path)> {
         return None;
     }
     Some((tag, Path::new(path)))
+}
+
+/// A `PORT=HOSTSOCKET` vsock spec split at its **first** `=`, so a socket path containing `=`
+/// survives. `None` when the port is not a number or the path is empty.
+pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
+    let (port, path) = spec.split_once('=')?;
+    if path.is_empty() {
+        return None;
+    }
+    Some((port.parse().ok()?, Path::new(path)))
 }
 
 /// Whether `entry` can be a guest environment entry: an `=` with a non-empty key. The value may
@@ -120,6 +134,8 @@ enum HelperError {
     Share(String),
     /// A `--env` that is not `KEY=VALUE`.
     Env(String),
+    /// A `--vsock` that is not `PORT=HOSTSOCKET`.
+    Vsock(String),
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -135,6 +151,7 @@ impl std::fmt::Display for HelperError {
                 path.display()
             ),
             Self::Share(s) => write!(f, "--share {s:?} is not TAG=HOSTPATH"),
+            Self::Vsock(v) => write!(f, "--vsock {v:?} is not PORT=HOSTSOCKET"),
             Self::Env(e) => write!(
                 f,
                 "--env {e:?} is not KEY=VALUE; the guest's environ would carry it as a string \
@@ -170,6 +187,11 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
             return Err(HelperError::Env(entry.clone()));
         }
     }
+    let vsock = args
+        .vsock
+        .as_deref()
+        .map(|spec| split_vsock(spec).ok_or_else(|| HelperError::Vsock(spec.to_string())))
+        .transpose()?;
 
     // Bound **before** entering, and served from a thread, because `krun_start_enter` never gives
     // this one back. That other threads keep running under it is not an assumption: a C program
@@ -189,6 +211,11 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
 
     for (tag, path) in shares {
         machine = machine.share(tag, path)?;
+    }
+    if let Some((port, path)) = vsock {
+        // `listen = true` per the header: the guest listens on the port and connections are
+        // initiated from the host side, which is the agent-channel direction.
+        machine = machine.vsock_port(port, path, true)?;
     }
     if let Some(dir) = &args.workdir {
         machine = machine.workdir(dir)?;
@@ -292,6 +319,18 @@ mod tests {
         assert!(split_share("data=").is_none(), "no path");
     }
 
+    /// A vsock spec is a port and a socket path; half of one, or a port that is not a number, is
+    /// refused rather than mapped as something else.
+    #[test]
+    fn a_vsock_spec_parses_its_port_and_survives_equals_in_the_path() {
+        let (port, path) = split_vsock("1024=/run/a=b.sock").expect("well-formed");
+        assert_eq!(port, 1024);
+        assert_eq!(path, Path::new("/run/a=b.sock"));
+        assert!(split_vsock("notaport=/run/x").is_none());
+        assert!(split_vsock("1024=").is_none());
+        assert!(split_vsock("1024").is_none());
+    }
+
     /// An env entry without a `=` is refused rather than handed to the guest as a string no libc
     /// would parse back out of environ. An empty *value* stays legal, because `FOO=` is ordinary.
     #[test]
@@ -335,6 +374,8 @@ mod tests {
             "KEY=value",
             "--share",
             "data=/opt/a=b",
+            "--vsock",
+            "1024=/run/agent.sock",
         ];
         let parsed = Cli::parse_from(argv);
         let Cmd::Vmm(got) = parsed.cmd else {
@@ -350,5 +391,8 @@ mod tests {
         assert_eq!(got.env, vec!["KEY=value".to_string()]);
         let (tag, path) = split_share(&got.shares[0]).expect("the share parses");
         assert_eq!((tag, path), ("data", Path::new("/opt/a=b")));
+        let (port, sock) =
+            split_vsock(got.vsock.as_deref().expect("the vsock spec parses")).expect("well-formed");
+        assert_eq!((port, sock), (1024, Path::new("/run/agent.sock")));
     }
 }

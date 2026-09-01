@@ -39,6 +39,10 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 # Scrubs a secret from memory after `bsx-channel` sends it, so it doesn't linger in freed memory.
 zeroize = "1"
+# Safe wrappers over the pty, termios and signal syscalls the interactive shell path needs on both
+# ends; already in the graph through clap's `terminal_size`. Each crate names only the features it
+# uses. The crate's internal `unsafe` is the dep's, not ours.
+rustix = { version = "1", default-features = false, features = ["std"] }
 # Structured logging to stderr; stdout stays reserved for a run's result.
 tracing = "0.1"
 # `json`: the `--log-json` machine-readable encoding of the same structured events.

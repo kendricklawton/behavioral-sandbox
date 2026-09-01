@@ -14,6 +14,10 @@
 //!   child's pipe can never fill and block `wait()`. A merely *stalled* host only becomes a forward
 //!   error if the connection carries a **write deadline**, so the bound holds only for a stream with
 //!   read/write deadlines set (the caller's job).
+//! - **A pty session is the interactive path.** A [`Request::ExecPty`] runs the command on a
+//!   guest pseudo-terminal instead of pipes: output streams back as `Stdout`, keystrokes arrive as
+//!   `Stdin`, and `Resize` follows the host terminal. The two directions run concurrently, which
+//!   is why serving takes a stream that can be duplicated ([`SplitStream`]).
 //! - **Tree reaping (best-effort).** A command runs in a per-exec cgroup where the guest has a
 //!   writable cgroup v2 mount, so a double-forked grandchild or `setsid` daemon holding the output
 //!   pipes open is killed with the rest. Where the cgroup cannot be made the agent warns and falls
@@ -77,6 +81,8 @@ pub enum AgentError {
     WorkDir(std::io::Error),
     /// The command could not be spawned (e.g. no such binary, permission denied).
     Spawn(std::io::Error),
+    /// Allocating the pseudo-terminal, duplicating the stream, or driving the pty failed.
+    Pty(std::io::Error),
     /// Reaping the finished child failed.
     Wait(std::io::Error),
 }
@@ -90,6 +96,7 @@ impl std::fmt::Display for AgentError {
             AgentError::BadPath(p) => write!(f, "unsafe file path: {p}"),
             AgentError::WorkDir(e) => write!(f, "working dir: {e}"),
             AgentError::Spawn(e) => write!(f, "spawn command: {e}"),
+            AgentError::Pty(e) => write!(f, "pty session: {e}"),
             AgentError::Wait(e) => write!(f, "wait for command: {e}"),
         }
     }
@@ -99,7 +106,10 @@ impl std::error::Error for AgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AgentError::Channel(e) => Some(e),
-            AgentError::WorkDir(e) | AgentError::Spawn(e) | AgentError::Wait(e) => Some(e),
+            AgentError::WorkDir(e)
+            | AgentError::Spawn(e)
+            | AgentError::Wait(e)
+            | AgentError::Pty(e) => Some(e),
             _ => None,
         }
     }
@@ -108,6 +118,38 @@ impl std::error::Error for AgentError {
 impl From<ChannelError> for AgentError {
     fn from(e: ChannelError) -> Self {
         AgentError::Channel(e)
+    }
+}
+
+/// A byte stream that can be duplicated into a second, independently owned handle over the same
+/// connection, and whose read deadline can be changed after the fact.
+///
+/// The pty session needs both: its output pump writes responses while the request loop reads, so
+/// each direction takes its own handle; and an interactive session idles for as long as a human
+/// thinks, so the accept loop's anti-hang read deadline has to come off once one starts. Both
+/// transports the agent serves are a raw fd underneath, where `try_clone` is a `dup`.
+pub trait SplitStream: Read + Write + Send + Sized {
+    /// A second handle over the same underlying connection.
+    fn try_clone_stream(&self) -> std::io::Result<Self>;
+    /// Sets or clears the read deadline on the underlying connection, shared by every handle.
+    fn set_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl SplitStream for std::os::unix::net::UnixStream {
+    fn try_clone_stream(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+    fn set_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
+impl SplitStream for vsock::VsockStream {
+    fn try_clone_stream(&self) -> std::io::Result<Self> {
+        self.try_clone()
+    }
+    fn set_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(timeout)
     }
 }
 
@@ -123,7 +165,7 @@ impl From<ChannelError> for AgentError {
 /// **not** an error here, just a [`Response::Exit`] with a non-zero code.
 pub fn serve<S>(stream: S) -> Result<i32, AgentError>
 where
-    S: Read + Write + Send,
+    S: SplitStream + 'static,
 {
     serve_with(stream, RunDir::fresh())
 }
@@ -136,7 +178,7 @@ where
 /// As [`serve`].
 pub fn serve_session<S>(stream: S, dir: &Path) -> Result<i32, AgentError>
 where
-    S: Read + Write + Send,
+    S: SplitStream + 'static,
 {
     serve_with(stream, RunDir::at(dir))
 }
@@ -157,8 +199,11 @@ fn refuse_spawn<S: Read + Write>(
 /// is still reported to the host over the accepted connection.
 fn serve_with<S>(stream: S, workdir: std::io::Result<RunDir>) -> Result<i32, AgentError>
 where
-    S: Read + Write + Send,
+    S: SplitStream + 'static,
 {
+    // Duplicated before the connection consumes the stream: an `ExecPty` needs a second handle,
+    // and by the time one arrives there is no stream left to clone.
+    let dup = stream.try_clone_stream().map_err(AgentError::Pty)?;
     let mut conn = ServerConnection::accept(stream)?;
 
     let workdir = match workdir {
@@ -185,6 +230,14 @@ where
                 artifacts,
                 timeout_ms,
             } => break (argv, stdin, env, artifacts, timeout_ms),
+            Request::ExecPty {
+                argv,
+                env,
+                cols,
+                rows,
+            } => {
+                return serve_pty(conn, dup, workdir.path(), &argv, &env, cols, rows);
+            }
             // A newer host's request type: reply gracefully rather than dropping the link.
             Request::Unknown { tag } => {
                 conn.send_response(&Response::Error(format!("unsupported request (tag {tag})")))?;
@@ -684,6 +737,189 @@ fn pump<R, S>(
             Err(_) => break,
         }
     }
+}
+
+/// Serves one interactive pty session: runs `argv` on a fresh guest pseudo-terminal and pumps it
+/// until the command exits or the host goes away.
+///
+/// - **Two handles, two directions.** `conn` keeps reading requests (`Stdin` bytes into the pty,
+///   `Resize` onto it); a pump thread owns the duplicate and streams the pty's output back as
+///   `Stdout`, then reaps the child and sends `Exit`. A pty has one output stream, the terminal,
+///   so nothing here is `Stderr`.
+/// - **The controlling terminal is acquired by `setsid -c`**, the guest's own util, because the
+///   session/ctty dance happens between fork and exec, where this crate's `#![forbid(unsafe_code)]`
+///   cannot reach (`pre_exec` is `unsafe`). The rootfs contract pins the binary's presence.
+/// - **A host that vanishes does not strand the command.** The request loop's exit kills the child
+///   (unless the pump already reaped it), the pump then sees the pty close, and the session ends.
+fn serve_pty<S: SplitStream + 'static>(
+    mut conn: ServerConnection<S>,
+    dup: S,
+    workdir: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+    cols: u16,
+    rows: u16,
+) -> Result<i32, AgentError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    use rustix::termios::{Winsize, tcsetwinsize};
+
+    let Some((program, args)) = argv.split_first() else {
+        conn.send_response(&Response::Error("empty command".into()))?;
+        return Err(AgentError::EmptyCommand);
+    };
+    let span = tracing::info_span!("exec_pty", argv = ?argv, env_vars = env.len());
+    let _enter = span.enter();
+
+    // An interactive session idles for as long as a human thinks, so the accept loop's anti-hang
+    // read deadline comes off. The write deadline stays: a host that stops draining output for
+    // that long is gone, and the write error is what tears the session down.
+    dup.set_read_deadline(None).map_err(AgentError::Pty)?;
+
+    let pty = (|| {
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+        grantpt(&master)?;
+        unlockpt(&master)?;
+        let name = ptsname(&master, Vec::new())?;
+        Ok::<_, rustix::io::Errno>((master, name))
+    })();
+    let (master, pts_name) = match pty {
+        Ok(pair) => pair,
+        Err(e) => {
+            let e = std::io::Error::from(e);
+            conn.send_response(&Response::Error(format!("allocate a pty: {e}")))?;
+            return Err(AgentError::Pty(e));
+        }
+    };
+    let winsize = |cols: u16, rows: u16| Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // On the master before the child exists, so the command's very first `TIOCGWINSZ` sees the
+    // host's real size rather than 0x0 (which full-screen programs read as "not a terminal").
+    let _ = tcsetwinsize(&master, winsize(cols, rows));
+
+    let pts_path = std::path::PathBuf::from(std::ffi::OsString::from_vec(pts_name.into_bytes()));
+    let slave = match std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&pts_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            conn.send_response(&Response::Error(format!(
+                "open the pty slave {}: {e}",
+                pts_path.display()
+            )))?;
+            return Err(AgentError::Pty(e));
+        }
+    };
+
+    // `setsid -c`: new session, and the slave (the child's stdin) becomes its controlling
+    // terminal, which is what routes `^C` typed on the host to the command's process group.
+    //
+    // The `Command` lives only inside this closure, deliberately: it retains the cloned slave
+    // handles in its stdio slots for as long as it exists, and a slave fd still open in the
+    // parent is a master that never reads EOF, which is a pump that never reaps. Watched hang.
+    let stdio = |f: &std::fs::File| f.try_clone().map(Stdio::from);
+    let child = (|| {
+        let mut cmd = Command::new("setsid");
+        cmd.arg("-c").arg(program).args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        cmd.current_dir(workdir)
+            .stdin(stdio(&slave)?)
+            .stdout(stdio(&slave)?)
+            .stderr(stdio(&slave)?)
+            .spawn()
+    })();
+    // The parent's last slave handle closes here either way, so the master reads EOF exactly
+    // when the command (and whatever it left behind holding the terminal) is gone.
+    drop(slave);
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return Err(refuse_spawn(&mut conn, program, e)),
+    };
+    let child_pid = child.id();
+
+    let master_read = std::fs::File::from(master.try_clone().map_err(AgentError::Pty)?);
+    let mut master_write = std::fs::File::from(master);
+    let mut writer = ServerConnection::resume(dup);
+    let pump = std::thread::spawn(move || pump_pty(master_read, &mut child, &mut writer));
+
+    // The request loop: bytes into the pty, size changes onto it, anything else refused. It ends
+    // when the host closes (the normal case, after it saw `Exit`) or errors.
+    loop {
+        match conn.recv_request() {
+            Ok(Request::Stdin(bytes)) => {
+                if master_write.write_all(&bytes).is_err() {
+                    // The pty is gone because the command is: the pump is reporting the exit.
+                    break;
+                }
+            }
+            Ok(Request::Resize { cols, rows }) => {
+                let _ = tcsetwinsize(&master_write, winsize(cols, rows));
+            }
+            Ok(_) => {
+                let _ =
+                    conn.send_response(&Response::Error("one pty session per connection".into()));
+            }
+            Err(_) => break,
+        }
+    }
+
+    // A vanished host must not strand the command on a terminal nobody reads. Only while the pump
+    // still runs: once it has reaped, the pid is free for the kernel to reuse and must not be
+    // signalled.
+    if !pump.is_finished()
+        && let Some(pid) = rustix::process::Pid::from_raw(child_pid as i32)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    pump.join().unwrap_or_else(|_| {
+        Err(AgentError::Pty(std::io::Error::other(
+            "the pty pump panicked",
+        )))
+    })
+}
+
+/// The pty session's output half: streams the master's bytes to the host until the terminal
+/// closes, then reaps the command and reports how it ended. Runs on its own thread with its own
+/// connection handle, concurrently with the request loop.
+fn pump_pty<S: SplitStream>(
+    mut master: std::fs::File,
+    child: &mut Child,
+    writer: &mut ServerConnection<S>,
+) -> Result<i32, AgentError> {
+    let mut buf = [0u8; 8192];
+    loop {
+        match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if writer
+                    .send_response(&Response::Stdout(buf[..n].to_vec()))
+                    .is_err()
+                {
+                    // The host is gone; stop pumping and reap. The kill belongs to the request
+                    // loop, which is also unblocking about now for the same reason.
+                    break;
+                }
+            }
+            // EIO is the pty's EOF: the last slave handle closed. Anything else ends the pump the
+            // same way, with the wait below still reporting how the command ended.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let status = child.wait().map_err(AgentError::Wait)?;
+    let code = exit_code(&status);
+    writer.send_response(&Response::Exit { code })?;
+    tracing::info!(code, "pty session ended");
+    Ok(code)
 }
 
 /// A command's exit code, mapping signal death to the shell convention `128 + signal` so the host

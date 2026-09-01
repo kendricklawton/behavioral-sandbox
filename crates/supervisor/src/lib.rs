@@ -59,6 +59,32 @@ pub struct VmConfig {
     pub env: Vec<OsString>,
     /// Extra virtiofs shares, as `(tag, host path)`.
     pub shares: Vec<(String, PathBuf)>,
+    /// A vsock mapping as `(guest port, host unix socket path)`: the guest listens on the port,
+    /// and a host process reaches it by connecting to the socket. One is enough for the agent
+    /// channel, which is what it exists for.
+    pub vsock: Option<(u32, PathBuf)>,
+    /// What the guest's console (the helper's stdin and stdout) is attached to.
+    pub console: Console,
+}
+
+/// What the guest's console is attached to: the helper's stdin feeds it and its output is the
+/// helper's stdout, so the two travel together.
+///
+/// stderr stays inherited either way: it is where the helper reports a refusal, and a caller
+/// detaching the console should still see why a boot failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Console {
+    /// The caller's own stdin and stdout, which is what makes `bsx run` behave like the command
+    /// it wraps.
+    #[default]
+    Inherited,
+    /// Nothing: input from `/dev/null`, output discarded. For a caller whose session travels a
+    /// channel of its own (the interactive shell), where an attached console would *compete for
+    /// the caller's stdin* — libkrun reads it into the guest console, so every keystroke it won
+    /// would vanish from the session (watched happen) — and interleave boot noise into a raw
+    /// terminal.
+    Detached,
 }
 
 impl VmConfig {
@@ -81,6 +107,8 @@ impl VmConfig {
             args: Vec::new(),
             env: Vec::new(),
             shares: Vec::new(),
+            vsock: None,
+            console: Console::Inherited,
         }
     }
 
@@ -120,6 +148,13 @@ impl VmConfig {
         for (tag, path) in &self.shares {
             argv.push("--share".into());
             let mut spec = OsString::from(tag);
+            spec.push("=");
+            spec.push(path);
+            argv.push(spec);
+        }
+        if let Some((port, path)) = &self.vsock {
+            argv.push("--vsock".into());
+            let mut spec = OsString::from(port.to_string());
             spec.push("=");
             spec.push(path);
             argv.push(spec);
@@ -354,8 +389,14 @@ fn helper_command_unless_helper(
     let mut cmd = Command::new(helper_path()?);
     cmd.args(cfg.helper_argv(name))
         .env(HELPER_MARKER, "1")
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
+        .stdin(match cfg.console {
+            Console::Inherited => Stdio::inherit(),
+            Console::Detached => Stdio::null(),
+        })
+        .stdout(match cfg.console {
+            Console::Inherited => Stdio::inherit(),
+            Console::Detached => Stdio::null(),
+        })
         .stderr(Stdio::inherit());
     Ok(cmd)
 }
@@ -647,6 +688,7 @@ mod tests {
         c.args = vec!["-c".into(), "echo hi".into()];
         c.env = vec!["KEY=value".into()];
         c.shares = vec![("data".to_string(), PathBuf::from("/opt/a=b"))];
+        c.vsock = Some((1024, PathBuf::from("/run/agent.sock")));
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -679,6 +721,8 @@ mod tests {
             "KEY=value",
             "--share",
             "data=/opt/a=b",
+            "--vsock",
+            "1024=/run/agent.sock",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),
@@ -696,7 +740,7 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        for absent in ["--workdir", "--arg", "--env", "--share"] {
+        for absent in ["--workdir", "--arg", "--env", "--share", "--vsock"] {
             assert!(
                 !flat.contains(&absent.to_string()),
                 "{absent} should not appear: {flat:?}"
