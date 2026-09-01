@@ -1131,12 +1131,13 @@ exclude = ["fuzz"]
         map
     }
 
-    /// Every workspace crate forbids `unsafe`. Two doc pages state that rule; this is what makes it
-    /// a checked claim rather than a list.
+    /// Every workspace crate forbids `unsafe` except the raw libkrun bindings. Two doc pages state
+    /// that rule; this is what makes it a checked claim rather than a list.
     ///
-    /// Derived from the tree, so a new crate fails here until someone decides which side it is on.
-    /// The raw libkrun bindings will be the one exception when they land, because the library is C,
-    /// and adding them means changing this assertion deliberately rather than by accident.
+    /// Derived from the tree, so a new crate fails here until someone decides which side it is on,
+    /// and asserted as an **equality** rather than a subset: a second crate dropping the attribute
+    /// fails, and so does `krun-sys` gaining it, since the `unsafe extern` block it exists for
+    /// would then not compile.
     #[test]
     fn every_crate_forbids_unsafe() {
         let root = workspace_root();
@@ -1170,12 +1171,16 @@ exclude = ["fuzz"]
         }
         forbids.sort();
         allows.sort();
-        assert!(
-            allows.is_empty(),
-            "every crate must carry `#![forbid(unsafe_code)]`; these do not: {allows:?}. \
-             Forbidding: {forbids:?}"
+        assert_eq!(
+            allows,
+            [UNSAFE_CRATE],
+            "`{UNSAFE_CRATE}` is the one crate that may use `unsafe`, because libkrun is a C \
+             library. Forbidding: {forbids:?}"
         );
     }
+
+    /// The single directory under `crates/` exempt from `#![forbid(unsafe_code)]`.
+    const UNSAFE_CRATE: &str = "krun";
 
     /// The three copies of [`FUZZ_TARGETS`] that no constant can reach: a cargo manifest and a
     /// workflow file cannot read a Rust `const`, and a target's source file is named by the

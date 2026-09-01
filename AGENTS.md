@@ -79,6 +79,7 @@ list of packages. Therefore a stale `-p` fails the gate, not the terminal of a r
 
 | Path | Package | What it is |
 |---|---|---|
+| `crates/krun` | `bsx-krun` | The safe wrapper over libkrun: a builder that puts the library's call-ordering rules in types, and its negative-errno returns into a typed error. The raw declarations sit under it in a **private** module, so this API is the only way to reach libkrun. **The one crate that may use `unsafe`**, because the library is C. |
 | `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. Both ends share it without change, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO: it binds a socket, accepts a connection, and serves repeated execs from one session directory. It does no init work and is not the security boundary. Static musl, baked into the guest image. Its binary keeps the bare name `guest-agent`, because the image build bakes in that path. |
 | `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |

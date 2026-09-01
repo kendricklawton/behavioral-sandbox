@@ -1,0 +1,345 @@
+//! Raw FFI declarations for [libkrun](https://github.com/containers/libkrun), hand-written from
+//! `/usr/include/libkrun.h`.
+//!
+//! **Private on purpose.** These are the only unsafe surface in the workspace, and keeping them
+//! module-private rather than in a separate `-sys` package means the safe wrapper beside them is
+//! the *only* way to reach libkrun: a `pub` crate of raw declarations is one `Cargo.toml` line away
+//! from being bypassed. It also keeps the `#![forbid(unsafe_code)]` exemption at exactly one crate,
+//! which `every_crate_forbids_unsafe` asserts as an equality.
+//!
+//! **Nothing here is checked.** Each function returns libkrun's own `int32_t`: zero or a positive
+//! value on success, a negative errno on failure. Turning that into a typed error and encoding the
+//! call ordering is the parent module's job.
+//!
+//! - **Hand-written, not generated.** `bindgen` would add a build-time dependency on libclang and
+//!   emit the whole 66-symbol surface; the app uses a fraction of it, and a declaration a human
+//!   wrote against the header is a declaration a human can review.
+//! - **The subset is what phases 2 and 3 need**, plus the capability probes. The display and input
+//!   vtables (`libkrun_display.h`, `libkrun_input.h`) are phase 4's and are not declared here,
+//!   because a callback table is a different kind of binding and guessing at it now would be
+//!   unreviewable.
+//! - **A wrong signature is undefined behaviour, not a compile error.** The C header is the only
+//!   authority; `the_declared_arity_matches_the_installed_header` reads the installed header back
+//!   and compares, so a libkrun bump that changes an argument fails the gate on a host that has it.
+//!
+//! Verified against libkrun 1.19.4.
+
+// Transcribed as a set against the header, so the arity check covers the whole subset rather than
+// only the part wrapped so far. Phase 3 wraps the network and rlimit calls; 0.4 has yet to settle
+// what stops a running VM, and `krun_get_shutdown_eventfd` is efi-only, so neither is wrapped here.
+#![allow(dead_code)]
+
+use std::os::raw::{c_char, c_int};
+
+/// The virtiofs tag libkrun's init treats as the root filesystem (`KRUN_FS_ROOT_TAG`). Passing it
+/// to `krun_add_virtiofs2` is the long form of `krun_set_root`, with the DAX window under the
+/// caller's control.
+pub const KRUN_FS_ROOT_TAG: &str = "/dev/root";
+
+/// `level` values for `krun_set_log_level` and `krun_init_log`.
+pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
+/// See [`KRUN_LOG_LEVEL_OFF`].
+pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
+/// See [`KRUN_LOG_LEVEL_OFF`].
+pub const KRUN_LOG_LEVEL_WARN: u32 = 2;
+/// See [`KRUN_LOG_LEVEL_OFF`].
+pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
+/// See [`KRUN_LOG_LEVEL_OFF`].
+pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
+/// See [`KRUN_LOG_LEVEL_OFF`].
+pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
+
+/// `target_fd` value selecting libkrun's own default log target (stderr).
+pub const KRUN_LOG_TARGET_DEFAULT: c_int = -1;
+
+/// `style` values for `krun_init_log`: whether the library emits terminal colour escapes.
+pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
+/// See [`KRUN_LOG_STYLE_AUTO`].
+pub const KRUN_LOG_STYLE_ALWAYS: u32 = 1;
+/// See [`KRUN_LOG_STYLE_AUTO`].
+pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
+
+/// `feature` arguments for [`has_feature`](crate::has_feature). **Ask the library, never a version
+/// number**: which
+/// features a build carries depends on how it was compiled, not on what it is called.
+pub const KRUN_FEATURE_NET: u64 = 0;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_BLK: u64 = 1;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_GPU: u64 = 2;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_SND: u64 = 3;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_INPUT: u64 = 4;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_EFI: u64 = 5;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_TEE: u64 = 6;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_AMD_SEV: u64 = 7;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_INTEL_TDX: u64 = 8;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_AWS_NITRO: u64 = 9;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u64 = 10;
+/// See [`KRUN_FEATURE_NET`].
+pub const KRUN_FEATURE_INIT_BLOB: u64 = 11;
+
+// Every declaration is transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`
+// and `gid_t` are `u32` on both targets this project builds for; naming them as such keeps this
+// crate free of a libc dependency, and `the_uid_type_is_the_width_the_header_uses` pins the
+// assumption rather than leaving it to a comment.
+unsafe extern "C" {
+    // --- context lifecycle -------------------------------------------------------------------
+    /// Creates a configuration context. Returns the context id, or a negative errno.
+    pub fn krun_create_ctx() -> i32;
+    /// Frees a configuration context. Not the way a *running* VM ends: `krun_start_enter` never
+    /// returns, so a started context is freed by the process exiting.
+    pub fn krun_free_ctx(ctx_id: u32) -> i32;
+
+    // --- logging -----------------------------------------------------------------------------
+    /// Sets the library's log level. Superseded by [`krun_init_log`], which also takes a target.
+    pub fn krun_set_log_level(level: u32) -> i32;
+    /// Initializes logging with a target fd, level, colour style and option bitmask.
+    pub fn krun_init_log(target_fd: c_int, level: u32, style: u32, options: u32) -> i32;
+
+    // --- machine shape -----------------------------------------------------------------------
+    /// Sets vCPU count and RAM. `num_vcpus` is a `u8`, which is the ceiling the API can express.
+    pub fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
+    /// Sets the host directory served as the guest's root over virtiofs.
+    pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
+    /// Adds a virtiofs share under `c_tag`.
+    pub fn krun_add_virtiofs(ctx_id: u32, c_tag: *const c_char, c_path: *const c_char) -> i32;
+    /// Adds a virtiofs share with an explicit DAX window size (`shm_size`, zero to disable).
+    pub fn krun_add_virtiofs2(
+        ctx_id: u32,
+        c_tag: *const c_char,
+        c_path: *const c_char,
+        shm_size: u64,
+    ) -> i32;
+    /// Overlays an empty read-only directory onto an existing virtiofs tree, for a mount point the
+    /// host tree does not carry. `mode` is directory mode bits (e.g. `0o040755`).
+    pub fn krun_fs_add_overlay_dir(
+        ctx_id: u32,
+        fs_tag: *const c_char,
+        path: *const c_char,
+        mode: u32,
+    ) -> i32;
+
+    // --- workload ----------------------------------------------------------------------------
+    /// Sets the guest executable, its argv and its envp. Both arrays are NULL-terminated.
+    pub fn krun_set_exec(
+        ctx_id: u32,
+        exec_path: *const c_char,
+        argv: *const *const c_char,
+        envp: *const *const c_char,
+    ) -> i32;
+    /// Sets the guest environment alone, as a NULL-terminated `KEY=VALUE` array.
+    pub fn krun_set_env(ctx_id: u32, envp: *const *const c_char) -> i32;
+    /// Sets the guest working directory.
+    pub fn krun_set_workdir(ctx_id: u32, workdir_path: *const c_char) -> i32;
+    /// Sets `RLIMIT_*` values applied before the guest starts, as a NULL-terminated array.
+    pub fn krun_set_rlimits(ctx_id: u32, rlimits: *const *const c_char) -> i32;
+    /// Sets the uid the process drops to immediately before the microVM starts.
+    pub fn krun_setuid(ctx_id: u32, uid: u32) -> i32;
+    /// Sets the gid the process drops to immediately before the microVM starts.
+    pub fn krun_setgid(ctx_id: u32, gid: u32) -> i32;
+
+    // --- console and channels ----------------------------------------------------------------
+    /// Suppresses libkrun's default console device, for a caller providing its own.
+    pub fn krun_disable_implicit_console(ctx_id: u32) -> i32;
+    /// Stops libkrun injecting its default `/init.krun`. The header requires this **before**
+    /// `krun_set_root`, which the wrapper encodes by putting it on a stage `krun_set_root` consumes.
+    pub fn krun_disable_implicit_init(ctx_id: u32) -> i32;
+    /// Attaches a virtio-console backed by three host descriptors.
+    pub fn krun_add_virtio_console_default(
+        ctx_id: u32,
+        input_fd: c_int,
+        output_fd: c_int,
+        err_fd: c_int,
+    ) -> i32;
+    /// Maps a guest vsock port to a host unix socket. `listen` chooses which side binds.
+    pub fn krun_add_vsock_port2(
+        ctx_id: u32,
+        port: u32,
+        c_filepath: *const c_char,
+        listen: bool,
+    ) -> i32;
+
+    // --- network -----------------------------------------------------------------------------
+    /// Points the network backend at a gvproxy socket path. Takes a **mutable** `char *` in the
+    /// header, transcribed as such rather than quietly narrowed.
+    pub fn krun_set_gvproxy_path(ctx_id: u32, c_path: *mut c_char) -> i32;
+    /// Hands the network backend an already-connected passt descriptor.
+    pub fn krun_set_passt_fd(ctx_id: u32, fd: c_int) -> i32;
+    /// Sets host-to-guest port forwards, as a NULL-terminated array.
+    pub fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
+    /// Attaches a virtio-net device over a unix-stream backend.
+    pub fn krun_add_net_unixstream(
+        ctx_id: u32,
+        c_path: *const c_char,
+        fd: c_int,
+        c_mac: *mut u8,
+        features: u32,
+        flags: u32,
+    ) -> i32;
+
+    // --- lifecycle and probes ----------------------------------------------------------------
+    /// Returns an eventfd that stops the VM when written to. The stop path, since the thread that
+    /// called `krun_start_enter` never comes back to be asked.
+    pub fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32;
+    /// **Never returns.** Takes over the calling process, boots the guest, and exits with the
+    /// guest's status. This one fact is why every VM is a helper process.
+    pub fn krun_start_enter(ctx_id: u32) -> i32;
+    /// Whether this build carries a `KRUN_FEATURE_*` capability. A probe, never a version compare.
+    pub fn krun_has_feature(feature: u64) -> i32;
+    /// The hypervisor's vCPU ceiling on this host.
+    pub fn krun_get_max_vcpus() -> i32;
+    /// Whether this host can nest virtualization.
+    pub fn krun_check_nested_virt() -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    /// Where the declarations above were transcribed from. Read at test time rather than vendored,
+    /// so the comparison is against the header this host would actually link against.
+    const HEADER: &str = "/usr/include/libkrun.h";
+
+    /// The declared subset, paired with the argument count the header gives it. A signature is the
+    /// one thing in this crate a compiler cannot check: a wrong arity is undefined behaviour at
+    /// call time, not a build error, so it is checked against the header instead.
+    ///
+    /// Arity only. Types would need a C parser to compare honestly, and a half-parser that silently
+    /// matched the wrong thing would be worse than not claiming to check them.
+    const DECLARED: &[(&str, usize)] = &[
+        ("krun_create_ctx", 0),
+        ("krun_free_ctx", 1),
+        ("krun_set_log_level", 1),
+        ("krun_init_log", 4),
+        ("krun_set_vm_config", 3),
+        ("krun_set_root", 2),
+        ("krun_add_virtiofs", 3),
+        ("krun_add_virtiofs2", 4),
+        ("krun_fs_add_overlay_dir", 4),
+        ("krun_set_exec", 4),
+        ("krun_set_env", 2),
+        ("krun_set_workdir", 2),
+        ("krun_set_rlimits", 2),
+        ("krun_setuid", 2),
+        ("krun_setgid", 2),
+        ("krun_disable_implicit_console", 1),
+        ("krun_disable_implicit_init", 1),
+        ("krun_add_virtio_console_default", 4),
+        ("krun_add_vsock_port2", 4),
+        ("krun_set_gvproxy_path", 2),
+        ("krun_set_passt_fd", 2),
+        ("krun_set_port_map", 2),
+        ("krun_add_net_unixstream", 6),
+        ("krun_get_shutdown_eventfd", 1),
+        ("krun_start_enter", 1),
+        ("krun_has_feature", 1),
+        ("krun_get_max_vcpus", 0),
+        ("krun_check_nested_virt", 0),
+    ];
+
+    /// The argument list of `fn` in the header text, or `None` if it declares no such function.
+    ///
+    /// Anchored on the `int32_t` return type, not on the bare name: the header mentions functions
+    /// inside comments (`/* Feature constants for krun_has_feature() */`), and a search for the
+    /// name alone reads that comment's empty parens as a zero-argument declaration. A return type
+    /// this header stops using would surface as "not declared", which is loud, rather than as a
+    /// match against prose.
+    ///
+    /// Declarations wrap across lines, so this joins from the opening paren to the matching close
+    /// rather than reading one line.
+    fn header_arity(header: &str, name: &str) -> Option<usize> {
+        let at = header.find(&format!("int32_t {name}("))?;
+        let open = at + header[at..].find('(')?;
+        let close = open + header[open..].find(')')?;
+        let args = header[open + 1..close].trim();
+        if args.is_empty() || args == "void" {
+            return Some(0);
+        }
+        Some(args.split(',').count())
+    }
+
+    #[test]
+    fn the_declared_arity_matches_the_installed_header() {
+        let Ok(header) = std::fs::read_to_string(HEADER) else {
+            // A skipped test is a pass to cargo, so say what was not checked and why.
+            println!(
+                "SKIPPED the_declared_arity_matches_the_installed_header: {HEADER} is absent, so \
+                 the declarations were compared against nothing. Install libkrun to run it."
+            );
+            return;
+        };
+        let mut wrong = Vec::new();
+        for (name, declared) in DECLARED {
+            match header_arity(&header, name) {
+                Some(actual) if actual == *declared => {}
+                Some(actual) => wrong.push(format!("{name}: declared {declared}, header {actual}")),
+                None => wrong.push(format!("{name}: not declared in {HEADER}")),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "these declarations disagree with {HEADER}, which is undefined behaviour at call \
+             time rather than a build error:\n  {}",
+            wrong.join("\n  ")
+        );
+    }
+
+    /// The parser has to be able to fail, or the test above passes on anything. Both directions:
+    /// a function the header does not have, and one whose arity was transcribed wrong.
+    ///
+    /// The comment case is the one that actually bit: reading the first textual occurrence of the
+    /// name found `krun_has_feature()` in prose and called it zero arguments, which reported a
+    /// correct declaration as wrong. A parser that mistakes prose for a declaration is equally able
+    /// to wave a wrong one through.
+    #[test]
+    fn the_header_check_rejects_a_wrong_arity_and_a_missing_symbol() {
+        let header = "/* See krun_two() for details */\n\
+                      int32_t krun_two(uint32_t a, const char *b);\n\
+                      int32_t krun_none(void);\n";
+        assert_eq!(header_arity(header, "krun_two"), Some(2));
+        assert_eq!(header_arity(header, "krun_none"), Some(0));
+        assert_eq!(header_arity(header, "krun_absent"), None);
+        assert_ne!(header_arity(header, "krun_two"), Some(3));
+    }
+
+    /// `uid_t`/`gid_t` are declared here as `u32` rather than pulled from a libc crate. That holds
+    /// on both targets this project builds for, and it is an assumption rather than a fact the
+    /// compiler checks, so it is pinned where it is made.
+    #[test]
+    fn the_uid_type_is_the_width_the_header_uses() {
+        assert_eq!(
+            size_of::<u32>(),
+            4,
+            "uid_t/gid_t are 32-bit on Linux and macOS"
+        );
+    }
+
+    /// The library is linked and answers. Compiled out where `build.rs` found no libkrun, because
+    /// without the link directive this would not build at all.
+    #[cfg(krun_linked)]
+    #[test]
+    fn the_linked_library_answers_a_probe() {
+        // `krun_get_max_vcpus` touches no context and mutates nothing, which makes it the one call
+        // safe to make from a unit test: it asks the hypervisor a question and returns.
+        let max = unsafe { super::krun_get_max_vcpus() };
+        assert!(
+            max > 0,
+            "krun_get_max_vcpus returned {max}; a negative value is an errno from the hypervisor"
+        );
+    }
+
+    #[cfg(not(krun_linked))]
+    #[test]
+    fn the_linked_library_answers_a_probe() {
+        println!(
+            "SKIPPED the_linked_library_answers_a_probe: build.rs found no libkrun to link, so \
+             nothing in this crate was called. Install libkrun to run it."
+        );
+    }
+}

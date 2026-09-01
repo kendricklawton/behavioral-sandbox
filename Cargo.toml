@@ -6,6 +6,7 @@
 resolver = "2"
 members = [
     "crates/channel",
+    "crates/krun",
     "crates/guest-agent",
     "crates/cli",
     "crates/test-support",

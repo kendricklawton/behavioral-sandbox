@@ -1,0 +1,20 @@
+[package]
+name = "bsx-krun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "The safe wrapper over libkrun, and the raw declarations under it."
+# Cargo's native-library uniqueness guard: two crates in one graph cannot both claim `krun`, so a
+# second set of bindings entering by any route is a build error rather than a duplicate-symbol
+# surprise at link time.
+links = "krun"
+build = "build.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

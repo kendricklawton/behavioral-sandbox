@@ -106,6 +106,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsx-krun"
+version = "0.0.4"
+
+[[package]]
 name = "bsx-test-support"
 version = "0.0.4"
 dependencies = [

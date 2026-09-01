@@ -64,8 +64,8 @@ the mechanism serving it; the full text is [docs/architecture.md](docs/architect
   defended is withdrawn. libkrun has no snapshot surface, so every boot is a cold boot.
 
 The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate and checked by
-`every_crate_forbids_unsafe` in the gate. The libkrun bindings will be the one exception, because
-the library is C.
+`every_crate_forbids_unsafe` in the gate. `bsx-krun`, the libkrun wrapper, is the one exception,
+because the library is C; the gate asserts that list exactly, so a second one cannot appear quietly.
 
 ## Building
 
@@ -86,6 +86,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 
 | Path | Package | Role |
 |------|---------|------|
+| `crates/krun` | `bsx-krun` | The safe wrapper over libkrun, with the raw declarations private beneath it. The one crate that may use `unsafe`, because the library is C. |
 | `crates/channel` | `bsx-channel` | The host↔guest wire protocol: nearly dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by both ends. |
 | `crates/guest-agent` | `bsx-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/cli` | `bsx` | The `bsx` CLI. No verbs today. The binary on `PATH` is `bsx`. |
