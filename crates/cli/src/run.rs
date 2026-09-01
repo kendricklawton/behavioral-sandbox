@@ -27,10 +27,10 @@ pub(crate) struct RunArgs {
     /// `$BSX_GUEST_ROOT`, then `~/.local/share/bsx/rootfs`.
     #[arg(long, value_name = "DIR")]
     pub(crate) root: Option<PathBuf>,
-    /// vCPUs for this sandbox.
+    /// vCPUs for this sandbox. Falls back to `$BSX_VCPUS`, then 1.
     #[arg(long, value_name = "N")]
     pub(crate) vcpus: Option<NonZeroU8>,
-    /// Guest RAM in MiB.
+    /// Guest RAM in MiB. Falls back to `$BSX_MEM_MIB`, then 512.
     #[arg(long, value_name = "MIB")]
     pub(crate) mem: Option<NonZeroU32>,
     /// The guest working directory.
@@ -122,6 +122,38 @@ fn resolve_root_from(
     Ok(root)
 }
 
+/// A resource limit from its flag, else its `BSX_*` variable, else `None` (the supervisor's
+/// default). The same flag-then-env order as the guest root, with the config-file layer still
+/// deferred with it.
+pub(crate) fn resolve_limit<T: std::str::FromStr>(
+    flag: Option<T>,
+    var: &'static str,
+) -> Result<Option<T>, String> {
+    resolve_limit_from(flag, var, std::env::var_os(var))
+}
+
+/// [`resolve_limit`] with the environment read lifted out, for [`resolve_root_from`]'s reason.
+/// A variable that is set but does not parse is refused loudly rather than ignored: a typo'd
+/// limit that silently falls back is a config that lies about what it configured.
+fn resolve_limit_from<T: std::str::FromStr>(
+    flag: Option<T>,
+    var: &'static str,
+    env: Option<OsString>,
+) -> Result<Option<T>, String> {
+    if flag.is_some() {
+        return Ok(flag);
+    }
+    let Some(raw) = env else {
+        return Ok(None);
+    };
+    let Some(text) = raw.to_str() else {
+        return Err(format!("{var} is set but is not valid UTF-8"));
+    };
+    text.parse().map(Some).map_err(|_| {
+        format!("{var}={text:?} is not a usable limit (a non-zero number that fits the knob)")
+    })
+}
+
 /// `$XDG_DATA_HOME`, else `$HOME/.local/share`, else nothing to derive a default from.
 fn data_dir(xdg_data: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     xdg_data
@@ -136,10 +168,10 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
         return Err("no command after `--`".to_string());
     };
     let mut cfg = VmConfig::new(root, program);
-    if let Some(v) = args.vcpus {
+    if let Some(v) = resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
-    if let Some(m) = args.mem {
+    if let Some(m) = resolve_limit(args.mem, "BSX_MEM_MIB")? {
         cfg.mem_mib = m;
     }
     cfg.workdir = args.workdir.clone();
@@ -272,6 +304,31 @@ mod tests {
             cfg.mounts,
             [(PathBuf::from("/project"), PathBuf::from("/srv/code"))]
         );
+    }
+
+    /// A limit resolves flag first, then its variable, and a variable that does not parse is a
+    /// loud refusal naming it, never a silent fall-back to the default.
+    #[test]
+    fn a_limit_resolves_flag_then_env_and_refuses_a_typo() {
+        let flag = NonZeroU8::new(4);
+        let env = Some(OsString::from("2"));
+        assert_eq!(
+            resolve_limit_from(flag, "BSX_VCPUS", env.clone()).expect("the flag wins"),
+            flag
+        );
+        assert_eq!(
+            resolve_limit_from::<NonZeroU8>(None, "BSX_VCPUS", env).expect("the env fills in"),
+            NonZeroU8::new(2)
+        );
+        assert_eq!(
+            resolve_limit_from::<NonZeroU8>(None, "BSX_VCPUS", None).expect("unset means unset"),
+            None
+        );
+        for bad in ["zero-is-not-a-machine", "0", "-1", ""] {
+            let err = resolve_limit_from::<NonZeroU8>(None, "BSX_VCPUS", Some(OsString::from(bad)))
+                .expect_err("a set-but-broken limit must refuse");
+            assert!(err.contains("BSX_VCPUS"), "names the variable: {err}");
+        }
     }
 
     /// A malformed share is refused here, before a VM is spawned to die on it.

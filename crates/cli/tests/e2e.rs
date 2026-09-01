@@ -135,6 +135,89 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     );
 }
 
+/// The 3.5 contract: the limits in the config are the machine the guest actually gets. Asked
+/// for 2 vCPUs and 256 MiB, the guest's own `nproc` says 2 and its `MemTotal` sits within a
+/// kernel-overhead band of the ask (measured 271 MiB for a 256 MiB config), not at the 512 MiB
+/// default and not at the host's size.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn the_configured_limits_are_what_the_guest_sees() {
+    if skipped("the_configured_limits_are_what_the_guest_sees") {
+        return;
+    }
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--vcpus", "2", "--mem", "256"])
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "nproc; awk '/MemTotal/{print $2}' /proc/meminfo",
+        ])
+        .output()
+        .expect("run bsx");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(
+        lines.next(),
+        Some("2"),
+        "nproc must be the configured 2: {stdout:?}"
+    );
+    let mem_kib: u64 = lines
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .expect("a MemTotal number");
+    let asked_kib = 256 * 1024;
+    assert!(
+        (asked_kib - 64 * 1024..=asked_kib + 64 * 1024).contains(&mem_kib),
+        "guest MemTotal {mem_kib} KiB is not within a kernel-overhead band of the 256 MiB ask"
+    );
+}
+
+/// The environment layer: with no flag, `BSX_VCPUS` decides, which is the flag-then-env order
+/// every layered knob here follows.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_limit_from_the_environment_reaches_the_guest() {
+    if skipped("a_limit_from_the_environment_reaches_the_guest") {
+        return;
+    }
+    let out = bsx()
+        .arg("run")
+        .env("BSX_VCPUS", "2")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--", "nproc"])
+        .output()
+        .expect("run bsx");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "2",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A machine larger than the host is a refusal before boot, not a guest that believes in RAM
+/// nothing can back.
+#[test]
+#[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
+fn a_machine_larger_than_the_host_is_refused_before_boot() {
+    let out = bsx()
+        .args(["run", "--root", "/tmp", "--mem", "4000000", "--", "true"])
+        .output()
+        .expect("run bsx");
+    if !Path::new("/proc/meminfo").exists() {
+        println!("SKIPPED a_machine_larger_than_the_host_is_refused_before_boot: no MemTotal");
+        return;
+    }
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("more RAM than this host"), "{err}");
+}
+
 /// The 3.3 contract: a host directory is read-write at the guest path, and edits land on the
 /// host. The `mkdir -p` mount point persisting in the image tree is the documented cost of
 /// libkrun's overlay-dir primitive being unusable, so it is asserted (and cleaned) rather than

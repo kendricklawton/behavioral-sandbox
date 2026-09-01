@@ -234,6 +234,15 @@ enum HelperError {
         /// The offending input, lossily rendered.
         input: String,
     },
+    /// More guest RAM than the host physically has. libkrun accepts it (guest RAM faults in
+    /// lazily) and the guest then believes in memory no host can back, which surfaces later as
+    /// the host OOMing instead of now as an error.
+    MemCeiling {
+        /// What the caller asked for, in MiB.
+        asked_mib: u32,
+        /// What the host has, in MiB.
+        host_mib: u32,
+    },
     /// An entry mixing `"` with a space, which libkrun's command-line codec was measured
     /// corrupting silently. Refused because a corrupted argv runs a command nobody wrote.
     CmdlineQuote {
@@ -267,6 +276,15 @@ impl std::fmt::Display for HelperError {
                 "{what} {input:?} carries a byte outside printable ASCII; libkrun passes the \
                  workload's argv and environment on the kernel command line and aborts on such \
                  a byte instead of reporting it"
+            ),
+            Self::MemCeiling {
+                asked_mib,
+                host_mib,
+            } => write!(
+                f,
+                "--mem {asked_mib} asks for more RAM than this host has ({host_mib} MiB); \
+                 libkrun would boot a guest believing in memory nothing can back, and the \
+                 failure would arrive later as the host running out"
             ),
             Self::CmdlineQuote { what, input } => write!(
                 f,
@@ -313,6 +331,14 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         .as_deref()
         .map(|spec| split_vsock(spec).ok_or_else(|| HelperError::Vsock(spec.to_string())))
         .transpose()?;
+    require_backable_mem(args.mem.get())?;
+    if args.vcpus.get() > MEASURED_VCPU_CLAMP {
+        eprintln!(
+            "bsx __vmm: warning: libkrun was measured silently clamping vCPU counts above \
+             {MEASURED_VCPU_CLAMP}; the guest may see fewer than the {} asked for",
+            args.vcpus
+        );
+    }
     let mut mounts = Vec::with_capacity(args.mounts.len());
     for spec in &args.mounts {
         let (guest, host) = split_mount(spec).ok_or_else(|| HelperError::Mount(spec.clone()))?;
@@ -408,6 +434,39 @@ fn bind_control_socket(name: &str) -> Result<(), HelperError> {
         })
         .map_err(HelperError::Socket)?;
     Ok(())
+}
+
+/// libkrun was **measured** (2026-09-01, 1.19.4, an 8-CPU host) silently clamping the vCPU count
+/// above this: 16 boots as 16, 17 and 24 boot as 16, and the config never learns. Above it the
+/// helper warns rather than refuses, because the bound may be different libkrun code or other
+/// hardware, and a warning stays true either way.
+const MEASURED_VCPU_CLAMP: u8 = 16;
+
+/// Host `MemTotal` in MiB, where the host exposes it. A host without a readable `/proc/meminfo`
+/// is left unchecked rather than guessed at: this is a capability probe, not a platform branch.
+fn host_mem_mib() -> Option<u32> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: u64 = meminfo
+        .lines()
+        .find(|l| l.starts_with("MemTotal:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
+    u32::try_from(kib / 1024).ok()
+}
+
+/// Refuses a `--mem` this host cannot physically back. Overcommit *across* VMs stays legal
+/// (guest RAM faults in lazily, which is what lets a cohort of idle VMs share a laptop); what is
+/// refused is a single machine larger than the host, which can never be honest.
+fn require_backable_mem(asked_mib: u32) -> Result<(), HelperError> {
+    match host_mem_mib() {
+        Some(host_mib) if asked_mib > host_mib => Err(HelperError::MemCeiling {
+            asked_mib,
+            host_mib,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Refuses an input the kernel command line cannot carry. See [`cmdline_safe`] for why this is a
@@ -547,6 +606,30 @@ mod tests {
         );
         assert!(split_mount("/project=").is_none(), "no host");
         assert!(split_mount("/project").is_none(), "no separator");
+    }
+
+    /// A machine larger than the host is refused with both numbers, because the alternative is
+    /// a guest that believes in RAM nothing can back and a failure that arrives as the host
+    /// OOMing later. Driven with a fabricated host size, since the check itself reads the real
+    /// one.
+    #[test]
+    fn a_mem_ask_beyond_the_host_is_refused_with_both_numbers() {
+        if let Some(host) = host_mem_mib() {
+            let err = require_backable_mem(host.saturating_add(1))
+                .expect_err("one MiB past the host must refuse");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&host.to_string()),
+                "names the host size: {msg}"
+            );
+            require_backable_mem(host).expect("exactly the host size passes");
+            require_backable_mem(1).expect("a small machine passes");
+        } else {
+            println!(
+                "SKIPPED a_mem_ask_beyond_the_host_is_refused_with_both_numbers: this host \
+                 exposes no readable MemTotal, so the ceiling is not checked here"
+            );
+        }
     }
 
     /// The crash guard: a byte outside printable ASCII in the workload's argv aborts the whole

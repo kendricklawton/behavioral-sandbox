@@ -44,10 +44,10 @@ pub(crate) struct ShellArgs {
     /// The guest root directory. Falls back like `bsx run`'s.
     #[arg(long, value_name = "DIR")]
     pub(crate) root: Option<PathBuf>,
-    /// vCPUs for this sandbox.
+    /// vCPUs for this sandbox. Falls back to `$BSX_VCPUS`, then 1.
     #[arg(long, value_name = "N")]
     pub(crate) vcpus: Option<std::num::NonZeroU8>,
-    /// Guest RAM in MiB.
+    /// Guest RAM in MiB. Falls back to `$BSX_MEM_MIB`, then 512.
     #[arg(long, value_name = "MIB")]
     pub(crate) mem: Option<std::num::NonZeroU32>,
     /// A host directory made read-write at a guest path, as `GUESTDIR=HOSTDIR`: the project
@@ -99,10 +99,10 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
     cfg.env = vec!["BSX_LOG=warn".into()];
     cfg.vsock = Some((VSOCK_PORT, channel_sock.clone()));
     cfg.console = Console::Detached;
-    if let Some(v) = args.vcpus {
+    if let Some(v) = crate::run::resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
-    if let Some(m) = args.mem {
+    if let Some(m) = crate::run::resolve_limit(args.mem, "BSX_MEM_MIB")? {
         cfg.mem_mib = m;
     }
     for spec in &args.shares {
