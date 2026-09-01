@@ -118,6 +118,69 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     assert_eq!(out.status.code(), Some(3), "the guest's code is the verb's");
 }
 
+/// The 3.3 contract: a host directory is read-write at the guest path, and edits land on the
+/// host. The `mkdir -p` mount point persisting in the image tree is the documented cost of
+/// libkrun's overlay-dir primitive being unusable, so it is asserted (and cleaned) rather than
+/// ignored: if it stops appearing, the mechanism changed and the docs should too.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
+    if skipped("a_mounted_directory_is_read_write_and_edits_land_on_the_host") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-mount");
+    std::fs::write(dir.path().join("f"), "from-host\n").expect("stage a host file");
+
+    let mount = format!("/project={}", dir.path().display());
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--mount", &mount])
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "cat /project/f && echo from-guest > /project/g",
+        ])
+        .output()
+        .expect("run bsx");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from-host\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("g")).expect("the guest's edit reached the host"),
+        "from-guest\n"
+    );
+    let leftover = guest_root().join("project");
+    assert!(
+        leftover.is_dir(),
+        "the mkdir -p mount point lands in the image tree; if this stops, the mechanism changed"
+    );
+    std::fs::remove_dir(&leftover).expect("tidy the documented drift");
+}
+
+/// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
+/// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
+#[test]
+#[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
+fn a_non_ascii_argument_is_refused_not_aborted_on() {
+    let out = bsx()
+        .args(["run", "--root", "/tmp", "--", "echo", "\u{e9}"])
+        .output()
+        .expect("run bsx");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a refusal, not the SIGABRT this class used to be"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("printable ASCII"), "names the rule: {err}");
+}
+
 /// A root that is not a directory is refused before any boot, with the message naming the fix.
 #[test]
 #[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]

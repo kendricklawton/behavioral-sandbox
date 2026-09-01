@@ -59,6 +59,11 @@ pub struct VmConfig {
     pub env: Vec<OsString>,
     /// Extra virtiofs shares, as `(tag, host path)`.
     pub shares: Vec<(String, PathBuf)>,
+    /// Host directories made read-write inside the guest, as `(guest path, host path)`. Edits
+    /// land on the host: this is the project-directory case, where the sandbox works on real
+    /// files. The helper wraps the workload in a mount preamble, so a VM with mounts needs
+    /// `/bin/sh` and `mount` in its image.
+    pub mounts: Vec<(PathBuf, PathBuf)>,
     /// A vsock mapping as `(guest port, host unix socket path)`: the guest listens on the port,
     /// and a host process reaches it by connecting to the socket. One is enough for the agent
     /// channel, which is what it exists for.
@@ -107,6 +112,7 @@ impl VmConfig {
             args: Vec::new(),
             env: Vec::new(),
             shares: Vec::new(),
+            mounts: Vec::new(),
             vsock: None,
             console: Console::Inherited,
         }
@@ -150,6 +156,13 @@ impl VmConfig {
             let mut spec = OsString::from(tag);
             spec.push("=");
             spec.push(path);
+            argv.push(spec);
+        }
+        for (guest, host) in &self.mounts {
+            argv.push("--mount".into());
+            let mut spec = OsString::from(guest);
+            spec.push("=");
+            spec.push(host);
             argv.push(spec);
         }
         if let Some((port, path)) = &self.vsock {
@@ -688,6 +701,7 @@ mod tests {
         c.args = vec!["-c".into(), "echo hi".into()];
         c.env = vec!["KEY=value".into()];
         c.shares = vec![("data".to_string(), PathBuf::from("/opt/a=b"))];
+        c.mounts = vec![(PathBuf::from("/project"), PathBuf::from("/srv/code"))];
         c.vsock = Some((1024, PathBuf::from("/run/agent.sock")));
 
         let argv: Vec<String> = c
@@ -721,6 +735,8 @@ mod tests {
             "KEY=value",
             "--share",
             "data=/opt/a=b",
+            "--mount",
+            "/project=/srv/code",
             "--vsock",
             "1024=/run/agent.sock",
         ] {
@@ -740,7 +756,14 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        for absent in ["--workdir", "--arg", "--env", "--share", "--vsock"] {
+        for absent in [
+            "--workdir",
+            "--arg",
+            "--env",
+            "--share",
+            "--vsock",
+            "--mount",
+        ] {
             assert!(
                 !flat.contains(&absent.to_string()),
                 "{absent} should not appear: {flat:?}"

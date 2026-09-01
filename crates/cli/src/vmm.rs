@@ -78,6 +78,11 @@ pub(crate) struct VmmArgs {
     /// process reaches it by connecting to the unix socket.
     #[arg(long, value_name = "PORT=HOSTSOCKET")]
     pub(crate) vsock: Option<String>,
+    /// A host directory made read-write at a guest path, as `GUESTDIR=HOSTDIR` (the same
+    /// guest-thing=host-thing direction as `--share`). Repeatable. Mounting needs `/bin/sh` and
+    /// `mount` in the guest image, because the workload is wrapped in a mount preamble.
+    #[arg(long = "mount", value_name = "GUESTDIR=HOSTDIR")]
+    pub(crate) mounts: Vec<String>,
 }
 
 /// A `TAG=HOSTPATH` share split at its **first** `=`, so a host path containing `=` survives.
@@ -99,6 +104,86 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
         return None;
     }
     Some((port.parse().ok()?, Path::new(path)))
+}
+
+/// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
+/// survives. The guest path must be absolute: it names a mount point inside the guest, and a
+/// relative one would mean "relative to wherever init happens to be".
+pub(crate) fn split_mount(spec: &str) -> Option<(&Path, &Path)> {
+    let (guest, host) = spec.split_once('=')?;
+    if !guest.starts_with('/') || host.is_empty() {
+        return None;
+    }
+    Some((Path::new(guest), Path::new(host)))
+}
+
+/// `s` as a single-quoted shell word, safe to splice into the mount preamble: the one byte a
+/// single-quoted string cannot carry is `'`, which becomes `'\''`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The virtiofs tag for mount `i`. Ours by construction, so it needs no quoting or validation
+/// beyond staying under virtio's 36-byte tag limit, which one digit of index cannot reach.
+fn mount_tag(i: usize) -> String {
+    format!("bsx-mnt-{i}")
+}
+
+/// The `sh -c` script that creates every `--mount`'s guest directory, mounts its tag there, and
+/// then becomes the real workload, with the command spliced in as single-quoted words so its
+/// exit code and PATH resolution match the unwrapped exec. A failed step stops the boot loudly
+/// (exit 2 on the console) rather than running the command with a directory silently missing.
+///
+/// **The script's grammar is dictated by the transport, not by taste.** It travels as one argv
+/// entry on the kernel command line, whose codec was measured (2026-09-01, libkrun 1.19.4)
+/// corrupting a space inside a double-quoted span (`a "b c" d` arrives as `a "bc" d"`) while
+/// carrying single-quoted spans intact. So: one line, no double quote anywhere, every path and
+/// command word through [`sh_quote`], and the usual `exec "$0" "$@"` tail replaced by splicing.
+///
+/// `mkdir -p` writes the mount point through the root virtiofs, so an empty directory lands in
+/// the shared image tree on the host and survives the VM; `build-rootfs --verify` reads that as
+/// drift, which is the honest report. `krun_fs_add_overlay_dir` was the way to avoid it and is
+/// unusable: against libkrun 1.19.4 a configuration it accepted aborts the VMM inside
+/// `krun_start_enter` (`InvalidAscii`, `src/vmm/src/builder.rs:1073`), measured 2026-09-01 with
+/// `KRUN_FEATURE_INIT_BLOB` present.
+fn mount_preamble(mounts: &[(&Path, &Path)], exec: &Path, args: &[String]) -> String {
+    let mut script = String::new();
+    for (i, (guest, _)) in mounts.iter().enumerate() {
+        let dir = sh_quote(&guest.to_string_lossy());
+        script.push_str(&format!(
+            "mkdir -p {dir} && mount -t virtiofs {tag} {dir} || {{ echo 'bsx: mounting' {dir} \
+             'failed' >&2; exit 2; }}; ",
+            tag = mount_tag(i),
+        ));
+    }
+    script.push_str("exec ");
+    script.push_str(&sh_quote(&exec.to_string_lossy()));
+    for arg in args {
+        script.push(' ');
+        script.push_str(&sh_quote(arg));
+    }
+    script
+}
+
+/// Whether `s` can ride the kernel command line, which is how libkrun hands the guest its
+/// workload: **printable ASCII only**. Not a style choice: a byte outside this range aborts the
+/// whole VMM inside `krun_start_enter` (`InvalidAscii`, unwrapped in libkrun's builder; measured
+/// 2026-09-01 against 1.19.4 with `echo é`, a newline argument, and a non-ASCII `--env` value),
+/// so the helper refuses here, where it can still be a typed error naming the byte.
+fn cmdline_safe(s: &OsStr) -> bool {
+    s.as_encoded_bytes()
+        .iter()
+        .all(|b| (0x20..=0x7e).contains(b))
+}
+
+/// Whether `s` survives the codec unchanged: the same measurement found a space inside a
+/// double-quoted span silently corrupted (`a "b c" d` arrives as `a "bc" d"`), which is worse
+/// than an abort because the guest runs a command nobody wrote. Refusing every entry that mixes
+/// `"` with a space is deliberately wider than the observed corruption, because the codec's
+/// exact grammar is libkrun's private business and a guess that under-refuses corrupts silently.
+fn codec_safe(s: &OsStr) -> bool {
+    let bytes = s.as_encoded_bytes();
+    !(bytes.contains(&b'"') && bytes.contains(&b' '))
 }
 
 /// Whether `entry` can be a guest environment entry: an `=` with a non-empty key. The value may
@@ -136,6 +221,24 @@ enum HelperError {
     Env(String),
     /// A `--vsock` that is not `PORT=HOSTSOCKET`.
     Vsock(String),
+    /// A `--mount` that is not `GUESTDIR=HOSTDIR` with an absolute guest path.
+    Mount(String),
+    /// An exec path, argument, or environment entry with a byte the kernel command line cannot
+    /// carry. Refused here because libkrun aborts the VMM on it instead of erroring.
+    CmdlineByte {
+        /// Which input carried it.
+        what: &'static str,
+        /// The offending input, lossily rendered.
+        input: String,
+    },
+    /// An entry mixing `"` with a space, which libkrun's command-line codec was measured
+    /// corrupting silently. Refused because a corrupted argv runs a command nobody wrote.
+    CmdlineQuote {
+        /// Which input carried it.
+        what: &'static str,
+        /// The offending input, lossily rendered.
+        input: String,
+    },
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -152,6 +255,21 @@ impl std::fmt::Display for HelperError {
             ),
             Self::Share(s) => write!(f, "--share {s:?} is not TAG=HOSTPATH"),
             Self::Vsock(v) => write!(f, "--vsock {v:?} is not PORT=HOSTSOCKET"),
+            Self::Mount(m) => write!(
+                f,
+                "--mount {m:?} is not GUESTDIR=HOSTDIR with an absolute guest path"
+            ),
+            Self::CmdlineByte { what, input } => write!(
+                f,
+                "{what} {input:?} carries a byte outside printable ASCII; libkrun passes the \
+                 workload's argv and environment on the kernel command line and aborts on such \
+                 a byte instead of reporting it"
+            ),
+            Self::CmdlineQuote { what, input } => write!(
+                f,
+                "{what} {input:?} mixes a double quote with a space, which libkrun's \
+                 command-line codec corrupts silently; rewrite it with single quotes"
+            ),
             Self::Env(e) => write!(
                 f,
                 "--env {e:?} is not KEY=VALUE; the guest's environ would carry it as a string \
@@ -192,6 +310,12 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         .as_deref()
         .map(|spec| split_vsock(spec).ok_or_else(|| HelperError::Vsock(spec.to_string())))
         .transpose()?;
+    let mut mounts = Vec::with_capacity(args.mounts.len());
+    for spec in &args.mounts {
+        let (guest, host) = split_mount(spec).ok_or_else(|| HelperError::Mount(spec.clone()))?;
+        require_dir("a mount", host)?;
+        mounts.push((guest, host));
+    }
 
     // Bound **before** entering, and served from a thread, because `krun_start_enter` never gives
     // this one back. That other threads keep running under it is not an assumption: a C program
@@ -212,6 +336,10 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     for (tag, path) in shares {
         machine = machine.share(tag, path)?;
     }
+    for (i, (_, host)) in mounts.iter().enumerate() {
+        // The device carrying the host directory; the guest path is the preamble's business.
+        machine = machine.share(&mount_tag(i), host)?;
+    }
     if let Some((port, path)) = vsock {
         // `listen = true` per the header: the guest listens on the port and connections are
         // initiated from the host side, which is the agent-channel direction.
@@ -221,9 +349,27 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         machine = machine.workdir(dir)?;
     }
 
-    let argv: Vec<&OsStr> = args.args.iter().map(OsStr::new).collect();
     let env: Vec<&OsStr> = args.env.iter().map(OsStr::new).collect();
-    machine = machine.exec(&args.exec, &argv, &env)?;
+    require_cmdline_safe("the exec path", args.exec.as_os_str())?;
+    for arg in &args.args {
+        require_cmdline_safe("a guest argument", OsStr::new(arg))?;
+    }
+    for entry in &env {
+        require_cmdline_safe("a guest environment entry", entry)?;
+    }
+    machine = if mounts.is_empty() {
+        let argv: Vec<&OsStr> = args.args.iter().map(OsStr::new).collect();
+        machine.exec(&args.exec, &argv, &env)?
+    } else {
+        // The workload becomes `sh -c '<mounts>; exec <command, quoted>'`: the mounts land
+        // before anything of the caller's runs, and the `exec` hands the process over with the
+        // exit code and PATH resolution the unwrapped form had.
+        let script = mount_preamble(&mounts, &args.exec, &args.args);
+        // Covers the guest mount paths, which are spliced into the script.
+        require_cmdline_safe("the mount preamble", OsStr::new(&script))?;
+        let argv: Vec<&OsStr> = vec![OsStr::new("-c"), OsStr::new(&script)];
+        machine.exec(Path::new("/bin/sh"), &argv, &env)?
+    };
 
     // Past here the process either becomes the guest or reports why it could not.
     Err(HelperError::Krun(machine.enter()))
@@ -258,6 +404,24 @@ fn bind_control_socket(name: &str) -> Result<(), HelperError> {
             }
         })
         .map_err(HelperError::Socket)?;
+    Ok(())
+}
+
+/// Refuses an input the kernel command line cannot carry. See [`cmdline_safe`] for why this is a
+/// crash guard rather than a style rule.
+fn require_cmdline_safe(what: &'static str, s: &OsStr) -> Result<(), HelperError> {
+    if !cmdline_safe(s) {
+        return Err(HelperError::CmdlineByte {
+            what,
+            input: s.to_string_lossy().into_owned(),
+        });
+    }
+    if !codec_safe(s) {
+        return Err(HelperError::CmdlineQuote {
+            what,
+            input: s.to_string_lossy().into_owned(),
+        });
+    }
     Ok(())
 }
 
@@ -329,6 +493,90 @@ mod tests {
         assert!(split_vsock("notaport=/run/x").is_none());
         assert!(split_vsock("1024=").is_none());
         assert!(split_vsock("1024").is_none());
+    }
+
+    /// The preamble is what runs before the caller's command: one line, no double quote anywhere
+    /// (the two constraints the cmdline codec was measured breaking), every mount and every
+    /// command word single-quoted, and the tail an `exec` into the caller's command.
+    #[test]
+    fn the_mount_preamble_mounts_each_tag_then_becomes_the_workload() {
+        let mounts = vec![
+            (Path::new("/project"), Path::new("/srv/a")),
+            (Path::new("/it's here"), Path::new("/srv/b")),
+        ];
+        // The command's own words go through `sh_quote` like the paths, so a word with spaces
+        // or quotes is data. (A word mixing `"` with a space never reaches here: the codec
+        // guard refuses it for every workload, wrapped or not.)
+        let script = mount_preamble(
+            &mounts,
+            Path::new("sh"),
+            &["-c".to_string(), "echo 'x y'".to_string()],
+        );
+        assert!(
+            !script.contains('\n'),
+            "one line, or the cmdline aborts: {script}"
+        );
+        assert!(
+            !script.contains('"'),
+            "no double quote, or the codec corrupts it: {script}"
+        );
+        assert!(script.contains("mkdir -p '/project' && mount -t virtiofs bsx-mnt-0 '/project'"));
+        assert!(
+            script.contains("'/it'\\''s here'"),
+            "a quote in a guest path is escaped, not spliced: {script}"
+        );
+        assert!(
+            script.ends_with(r#"exec 'sh' '-c' 'echo '\''x y'\'''"#),
+            "the command is spliced in quoted, so its own quotes are data: {script}"
+        );
+    }
+
+    /// A mount spec is guest=host with an absolute guest path; anything else is refused.
+    #[test]
+    fn a_mount_spec_requires_an_absolute_guest_path() {
+        let (guest, host) = split_mount("/project=/srv/a=b").expect("well-formed");
+        assert_eq!(guest, Path::new("/project"));
+        assert_eq!(host, Path::new("/srv/a=b"));
+        assert!(split_mount("project=/srv/a").is_none(), "relative guest");
+        assert!(split_mount("/project=").is_none(), "no host");
+        assert!(split_mount("/project").is_none(), "no separator");
+    }
+
+    /// The crash guard: a byte outside printable ASCII in the workload's argv aborts the whole
+    /// VMM inside libkrun, so it must be refused before entering, with the input named.
+    #[test]
+    fn a_byte_the_cmdline_cannot_carry_is_refused_not_aborted_on() {
+        for ok in ["echo", "hi there", "a=\"b\"; $x | { y; }"] {
+            assert!(cmdline_safe(OsStr::new(ok)), "{ok:?} should pass");
+        }
+        for bad in ["\u{e9}", "a\nb", "tab\the", "nul\0"] {
+            assert!(!cmdline_safe(OsStr::new(bad)), "{bad:?} must be refused");
+        }
+        let err = require_cmdline_safe("a guest argument", OsStr::new("\u{e9}"))
+            .expect_err("must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("kernel command line"), "says why: {msg}");
+        assert!(msg.contains("aborts"), "names the stake: {msg}");
+    }
+
+    /// The codec guard: a space inside a double-quoted span was measured arriving corrupted
+    /// (`a "b c" d` as `a "bc" d"`), so anything mixing `"` with a space is refused with the
+    /// rewrite named. Wider than the observed corruption on purpose.
+    #[test]
+    fn an_entry_the_codec_would_corrupt_is_refused_with_the_rewrite_named() {
+        assert!(codec_safe(OsStr::new("a\"b")), "a quote alone is fine");
+        assert!(codec_safe(OsStr::new("a b c")), "spaces alone are fine");
+        assert!(
+            codec_safe(OsStr::new("echo 'x y'")),
+            "single quotes carry spaces"
+        );
+        assert!(
+            !codec_safe(OsStr::new("a \"b c\" d")),
+            "the measured corruption"
+        );
+        let err = require_cmdline_safe("a guest argument", OsStr::new("echo \"x y\""))
+            .expect_err("must refuse");
+        assert!(err.to_string().contains("single quotes"), "{err}");
     }
 
     /// An env entry without a `=` is refused rather than handed to the guest as a string no libc

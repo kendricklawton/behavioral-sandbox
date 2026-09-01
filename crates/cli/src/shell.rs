@@ -50,7 +50,12 @@ pub(crate) struct ShellArgs {
     /// Guest RAM in MiB.
     #[arg(long, value_name = "MIB")]
     pub(crate) mem: Option<std::num::NonZeroU32>,
-    /// An extra read-write virtiofs share, as `TAG=HOSTPATH`. Repeatable.
+    /// A host directory made read-write at a guest path, as `GUESTDIR=HOSTDIR`: the project
+    /// case, where edits land on the host. Repeatable.
+    #[arg(long = "mount", value_name = "GUESTDIR=HOSTDIR")]
+    pub(crate) mounts: Vec<String>,
+    /// An extra virtiofs device, as `TAG=HOSTPATH`, for a guest that mounts by tag itself.
+    /// Repeatable; `--mount` is the one that also mounts.
     #[arg(long = "share", value_name = "TAG=HOSTPATH")]
     pub(crate) shares: Vec<String>,
     /// A `KEY=VALUE` entry for the shell's guest environment. Repeatable.
@@ -105,6 +110,14 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
             return Err(format!("--share {spec:?} is not TAG=HOSTPATH"));
         };
         cfg.shares.push((tag.to_string(), path.to_path_buf()));
+    }
+    for spec in &args.mounts {
+        let Some((guest, host)) = crate::vmm::split_mount(spec) else {
+            return Err(format!(
+                "--mount {spec:?} is not GUESTDIR=HOSTDIR with an absolute guest path"
+            ));
+        };
+        cfg.mounts.push((guest.to_path_buf(), host.to_path_buf()));
     }
     let name = args
         .name
