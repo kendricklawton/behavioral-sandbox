@@ -37,7 +37,7 @@ fn main() {
             emit_link();
         }
         _ => println!(
-            "cargo::warning=libkrun not found (no pkg-config entry). bsx-krun-sys compiled its \
+            "cargo::warning=libkrun not found (no pkg-config entry). bsx-krun compiled its \
              declarations, but nothing can link them: install libkrun, or set BSX_KRUN_LIB_DIR."
         ),
     }

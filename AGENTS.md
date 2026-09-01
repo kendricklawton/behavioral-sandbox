@@ -174,9 +174,9 @@ cargo xtask build-rootfs     # the guest image (Alpine + the GUEST_PACKAGES runt
   imperative and describe **what you did** ("fix: bound session reads by a deadline"). A mixed change
   takes its most significant type (`fix` before `refactor` before `test`). **Public-API changes carry
   the `api` scope** (`feat(api):` or `fix(api)!:`), so you can audit a downstream pin bump from the
-  log alone. The surface is the wire framing of `bsx-channel`, and `PINNED_SURFACE_CRATES` in
-  `xtask/src/main.rs` is the list `the_manual_names_the_whole_pinned_surface` holds this page to. The
-  supervisor joins it when it exists.
+  log alone. The surface is the wire framing of `bsx-channel` and the spawn and discovery API of
+  `bsx-supervisor`; `PINNED_SURFACE_CRATES` in `xtask/src/main.rs` is the list
+  `the_manual_names_the_whole_pinned_surface` holds this page to.
 - **Backwards compatibility follows the direction of the data.** Structs that the caller constructs
   (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and you can still
   check the invariants. Structs that the code returns (`RunResult`, `Artifact`, `ExecMetrics`) keep

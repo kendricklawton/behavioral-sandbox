@@ -6,8 +6,9 @@
 //! in a real (dev-)dependency crate rather than be copy-pasted. Never shipped (`publish = false`)
 //! and pure-std, so it stays a leaf every suite can borrow without coupling.
 //!
-//! The host-capability predicates and the small-filesystem fixtures that used to live here were the
-//! Firecracker suite's, and went with it.
+//! The small-filesystem fixtures that used to live here were the Firecracker suite's, and went
+//! with it. One host-capability probe is back ([`kvm_unusable`]), because the leak tests and the
+//! benches both refuse a host that cannot boot a VM and should refuse it with one message.
 
 #![forbid(unsafe_code)]
 // The helpers panic as the idiomatic test assertion, which the workspace's `clippy::panic` deny
@@ -15,6 +16,27 @@
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
+
+/// Why `/dev/kvm` cannot back a VM from this process, or `None` when it can.
+///
+/// Opened read-write, which is what a VMM needs, rather than tested for existence: the common
+/// failure is a user outside the `kvm` group, where the device exists, every boot dies, and an
+/// existence check reads that as "the VM never started" instead of naming the fix.
+#[must_use]
+pub fn kvm_unusable() -> Option<String> {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+    {
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("/dev/kvm is absent".into()),
+        Err(e) => Some(format!(
+            "/dev/kvm cannot be opened read-write ({e}); membership of the kvm group is the \
+             usual fix"
+        )),
+    }
+}
 
 /// A `Write` sink that appends into a shared buffer, for a test asserting on what was **logged**.
 ///

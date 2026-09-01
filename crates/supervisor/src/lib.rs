@@ -84,14 +84,18 @@ impl VmConfig {
         }
     }
 
-    /// The argument vector that re-enters this executable as this machine.
+    /// The argument vector that re-enters this executable as this machine, named `name`.
     ///
-    /// Public so a caller can print what would be run, and so the flag spellings have exactly one
-    /// definition for the lint in `xtask` to compare against the parser.
+    /// The name is on the argv because the helper is what binds the control socket: a spawn that
+    /// kept the name to itself would start a VM that discovery cannot see. Public so a caller can
+    /// print what would be run, and so the flag spellings have exactly one definition for the lint
+    /// in `xtask` to compare against the parser.
     #[must_use]
-    pub fn helper_argv(&self) -> Vec<OsString> {
+    pub fn helper_argv(&self, name: &str) -> Vec<OsString> {
         let mut argv: Vec<OsString> = vec![
             HELPER_SUBCOMMAND.into(),
+            "--name".into(),
+            name.into(),
             "--root".into(),
             self.root.clone().into(),
             "--vcpus".into(),
@@ -137,6 +141,9 @@ pub enum Error {
     /// This process is already a VM helper, so spawning would re-execute it forever. A caller that
     /// hits this has not dispatched [`HELPER_SUBCOMMAND`] before reaching for [`Vm::spawn`].
     AlreadyHelper,
+    /// A name the control socket would refuse. Caught before anything is spawned, because the
+    /// helper would only fail on it after the caller has lost the synchronous error path.
+    Name(String),
     /// Waiting on, signalling, or reaping the helper failed.
     Wait(std::io::Error),
 }
@@ -152,6 +159,12 @@ impl std::fmt::Display for Error {
                  so re-executing it would recurse. Dispatch the `{HELPER_SUBCOMMAND}` subcommand \
                  before spawning."
             ),
+            Self::Name(name) => write!(
+                f,
+                "{name:?} is not a usable VM name: {}, since the name becomes the control \
+                 socket's filename",
+                socket::name_rule()
+            ),
             Self::Wait(e) => write!(f, "waiting on the VM helper: {e}"),
         }
     }
@@ -161,7 +174,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::HelperPath(e) | Self::Spawn(e) | Self::Wait(e) => Some(e),
-            Self::AlreadyHelper => None,
+            Self::AlreadyHelper | Self::Name(_) => None,
         }
     }
 }
@@ -197,20 +210,25 @@ pub struct Vm {
     /// handed to somebody else. Taking the child out is what makes that unrepresentable, rather
     /// than a `reaped: bool` two code paths have to keep in step.
     child: Option<Child>,
-    /// The name a caller gave this VM, carried for messages and for the control socket 2.5 adds.
+    /// The name a caller gave this VM. The helper binds `<runtime>/bsx/<name>.sock` with it, which
+    /// is what [`discover`] lists.
     name: String,
 }
 
 impl Vm {
-    /// Spawns a helper process for `cfg`, re-executing this binary through [`helper_path`].
+    /// Spawns a helper process for `cfg`, re-executing this binary through [`helper_path`]. The
+    /// name travels on the helper's argv and becomes its control socket, so the VM this starts is
+    /// one [`discover`] can list; a name [`socket::valid_name`] refuses is refused here, before
+    /// there is a process to fail asynchronously.
     ///
     /// The helper inherits stdio: a VM's output is the caller's output, which is what makes
     /// `bsx run` behave like running the command. Redirecting it is the caller's business.
     pub fn spawn(name: impl Into<String>, cfg: &VmConfig) -> Result<Self, Error> {
-        let child = helper_command(cfg)?.spawn().map_err(Error::Spawn)?;
+        let name = name.into();
+        let child = helper_command(&name, cfg)?.spawn().map_err(Error::Spawn)?;
         Ok(Self {
             child: Some(child),
-            name: name.into(),
+            name,
         })
     }
 
@@ -313,8 +331,8 @@ impl Drop for Vm {
 ///
 /// Split from [`Vm::spawn`] so the "this executable, never `PATH`" property is testable without
 /// racing a child that exits before `/proc` can be read.
-fn helper_command(cfg: &VmConfig) -> Result<Command, Error> {
-    helper_command_unless_helper(cfg, std::env::var_os(HELPER_MARKER).is_some())
+fn helper_command(name: &str, cfg: &VmConfig) -> Result<Command, Error> {
+    helper_command_unless_helper(name, cfg, std::env::var_os(HELPER_MARKER).is_some())
 }
 
 /// The body of [`helper_command`] with the environment read lifted out.
@@ -322,12 +340,19 @@ fn helper_command(cfg: &VmConfig) -> Result<Command, Error> {
 /// Split so the recursion guard is a pure decision a test can drive both ways. Setting an
 /// environment variable is `unsafe` in this edition and this crate forbids `unsafe`, so a test that
 /// exercised the guard through the real environment could not be written here at all.
-fn helper_command_unless_helper(cfg: &VmConfig, already_helper: bool) -> Result<Command, Error> {
+fn helper_command_unless_helper(
+    name: &str,
+    cfg: &VmConfig,
+    already_helper: bool,
+) -> Result<Command, Error> {
     if already_helper {
         return Err(Error::AlreadyHelper);
     }
+    if !socket::valid_name(name) {
+        return Err(Error::Name(name.to_string()));
+    }
     let mut cmd = Command::new(helper_path()?);
-    cmd.args(cfg.helper_argv())
+    cmd.args(cfg.helper_argv(name))
         .env(HELPER_MARKER, "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -379,14 +404,19 @@ pub mod socket {
     /// back to `$TMPDIR` covers macOS, where `TMPDIR` is per-user, and `/tmp` is the last resort,
     /// which is **shared**, and is why the mode and owner are checked rather than assumed.
     pub fn runtime_dir() -> io::Result<PathBuf> {
+        use std::os::unix::fs::DirBuilderExt;
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .or_else(|| std::env::var_os("TMPDIR"))
             .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         let dir = base.join(DIR_NAME);
-        if !dir.exists() {
-            std::fs::create_dir_all(&dir)?;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-        }
+        // Created at its final mode rather than created and then tightened: create-then-chmod
+        // leaves a window at the caller's umask, and this directory can sit under a shared `/tmp`.
+        // Recursive, so a directory that already exists is not an error; whether the existing one
+        // is acceptable is the check below, on every resolution.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(&dir)?;
         require_private(&dir)?;
         Ok(dir)
     }
@@ -399,7 +429,7 @@ pub mod socket {
     fn require_private(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(dir)?;
-        if meta.uid() != nix_getuid() {
+        if meta.uid() != real_uid() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
@@ -425,7 +455,7 @@ pub mod socket {
 
     /// This process's real uid, read from `/proc/self/status` so the crate keeps its
     /// `#![forbid(unsafe_code)]` and takes no libc dependency for one integer.
-    fn nix_getuid() -> u32 {
+    fn real_uid() -> u32 {
         std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -437,6 +467,11 @@ pub mod socket {
             // A `/proc` this cannot read is a host this cannot check, and claiming uid 0 would make
             // the owner check pass by accident. `u32::MAX` is not a real uid, so it fails closed.
             .unwrap_or(u32::MAX)
+    }
+
+    /// The rule a usable name satisfies, spelled by the function every refusal quotes.
+    pub(crate) fn name_rule() -> String {
+        format!("1..={MAX_NAME} characters of [A-Za-z0-9_-]")
     }
 
     /// Whether `name` may become a socket file.
@@ -460,8 +495,8 @@ pub mod socket {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{name:?} is not a usable VM name: 1..={MAX_NAME} characters of \
-                     [A-Za-z0-9_-], since the name becomes a filename"
+                    "{name:?} is not a usable VM name: {}, since the name becomes a filename",
+                    name_rule()
                 ),
             ));
         }
@@ -534,11 +569,11 @@ pub mod discover {
         live_in(&socket::runtime_dir()?)
     }
 
-    /// [`live`] against an explicit directory.
-    ///
-    /// Split so the scan is testable: `live` reads the real runtime directory, where another VM on
-    /// the machine would change the answer, which makes a test either flaky or vacuous.
-    pub(crate) fn live_in(dir: &Path) -> io::Result<Vec<Found>> {
+    /// [`live`] against an explicit directory, for a caller whose helpers were pointed somewhere
+    /// other than the runtime directory: a test or bench that gives its VMs a private
+    /// `XDG_RUNTIME_DIR` scans `<that>/bsx` with this, where the real directory would mix in
+    /// whatever else the machine is running.
+    pub fn live_in(dir: &Path) -> io::Result<Vec<Found>> {
         let mut found: Vec<Found> = entries_in(dir)?
             .into_iter()
             .filter(|(_, path)| socket::is_live(path))
@@ -557,8 +592,8 @@ pub mod discover {
         reap_stale_in(&socket::runtime_dir()?)
     }
 
-    /// [`reap_stale`] against an explicit directory. Split for the reason [`live_in`] is.
-    pub(crate) fn reap_stale_in(dir: &Path) -> io::Result<usize> {
+    /// [`reap_stale`] against an explicit directory, for the caller [`live_in`] exists for.
+    pub fn reap_stale_in(dir: &Path) -> io::Result<usize> {
         let mut removed = 0;
         for (_, path) in entries_in(dir)? {
             if socket::clear_if_stale(&path)? {
@@ -614,7 +649,7 @@ mod tests {
         c.shares = vec![("data".to_string(), PathBuf::from("/opt/a=b"))];
 
         let argv: Vec<String> = c
-            .helper_argv()
+            .helper_argv("vm-under-test")
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
@@ -624,6 +659,8 @@ mod tests {
             "the helper is entered by subcommand"
         );
         for expected in [
+            "--name",
+            "vm-under-test",
             "--root",
             "/srv/root",
             "--vcpus",
@@ -654,7 +691,7 @@ mod tests {
     /// have to interpret.
     #[test]
     fn an_unset_option_contributes_no_flag() {
-        let argv = cfg().helper_argv();
+        let argv = cfg().helper_argv("plain");
         let flat: Vec<_> = argv
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -682,7 +719,7 @@ mod tests {
     /// read and turn a real assertion into a flaky one.
     #[test]
     fn the_spawn_command_runs_this_executable_not_a_path_lookup() {
-        let cmd = helper_command(&cfg()).expect("build the helper command");
+        let cmd = helper_command("vm", &cfg()).expect("build the helper command");
         assert_eq!(
             Path::new(cmd.get_program()),
             helper_path().expect("current_exe resolves"),
@@ -720,21 +757,54 @@ mod tests {
     /// by filling the machine with processes.
     #[test]
     fn a_helper_refuses_to_spawn_another_helper() {
-        let err = helper_command_unless_helper(&cfg(), true)
+        let err = helper_command_unless_helper("vm", &cfg(), true)
             .expect_err("a helper must refuse to spawn a helper");
         assert!(matches!(err, Error::AlreadyHelper), "got {err:?}");
         assert!(
             err.to_string().contains(HELPER_SUBCOMMAND),
             "names the fix: {err}"
         );
-        helper_command_unless_helper(&cfg(), false)
+        helper_command_unless_helper("vm", &cfg(), false)
             .expect("and builds normally when this process is not a helper");
+    }
+
+    /// The name a caller spawns with has to reach the helper's argv: the helper is what binds the
+    /// control socket, so a spawn that kept the name to itself would start a VM `discover` cannot
+    /// see, while `Vm::name()` claims otherwise.
+    #[test]
+    fn the_spawned_name_reaches_the_helper_argv() {
+        let cmd = helper_command("visible", &cfg()).expect("build the helper command");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--name")
+            .expect("the helper must be told its name");
+        assert_eq!(args.get(at + 1).map(String::as_str), Some("visible"));
+    }
+
+    /// A name the socket module would refuse becomes a synchronous error, not a helper that dies
+    /// after `spawn` already returned `Ok`.
+    #[test]
+    fn a_name_the_socket_would_refuse_is_refused_before_anything_spawns() {
+        let err = helper_command_unless_helper("../escape", &cfg(), false)
+            .expect_err("a traversal cannot become a socket filename");
+        assert!(
+            matches!(&err, Error::Name(n) if n == "../escape"),
+            "got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("[A-Za-z0-9_-]"),
+            "states the rule: {err}"
+        );
     }
 
     /// The marker has to reach the child, or the guard above never trips for a real helper.
     #[test]
     fn a_spawned_helper_carries_the_marker() {
-        let cmd = helper_command(&cfg()).expect("build the helper command");
+        let cmd = helper_command("vm", &cfg()).expect("build the helper command");
         let marked = cmd
             .get_envs()
             .any(|(k, v)| k == HELPER_MARKER && v.is_some());

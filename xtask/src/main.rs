@@ -641,9 +641,9 @@ fn setup() -> Result<()> {
 }
 
 /// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
-/// rule names. One today, since the engine that carried the other was deleted; the supervisor that
-/// replaces it joins this list when it exists.
-const PINNED_SURFACE_CRATES: [&str; 1] = ["bsx-channel"];
+/// rule names. The wire framing, and the spawn/discovery API both shipped binaries drive their
+/// VMs through.
+const PINNED_SURFACE_CRATES: [&str; 2] = ["bsx-channel", "bsx-supervisor"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///

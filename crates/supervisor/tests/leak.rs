@@ -31,9 +31,13 @@ const LONG_LIVED: &str = "sleep 30";
 const BOOT_GRACE: Duration = Duration::from_secs(5);
 
 /// Why this host cannot run these, or `None` when it can.
+///
+/// The KVM check opens the device rather than testing for its file: for a user outside the `kvm`
+/// group the device exists, every boot dies, and an existence check would let these run into an
+/// assertion saying the VM never started instead of a skip naming the fix.
 fn skip_reason() -> Option<String> {
-    if !Path::new("/dev/kvm").exists() {
-        return Some("/dev/kvm is absent".into());
+    if let Some(why) = bsx_test_support::kvm_unusable() {
+        return Some(why);
     }
     if !guest_root().is_dir() {
         return Some(format!(
@@ -181,6 +185,18 @@ fn a_supervisor_killed_mid_boot_leaves_no_vm() {
         "the VM never started a vCPU"
     );
     assert!(pid_is_live(pid), "the helper should still be running");
+    // The positive first, against the directory this test's helpers were actually pointed at: a
+    // scan that never sees the running VM would make the absence asserted below vacuous. (An
+    // earlier version scanned the test process's own runtime directory, where "midboot" could
+    // never appear, and passed while asserting nothing.)
+    let scan_dir = runtime.path().join("bsx");
+    assert!(
+        bsx_supervisor::discover::live_in(&scan_dir)
+            .expect("scan the private runtime directory")
+            .iter()
+            .any(|f| f.name == "midboot"),
+        "a running VM must be discoverable, or its absence after the kill proves nothing"
+    );
 
     child.kill().expect("kill the helper mid-boot");
     child.wait().expect("reap it");
@@ -194,9 +210,10 @@ fn a_supervisor_killed_mid_boot_leaves_no_vm() {
         "a control socket is still answering for a VM whose helper is dead"
     );
     assert!(
-        bsx_supervisor::discover::live()
-            .map(|v| v.iter().all(|f| f.name != "midboot"))
-            .unwrap_or(true),
+        bsx_supervisor::discover::live_in(&scan_dir)
+            .expect("scan the private runtime directory")
+            .iter()
+            .all(|f| f.name != "midboot"),
         "a killed VM is still being discovered"
     );
 }

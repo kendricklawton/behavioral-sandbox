@@ -13,11 +13,8 @@ clap.workspace = true
 # The host↔guest contract constants (`VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
 # writes the guest's init line from the same definition the driver dials, so they cannot drift.
 bsx-channel = { path = "../crates/channel" }
-# The driver, for `bench-boot`: it boots real microVMs and reads `boot_latency`. A dev-only
-# dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
-
-[dev-dependencies]
-# The shared scratch-dir guard for the tests, instead of a hand-rolled TempDir per test module.
+# The scratch-dir guard for the tests, and the `/dev/kvm` probe the benches refuse a host
+# with, so they and the supervisor's leak tests explain an unusable device the same way.
 bsx-test-support = { path = "../crates/test-support" }
 
 [lints]

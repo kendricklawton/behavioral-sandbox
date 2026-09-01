@@ -21,9 +21,9 @@
 //! # What it deliberately does not do
 //!
 //! No stop path. `krun_get_shutdown_eventfd` is efi-only and returns `-ENOTSUP` against a stock
-//! libkrun, and what stops a running VM here is an open question (`scratch/ROADMAP.md` 0.4).
-//! Wrapping the efi call would encode an answer nobody has established. Network and rlimits are
-//! phase 3's; their declarations are already in `sys`.
+//! libkrun, and what stops a running VM is a signal to the helper process (`bsx-supervisor`'s
+//! `Vm::stop`), so there is nothing of libkrun's to wrap. Network and rlimits are phase 3's;
+//! their declarations are already in `sys`.
 //!
 //! # Strings
 //!

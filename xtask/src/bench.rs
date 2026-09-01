@@ -19,7 +19,7 @@
 //! vCPU thread appearing. The guest's own share is inside the second number, not separated from it,
 //! and this file says so rather than implying a precision it does not have.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -71,10 +71,28 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
         let mut child = ctx.spawn_guest(&format!("bench-boot-{i}"), "true")?;
         let pid = child.id();
 
-        if !wait_until(BOOT_GRACE, || vm_is_running(pid) || !pid_is_live(pid)) {
+        // Whether a vCPU was ever *seen*, not merely waited for: the wait also ends when the
+        // process dies, and a sample taken then would record the guest's whole life as its
+        // "to vCPU" time rather than being dropped as the failed observation it is.
+        let mut saw_vcpu = false;
+        let ended = wait_until(BOOT_GRACE, || {
+            if vm_is_running(pid) {
+                saw_vcpu = true;
+                return true;
+            }
+            !pid_is_live(pid)
+        });
+        if !ended {
             let _ = child.kill();
             let _ = child.wait();
             bail!("boot {i}: no vCPU thread within {BOOT_GRACE:?}");
+        }
+        if !saw_vcpu {
+            let status = child.wait().context("reap the early-exiting helper")?;
+            bail!(
+                "boot {i}: the helper ended ({status}) before a vCPU was observed; run \
+                 `bsx __vmm` by hand to see why"
+            );
         }
         to_vcpu.push(started.elapsed().as_millis() as u64);
 
@@ -140,11 +158,22 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
         }
         let mut child = ctx.spawn_guest(&format!("bench-fp-{i}"), IDLE_GUEST)?;
         let pid = child.id();
-        if !wait_until(BOOT_GRACE, || vm_is_running(pid) || !pid_is_live(pid)) {
+        let mut saw_vcpu = false;
+        let ended = wait_until(BOOT_GRACE, || {
+            if vm_is_running(pid) {
+                saw_vcpu = true;
+                return true;
+            }
+            !pid_is_live(pid)
+        });
+        if !ended || !saw_vcpu {
             let _ = child.kill();
             let _ = child.wait();
             teardown(&mut cohort);
-            bail!("VM {i}: no vCPU thread within {BOOT_GRACE:?}");
+            bail!(
+                "VM {i}: never reached a running vCPU (an idle guest has no reason to exit; run \
+                 `bsx __vmm` by hand to see why)"
+            );
         }
         cohort.push(child);
         progress.tick(cohort.len(), "");
@@ -216,8 +245,11 @@ struct BenchContext {
 impl BenchContext {
     /// Resolves the inputs, refusing with the command that produces each missing one.
     fn resolve() -> Result<Self> {
-        if !Path::new("/dev/kvm").exists() {
-            bail!("/dev/kvm is absent: these benchmarks boot real VMs");
+        // Opened, not tested for existence: for a user outside the `kvm` group the device is
+        // there, every boot dies, and an existence check turns that into "no vCPU thread within
+        // 10s" instead of a refusal naming the fix.
+        if let Some(why) = bsx_test_support::kvm_unusable() {
+            bail!("{why}: these benchmarks boot real VMs");
         }
         // The **release** binary, deliberately: a debug build measures the wrong thing, and the old
         // suite's withdrawn numbers included a run whose profile was never recorded.

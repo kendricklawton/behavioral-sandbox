@@ -87,6 +87,12 @@ pub(crate) fn split_share(spec: &str) -> Option<(&str, &Path)> {
     Some((tag, Path::new(path)))
 }
 
+/// Whether `entry` can be a guest environment entry: an `=` with a non-empty key. The value may
+/// be empty, because `FOO=` is how an environment unsets-but-keeps a variable.
+pub(crate) fn well_formed_env(entry: &str) -> bool {
+    matches!(entry.split_once('='), Some((key, _)) if !key.is_empty())
+}
+
 /// Build the machine and enter it. **Returns only on failure**, mirroring the wrapper's own
 /// `enter`, because a success means this process is now the guest and will exit with its status.
 pub(crate) fn run(args: &VmmArgs) -> ExitCode {
@@ -112,6 +118,8 @@ enum HelperError {
     },
     /// A `--share` that is not `TAG=HOSTPATH`.
     Share(String),
+    /// A `--env` that is not `KEY=VALUE`.
+    Env(String),
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -127,6 +135,11 @@ impl std::fmt::Display for HelperError {
                 path.display()
             ),
             Self::Share(s) => write!(f, "--share {s:?} is not TAG=HOSTPATH"),
+            Self::Env(e) => write!(
+                f,
+                "--env {e:?} is not KEY=VALUE; the guest's environ would carry it as a string \
+                 no libc parses back"
+            ),
             Self::Socket(e) => write!(f, "the control socket: {e}"),
             Self::Krun(e) => write!(f, "{e}"),
         }
@@ -142,24 +155,39 @@ impl From<bsx_krun::Error> for HelperError {
 /// Returns `Infallible` in the `Ok` position: there is no success value because a successful start
 /// never comes back here. The type says so, so nobody writes code after it.
 fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperError> {
+    // Every argument is checked before the control socket is bound, so a refused invocation does
+    // not leave a socket file behind for a VM that never existed. A *libkrun* failure after the
+    // bind still leaves one, which is the leftover the supervisor's stale check exists for.
     require_dir("the root", &args.root)?;
+    let mut shares = Vec::with_capacity(args.shares.len());
+    for spec in &args.shares {
+        let (tag, path) = split_share(spec).ok_or_else(|| HelperError::Share(spec.clone()))?;
+        require_dir("a share", path)?;
+        shares.push((tag, path));
+    }
+    for entry in &args.env {
+        if !well_formed_env(entry) {
+            return Err(HelperError::Env(entry.clone()));
+        }
+    }
 
     // Bound **before** entering, and served from a thread, because `krun_start_enter` never gives
     // this one back. That other threads keep running under it is not an assumption: a C program
     // with a ticker thread was watched printing straight through a guest's boot, life and exit.
     //
-    // The listener is deliberately not stored. libkrun exits the process when the guest ends, which
-    // does not unwind, so there is nothing a `Drop` here could clean up: the socket file outliving
-    // this process is the normal case, and the supervisor's stale check is what handles it.
-    let _listener = args.name.as_deref().map(bind_control_socket).transpose()?;
+    // The listener moves into its accept thread and nothing here holds it. libkrun exits the
+    // process when the guest ends, which does not unwind, so there is nothing a `Drop` here could
+    // clean up: the socket file outliving this process is the normal case, and the supervisor's
+    // stale check is what handles it.
+    if let Some(name) = args.name.as_deref() {
+        bind_control_socket(name)?;
+    }
 
     let mut machine = bsx_krun::Context::new()?
         .root(&args.root)?
         .vm_config(args.vcpus, args.mem)?;
 
-    for spec in &args.shares {
-        let (tag, path) = split_share(spec).ok_or_else(|| HelperError::Share(spec.clone()))?;
-        require_dir("a share", path)?;
+    for (tag, path) in shares {
         machine = machine.share(tag, path)?;
     }
     if let Some(dir) = &args.workdir {
@@ -258,6 +286,18 @@ mod tests {
         assert!(split_share("data").is_none(), "no separator");
         assert!(split_share("=/opt").is_none(), "no tag");
         assert!(split_share("data=").is_none(), "no path");
+    }
+
+    /// An env entry without a `=` is refused rather than handed to the guest as a string no libc
+    /// would parse back out of environ. An empty *value* stays legal, because `FOO=` is ordinary.
+    #[test]
+    fn an_env_entry_that_is_not_key_value_is_refused() {
+        assert!(well_formed_env("KEY=value"));
+        assert!(well_formed_env("KEY="), "an empty value is a real entry");
+        assert!(well_formed_env("KEY=a=b"), "values may carry their own =");
+        assert!(!well_formed_env("KEY"), "no separator");
+        assert!(!well_formed_env("=value"), "no key");
+        assert!(!well_formed_env(""), "empty");
     }
 
     /// Every flag the supervisor will write has to parse back into the field it meant. Exercised
