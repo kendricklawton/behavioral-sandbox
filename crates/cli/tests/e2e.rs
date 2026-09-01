@@ -449,6 +449,26 @@ fn a_dry_run_prints_the_posture_and_boots_nothing() {
     );
 }
 
+/// A `--share` cannot take a tag `--mount` uses. The guest mounts by tag, so a duplicate left it
+/// mounting whichever device the kernel matched first: `--share bsx-mnt-0=X --mount /mnt=Y` put
+/// `X` at `/mnt` and `Y` nowhere, with `--dry-run` printing the mount that did not happen
+/// (measured 2026-09-01). Refused before boot, because nothing downstream can tell.
+#[test]
+#[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
+fn a_share_tag_that_would_shadow_a_mount_is_refused_before_boot() {
+    let out = bsx()
+        .args(["run", "--root", "/tmp"])
+        .args(["--share", "bsx-mnt-0=/tmp"])
+        .args(["--mount", "/mnt=/tmp"])
+        .args(["--", "true"])
+        .output()
+        .expect("run bsx");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bsx-mnt-0"), "names the tag: {err}");
+    assert!(err.contains("reserved"), "names the rule: {err}");
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

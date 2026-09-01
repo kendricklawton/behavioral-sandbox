@@ -145,8 +145,10 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     let mut vm = Vm::spawn(name.clone(), &cfg).map_err(|e| e.to_string())?;
     // Held only until the agent answers. Until this returns, the `Vm` still owns the helper, so a
     // guest that never comes up is torn down by the `?` below rather than left running.
+    // The dial says what it saw; what the VM did wrong is in the VM's own account of itself,
+    // which is why that file exists and why this names it instead of guessing.
     let dialed = crate::agent::dial(&channel, &mut vm)
-        .map_err(|e| format!("{e}; the VM's own report is in {}", log.display()))?;
+        .map_err(|e| format!("{e}; its own report is in {}", log.display()))?;
     drop(dialed);
     vm.detach().map_err(|e| e.to_string())?;
     Ok(Outcome::Running(name))

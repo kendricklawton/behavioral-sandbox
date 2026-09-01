@@ -15,7 +15,7 @@
 //! - **`exec` needs an agent**, which means a VM started by `bsx up`. A VM booted straight into a
 //!   workload has nothing listening to ask.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -53,6 +53,9 @@ pub(crate) struct ExecArgs {
     /// A `KEY=VALUE` entry for the command's environment. Repeatable.
     #[arg(long = "env", value_name = "KEY=VALUE")]
     pub(crate) env: Vec<String>,
+    /// Send this process's stdin to the command, read to end of input before it starts.
+    #[arg(long = "stdin", short = 'i')]
+    pub(crate) stdin: bool,
     /// The command, after `--`. Resolved by the guest, against the guest's `PATH`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -203,10 +206,15 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
 
     // Read before the dial, because this can wait on whatever is feeding stdin and there is no
     // reason to hold a connection into the guest open while it does.
-    let stdin = read_stdin()?;
+    let stdin = if args.stdin {
+        read_stdin()?
+    } else {
+        Vec::new()
+    };
 
     let channel_sock = socket::agent_path_for(&args.name).map_err(|e| e.to_string())?;
-    let (mut conn, _stream) = crate::agent::connect(&channel_sock).map_err(|e| e.to_string())?;
+    let (mut conn, _stream) =
+        crate::agent::connect(&channel_sock, &control_sock).map_err(|e| e.to_string())?;
     conn.send_exec(&args.command, &stdin, &env, &[] as &[&str], None)
         .map_err(|e| format!("start the command: {e}"))?;
 
@@ -227,30 +235,37 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
             }
             Ok(Response::Error(msg)) => return Err(format!("the agent refused: {msg}")),
             Ok(_) => {}
+            // A channel that ends mid-command is most often the VM ending under it, which the
+            // control socket can be *asked* rather than guessed at: "failed to fill whole buffer"
+            // is true and tells the caller nothing about what happened to their sandbox.
+            Err(e) if !socket::is_live(&control_sock) => {
+                return Err(format!(
+                    "the VM {:?} ended while the command was running ({e})",
+                    args.name
+                ));
+            }
             Err(e) => return Err(format!("the command ended abnormally: {e}")),
         }
     }
 }
 
-/// This process's stdin for the guest command, or nothing when there is a terminal on it.
+/// This process's stdin, read to end of input, for a caller that asked for it with `--stdin`.
 ///
-/// The agent's exec request carries stdin as one payload rather than a stream, so it has to be
-/// read to EOF before the command starts, and a terminal has no EOF to read to: waiting for one
-/// would hang on every interactive invocation. A capability probe, not a guess about how it was
-/// run.
+/// **Only when asked.** The agent's exec request carries stdin as one payload rather than a
+/// stream, so it has to be read to EOF before the command starts, and plenty of things hand a
+/// program an stdin that never reaches one: a job runner's idle pipe, a CI harness, an
+/// interactive terminal. Reading whenever stdin was not a terminal made `bsx exec vm -- echo hi`
+/// hang forever with no output under exactly such a pipe (watched, twice). So the flag, which is
+/// also the spelling every comparable tool uses.
 ///
 /// **An inherited stdin can be non-blocking, and that is not an error.** `O_NONBLOCK` belongs to
 /// the open file description, which a caller shares with whoever handed it over, so a read can
 /// return `EAGAIN` meaning "nothing yet" where this wants "nothing ever". Reported as a failure,
 /// that made `bsx exec` refuse to run anything at all under a harness whose stdin was
 /// non-blocking (watched happen). Waiting for readability and retrying is what a blocking read
-/// would have done, without setting a flag back on an fd this process does not own.
+/// would have done, without setting a flag back on a description this process does not own.
 fn read_stdin() -> Result<Vec<u8>, String> {
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Ok(Vec::new());
-    }
-    let mut reader = stdin
+    let mut reader = std::io::stdin()
         .lock()
         .take(u64::try_from(bsx_channel::MAX_PAYLOAD).unwrap_or(u64::MAX));
     let mut buf = Vec::new();

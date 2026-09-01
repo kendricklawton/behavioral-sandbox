@@ -143,8 +143,12 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         return Ok(0);
     }
     let mut vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
-    let (mut reader, stream) =
-        crate::agent::dial(&channel_sock, &mut vm).map_err(|e| e.to_string())?;
+    // This VM's console is discarded (a raw terminal is about to own it), so there is no report
+    // to point at: the likeliest cause of a session VM ending early is an image with no agent in
+    // it, and naming that beats naming nothing.
+    let (mut reader, stream) = crate::agent::dial(&channel_sock, &mut vm).map_err(|e| {
+        format!("{e}; is the guest image one with the agent baked in? (`cargo xtask build-rootfs`)")
+    })?;
 
     // Sized before raw mode, engaged before the request: output starts the moment the agent has
     // the command, and a cooked terminal would re-interpret it.

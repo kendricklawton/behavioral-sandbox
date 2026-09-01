@@ -8,8 +8,8 @@
 //!   guest is listening on the vsock port inside, and resets when the forward fails (watched
 //!   happen), so the **protocol handshake is the readiness probe** and a dial retries through it.
 //! - **A dial that runs out of grace is not the same failure as a VM that died.** [`Error`] keeps
-//!   the two apart, because a VM that ended before answering usually means the image carries no
-//!   agent, and one that is still there and silent means something else entirely.
+//!   the two apart, and neither says *why*: what a VM did wrong is in its own report, and a dial
+//!   that guessed would be a guess printed as a diagnosis. The caller adds what it knows.
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -37,9 +37,9 @@ pub(crate) type Dialed = (ClientConnection<UnixStream>, UnixStream);
 /// Why the agent could not be reached, kept apart so a caller can say the right thing: a VM that
 /// died is a different report from one that is simply busy.
 pub(crate) enum Error {
-    /// The VM ended before the agent answered.
+    /// The VM ended before the agent answered, described as the watcher saw it.
     VmEnded(String),
-    /// The grace ran out. The VM is still there, so it is booting slowly or already busy.
+    /// The grace ran out with the VM neither answering nor observed to have ended.
     Silent {
         /// The socket dialled, named because a caller may have derived it from a VM name.
         socket: std::path::PathBuf,
@@ -51,15 +51,15 @@ pub(crate) enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::VmEnded(how) => write!(
-                f,
-                "the VM ended ({how}) before the agent answered: is the guest image one with the \
-                 agent baked in? (`cargo xtask build-rootfs`)"
-            ),
+            Self::VmEnded(how) => {
+                write!(f, "the VM ended ({how}) before the agent answered")
+            }
+            // Deliberately claims nothing about why. The earlier wording said the VM was still
+            // running, which the `connect` path never checked, and named a missing agent as the
+            // cause, which was printed verbatim over a refused `--mem` (watched).
             Self::Silent { socket, last } => write!(
                 f,
-                "the agent on {} did not answer within {DIAL_GRACE:?}, and the VM is still \
-                 running (last attempt: {last})",
+                "the agent on {} did not answer within {DIAL_GRACE:?} (last attempt: {last})",
                 socket.display()
             ),
         }
@@ -77,10 +77,18 @@ pub(crate) fn dial(sock: &Path, vm: &mut Vm) -> Result<Dialed, Error> {
     dial_while(sock, ended, vm)
 }
 
-/// Dials the agent of a VM this process does not hold: nothing to watch, so only the grace ends
-/// the loop.
-pub(crate) fn connect(sock: &Path) -> Result<Dialed, Error> {
-    dial_while(sock, |()| None, &mut ())
+/// Dials the agent of a VM this process does not hold, watching the VM's **control socket** for
+/// the end this process cannot `wait` for.
+///
+/// Without it a VM that ends mid-call is indistinguishable from one that is slow, so the caller
+/// waits out the whole grace and is then told the agent was silent, which is true and useless.
+pub(crate) fn connect(sock: &Path, control: &Path) -> Result<Dialed, Error> {
+    let ended = |control: &mut &Path| {
+        (!bsx_supervisor::socket::is_live(control))
+            .then(|| Error::VmEnded("its control socket stopped answering".to_string()))
+    };
+    let mut watched = control;
+    dial_while(sock, ended, &mut watched)
 }
 
 /// The dial loop, with what ends it early left to the caller.
@@ -119,4 +127,39 @@ fn try_dial(sock: &Path) -> Result<Dialed, String> {
         .map_err(|e| e.to_string())?;
     stream.set_read_timeout(None).map_err(|e| e.to_string())?;
     Ok((conn, stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::Error;
+
+    /// A dial reports what it observed and nothing else. Both messages once said more than they
+    /// had checked: the silent one claimed the VM was still running, which the `connect` path
+    /// never looked at, and the ended one named a missing agent as the cause, which was printed
+    /// verbatim over a refused `--mem` (watched). What went wrong is the VM's to say.
+    #[test]
+    fn a_dial_failure_claims_only_what_it_checked() {
+        let silent = Error::Silent {
+            socket: PathBuf::from("/run/x.agent"),
+            last: "connection refused".to_string(),
+        }
+        .to_string();
+        assert!(silent.contains("/run/x.agent"), "{silent}");
+        assert!(silent.contains("connection refused"), "{silent}");
+        assert!(
+            !silent.contains("still running"),
+            "a silent dial does not know the VM is alive: {silent}"
+        );
+
+        let ended = Error::VmEnded("Code(2)".to_string()).to_string();
+        assert!(ended.contains("Code(2)"), "{ended}");
+        for guess in ["agent baked in", "build-rootfs"] {
+            assert!(
+                !ended.contains(guess),
+                "a dial does not diagnose why the VM ended: {ended}"
+            );
+        }
+    }
 }

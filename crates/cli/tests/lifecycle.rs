@@ -9,9 +9,11 @@
 //! Each test is given its own `XDG_RUNTIME_DIR`, so a run neither lists nor stops the VMs the
 //! person running it has open.
 
-// A test binary: `expect` is the idiomatic assertion in helpers outside `#[test]`.
-#![allow(clippy::expect_used)]
+// A test binary: `expect` is the idiomatic assertion in helpers outside `#[test]`, and `panic!`
+// is how a test reports a *hang* it had to bound itself rather than wait out.
+#![allow(clippy::expect_used, clippy::panic)]
 
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -160,6 +162,30 @@ fn a_sandbox_started_by_up_outlives_the_command_that_started_it() {
         "the log the boot would report into is missing"
     );
 
+    // The log takes the **guest console** as well as the helper's own stderr, which is the half
+    // that makes it worth pointing a caller at: a detached VM's console is otherwise discarded,
+    // and a boot that failed on it left the operator reading an empty file (watched). The agent
+    // announces itself on that console, so a healthy boot proves the plumbing.
+    let announced = std::fs::read_to_string(&log).expect("the log is readable");
+    assert!(
+        announced.contains(bsx_channel::GUEST_READY_MARKER),
+        "the guest console did not reach the log: {announced:?}"
+    );
+
+    // The channel runs commands in the sandbox, so it carries the lock its control socket does.
+    // libkrun binds it under the caller's umask, which left it world-connectable (measured).
+    for (sock, what) in [
+        (rt.path().join("bsx/outlives.agent"), "the agent channel"),
+        (rt.path().join("bsx/outlives.sock"), "the control socket"),
+    ] {
+        let mode = std::fs::metadata(&sock)
+            .expect("the socket exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{what} is mode {mode:04o}, not 0600");
+    }
+
     // The `up` process is gone: `output()` waited for it. So the VM has no parent holding it, and
     // it is still answering.
     let out = bsx(&rt)
@@ -267,7 +293,7 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
             rustix::io::ioctl_fionbio(&read, true).expect("make the read end non-blocking");
         }
         let child = bsx(&rt)
-            .args(["exec", "instdin", "--", "cat"])
+            .args(["exec", "instdin", "-i", "--", "cat"])
             .stdin(std::process::Stdio::from(read))
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -288,6 +314,42 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
         "through-the-pipe",
         "a non-blocking description"
     );
+
+    // Without the flag, an stdin nobody ever closes must not be read: a job runner's idle pipe
+    // has no end of input, and reading one made `bsx exec vm -- echo hi` hang forever with no
+    // output (watched). The write end stays open here for exactly that reason.
+    //
+    // Waited with a deadline rather than `output()`, because the failure being pinned is a
+    // *hang*: `output()` would block this suite instead of reporting, which is what it did.
+    let (read, _write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+    let mut child = bsx(&rt)
+        .args(["exec", "instdin", "--", "echo", "unblocked"])
+        .stdin(std::process::Stdio::from(read))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("run bsx exec");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll bsx exec") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("bsx exec read an stdin nobody ever closes, and never returned");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    assert!(status.success(), "bsx exec failed: {status}");
+    // Read after it exited, so the pipe is at EOF and this cannot block either.
+    let mut said = String::new();
+    child
+        .stdout
+        .take()
+        .expect("piped")
+        .read_to_string(&mut said)
+        .expect("read its output");
+    assert_eq!(said.trim(), "unblocked");
 }
 
 /// A VM booted straight into a workload has nothing to ask, and says so. Named because the

@@ -209,11 +209,20 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// The virtiofs tag for mount `i`. Ours by construction, so it needs no quoting or validation
-/// beyond staying under virtio's 36-byte tag limit, which the 8-byte prefix plus even a 20-digit
-/// index stays inside.
+/// The prefix every tag this helper invents carries, and which a caller's `--share` may not use.
+///
+/// **The tag is what the guest mounts by, not the flag it came from.** Two virtiofs devices under
+/// one tag leave the guest mounting whichever the kernel matches first, so a `--share bsx-mnt-0`
+/// beside a `--mount` put the caller's share at the mount point and the mount nowhere: the guest
+/// saw a host directory nobody asked for there, silently, and `--dry-run` printed the mount that
+/// did not happen (measured 2026-09-01).
+const RESERVED_TAG_PREFIX: &str = "bsx-";
+
+/// The virtiofs tag for mount `i`. Ours by construction, since [`RESERVED_TAG_PREFIX`] is refused
+/// to callers, so it needs no quoting or validation beyond staying under virtio's 36-byte tag
+/// limit, which the prefix plus even a 20-digit index stays inside.
 fn mount_tag(i: usize) -> String {
-    format!("bsx-mnt-{i}")
+    format!("{RESERVED_TAG_PREFIX}mnt-{i}")
 }
 
 /// The `sh -c` script that creates every `--mount`'s guest directory, mounts its tag there, and
@@ -306,6 +315,9 @@ enum HelperError {
     },
     /// A `--share` that is not `TAG=HOSTPATH`.
     Share(String),
+    /// A `--share` whose tag is one this helper invents for itself, which would leave the guest
+    /// mounting whichever device the kernel matched first.
+    ReservedTag(String),
     /// A `--env` that is not `KEY=VALUE`.
     Env(String),
     /// A `--vsock` that is not `PORT=HOSTSOCKET`.
@@ -361,6 +373,13 @@ impl std::fmt::Display for HelperError {
                 path.display()
             ),
             Self::Share(s) => write!(f, "--share {s:?} is not TAG=HOSTPATH"),
+            Self::ReservedTag(tag) => write!(
+                f,
+                "--share tag {tag:?} starts with {RESERVED_TAG_PREFIX:?}, which is reserved for \
+                 the devices --mount adds: two virtiofs devices under one tag leave the guest \
+                 mounting whichever the kernel matches first, so one of them silently serves the \
+                 other's directory. Pick a tag that does not start with {RESERVED_TAG_PREFIX:?}."
+            ),
             Self::Vsock(v) => write!(f, "--vsock {v:?} is not PORT=HOSTSOCKET"),
             Self::Mount(m) => write!(
                 f,
@@ -422,6 +441,9 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     let mut shares = Vec::with_capacity(args.shares.len());
     for spec in &args.shares {
         let (tag, path) = split_share(spec).ok_or_else(|| HelperError::Share(spec.clone()))?;
+        if tag.starts_with(RESERVED_TAG_PREFIX) {
+            return Err(HelperError::ReservedTag(tag.to_string()));
+        }
         require_dir("a share", path)?;
         shares.push((tag, path));
     }
@@ -499,6 +521,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         // `listen = true` per the header: the guest listens on the port and connections are
         // initiated from the host side, which is the agent-channel direction.
         machine = machine.vsock_port(port, path, true)?;
+        restrict_when_bound(path);
     }
     if let Some(dir) = &args.workdir {
         machine = machine.workdir(dir)?;
@@ -628,6 +651,41 @@ fn stop_this_vm() {
     let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
 }
 
+/// How long the mode fixer waits for libkrun to bind the channel socket, and how often it looks.
+/// Generous against a slow boot and bounded so the thread cannot outlive its usefulness; the
+/// socket appears inside `krun_start_enter`, which is milliseconds after this is spawned.
+const BIND_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const BIND_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Tightens the agent channel socket to `0600` once libkrun has bound it.
+///
+/// **The channel runs commands in the sandbox**, so it deserves the lock its control socket has.
+/// libkrun binds it inside `krun_start_enter`, under the caller's umask, which commonly leaves it
+/// world-connectable (measured: `srwxr-xr-x` against the control socket's `srw-------`), and there
+/// is no call to hand it a mode. So this waits for the file and fixes it, from a thread, because
+/// the one that would have done it is about to become a guest.
+///
+/// The runtime directory is `0700` and checked on every resolution, which is what actually keeps
+/// another user out during the window between bind and this; the mode is the second lock, for the
+/// same reason the control socket sets one.
+fn restrict_when_bound(path: &Path) {
+    let path = path.to_path_buf();
+    // Best-effort by construction: a VM whose socket could not be tightened still runs, and a
+    // failure here has nowhere to be reported once the main thread is inside libkrun.
+    let _ = std::thread::Builder::new()
+        .name("bsx-chan-mode".to_string())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + BIND_WAIT;
+            while std::time::Instant::now() < deadline {
+                if path.exists() {
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                    return;
+                }
+                std::thread::sleep(BIND_POLL);
+            }
+        });
+}
+
 /// libkrun was **measured** (2026-09-01, 1.19.4, an 8-CPU host) silently clamping the vCPU count
 /// above this: 16 boots as 16, 17 and 24 boot as 16, and the config never learns. Above it the
 /// helper warns rather than refuses, because the bound may be different libkrun code or other
@@ -735,6 +793,28 @@ mod tests {
         assert!(split_share("data").is_none(), "no separator");
         assert!(split_share("=/opt").is_none(), "no tag");
         assert!(split_share("data=").is_none(), "no path");
+    }
+
+    /// A caller's `--share` may not take a tag this helper invents, because the guest mounts by
+    /// tag: the duplicate would put one device's directory where the other's was asked for, and
+    /// nothing downstream could tell.
+    #[test]
+    fn a_share_tag_cannot_shadow_the_device_a_mount_adds() {
+        for i in [0usize, 1, 42] {
+            assert!(
+                mount_tag(i).starts_with(RESERVED_TAG_PREFIX),
+                "every invented tag must be inside the reserved namespace"
+            );
+        }
+        let (tag, _) = split_share("bsx-mnt-0=/tmp").expect("it parses; the refusal is separate");
+        assert!(tag.starts_with(RESERVED_TAG_PREFIX));
+        assert!(
+            !split_share("data=/tmp")
+                .expect("a plain tag parses")
+                .0
+                .starts_with(RESERVED_TAG_PREFIX),
+            "an ordinary tag is untouched by the rule"
+        );
     }
 
     /// A vsock spec is a port and a socket path; half of one, or a port that is not a number, is

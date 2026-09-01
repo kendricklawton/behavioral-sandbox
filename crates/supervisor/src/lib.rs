@@ -132,12 +132,17 @@ pub struct VmConfig {
     pub rootfs: RootFs,
     /// What the guest's console (the helper's stdin and stdout) is attached to.
     pub console: Console,
-    /// A file to take the helper's own stderr, instead of inheriting the caller's.
+    /// A file to take everything this VM says, instead of the caller's stderr.
     ///
     /// **A VM that outlives its caller must not hold the caller's stderr.** Inherited, the helper
     /// keeps the write end open after the caller has exited, so a caller whose stderr is a pipe
     /// waits for an EOF that never comes (watched: `bsx up` read through a pipe never returned),
     /// and anything the guest says later lands in whatever that terminal has since become.
+    ///
+    /// Takes the helper's own stderr always, and the **guest console** as well where
+    /// [`Console::Detached`] would otherwise discard it: a detached VM that failed to boot has
+    /// its explanation on that console, and a log without it is a file a caller is pointed at
+    /// and finds empty (watched).
     pub log: Option<PathBuf>,
 }
 
@@ -153,11 +158,11 @@ pub enum Console {
     /// it wraps.
     #[default]
     Inherited,
-    /// Nothing: input from `/dev/null`, output discarded. For a caller whose session travels a
-    /// channel of its own (the interactive shell), where an attached console would *compete for
-    /// the caller's stdin* — libkrun reads it into the guest console, so every keystroke it won
-    /// would vanish from the session (watched happen) — and interleave boot noise into a raw
-    /// terminal.
+    /// Nothing of the caller's: input from `/dev/null`, output to [`VmConfig::log`] if there is
+    /// one and discarded if there is not. For a caller whose session travels a channel of its own
+    /// (the interactive shell), where an attached console would *compete for the caller's stdin*
+    /// — libkrun reads it into the guest console, so every keystroke it won would vanish from the
+    /// session (watched happen) — and interleave boot noise into a raw terminal.
     Detached,
 }
 
@@ -500,6 +505,26 @@ fn helper_command_unless_helper(
     if !socket::valid_name(name) {
         return Err(Error::Name(name.to_string()));
     }
+    // Opened once and duplicated, because the console and the helper's stderr are two streams of
+    // one VM's account of itself and interleaving them in one file is the point.
+    let log = match &cfg.log {
+        // 0600 and truncating: one boot, one log, and not a file anyone else can read.
+        Some(path) => Some(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(Error::Log)?,
+        ),
+        None => None,
+    };
+    let console_out = match (cfg.console, &log) {
+        (Console::Inherited, _) => Stdio::inherit(),
+        (Console::Detached, Some(file)) => file.try_clone().map_err(Error::Log)?.into(),
+        (Console::Detached, None) => Stdio::null(),
+    };
     let mut cmd = Command::new(helper_path()?);
     cmd.args(cfg.helper_argv(name))
         .env(HELPER_MARKER, "1")
@@ -507,20 +532,9 @@ fn helper_command_unless_helper(
             Console::Inherited => Stdio::inherit(),
             Console::Detached => Stdio::null(),
         })
-        .stdout(match cfg.console {
-            Console::Inherited => Stdio::inherit(),
-            Console::Detached => Stdio::null(),
-        })
-        .stderr(match &cfg.log {
-            // 0600 and truncating: one boot, one log, and not a file anyone else can read.
-            Some(path) => std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(Error::Log)?
-                .into(),
+        .stdout(console_out)
+        .stderr(match log {
+            Some(file) => file.into(),
             None => Stdio::inherit(),
         });
     Ok(cmd)
