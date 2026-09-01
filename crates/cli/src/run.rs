@@ -250,6 +250,8 @@ mod tests {
             "data=/tmp",
             "--env",
             "K=v",
+            "--mount",
+            "/project=/srv/code",
             "--",
             "prog",
             "-x",
@@ -266,6 +268,10 @@ mod tests {
         assert_eq!(cfg.workdir.as_deref(), Some(Path::new("/w")));
         assert_eq!(cfg.env, [OsString::from("K=v")]);
         assert_eq!(cfg.shares, [("data".to_string(), PathBuf::from("/tmp"))]);
+        assert_eq!(
+            cfg.mounts,
+            [(PathBuf::from("/project"), PathBuf::from("/srv/code"))]
+        );
     }
 
     /// A malformed share is refused here, before a VM is spawned to die on it.

@@ -107,11 +107,13 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
 }
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
-/// survives. The guest path must be absolute: it names a mount point inside the guest, and a
-/// relative one would mean "relative to wherever init happens to be".
+/// survives. The guest path must be absolute (it names a mount point inside the guest, and a
+/// relative one would mean "relative to wherever init happens to be") and must not be `/`
+/// itself: mounting over the guest root mid-boot shadows the running system, which is never
+/// what a project mount meant.
 pub(crate) fn split_mount(spec: &str) -> Option<(&Path, &Path)> {
     let (guest, host) = spec.split_once('=')?;
-    if !guest.starts_with('/') || host.is_empty() {
+    if !guest.starts_with('/') || guest == "/" || host.is_empty() {
         return None;
     }
     Some((Path::new(guest), Path::new(host)))
@@ -124,7 +126,8 @@ fn sh_quote(s: &str) -> String {
 }
 
 /// The virtiofs tag for mount `i`. Ours by construction, so it needs no quoting or validation
-/// beyond staying under virtio's 36-byte tag limit, which one digit of index cannot reach.
+/// beyond staying under virtio's 36-byte tag limit, which the 8-byte prefix plus even a 20-digit
+/// index stays inside.
 fn mount_tag(i: usize) -> String {
     format!("bsx-mnt-{i}")
 }
@@ -538,6 +541,10 @@ mod tests {
         assert_eq!(guest, Path::new("/project"));
         assert_eq!(host, Path::new("/srv/a=b"));
         assert!(split_mount("project=/srv/a").is_none(), "relative guest");
+        assert!(
+            split_mount("/=/srv/a").is_none(),
+            "mounting over the guest root is refused"
+        );
         assert!(split_mount("/project=").is_none(), "no host");
         assert!(split_mount("/project").is_none(), "no separator");
     }
