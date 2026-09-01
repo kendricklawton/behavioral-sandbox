@@ -90,6 +90,7 @@ pub const KRUN_FEATURE_INIT_BLOB: u64 = 11;
 // and `gid_t` are `u32` on both targets this project builds for; naming them as such keeps this
 // crate free of a libc dependency, and `the_uid_type_is_the_width_the_header_uses` pins the
 // assumption rather than leaving it to a comment.
+#[cfg(krun_linked)]
 unsafe extern "C" {
     // --- context lifecycle -------------------------------------------------------------------
     /// Creates a configuration context. Returns the context id, or a negative errno.
@@ -199,6 +200,82 @@ unsafe extern "C" {
     /// Whether this host can nest virtualization.
     pub fn krun_check_nested_virt() -> i32;
 }
+
+/// Stub twins of every symbol the wrapper calls, compiled where `build.rs` found no libkrun.
+///
+/// A workspace build (and the gate) has to succeed on a host with no libkrun, and an undefined
+/// symbol fails at link even when the call that references it is unreachable. Each stub returns
+/// [`NOT_LINKED`], and the wrapper reports that as its not-linked error rather than reading an
+/// errno the stub would have had to invent.
+///
+/// Only the symbols with a caller: a declaration alone links fine, and an unstubbed symbol that
+/// gains a caller fails the no-libkrun build at link, which is the reminder to add its stub here.
+#[cfg(not(krun_linked))]
+#[allow(clippy::missing_safety_doc)] // stubs of foreign declarations; nothing here dereferences
+mod stub {
+    use super::c_char;
+
+    /// Any negative value fails the wrapper's `check`; the wrapper substitutes the not-linked
+    /// report without reading which one.
+    const NOT_LINKED: i32 = i32::MIN;
+
+    pub unsafe fn krun_create_ctx() -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_free_ctx(_ctx_id: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_disable_implicit_init(_ctx_id: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_set_root(_ctx_id: u32, _root_path: *const c_char) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_set_vm_config(_ctx_id: u32, _num_vcpus: u8, _ram_mib: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_add_virtiofs(
+        _ctx_id: u32,
+        _c_tag: *const c_char,
+        _c_path: *const c_char,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_add_vsock_port2(
+        _ctx_id: u32,
+        _port: u32,
+        _c_filepath: *const c_char,
+        _listen: bool,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_set_workdir(_ctx_id: u32, _workdir_path: *const c_char) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_set_exec(
+        _ctx_id: u32,
+        _exec_path: *const c_char,
+        _argv: *const *const c_char,
+        _envp: *const *const c_char,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_start_enter(_ctx_id: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_has_feature(_feature: u64) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_get_max_vcpus() -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_check_nested_virt() -> i32 {
+        NOT_LINKED
+    }
+}
+
+#[cfg(not(krun_linked))]
+pub use stub::*;
 
 #[cfg(test)]
 mod tests {

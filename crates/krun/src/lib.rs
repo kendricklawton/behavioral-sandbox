@@ -65,6 +65,12 @@ pub enum Error {
         /// Which argument, so the caller knows which of several strings was rejected.
         what: &'static str,
     },
+    /// This build links no libkrun: `build.rs` found none, so every call is a stub that reports
+    /// the library as missing rather than an errno a stub would have had to invent.
+    NotLinked {
+        /// The `krun_*` function that was asked for.
+        call: &'static str,
+    },
 }
 
 impl fmt::Display for Error {
@@ -77,6 +83,11 @@ impl fmt::Display for Error {
                     "{what} contains an interior NUL byte and cannot be passed to libkrun"
                 )
             }
+            Self::NotLinked { call } => write!(
+                f,
+                "{call} cannot be called: this build links no libkrun (install libkrun, or set \
+                 BSX_KRUN_LIB_DIR, and rebuild)"
+            ),
         }
     }
 }
@@ -85,7 +96,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Call { source, .. } => Some(source),
-            Self::InteriorNul { .. } => None,
+            Self::InteriorNul { .. } | Self::NotLinked { .. } => None,
         }
     }
 }
@@ -95,13 +106,25 @@ impl std::error::Error for Error {
 /// return a value (a context id, a feature answer) rather than only a status.
 fn check(call: &'static str, rc: i32) -> Result<i32, Error> {
     if rc < 0 {
-        Err(Error::Call {
-            call,
-            source: std::io::Error::from_raw_os_error(-rc),
-        })
+        Err(call_failed(call, rc))
     } else {
         Ok(rc)
     }
+}
+
+#[cfg(krun_linked)]
+fn call_failed(call: &'static str, rc: i32) -> Error {
+    Error::Call {
+        call,
+        source: std::io::Error::from_raw_os_error(-rc),
+    }
+}
+
+/// In a build with no libkrun every call is a stub, so the one truthful failure is "the library
+/// is not here", not whichever value the stub returned.
+#[cfg(not(krun_linked))]
+fn call_failed(call: &'static str, _rc: i32) -> Error {
+    Error::NotLinked { call }
 }
 
 /// A path as a `CString`, or [`Error::InteriorNul`] naming which argument was rejected.
@@ -120,6 +143,7 @@ fn c_bytes(what: &'static str, s: &OsStr) -> Result<CString, Error> {
 /// thread-safety for its context table, and an FFI handle whose threading rules are unstated is one
 /// a caller should not be able to move across threads by accident. The helper process that calls
 /// [`Machine::enter`] does so on the thread that built the context, which is all this project needs.
+#[derive(Debug)]
 struct Ctx {
     id: u32,
     _not_send: PhantomData<*const ()>,
@@ -138,6 +162,7 @@ impl Drop for Ctx {
 ///
 /// The stage exists so `disable_implicit_init` cannot be called too late: the header requires it
 /// before `krun_set_root`, and [`root`](Self::root) consumes `self`.
+#[derive(Debug)]
 pub struct Context {
     ctx: Ctx,
     retained: Vec<CString>,
@@ -184,6 +209,7 @@ impl Context {
 }
 
 /// A context with a root filesystem, being configured toward [`enter`](Self::enter).
+#[derive(Debug)]
 pub struct Machine {
     ctx: Ctx,
     retained: Vec<CString>,
@@ -330,7 +356,9 @@ mod tests {
 
     /// `check` is the whole of the error mapping, and its sign convention is the part that is easy
     /// to get backwards: libkrun returns a *negated* errno, so `-2` is `ENOENT` and not errno 2's
-    /// negation being passed through to `io::Error` as-is.
+    /// negation being passed through to `io::Error` as-is. Only meaningful where a real library
+    /// produced the value: the stub build reports every failure as [`Error::NotLinked`] instead.
+    #[cfg(krun_linked)]
     #[test]
     fn a_negative_return_is_read_as_a_negated_errno() {
         let err = check("krun_test", -2).expect_err("a negative return is a failure");
@@ -363,6 +391,30 @@ mod tests {
         );
     }
 
+    /// The no-libkrun build: every call is a stub, and the report names the missing library and
+    /// the fix rather than an errno a stub invented. Compiled only where `build.rs` found nothing,
+    /// which is the CI case; where a real library is linked the twin below says what was skipped.
+    #[cfg(not(krun_linked))]
+    #[test]
+    fn a_build_without_libkrun_reports_the_library_as_missing() {
+        let err = Context::new().expect_err("no libkrun is linked into this build");
+        assert!(
+            matches!(&err, Error::NotLinked { call } if *call == "krun_create_ctx"),
+            "got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("BSX_KRUN_LIB_DIR"), "names the fix: {msg}");
+    }
+
+    #[cfg(krun_linked)]
+    #[test]
+    fn a_build_without_libkrun_reports_the_library_as_missing() {
+        println!(
+            "SKIPPED a_build_without_libkrun_reports_the_library_as_missing: this build links a \
+             real libkrun, so the stub path is compiled out."
+        );
+    }
+
     /// The C arrays libkrun reads are NULL-terminated, not length-carrying, so the terminator is
     /// load-bearing: without it libkrun walks off the end of the array.
     #[test]
@@ -383,6 +435,7 @@ mod tests {
 
     /// An error has to name the call that failed, or a supervisor log says only that "libkrun
     /// failed" for any of twenty-seven functions.
+    #[cfg(krun_linked)]
     #[test]
     fn the_message_names_the_call_and_the_errno() {
         let msg = check("krun_set_root", -13)

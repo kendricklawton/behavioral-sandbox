@@ -1,10 +1,11 @@
 //! Emits the link directive for libkrun, and only when the library is actually present.
 //!
-//! **An absent libkrun is not a build failure here.** This crate's rlib carries declarations, not
-//! references, so it compiles anywhere; the host-safe gate runs on machines with no hypervisor
-//! stack at all. What an absent library does is leave the link directive unemitted, so an
-//! executable that calls into it fails at link with the linker's own error, and this crate's own
-//! tests that touch the library are compiled out (`cfg(krun_linked)`) with a printed reason.
+//! **An absent libkrun is not a build failure anywhere in the workspace.** The host-safe gate runs
+//! on machines with no hypervisor stack at all, and an undefined symbol fails an executable's link
+//! even when the call is unreachable. So an absent library leaves the link directive unemitted and
+//! `sys` compiles stub twins instead: every call then reports the library as missing through a
+//! typed error, and this crate's own tests that touch the library are compiled out
+//! (`cfg(krun_linked)`) with a printed reason.
 //!
 //! `pkg-config` is shelled rather than taken as a build dependency: one probe on one platform does
 //! not earn a crate, and the fallback is the plain `-l krun` any linker already understands.

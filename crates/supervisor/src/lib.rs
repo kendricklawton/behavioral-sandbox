@@ -873,8 +873,16 @@ mod tests {
             name: "gone".to_string(),
         };
         // Wait for it to exit *without* reaping through `try_wait`, so `stop` meets a finished but
-        // unreaped child, which is exactly the race being modelled.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // unreaped child, which is exactly the race being modelled. An unreaped exit shows as a
+        // zombie in `/proc`, so that is what is polled for: a fixed sleep was watched losing this
+        // race under a loaded gate run and reporting the kill it caused as the failure.
+        let pid = vm.pid();
+        for _ in 0..500 {
+            if !pid_is_live(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert_eq!(
             vm.stop().expect("stopping a finished VM is not an error"),
             Exit::Code(3),
