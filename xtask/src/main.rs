@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod artifacts;
+mod bench;
 mod drift;
 mod guest_bins;
 mod lints;
@@ -74,6 +75,23 @@ enum Cmd {
         #[arg(long)]
         update_lock: bool,
     },
+    /// Measure cold-boot latency as nearest-rank percentiles: spawn → a running vCPU, and
+    /// spawn → the exit of a guest running `/bin/true`. Needs `/dev/kvm`, the guest tree and a
+    /// **release** `bsx`.
+    BenchBoot {
+        /// How many boots to time. Default 100, the floor at which a `p99` has any sample above
+        /// it; below that it prints `—`.
+        #[arg(long, default_value_t = 100)]
+        runs: usize,
+    },
+    /// Measure the per-sandbox memory footprint of a cohort of idle VMs kept alive together:
+    /// per-VMM Pss and Rss as percentiles, plus the whole-host `MemAvailable` drop per VM. Needs
+    /// `/dev/kvm`, the guest tree and a **release** `bsx`.
+    BenchFootprint {
+        /// How many idle VMs to bring up (stops earlier at the memory floor). Default 8.
+        #[arg(long, default_value_t = 8)]
+        count: usize,
+    },
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the
     /// config parser) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
@@ -115,6 +133,8 @@ fn main() -> Result<()> {
             verify,
             update_lock,
         } => rootfs::build_rootfs(verify, update_lock),
+        Cmd::BenchBoot { runs } => bench::bench_boot(runs),
+        Cmd::BenchFootprint { count } => bench::bench_footprint(count),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
     }
