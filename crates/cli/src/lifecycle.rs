@@ -218,21 +218,50 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
 
 /// This process's stdin for the guest command, or nothing when there is a terminal on it.
 ///
-/// The agent's exec request carries stdin as one payload rather than a stream, so it has to be read to
-/// EOF before the command starts, and a terminal has no EOF to read to: waiting for one would
-/// hang on every interactive invocation. A capability probe, not a guess about how it was run.
+/// The agent's exec request carries stdin as one payload rather than a stream, so it has to be
+/// read to EOF before the command starts, and a terminal has no EOF to read to: waiting for one
+/// would hang on every interactive invocation. A capability probe, not a guess about how it was
+/// run.
+///
+/// **An inherited stdin can be non-blocking, and that is not an error.** `O_NONBLOCK` belongs to
+/// the open file description, which a caller shares with whoever handed it over, so a read can
+/// return `EAGAIN` meaning "nothing yet" where this wants "nothing ever". Reported as a failure,
+/// that made `bsx exec` refuse to run anything at all under a harness whose stdin was
+/// non-blocking (watched happen). Waiting for readability and retrying is what a blocking read
+/// would have done, without setting a flag back on an fd this process does not own.
 fn read_stdin() -> Result<Vec<u8>, String> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return Ok(Vec::new());
     }
-    let mut buf = Vec::new();
-    stdin
+    let mut reader = stdin
         .lock()
-        .take(u64::try_from(bsx_channel::MAX_PAYLOAD).unwrap_or(u64::MAX))
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("read stdin: {e}"))?;
-    Ok(buf)
+        .take(u64::try_from(bsx_channel::MAX_PAYLOAD).unwrap_or(u64::MAX));
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(buf),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => wait_readable()?,
+            Err(e) => return Err(format!("read stdin: {e}")),
+        }
+    }
+}
+
+/// Blocks until stdin has something to read or has ended. The wait a blocking read would have
+/// done, for a description whose owner made it non-blocking.
+fn wait_readable() -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let mut fds = [rustix::event::PollFd::new(
+        &stdin,
+        rustix::event::PollFlags::IN,
+    )];
+    // No timeout: a pipe nobody writes to and nobody closes is exactly what a blocking read waits
+    // on too, so this adds no way to hang that reading normally did not have.
+    rustix::event::poll(&mut fds, None).map_err(|e| format!("wait on stdin: {e}"))?;
+    Ok(())
 }
 
 fn end(name: &str) -> Result<String, String> {

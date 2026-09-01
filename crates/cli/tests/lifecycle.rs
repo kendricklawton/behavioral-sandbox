@@ -203,12 +203,14 @@ fn the_lifecycle_verbs_reach_a_vm_this_process_did_not_start() {
 
     // Sessions compose: the agent serves every connection from one working directory, so a second
     // exec sees what the first left. This is what makes a long-lived VM worth having.
+    let out = bsx(&rt)
+        .args(["exec", "verbs", "--", "sh", "-c", "echo kept > state"])
+        .output()
+        .expect("run bsx exec");
     assert!(
-        bsx(&rt)
-            .args(["exec", "verbs", "--", "sh", "-c", "echo kept > state"])
-            .status()
-            .expect("run bsx exec")
-            .success()
+        out.status.success(),
+        "writing the session state failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     let out = bsx(&rt)
         .args(["exec", "verbs", "--", "cat", "state"])
@@ -239,6 +241,55 @@ fn the_lifecycle_verbs_reach_a_vm_this_process_did_not_start() {
     }
 }
 
+/// Stdin reaches the guest command, including from a **non-blocking** description.
+///
+/// `O_NONBLOCK` belongs to the open file description, which a caller shares with whoever handed
+/// stdin over, so a read can return `EAGAIN` meaning "nothing yet". Read as a failure, that made
+/// `bsx exec` refuse to run anything at all: found because this suite's own harness passed one
+/// down. Both are asserted, since a fix that simply ignored `EAGAIN` would drop the input rather
+/// than wait for it, and the ordinary pipe would not notice.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
+fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
+    if skipped("stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once") {
+        return;
+    }
+    let rt = runtime("lifecycle-stdin");
+    let _vm = up(&rt, "instdin");
+
+    let piped = |nonblocking: bool| -> String {
+        // `CLOEXEC`, or the child inherits copies of **both** ends and its stdin never
+        // reaches EOF, because it is holding the write end open itself (watched: it hung
+        // this test).
+        let (read, write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+        if nonblocking {
+            rustix::io::ioctl_fionbio(&read, true).expect("make the read end non-blocking");
+        }
+        let child = bsx(&rt)
+            .args(["exec", "instdin", "--", "cat"])
+            .stdin(std::process::Stdio::from(read))
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("run bsx exec");
+        // Written after the spawn, so a non-blocking reader meets an empty pipe first and has to
+        // wait: reading once and giving up would come back with nothing.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        rustix::io::write(&write, b"through-the-pipe\n").expect("write the payload");
+        drop(write);
+        let out = child.wait_with_output().expect("wait for bsx exec");
+        assert!(out.status.success(), "bsx exec failed on stdin");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    assert_eq!(piped(false), "through-the-pipe", "an ordinary pipe");
+    assert_eq!(
+        piped(true),
+        "through-the-pipe",
+        "a non-blocking description"
+    );
+}
+
 /// A VM booted straight into a workload has nothing to ask, and says so. Named because the
 /// alternative is `exec` connecting to a socket that does not exist and reporting the path.
 #[test]
@@ -252,7 +303,9 @@ fn exec_names_a_vm_with_no_agent_channel_rather_than_dialling_nothing() {
         .arg("run")
         .arg("--root")
         .arg(guest_root())
-        .args(["--name", "plain", "--", "sleep", "10"])
+        // Long enough that a loaded machine cannot end the VM before the assertion runs: the
+        // test kills it either way, so the number is headroom and not a wait anyone pays.
+        .args(["--name", "plain", "--", "sleep", "120"])
         .spawn()
         .expect("run bsx run");
     // The VM is up once it is listed; polling beats a fixed sleep under a loaded gate.
