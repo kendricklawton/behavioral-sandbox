@@ -249,6 +249,10 @@ fn require_dir(what: &'static str, path: &Path) -> Result<(), HelperError> {
 
 #[cfg(test)]
 mod tests {
+    // `panic!` is the assertion in the let-else arm below; the tree-wide deny is for the host
+    // path, and this module is not on it.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     /// The check that stops a silent success. Without it libkrun boots, finds nothing, and exits 0,
@@ -333,7 +337,9 @@ mod tests {
             "data=/opt/a=b",
         ];
         let parsed = Cli::parse_from(argv);
-        let Cmd::Vmm(got) = parsed.cmd.expect("the helper subcommand parses");
+        let Cmd::Vmm(got) = parsed.cmd else {
+            panic!("the helper subcommand parses as itself");
+        };
 
         assert_eq!(got.root, Path::new("/srv/root"));
         assert_eq!(got.exec, Path::new("/bin/sh"));

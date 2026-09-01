@@ -19,6 +19,10 @@ bsx-krun = { path = "../krun" }
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
 
+[dev-dependencies]
+# The `/dev/kvm` probe, so the end-to-end tests skip with the same message everywhere.
+bsx-test-support = { path = "../test-support" }
+
 [features]
 # Exposes library items for the fuzz harness in `fuzz/`; without it the library target is empty and
 # the package is just the `bsx` binary. Nothing is behind it today (see `src/lib.rs`).
