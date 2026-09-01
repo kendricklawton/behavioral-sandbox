@@ -14,7 +14,7 @@ attached to host-kernel hooks, outside the guest's address space and outside any
 can enter.
 
 ## 3. Jailed execution by default
-The CLI, the daemon, and `Sandbox::open` jail by default: Firecracker is launched via the `jailer`
+The CLI and `Sandbox::open` jail by default: Firecracker is launched via the `jailer`
 helper, which places the process inside a restricted chroot, drops privileges to an unprivileged
 user/group, and assigns cgroup v2 limits before executing guest code. Firecracker's own built-in
 seccomp filters stay enabled (the driver never passes `--no-seccomp`). The opt-outs are named,
@@ -30,20 +30,16 @@ see [Benchmarks](./benchmarks.md).
 ## 5. Host-signed audit records
 Audit records captured by `bsx-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. Whichever path persists a record signs it with a host-held ed25519 key, so alteration after the run is detectable off-host (`bsx verify`).
 
-## 6. Versioned newline-JSON daemon protocol
-The `bsx serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; a non-Rust client drives the wire, not the crate.
-
 ## 7. Synchronous engine, no async runtime
-The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
-other executor anywhere in `bsx-engine`, `bsx-channel`, or `bsx serve`. This is a decision, not an
+The driver is **synchronous**: blocking I/O, one thread per sandbox, no `tokio` or
+other executor anywhere in `bsx-engine` or `bsx-channel`. This is a decision, not an
 accident of how the code grew, and it rests on three arguments. `deny.toml` bans the common runtimes
 outright, so one arriving transitively fails `cargo deny check` in the gate rather than landing as a
 lockfile diff.
 
-**Concurrency here is bounded by microVMs, not by sockets.** A session's real cost
-is a whole Firecracker microVM holding hundreds of MiB of guest RAM, so the daemon's ceiling
-(`--max-sessions`, default 16, plus the committed-memory ceilings) is reached by host RAM long
-before thread stacks are worth a thought. Thread-per-session at this scale is free, and it keeps a
+**Concurrency here is bounded by microVMs, not by sockets.** A sandbox's real cost
+is a whole Firecracker microVM holding hundreds of MiB of guest RAM, so host RAM binds long
+before thread stacks are worth a thought. Thread-per-sandbox at this scale is free, and it keeps a
 stack trace readable end to end.
 
 **The dependency surface is a security property.** This engine's pitch is that a hoster can audit
@@ -62,19 +58,16 @@ no executor.
 **What would change this decision.** Stated so the trade-off can be re-opened on evidence rather
 than on taste:
 
-- A credible need for hundreds to thousands of concurrent **idle** sessions (parked connections,
-  not running VMs), where per-thread stacks become the binding constraint.
-- Genuinely multiplexed daemon work: streaming exec output to many concurrent watchers, long-lived
-  event subscriptions, or a network-facing (rather than local-socket) protocol.
+- A credible need for hundreds to thousands of concurrent **idle** sandboxes, where per-thread
+  stacks become the binding constraint.
+- Genuinely multiplexed work: streaming exec output to many concurrent watchers, or long-lived
+  event subscriptions.
 - A profile showing thread-per-session as a **measured** bottleneck under realistic workloads.
 
 None of these are planned, so the engine stays synchronous.
 
 **This does not constrain downstream.** Async is the right choice in plenty of places that consume
-this engine, and the architecture keeps them outside this repo: a non-Rust client (an `async`
-variant suits an agent loop, since the frameworks calling it are async) and any hoster's platform
-layer multiplexing many daemons. They speak the wire protocol, which is transport-agnostic
-and says nothing about how either side schedules its work.
+this engine, and the architecture keeps them outside this repo.
 
 ## 8. Portability is a capability question, not a distro question
 
@@ -208,11 +201,11 @@ e2fsprogs was never fuzzed here either. A genuinely corrupt image now fails the 
 error instead of being repaired into something, which is the deliberate posture: refusing to read a
 broken guest image is easier to defend than trusting a repair pass over attacker-chosen bytes.
 
-## 11. The CLI and the daemon boot the shared read-only base
+## 11. The CLI boots the shared read-only base
 
-`BootConfig::read_only_root` was designed as an embedder's field, and until this decision neither
-the CLI nor the daemon set it: every `bsx run` copied the base image into its workdir and booted the
-copy read-write. The recorded reason was that sharing pays off across concurrent sandboxes, which a
+`BootConfig::read_only_root` was designed as an embedder's field, and until this decision the CLI
+did not set it: every `bsx run` copied the base image into its workdir and booted the copy
+read-write. The recorded reason was that sharing pays off across concurrent sandboxes, which a
 one-shot CLI does not have. That reason was incomplete. The copy has a second cost the argument
 never priced: duplicating the 132 MiB base is 49 ms of a 149 ms p50 cold boot
 ([exec-01, 2026-08-16](./benchmarks.md#boot-by-rootfs-path-n100-per-series)), and a one-shot
@@ -221,17 +214,15 @@ taken on a measurement of the same trade-off from 2026-08-12, which is withdrawn
 here: it was taken before `quiet` entered the boot arguments, so its denominator was a 352 ms boot
 rather than this one.
 
-**`run`, `shell`, and `serve` now set `read_only_root` in their shared posture fold**
-(`apply_posture`), so every CLI- and daemon-launched VM boots the agent image `O_RDONLY` with its
-writable layer on the per-run tmpfs overlay. For the daemon this also puts its pre-warmed pool on
-the shared-base path, where clones reference one pinned base instead of each carrying a private
-disk copy.
+**`run` and `shell` now set `read_only_root` in their shared posture fold**
+(`apply_posture`), so every CLI-launched VM boots the agent image `O_RDONLY` with its
+writable layer on the per-run tmpfs overlay.
 
 **The engine default does not move.** The copy path boots any rootfs; the overlay path hands PID 1
 to the image's overlay init and fails the boot of an image that lacks it. `BootConfig::default()`
 keeping `read_only_root = false` is therefore the honest default for an embedder pointing the
 engine at an arbitrary image, and the flip lives in the layer that knows which image it boots: the
-CLI and the daemon ship the agent image.
+CLI ships the agent image.
 
 **Two behavior changes ride along, named rather than buried.** A `rootfs` override naming an image
 without the overlay init now fails at boot instead of booting unshared. And writes to `/` are

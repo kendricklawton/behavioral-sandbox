@@ -18,7 +18,6 @@ on:
       - 'crates/channel/**'
       - 'crates/cli/**'
       - 'crates/probes-loader/**'
-      - 'crates/protocol/**'
       - 'crates/record/**'
       - 'crates/probes-common/**'
       - 'fuzz/**'

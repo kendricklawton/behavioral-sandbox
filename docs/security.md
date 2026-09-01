@@ -114,8 +114,7 @@ to a pre-`v0.1.0` single-maintainer project:
    regular commit, with a regression test on the gate wherever the bug class allows one.
 3. **Disclose together.** The timeline is agreed upon with the reporter in the advisory; the default
    ask is that the fix lands before publication. When it does, the GitHub advisory is published,
-   [`RELEASES.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/RELEASES.md) notes
-   it, and the reporter is credited if they want to be.
+   and the reporter is credited if they want to be.
 
 ## Reporting a vulnerability
 

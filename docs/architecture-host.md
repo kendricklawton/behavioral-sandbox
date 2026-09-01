@@ -6,10 +6,7 @@ Where the pieces sit, and which boundaries a run crosses:
 LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
 
   HOST USERSPACE
-    bsx CLI / client
-        |  unix socket wire API
-        v
-    bsx serve daemon   <-------------------------------+
+    bsx CLI            <-------------------------------+
         |  bsx-engine API                              |
         v                                    ring buffer, flow and
     Firecracker VMM (jailed, chrooted)         deny events
@@ -29,7 +26,7 @@ LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
         |                                              |
     GUEST MEMORY AND OS                                 (observed from
       guest kernel                                       the host side)
-      guest-agent (static musl)  <--- vsock / channel ---> daemon
+      guest-agent (static musl)  <--- vsock / channel ---> driver
         |  execve, stdio
         v
       untrusted code
@@ -98,7 +95,7 @@ of that base in its workdir, reclaimed with the workdir at teardown; that path b
 with the guest's writable layer supplied by a per-run `tmpfs` overlay: one base image serves many
 concurrent VMs, and nothing pays to duplicate it (the copy costs 49 ms of a 149 ms p50 boot,
 exec-01, 2026-08-16). It requires an image that carries the overlay init, so the callers that know
-their image set it: the CLI and the daemon boot the agent image and turn it on in their shared
+their image set it: the CLI boots the agent image and turns it on in its shared
 posture fold (`apply_posture`), and an embedder sets it on the `BootConfig` a snapshot source or a
 pool boots from. Either way, nothing a run changes outlives it unless explicitly collected. Bulk
 data rides block devices instead: a read-only ext4 built from `input_dir`, and a writable one
@@ -107,7 +104,7 @@ embedding-API fields rather than CLI flags: there is no flag or config key that 
 storage shape.
 
 ```text
-SANDBOX STORAGE LAYERING  (a read_only_root boot, what the CLI and the daemon run;
+SANDBOX STORAGE LAYERING  (a read_only_root boot, what the CLI runs;
                            the engine default gives each VM its own read-write
                            copy of the base instead)
 

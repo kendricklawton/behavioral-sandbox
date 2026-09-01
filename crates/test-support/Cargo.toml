@@ -15,9 +15,6 @@ description = "Test-only helpers shared across crates (cgroup caps, host-capabil
 # log line *says* need. Both crates that enable it already depend on these two directly, so it adds
 # no crate to any tree.
 [dependencies]
-# The `#[repr(C)]` probe records, so the synthetic-event fixture below builds the same struct the
-# kernel would have written. Zero-dependency and `no_std`, so it costs a test binary nothing.
-bsx-probes-common = { path = "../probes-common" }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 

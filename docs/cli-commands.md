@@ -2,8 +2,7 @@
 
 The four verbs: [`bsx run`](#bsx-run) for one sandbox and one command, [`bsx shell`](#bsx-shell)
 for a stateful session, [`bsx doctor`](#bsx-doctor) to check a host before the first sandbox, and
-[`bsx verify`](#bsx-verify) to check a signed audit record. The daemon,
-[`bsx serve`](./daemon.md), has its own chapter.
+[`bsx verify`](#bsx-verify) to check a signed audit record.
 
 ## `bsx run`
 
@@ -110,7 +109,7 @@ release range. The rationale is
 
 ## `bsx verify`
 
-`bsx run --record` and the daemon's `trace` reply sign the finalized record with a **host key**
+`bsx run --record` signs the finalized record with a **host key**
 that never crosses into the guest (the key loads in the host process; only the detached `ed25519`
 signature over the canonical record bytes reaches the file), so a consumer can
 detect any alteration made *after* the producing host. The record file is a schema-2 envelope,
@@ -122,8 +121,7 @@ envelope is bounded at 16 MiB, and a record file (which may hold a session chain
 is bounded at 256 MiB, rejected up front if exceeded.
 
 The file's shape picks the check. One line is a single envelope. Several lines, one envelope per
-line in order (the shape a daemon client saves its `trace` replies in), verify as a **session
-chain**: signatures plus each record's commitment to its predecessor's hash, so a reordered,
+line in order, verify as a **session chain**: signatures plus each record's commitment to its predecessor's hash, so a reordered,
 inserted, or dropped record fails even though every envelope alone carries a valid signature.
 `a_chain_file_verifies_and_a_reordered_or_tampered_one_fails` pins both directions.
 
@@ -156,7 +154,7 @@ records already signed. Keep the retired public keys (their `key_id`s) listed in
 with the current signing key and any `--key` given, so old and new records both verify.
 
 **Session hash-chain.** A one-shot `bsx run --record` writes a single, unchained record. Within a
-**session** (the [daemon](./daemon.md)'s `trace` verb), each record additionally commits to the
+**session**, each record additionally commits to the
 previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
 saves the records one per line can hand the file to `bsx verify` (or call the library's
 `verify_chain`) and detect a reordered, inserted, or deleted one, not just a single-record edit.

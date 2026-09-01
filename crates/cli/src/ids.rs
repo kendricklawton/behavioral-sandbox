@@ -15,7 +15,7 @@
 
 /// This process's uids, plus the invoking uid when it is running under `sudo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostIds {
+pub(crate) struct HostIds {
     real: u32,
     effective: u32,
     sudo: Option<u32>,
@@ -24,7 +24,7 @@ pub struct HostIds {
 impl HostIds {
     /// Read from `/proc/self/status` and the environment, or `None` if `/proc` is unreadable.
     #[must_use]
-    pub fn current() -> Option<Self> {
+    pub(crate) fn current() -> Option<Self> {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
         let (real, effective) = uids(&status)?;
         // An unparseable value is not a claim, so it extends trust to nobody rather than refusing.
@@ -37,8 +37,8 @@ impl HostIds {
     }
 
     /// Builds an identity from its parts, for a uid combination this process cannot be.
-    #[must_use]
-    pub fn from_parts(real: u32, effective: u32, sudo: Option<u32>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_parts(real: u32, effective: u32, sudo: Option<u32>) -> Self {
         Self {
             real,
             effective,
@@ -48,13 +48,13 @@ impl HostIds {
 
     /// This process's effective uid.
     #[must_use]
-    pub fn effective(self) -> u32 {
+    pub(crate) fn effective(self) -> u32 {
         self.effective
     }
 
     /// The invoking uid, but only in the state `sudo` produces. See the module header.
     #[must_use]
-    pub fn sudo_invoker(self) -> Option<u32> {
+    pub(crate) fn sudo_invoker(self) -> Option<u32> {
         if self.effective == 0 && self.real == 0 {
             self.sudo
         } else {
@@ -64,7 +64,7 @@ impl HostIds {
 
     /// Whether a file owned by `uid` was authored by someone this process trusts.
     #[must_use]
-    pub fn trusts(self, uid: u32) -> bool {
+    pub(crate) fn trusts(self, uid: u32) -> bool {
         uid == self.effective || uid == 0 || self.sudo_invoker() == Some(uid)
     }
 
@@ -74,7 +74,7 @@ impl HostIds {
     /// won't let one user unlink or rename another's file there; without it, owning the file proves
     /// nothing about what is at that path a moment later.
     #[must_use]
-    pub fn trusts_dir(self, uid: u32, mode: u32) -> bool {
+    pub(crate) fn trusts_dir(self, uid: u32, mode: u32) -> bool {
         self.trusts(uid) && (mode & 0o022 == 0 || mode & 0o1000 != 0)
     }
 }

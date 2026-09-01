@@ -1,4 +1,4 @@
-# Release packaging: on a pushed v* tag (the user's act; tags are human-cut per RELEASES.md),
+# Release packaging: on a pushed v* tag (the user's act; tags are human-cut),
 # assemble `cargo xtask dist`, sign SHA256SUMS with the BSX_RELEASE_SIGNING_KEY secret (a
 # detached ed25519 signature; a tag build without the secret or the .sig hard-fails, never ships
 # unsigned), and attach tarball + SHA256SUMS + SHA256SUMS.sig to a DRAFT GitHub release, so

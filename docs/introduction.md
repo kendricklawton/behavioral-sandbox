@@ -14,14 +14,13 @@ It exists for the usual suspects: a third-party binary, a fork's CI job, a depen
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
 infrastructure (air-gapped or regulated is fine), and the watching and the policy live in the host
 kernel, outside the guest, so the record is produced by code the guest does not run. The paths that
-persist a record sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
-`trace`), and `bsx verify` checks one. The
+persist a record sign it with a host key (`--record`, an operator's `records_dir`), and
+`bsx verify` checks one. The
 [threat model](./security-threat-model.md#record-integrity-beyond-the-guest) states exactly what that
 does and does not prove.
 
-The engine can be driven three ways: as the **`bsx` CLI** (one sandbox per command), as a
-**Rust library** embedded in a larger application, or programmatically over a unix socket through
-the **`bsx` daemon** and its versioned wire API.
+The engine can be driven two ways: as the **`bsx` CLI** (one sandbox per command), or as a
+**Rust library** embedded in a larger application.
 
 ## How it fits together
 
@@ -55,9 +54,6 @@ is a runtime plus a clean driver API you self-host, and the model driving an age
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
-- **[Using the `bsx serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
-  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`cancel`/`close`), the pre-warmed pool for fast
-  `open`, logs and metrics for the hoster, and the reference client for it.
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each pinned by a privileged test.

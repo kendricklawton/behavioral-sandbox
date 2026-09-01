@@ -1906,7 +1906,7 @@ mod tests {
         // per-VM dir name **twice** (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`),
         // so a long VM_DIR_PREFIX plus a real scratch dir overflows `sun_path`. Pin that the prefix and
         // the shipped scratch defaults (the ci-privileged wrapper's and the guided install's) fit, even
-        // at the widest pid and a long-lived daemon's high sequence. A much longer $HOME can still
+        // at the widest pid and a long-lived process's high sequence. A much longer $HOME can still
         // exceed it, by design: `check_sun_path` then refuses with the fix.
         let name = format!("{VM_DIR_PREFIX}-{}-{}", u32::MAX, 99_999);
         for scratch in ["/var/tmp/bsx", "/home/operator/.bsx"] {

@@ -18,8 +18,8 @@ drives four crossings, enumerated in the [threat model](./security-threat-model.
 BPF program or map.
 
 Every execution yields a host-observed **audit record** of what the host was able to see, and the
-paths that persist one sign it with a host key (`bsx run --record` or an operator's `records_dir`,
-and the daemon's `trace` reply). What a signature does and does not establish is stated in
+paths that persist one sign it with a host key (`bsx run --record` or an operator's `records_dir`).
+What a signature does and does not establish is stated in
 [Record integrity beyond the guest](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 ### Design rules
@@ -53,16 +53,16 @@ verified outcome.
 ```text
                      CONSUMER ENTRY POINTS & API SURFACES
 
-    [ Rust Embedder ]            [ Daemon Client ]            [ Audit Verifier ]
-            |                            |                             |
-            v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
-     `bsx-engine`                 `bsx-protocol`                `bsx-record`
-  (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
-            |                            |
-            |                            v
-            |               `bsx serve` / `bsx` CLI
-            |            (a thin host of the same `bsx-engine`)
-            |                            |
+    [ Rust Embedder ]                                     [ Audit Verifier ]
+            |                                                     |
+            v (In-Process)                                        v (Off-Host)
+     `bsx-engine`                                          `bsx-record`
+  (Sandbox, BootConfig, Vm)                          (ed25519 verify/chain)
+            |
+            v
+        `bsx` CLI
+  (a thin host of the same `bsx-engine`)
+            |
             +----------------------------+
                                          |
                +-------------------------+-------------------------+
@@ -94,9 +94,7 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
 | `bsx-probes-loader` | `crates/probes-loader` | The aya userspace half: attach the probes, read their maps, assemble the record. |
 | `bsx-record` | `crates/record` | The signed audit record: its types, deterministic JSON, summary projection, and ed25519 signing/verification. No aya, so a record verifies off-host. |
-| `bsx-protocol` | `crates/protocol` | The daemon's wire types, versioned. |
-| `bsx-client` | `crates/client` | The Rust reference client for `bsx serve`. |
-| `bsx` | `crates/cli` | The `bsx` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package, binary, and command all share the name. |
+| `bsx` | `crates/cli` | The `bsx` binary: `run`, `shell`, `doctor`, `verify`. Package, binary, and command all share the name. |
 | `bsx-test-support` | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
 

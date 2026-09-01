@@ -293,9 +293,9 @@ impl From<ChannelError> for VmmError {
 /// silent growth.
 pub const FDS_PER_VM: usize = 8;
 
-/// The largest `vcpu_count` the pinned Firecracker accepts. Public because the CLI and the daemon
-/// both bound a caller's request at their own edge, and a second copy of this number is how a pin
-/// drifts: they read it from here.
+/// The largest `vcpu_count` the pinned Firecracker accepts. Public because the CLI bounds a
+/// caller's request at its own edge, and a second copy of this number is how a pin drifts: it
+/// reads it from here.
 pub const MAX_VCPUS: u8 = 32;
 
 /// Whether `vcpus` is a count the pinned Firecracker will boot: `[1, MAX_VCPUS]` and either 1 or

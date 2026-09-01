@@ -63,8 +63,7 @@ fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
 fn require_limits_without_the_jailer_is_refused_before_any_vmm() {
     // `require_limits` caps the *jailed* VMM's cgroup. The engine owns this contradiction
     // (`LimitsUnavailable`, raised before any VMM is spawned), so the CLI keeps no second copy of
-    // the rule; `serve`'s startup check is the one deliberate pre-check, because a daemon must
-    // fail at bind time rather than refuse every later session.
+    // the rule.
     let dir = PolicyDir::with_toml("limits-unjailed", "");
     let (code, stderr) = run_in(&dir, &["--require-limits"]);
     assert_eq!(code, Some(2), "a posture contradiction exits 2: {stderr}");
@@ -129,29 +128,6 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
     assert!(
         stderr.contains("log filter") && stderr.contains("bsx=notalevel"),
         "the refusal names the filter it could not parse: {stderr}"
-    );
-
-    // The daemon: refuses to start, same loudness (it would otherwise serve with logging the
-    // operator did not choose).
-    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
-        .args(["serve", "--log", "bsx=notalevel", "--socket"])
-        .arg(dir.path().join("never-bound.sock"))
-        .current_dir(dir.path())
-        .output()
-        .unwrap_or_else(|e| panic!("spawn bsx serve: {e}"));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "the daemon refuses to start: {stderr}"
-    );
-    assert!(
-        stderr.contains("log filter") && stderr.contains("bsx=notalevel"),
-        "the daemon's refusal names the filter too: {stderr}"
-    );
-    assert!(
-        !dir.path().join("never-bound.sock").exists(),
-        "a daemon refused at startup must not have bound its socket"
     );
 }
 

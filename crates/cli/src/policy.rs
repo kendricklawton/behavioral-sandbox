@@ -2,10 +2,9 @@
 //! but never loosen.
 //!
 //! **Where this binds, and where it is only a guardrail.** A caller of the CLI is *trusted*: they own
-//! the config file and the environment, so policy there is a house default rather than a boundary. The
-//! boundary is `bsx serve`, whose clients arrive over a socket and control neither the daemon's
-//! environment nor its `.bsx.toml`, so the same policy applied to a client's `open` is real enforcement.
-//! That asymmetry is why the resolution below lives in one shared place rather than in flag parsing.
+//! the config file and the environment, so policy there is a house default rather than a boundary.
+//! The resolution below lives in one shared place rather than in flag parsing, so the layers cannot
+//! drift.
 //!
 //! **A ceiling is not just another config value.** The layering is flags > env > file, so a plain config
 //! value is a *default a caller overrides*, which is right for defaults and wrong for ceilings. Ceilings
@@ -14,53 +13,9 @@
 
 use std::fmt;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use bsx_engine::{Limits, MAX_VCPUS};
-use bsx_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
-
-/// Whether every `asked` CIDR sits inside `ceiling`, the containment check both address families
-/// take. An empty ceiling is no ceiling: the tap still denies by default, so an operator who set
-/// none has only declined to bound *what* a caller may ask for.
-///
-/// # Errors
-/// [`PolicyError::EgressNotAllowed`] naming the first CIDR that reaches outside every entry.
-fn within<C>(ceiling: &[C], asked: impl IntoIterator<Item = C>) -> Result<(), PolicyError>
-where
-    C: Contains + fmt::Display,
-{
-    if ceiling.is_empty() {
-        return Ok(());
-    }
-    for asked in asked {
-        if !ceiling.iter().any(|allowed| allowed.contains(&asked)) {
-            return Err(PolicyError::EgressNotAllowed {
-                asked: asked.to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// A CIDR that can say whether it covers another of its own family, so [`within`] runs one loop for
-/// both. The two loader types carry the same inherent method and no shared trait.
-trait Contains {
-    /// Whether `other` is entirely inside this CIDR.
-    fn contains(&self, other: &Self) -> bool;
-}
-
-impl Contains for Ipv4Cidr {
-    fn contains(&self, other: &Self) -> bool {
-        Ipv4Cidr::contains(self, other)
-    }
-}
-
-impl Contains for Ipv6Cidr {
-    fn contains(&self, other: &Self) -> bool {
-        Ipv6Cidr::contains(self, other)
-    }
-}
 
 /// The refusal for a vCPU count the pinned VMM will not boot, in one wording for every surface that
 /// refuses one. `subject` names what was asked: the CLI says `vCPUs`, the wire and the config file
@@ -86,12 +41,6 @@ impl IsolationMode {
         matches!(self, Self::Unjailed)
     }
 
-    /// Whether this mode is jailed.
-    #[must_use]
-    pub fn is_jailed(self) -> bool {
-        matches!(self, Self::Jailed)
-    }
-
     /// Construct from an `unjailed` boolean flag (e.g. `--unjailed`).
     #[must_use]
     pub fn from_unjailed(unjailed: bool) -> Self {
@@ -101,35 +50,6 @@ impl IsolationMode {
             Self::Jailed
         }
     }
-}
-
-/// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AllowRule {
-    pub cidr: Ipv4Cidr,
-    pub port: Option<u16>,
-    pub proto: Option<Protocol>,
-}
-/// Parse one `--allow` value, `IP[/CIDR][:PORT][/PROTO]`, into an [`AllowRule`]. Parsed
-/// right-to-left so the grammar is unambiguous.
-pub fn parse_allow(s: &str) -> Result<AllowRule, String> {
-    let (head, proto) = match s.rsplit_once('/') {
-        Some((rest, tail)) if tail.eq_ignore_ascii_case("tcp") => (rest, Some(Protocol::Tcp)),
-        Some((rest, tail)) if tail.eq_ignore_ascii_case("udp") => (rest, Some(Protocol::Udp)),
-        _ => (s, None),
-    };
-    let (addr_cidr, port) = match head.rsplit_once(':') {
-        Some((addr, p)) => {
-            let port: u16 = p
-                .parse()
-                .map_err(|_| format!("invalid port {p:?} in --allow {s:?}"))?;
-            (addr, Some(port))
-        }
-        None => (head, None),
-    };
-    // The whole rule is the locus, not the address slice, so a refusal quotes what the operator typed.
-    let cidr = crate::config::parse_v4_cidr(addr_cidr, &format!("--allow {s:?}"))?;
-    Ok(AllowRule { cidr, port, proto })
 }
 
 /// What a caller asked for. `None` means "unspecified", which takes the operator default (else the
@@ -176,15 +96,6 @@ pub struct Policy {
     /// the deny-by-default egress policy a NIC still gets.
     pub allow_net: Option<bool>,
 
-    /// Refuse a run without an audit record on this host.
-    pub require_record: bool,
-    /// Directory where required audit records are stored by default.
-    pub records_dir: Option<PathBuf>,
-
-    /// Operator ceiling on allowed IPv4 egress CIDRs. Empty means no restriction.
-    pub max_egress_v4: Vec<Ipv4Cidr>,
-    /// Operator ceiling on allowed IPv6 egress CIDRs. Empty means no restriction.
-    pub max_egress_v6: Vec<Ipv6Cidr>,
 }
 
 impl Policy {
@@ -214,23 +125,11 @@ impl Policy {
         self.max_output_cap = tighter(self.max_output_cap, project.max_output_cap);
 
         self.require_jail |= project.require_jail;
-        self.require_record |= project.require_record;
         self.allow_net = match (self.allow_net, project.allow_net) {
             (Some(false), _) | (_, Some(false)) => Some(false),
             (_, set @ Some(true)) => set,
             (user, None) => user,
         };
-
-        // A user ceiling binds as written; the project's applies only where the user set none.
-        // Do **not** intersect the two by containment: an empty list means "no restriction" in
-        // [`Policy::check_egress`], so filtering a wider project list against a narrower user one
-        // yields the empty list and widens the ceiling it was meant to tighten.
-        if self.max_egress_v4.is_empty() {
-            self.max_egress_v4 = project.max_egress_v4.clone();
-        }
-        if self.max_egress_v6.is_empty() {
-            self.max_egress_v6 = project.max_egress_v6.clone();
-        }
 
         self
     }
@@ -263,13 +162,6 @@ pub enum PolicyError {
     JailRequired,
     /// `--net` was asked for on a host that forbids guest NICs.
     NetForbidden,
-    /// `--record` was omitted on a host that requires an audit record.
-    RecordRequired,
-    /// An `--allow` egress CIDR rule extends beyond the operator's approved range.
-    EgressNotAllowed {
-        /// The requested CIDR string that was outside the operator's ceiling.
-        asked: String,
-    },
 }
 
 impl fmt::Display for PolicyError {
@@ -292,53 +184,11 @@ impl fmt::Display for PolicyError {
                 "this host does not permit guest networking: `--net` is refused (operator policy: \
                  `allow_net = false` in .bsx.toml)",
             ),
-            Self::RecordRequired => f.write_str(
-                "this host requires an audit record: omitting --record is refused (operator policy: \
-                 `require_record = true` in .bsx.toml)",
-            ),
-            Self::EgressNotAllowed { asked } => write!(
-                f,
-                "requested egress CIDR {asked} extends beyond this host's operator ceiling \
-                 (operator policy: `max_egress_v4`/`max_egress_v6` in .bsx.toml)"
-            ),
         }
     }
 }
 
 impl std::error::Error for PolicyError {}
-
-impl PolicyError {
-    /// The refusal phrased for a **daemon's** wire client: the same message, but pointing at the
-    /// `bsx serve` flag that set the posture rather than `.bsx.toml`, which a daemon never reads.
-    /// `Display` stays the CLI flavor, where the file *is* where the posture lives.
-    #[must_use]
-    pub fn daemon_message(&self) -> String {
-        match self {
-            Self::Ceiling {
-                knob,
-                asked,
-                ceiling,
-            } => format!(
-                "{knob} {asked} exceeds this host's limit of {ceiling} (operator policy: \
-                 `--max-{}` on bsx serve)",
-                knob.replace('_', "-")
-            ),
-            // Unreachable from today's daemon (it sets no such posture), phrased without the file
-            // pointer so they stay honest if a serve flag ever grows them.
-            Self::JailRequired => "this host requires the jail (operator policy)".to_string(),
-            Self::NetForbidden => {
-                "this host does not permit guest networking (operator policy)".to_string()
-            }
-            Self::RecordRequired => {
-                "this host requires an audit record (operator policy)".to_string()
-            }
-            Self::EgressNotAllowed { asked } => format!(
-                "requested egress CIDR {asked} extends beyond this host's operator ceiling \
-                 (operator policy)"
-            ),
-        }
-    }
-}
 
 impl Policy {
     /// Resolves a caller's request against this policy into concrete [`Limits`]. What happens to an
@@ -424,23 +274,6 @@ impl Policy {
         Ok(())
     }
 
-    /// Refuse an egress policy whose requested CIDR rules extend beyond the operator's approved CIDR ceilings.
-    /// # Errors
-    /// [`PolicyError::EgressNotAllowed`] when a requested CIDR is not contained within the operator's allowed list.
-    pub fn check_egress(&self, egress: &EgressPolicy) -> Result<(), PolicyError> {
-        within(&self.max_egress_v4, egress.cidrs_v4())?;
-        within(&self.max_egress_v6, egress.cidrs_v6())
-    }
-
-    /// Refuse a run without an audit record on a host that requires recording.
-    /// # Errors
-    /// [`PolicyError::RecordRequired`] when recording is omitted under `require_record = true`.
-    pub fn check_record(&self, recording: bool) -> Result<(), PolicyError> {
-        if !recording && self.require_record {
-            return Err(PolicyError::RecordRequired);
-        }
-        Ok(())
-    }
 }
 
 /// Resolve one knob: refuse an explicit over-ask, clamp an unasked-for default, and otherwise take
@@ -788,36 +621,6 @@ mod tests {
         };
         assert_eq!(on.check_record(false), Err(PolicyError::RecordRequired));
         assert!(on.check_record(true).is_ok(), "recorded runs are permitted");
-    }
-
-    #[test]
-    fn the_daemon_flavor_names_the_serve_flag_not_the_file() {
-        // Two renderings of one refusal, each naming where the posture lives: `Display` is the
-        // CLI's (`.bsx.toml` governs), `daemon_message` the daemon's (its own flags do; it reads no
-        // `.bsx.toml`). Pointing a wire client at the file names a surface that does not govern it.
-        for (knob, flag) in [
-            ("vcpus", "--max-vcpus"),
-            ("mem_mib", "--max-mem-mib"),
-            ("wall_secs", "--max-wall-secs"),
-            ("output_cap", "--max-output-cap"),
-        ] {
-            let err = PolicyError::Ceiling {
-                knob,
-                asked: 9,
-                ceiling: 2,
-            };
-            assert!(
-                err.to_string().contains(".bsx.toml"),
-                "the CLI flavor names the file: {err}"
-            );
-            let daemon = err.daemon_message();
-            assert!(
-                daemon.contains(flag) && !daemon.contains(".bsx.toml"),
-                "the daemon flavor names {flag}, never the file: {daemon}"
-            );
-            // Both carry the same substance: the knob, the ask, and the bound.
-            assert!(daemon.contains(knob) && daemon.contains('9') && daemon.contains('2'));
-        }
     }
 
     #[test]

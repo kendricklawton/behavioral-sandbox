@@ -9,9 +9,7 @@
 //! - **A spent budget is refused, never armed.** The kernel reads a zero timeout as "block
 //!   forever", so arming one is the hang this exists to prevent.
 //!
-//! `crates/cli` holds its own copy for the daemon's sockets and cannot share this type across the
-//! crate boundary; `every_deadline_bounded_socket_refuses_a_spent_budget` pins both to the same
-//! invariant.
+//! `every_deadline_bounded_socket_refuses_a_spent_budget` pins this invariant.
 
 use std::borrow::Borrow;
 use std::io::{Read, Write};

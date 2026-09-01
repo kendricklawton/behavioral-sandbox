@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn connect_retries_through_dropped_dials() {
-        // A peer close before the ack must not kill the caller (in the daemon: the session): the
+        // A peer close before the ack must not kill the caller: the
         // dial retries within its window and the request proceeds on the surviving connection.
         let (_dir, uds, server) =
             flaky_vsock_agent("bsx-vsock-flaky-preack", 2, DropPhase::BeforeAck);

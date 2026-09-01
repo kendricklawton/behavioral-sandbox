@@ -7,7 +7,7 @@ the guest directly. It sees the syscalls only as the host footprint of the VMM, 
 serves its guest syscalls in its own kernel. The eBPF programs stay outside the address space of the
 guest, and outside each namespace that the guest can enter. Each run makes a host-observed **audit
 record** of what the host saw. The paths that keep a record sign it with a host key (`--record`, the
-`records_dir` of an operator, the daemon's `trace`). This file is the operating manual. Read it every
+`records_dir` of an operator). This file is the operating manual. Read it every
 session.
 
 The project uses stable Rust in one workspace. `rust-toolchain.toml` pins the version. It runs on
@@ -81,9 +81,7 @@ know, the boot sequence, and the teardown layers.
 | `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` records that cross the eBPF boundary. Zero dependencies, one source. |
 | `crates/probes-loader` | `bsx-probes-loader` | aya userspace. It attaches to one sandbox, reads the maps, and assembles the record. |
 | `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and Ed25519 signing and verification. It has no aya, so a record verifies off-host. |
-| `crates/protocol` | `bsx-protocol` | The wire types of the daemon, with versions. |
-| `crates/client` | `bsx-client` | Rust reference client for `bsx serve`. |
-| `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`) and `bsx serve`. The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not the engine. |
+| `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`). The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not the engine. |
 | `crates/test-support` | `bsx-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, and the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook. `SUMMARY.md` is the index. The names are flat `topic-subtopic.md`. The hierarchy is in `SUMMARY.md`, not in directories. |
@@ -147,8 +145,8 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   not have the capability. Host variance lives in the `doctor.rs` preflight, never in the boot path.
   A conditional in `spawn.rs` or `jail.rs` makes N boot paths and leaves N-1 untested. For the full
   reason, see `docs/architecture-decisions.md`, decision 8.
-- **A comment must earn its lines. `crates/channel` and `crates/client` are the reference.** Read
-  these two crates before you comment a third. The rustdoc of an item starts with **one line** in
+- **A comment must earn its lines. `crates/channel` is the reference.** Read it
+  before you comment another crate. The rustdoc of an item starts with **one line** in
   the third-person indicative, for example "Writes a single length-prefixed protocol frame." or
   "Returns `true` if the failure was caused by clean EOF or disconnect." Put any constraint in that
   line or in a trailing clause, for example "...to prevent unbounded allocations." or "Must fit in
@@ -183,14 +181,14 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   `gh pr merge`, and review approvals. You cannot configure this part. The person who runs an agent
   decides if the agent runs `git commit` and `git push`. Do it when the person asks, and not at other
   times. Commits go to `main`. Make one logical change for each commit. Never add an AI co-author or
-  an attribution trailer. A human makes the release tags (`RELEASES.md`).
+  an attribution trailer. A human makes the release tags.
 - **Commit messages follow Conventional Commits.** Use `type(scope)?: subject` with the standard
   types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, and `build`. Use the
   imperative and describe **what you did** ("fix: bound session reads by a deadline"). A mixed change
   takes its most significant type (`fix` before `refactor` before `test`). **Public-API changes carry
   the `api` scope** (`feat(api):` or `fix(api)!:`), so you can audit a downstream pin bump from the
   log alone. The surface is the public API of `bsx-engine`, the wire framing of `bsx-channel`, the
-  wire types of `bsx-protocol`, and the signed-envelope surface of `bsx-record`.
+  and the signed-envelope surface of `bsx-record`.
   `docs/embedding-scope.md` names it exactly.
 - **Backwards compatibility follows the direction of the data.** Structs that the caller constructs
   (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and you can still
@@ -200,6 +198,3 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   with `cargo xtask semver-check`, which names each crate. If you run `cargo-semver-checks` bare, it
   drops every `publish = false` package (all of them) and exits `0` with nothing checked. It is also
   inert until `0.1.0`, because cargo treats every `0.0.x` bump as already breaking.
-- **The wire carries no identity.** By design, anything that authenticates *users* stays out of
-  `bsx-protocol`. The access control of the daemon is the permissions of the socket. This is a
-  recorded non-goal on the flags of `serve`.

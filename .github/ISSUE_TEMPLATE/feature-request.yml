@@ -37,7 +37,6 @@ body:
       label: Which surface does it touch?
       options:
         - CLI (bsx run / shell / doctor)
-        - bsx serve (daemon) + wire API
         - engine API (the `bsx` library)
         - probes / audit record
         - benchmarks / docs / tooling

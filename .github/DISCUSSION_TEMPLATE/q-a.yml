@@ -50,7 +50,6 @@ body:
         - Booting a sandbox (bsx run / bsx shell)
         - eBPF observability (--trace / --record / --watch)
         - Networking (--net / --allow)
-        - The daemon (bsx serve)
         - Embedding the bsx-engine library
         - Something else
     validations:

@@ -81,11 +81,6 @@ enum Cmd {
         #[arg(long)]
         verify: bool,
     },
-    /// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`, under the
-    /// crate's own nightly toolchain (`build-std`). Host-safe; skips with a note when `bpf-linker` or
-    /// `rustup` is missing. The object lands at `crates/probes/target/bpfel-unknown-none/release/probes`.
-    #[command(visible_alias = "probes")]
-    BuildProbes,
     /// Check the pinned API surface against a baseline git rev with `cargo-semver-checks`, naming
     /// each crate explicitly (the default set silently drops every `publish = false` package, which
     /// is all of them). Refuses rather than reporting a pass it did not earn. Needs
@@ -106,14 +101,6 @@ enum Cmd {
         /// against the `v0.0.x` checkpoint line, `v` stripped.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
-    },
-    /// Mint (or show) the release signing key and print the pin-and-secret ceremony: pin the
-    /// public key (`release-key.pem` + the `install.sh` heredoc), set the
-    /// `BSX_RELEASE_SIGNING_KEY` CI secret. The private key lives at `--path`, outside the repo.
-    ReleaseKey {
-        /// Where the private key file lives (created `0600` on first use; never under `dist/`).
-        #[arg(long, value_name = "FILE")]
-        path: PathBuf,
     },
     /// Build the static native-ELF fixture (`examples/writefile`) for the guest target, the
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
@@ -185,46 +172,7 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         runs: usize,
     },
-    /// Measure the syscall-tracing overhead: the per-`openat` cost with no probes attached, vs
-    /// probes attached but filtered out, vs probes attached and writing each event to the ring buffer.
-    /// The delta is the honest cost of tracing. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
-    /// build-probes` (not KVM).
-    BenchTrace {
-        /// How many bursts to time per condition (more → tighter tail percentiles). Default 100, the
-        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
-        #[arg(long, default_value_t = 100)]
-        runs: usize,
-    },
-    /// Measure the resource-metering overhead: the added per-context-switch cost of the attached
-    /// `sched_switch` accounting probe, with no meter vs attached-but-not-metering-us vs
-    /// attached-and-metering-us, on a ping-pong micro-workload. The delta is the honest cost; one shared
-    /// program means it stays bounded under many sandboxes. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
-    /// build-probes` (not KVM).
-    BenchMeter {
-        /// How many bursts to time per condition (more → tighter tail percentiles). Default 100, the
-        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
-        #[arg(long, default_value_t = 100)]
-        runs: usize,
-    },
-    /// Measure the eBPF overhead under load: sweep the watched-target-set size (1 → 512) for the shared
-    /// syscall tracer and `sched_switch` meter and show the per-event cost stays flat, an O(1) map
-    /// lookup, so overhead scales with the event rate, not the number of concurrent sandboxes. Needs
-    /// `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM).
-    BenchScale {
-        /// How many bursts to time per set size (more → steadier p50). Default 100.
-        #[arg(long, default_value_t = 100)]
-        runs: usize,
-    },
-    /// Measure the record-signing overhead: the per-record cost of one `ed25519` sign
-    /// over already-canonical bytes, plus verify, the SHA-256 chain hash, and a chained sign, so the
-    /// integrity step is measured like everything else. Host-only (no KVM, no eBPF); the point is
-    /// that it is sub-millisecond and off the boot/exec path.
-    BenchSign {
-        /// How many iterations to time per operation (more → tighter tail percentiles). Default 1000.
-        #[arg(long, default_value_t = 1000)]
-        runs: usize,
-    },
-    /// Fuzz the untrusted-input decoders (the host↔guest channel, the daemon's client wire, the
+    /// Fuzz the untrusted-input decoders (the host↔guest channel, the
     /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
     /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
@@ -266,11 +214,9 @@ fn main() -> Result<()> {
                 vendor::vendor(dir)
             }
         }
-        Cmd::BuildProbes => build_probes(),
         Cmd::SemverCheck { baseline } => semver_check(baseline.as_deref()),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::Dist { version } => dist::dist(version),
-        Cmd::ReleaseKey { path } => dist::release_key(&path),
         Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {
             verify,
@@ -281,10 +227,6 @@ fn main() -> Result<()> {
         Cmd::BenchDensity { count } => bench::bench_density(count),
         Cmd::BenchFootprint { count } => bench::bench_footprint(count),
         Cmd::BenchAll { runs } => bench::bench_all(runs),
-        Cmd::BenchTrace { runs } => bench::bench_trace(runs),
-        Cmd::BenchMeter { runs } => bench::bench_meter(runs),
-        Cmd::BenchScale { runs } => bench::bench_scale(runs),
-        Cmd::BenchSign { runs } => bench::bench_sign(runs),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
     }
@@ -305,7 +247,6 @@ fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
 /// `fuzz/fuzz_targets/`, and the nightly matrix in `.github/workflows/fuzz.yml`.
 /// `fuzz_targets_are_single_sourced` is what holds those three to this list.
 const FUZZ_TARGETS: &[&str] = &[
-    "protocol_message",
     "channel_response",
     "signing_envelope",
     "channel_request",
@@ -321,11 +262,16 @@ const FUZZ_TARGETS: &[&str] = &[
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
 /// rather than pretending. Fuzzing is never wired into `ci` (the in-gate coverage is the crates' own
 /// dependency-light mutation tests).
+/// The pinned nightly `cargo fuzz` runs under. Single-sourced here: a bare `+nightly` would take
+/// whatever the last `rustup update` fetched, so a crash found here could be unreproducible on the
+/// next machine.
+const FUZZ_NIGHTLY: &str = "nightly-2026-07-20";
+
 fn require_cargo_fuzz() -> Result<()> {
     if cargo_fuzz_available() {
         return Ok(());
     }
-    let nightly = probes_nightly().unwrap_or("<unreadable pin>");
+    let nightly = FUZZ_NIGHTLY;
     bail!(
         "cargo-fuzz not found — install it with `cargo install cargo-fuzz --locked` and add the \
          pinned toolchain (`rustup toolchain install {nightly} --profile minimal`)."
@@ -343,7 +289,7 @@ fn cargo_fuzz_run_argv(target: &str, root: &Path) -> Result<Vec<String>> {
     // `+<pinned>`, not a bare `+nightly`: the alias is whatever the last `rustup update` fetched, so
     // a bare `+nightly` would ignore the pin entirely and a crash found here could be unreproducible
     // on the next machine. One nightly serves the whole repo (see [`probes_nightly`]).
-    let toolchain = format!("+{}", probes_nightly()?);
+    let toolchain = format!("+{FUZZ_NIGHTLY}");
     let mut args: Vec<String> = [toolchain.as_str(), "fuzz", "run", target]
         .iter()
         .map(|s| (*s).to_owned())
@@ -451,8 +397,13 @@ fn missing_cgroup_controllers(subtree: &str) -> Option<String> {
 }
 
 pub(crate) fn effective_uid() -> Result<u32> {
-    bsx_record::HostIds::current()
-        .map(bsx_record::HostIds::effective)
+    let status =
+        std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|f| f.parse().ok())
         .context("read the effective uid from /proc/self/status")
 }
 
@@ -511,10 +462,6 @@ fn ci() -> Result<()> {
     cargo(&["deny", "check"])?;
     deny_detached_workspaces(workspace_root())?;
     lint_detached_workspaces(workspace_root())?;
-    // The eBPF object build is part of the CI gate. Host-safe and guarded, it skips with a note
-    // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
-    // probe that fails to compile (or drops its BTF) now fails here, not later at load.
-    build_probes()?;
     println!("\n✓ all checks passed");
     Ok(())
 }
@@ -586,34 +533,8 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
     for manifest in detached_manifests(root)? {
         let dir = manifest.parent().unwrap_or(root).to_path_buf();
         let shown = dir.strip_prefix(root).unwrap_or(&dir).display().to_string();
-        // Only `crates/probes` pins its own channel; `fuzz` builds on whatever the caller has.
-        //
-        // The nightly is installed `--profile minimal`, so the toolchain being present does not
-        // mean it can lint: `rustfmt` and `clippy` are separate components. Skip on either being
-        // absent rather than failing, the same call [`build_probes`] makes, and name the fix.
-        let toolchain = if dir.ends_with("probes") {
-            let nightly = probes_nightly()?;
-            let missing: Vec<&str> = ["rustfmt", "clippy"]
-                .into_iter()
-                .filter(|c| !nightly_has_component(c))
-                .collect();
-            if !nightly_ebpf_ready() || !missing.is_empty() {
-                println!(
-                    "· skipping fmt/clippy for {shown}: {nightly} lacks {} (add it: `rustup \
-                     component add --toolchain {nightly} {}`)",
-                    if missing.is_empty() {
-                        "the pinned toolchain".to_string()
-                    } else {
-                        missing.join(" and ")
-                    },
-                    missing.join(" ")
-                );
-                continue;
-            }
-            Some(nightly)
-        } else {
-            None
-        };
+        // `fuzz` builds on whatever toolchain the caller has.
+        let toolchain: Option<&str> = None;
         run_in(&dir, toolchain, &["fmt", "--check"], &shown)?;
         // No `--all-targets`: it adds a test harness, and `crates/probes` is `no_std` for a target
         // with no `test` crate and no panic handler, so the harness cannot build at all. The
@@ -947,20 +868,6 @@ fn privileged_preflight() -> Result<()> {
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
     // The eBPF probe tests load the object built from `crates/probes`; build it here (the
-    // same "don't shell a nightly `cargo build` from a `#[test]`" rule). `build_probes` soft-skips
-    // without the eBPF toolchain (the everyday gate must stay host-safe), but *this* gate exists to
-    // prove the observe-and-enforce half, so a missing object must fail loudly here, exactly like
-    // the `readelf` check above: the probe tests would otherwise self-skip and look like passes.
-    build_probes()?;
-    let object = workspace_root().join("crates/probes/target/bpfel-unknown-none/release/probes");
-    if !object.is_file() {
-        bail!(
-            "eBPF object not built ({}) — the probe tests skip themselves without it, and a \
-             skipped test looks like a pass; install bpf-linker + the nightly toolchain (see \
-             AGENTS.md)",
-            object.display()
-        );
-    }
     Ok(())
 }
 
@@ -977,11 +884,6 @@ fn setup() -> Result<()> {
         let ok = c.status == bsx_engine::doctor::CheckStatus::Ok;
         check(&c.label, ok);
     }
-    // The eBPF-observability capability row (owned by the probe loader, out of `bsx`).
-    check(
-        "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        bsx_probes_loader::check_support().is_ok(),
-    );
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
@@ -991,17 +893,7 @@ fn setup() -> Result<()> {
     // be the same hollow-green this gate exists to refuse.
     check(
         &format!(
-            "bpf-linker installed, pinned {BPF_LINKER_VERSION} (found {})",
-            bpf_linker_version().unwrap_or_else(|| "none".into())
-        ),
-        bpf_linker_version().as_deref() == Some(BPF_LINKER_VERSION),
-    );
-    check(
-        &format!(
-            "pinned nightly {} + rust-src (eBPF object build: `cargo xtask build-probes`)",
-            // The gate test guarantees this parses, so the fallback is unreachable in a checked-out
-            // tree; it exists so a setup *report* never fails outright over a display string.
-            probes_nightly().unwrap_or("<unreadable pin>")
+            "pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"
         ),
         nightly_ebpf_ready(),
     );
@@ -1069,11 +961,10 @@ fn setup() -> Result<()> {
 /// note and returns `Ok` rather than failing, because the everyday host gate must not require the eBPF
 /// toolchain. This step is folded into `ci`, and `ci-privileged` builds it before the probe tests.
 /// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
-/// rule, `docs/embedding-scope.md`, and `RELEASES.md` all name.
-/// `pinned_surface_is_named_the_same_in_every_doc` holds those three to this list, so a crate can't
-/// join the surface in one document and be missing from the tag's own release notes.
-const PINNED_SURFACE_CRATES: [&str; 4] =
-    ["bsx-engine", "bsx-channel", "bsx-protocol", "bsx-record"];
+/// rule and `docs/embedding-scope.md` both name.
+/// `pinned_surface_is_named_the_same_in_every_doc` holds those two to this list, so a crate can't
+/// join the surface in one document and be missing from the other.
+const PINNED_SURFACE_CRATES: [&str; 3] = ["bsx-engine", "bsx-channel", "bsx-record"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///
@@ -1107,7 +998,7 @@ fn semver_check(baseline: Option<&str>) -> Result<()> {
         bail!(
             "the workspace is {version}: under cargo's semver rules every 0.0.x bump is already a \
              major change, so cargo-semver-checks skips every lint and reports a pass it did not \
-             earn. This command becomes meaningful at 0.1.0 (see RELEASES.md)."
+             earn. This command becomes meaningful at 0.1.0."
         );
     }
 
@@ -1147,135 +1038,6 @@ fn latest_version_tag(root: &Path) -> Result<String> {
         .context("no `v*` tag to use as a semver baseline; pass --baseline <rev>")
 }
 
-fn build_probes() -> Result<()> {
-    if !in_path("bpf-linker") {
-        println!(
-            "· skipping eBPF object build: bpf-linker not found (install it: \
-             `cargo install bpf-linker --locked --version {BPF_LINKER_VERSION}`; \
-             see `cargo xtask setup`)"
-        );
-        return Ok(());
-    }
-    if !in_path("rustup") {
-        println!(
-            "· skipping eBPF object build: rustup not found \
-             (crates/probes needs a nightly toolchain with `build-std`)"
-        );
-        return Ok(());
-    }
-    // The build below runs `rustup run nightly cargo build -Z build-std`, which needs the nightly
-    // toolchain *and* its `rust-src` component. A host with `rustup` + `bpf-linker` but no nightly
-    // would otherwise fall through to the build and `bail!`, failing the everyday gate, the exact
-    // thing this guard exists to prevent (`ci` must run everywhere). Skip cleanly instead.
-    if !nightly_ebpf_ready() {
-        let nightly = probes_nightly()?;
-        println!(
-            "· skipping eBPF object build: the pinned toolchain {nightly} with `rust-src` is not \
-             installed (add it: `rustup toolchain install {nightly} --profile minimal \
-             --component rust-src`; see `cargo xtask setup`)"
-        );
-        return Ok(());
-    }
-    let dir = workspace_root().join("crates/probes");
-    // `rustup run <pinned nightly>` names the toolchain explicitly because a parent `cargo xtask`
-    // leaks `RUSTUP_TOOLCHAIN=stable` into this child, which would otherwise override the crate's
-    // `rust-toolchain.toml` and fail `build-std`. The channel comes *from* that file
-    // ([`probes_nightly`]) rather than a literal, so naming it here can't drift from the pin. The
-    // crate's `.cargo/config.toml` supplies the target + `build-std`; `bpf-linker` (on PATH) links
-    // the object. `--locked` holds the probes lockfile.
-    let nightly = probes_nightly()?;
-    println!(
-        "$ rustup run {nightly} cargo build --release --locked  (in crates/probes → bpfel-unknown-none)"
-    );
-    let status = Command::new("rustup")
-        .args(["run", nightly, "cargo", "build", "--release", "--locked"])
-        .current_dir(&dir)
-        .status()
-        .context("building crates/probes (eBPF object)")?;
-    if !status.success() {
-        bail!(
-            "eBPF object build failed (crates/probes) — a program the verifier would reject, or a \
-             missing nightly toolchain / `rust-src` (see `cargo xtask setup`)"
-        );
-    }
-    // The object must carry BTF (`bpf-linker --btf`), the CO-RE portability + BTF map typing
-    // that lets aya relocate it against the running kernel. A missing `.BTF` section means the linker
-    // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it. The
-    // check walks the ELF section headers for a section named exactly `.BTF` (not a raw byte scan,
-    // which `.BTF.ext` alone or a coincidental byte run could satisfy).
-    let obj = dir.join("target/bpfel-unknown-none/release/probes");
-    let bytes =
-        std::fs::read(&obj).with_context(|| format!("read built object {}", obj.display()))?;
-    if !elf_has_section(&bytes, ".BTF") {
-        bail!(
-            "built eBPF object {} carries no .BTF section — is `-C link-arg=--btf` still set in \
-             crates/probes/.cargo/config.toml (and `debug` kept in the profile)?",
-            obj.display()
-        );
-    }
-    println!("· eBPF object built (with BTF): {}", obj.display());
-    Ok(())
-}
-
-/// Whether the ELF object in `bytes` has a section named exactly `name` (e.g. `.BTF`). A
-/// dependency-free ELF64 little-endian section-header walk: read the section-header table, resolve
-/// each section's name against the section-header string table, and compare. Precise where a raw
-/// byte-substring scan is not, `.BTF.ext` alone or a coincidental byte run won't satisfy it. Returns
-/// `false` on any malformed or non-ELF64-LE buffer, the safe direction for the build guard (a weird
-/// object fails the check rather than passing it).
-fn elf_has_section(bytes: &[u8], name: &str) -> bool {
-    // All reads are bounds- and overflow-checked (`checked_add` on the end offset), so a corrupt
-    // object with an out-of-range or huge offset yields `None` (→ `false`), never an index panic.
-    let u16_at = |o: usize| -> Option<u16> {
-        bytes
-            .get(o..o.checked_add(2)?)
-            .map(|s| u16::from_le_bytes([s[0], s[1]]))
-    };
-    let u32_at = |o: usize| -> Option<u32> {
-        bytes
-            .get(o..o.checked_add(4)?)?
-            .try_into()
-            .ok()
-            .map(u32::from_le_bytes)
-    };
-    let u64_at = |o: usize| -> Option<u64> {
-        bytes
-            .get(o..o.checked_add(8)?)?
-            .try_into()
-            .ok()
-            .map(u64::from_le_bytes)
-    };
-    let walk = || -> Option<bool> {
-        // ELF64, little-endian: magic, then EI_CLASS == 2 (64-bit) and EI_DATA == 1 (LSB).
-        if bytes.get(0..4)? != b"\x7fELF" || *bytes.get(4)? != 2 || *bytes.get(5)? != 1 {
-            return Some(false);
-        }
-        let e_shoff = u64_at(0x28)? as usize; // section-header table offset
-        let e_shentsize = u16_at(0x3a)? as usize; // bytes per section header
-        let e_shnum = u16_at(0x3c)? as usize; // section-header count
-        let e_shstrndx = u16_at(0x3e)? as usize; // index of the section-name string table
-        if e_shentsize < 0x40 || e_shnum == 0 || e_shstrndx >= e_shnum {
-            return Some(false);
-        }
-        // The string-table section's data holds every section name (NUL-terminated at sh_name).
-        let strtab_hdr = e_shoff.checked_add(e_shstrndx.checked_mul(e_shentsize)?)?;
-        let str_off = u64_at(strtab_hdr.checked_add(0x18)?)? as usize;
-        let str_size = u64_at(strtab_hdr.checked_add(0x20)?)? as usize;
-        let strtab = bytes.get(str_off..str_off.checked_add(str_size)?)?;
-        for i in 0..e_shnum {
-            let hdr = e_shoff.checked_add(i.checked_mul(e_shentsize)?)?;
-            let sh_name = u32_at(hdr)? as usize; // offset into the string table
-            let rest = strtab.get(sh_name..)?;
-            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-            if &rest[..end] == name.as_bytes() {
-                return Some(true);
-            }
-        }
-        Some(false)
-    };
-    walk().unwrap_or(false)
-}
-
 /// Whether the nightly toolchain with the `rust-src` component (needed to build `crates/probes` with
 /// `-Z build-std`) is installed, via `rustup component list --installed`. Informational, for `setup`.
 fn nightly_ebpf_ready() -> bool {
@@ -1287,9 +1049,7 @@ fn nightly_ebpf_ready() -> bool {
     // The *pinned* toolchain, not the `nightly` alias: with an exact date pinned, having some
     // nightly installed says nothing about having this one, and reporting ready on the wrong
     // toolchain would turn a clean skip into a confusing build failure.
-    let Ok(nightly) = probes_nightly() else {
-        return false;
-    };
+    let nightly = FUZZ_NIGHTLY;
     let mut cmd = Command::new(rustup);
     cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
     // Under a sudo that reset `$HOME` to root's, `rustup` would read root's empty `~/.rustup` and
@@ -1309,91 +1069,6 @@ fn nightly_ebpf_ready() -> bool {
                     .any(|l| l.trim().starts_with("rust-src"))
         })
         .unwrap_or(false)
-}
-
-/// Whether the pinned nightly carries `component`, asked the same sudo-aware way as
-/// [`nightly_ebpf_ready`].
-///
-/// The nightly is installed `--profile minimal`, which carries neither `rustfmt` nor `clippy`, so
-/// having the toolchain says nothing about being able to lint with it. CI learned this the hard
-/// way: the detached-workspace lint passed on a dev box that happened to have both and failed the
-/// gate with "'cargo-fmt' is not installed for the toolchain".
-fn nightly_has_component(component: &str) -> bool {
-    let Some(rustup) = dev_tool_path("rustup") else {
-        return false;
-    };
-    let Ok(nightly) = probes_nightly() else {
-        return false;
-    };
-    let mut cmd = Command::new(rustup);
-    cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
-    if std::env::var_os("RUSTUP_HOME").is_none()
-        && let Some(user) = std::env::var_os("SUDO_USER")
-        && let Some(home) = user_home(&user)
-    {
-        cmd.env("RUSTUP_HOME", home.join(".rustup"));
-    }
-    cmd.output()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .any(|l| l.trim().starts_with(component))
-        })
-        .unwrap_or(false)
-}
-
-/// The exact nightly `crates/probes` builds with, read out of its `rust-toolchain.toml` at compile
-/// time. **That file is the single source**: `rustup run <channel>` with a literal `nightly` here
-/// would silently override the pin (an explicit toolchain argument outranks the file), which is the
-/// same second-copy drift that let the Firecracker pin sit 21 months stale. Parsed rather than
-/// duplicated so the two can't disagree; `ebpf_toolchain_pins_are_single_sourced` extends that to
-/// the CI workflows, which cannot read the file at all.
-/// A malformed toolchain file is an error, never a silent fall back to the floating `nightly`
-/// channel: falling back would build with an unpinned compiler while every message still claimed
-/// the pin, which is worse than not pinning at all. `ebpf_toolchain_pins_are_single_sourced` fails
-/// the gate long before this could fire.
-fn probes_nightly() -> Result<&'static str> {
-    toolchain_channel(include_str!("../../crates/probes/rust-toolchain.toml")).context(
-        "crates/probes/rust-toolchain.toml does not declare a [toolchain] channel: the eBPF \
-         nightly pin is unreadable",
-    )
-}
-
-/// The `channel = "..."` value out of a `rust-toolchain.toml`. Deliberately a line scan, not a TOML
-/// parse: `xtask` is dev tooling and this is one unambiguous key, so the dependency isn't worth it.
-fn toolchain_channel(text: &str) -> Option<&str> {
-    text.lines()
-        .map(str::trim)
-        // Skip the comment prose above the table, which also contains the word `channel`.
-        .filter(|l| !l.starts_with('#'))
-        .find_map(|l| l.strip_prefix("channel"))?
-        .trim_start()
-        .strip_prefix('=')?
-        .trim()
-        .trim_matches('"')
-        .into()
-}
-
-/// The `bpf-linker` version the eBPF object is linked with. Unlike `aya` (a Cargo dependency, so
-/// `Cargo.lock` pins it), this is a **host binary installed out of band**, and
-/// `cargo install bpf-linker --locked` locks bpf-linker's *dependencies*, not bpf-linker itself, so
-/// without this every install takes whatever is newest. It links against the pinned nightly's LLVM,
-/// so the pair moves together: bump both, or neither.
-const BPF_LINKER_VERSION: &str = "0.10.3";
-
-/// The installed `bpf-linker`'s version (`bpf-linker 0.10.3` on stdout), or `None` if it isn't
-/// installed or won't report one. Resolved the sudo-aware way, like the other `~/.cargo/bin` dev
-/// tools, so `sudo cargo xtask setup` doesn't misreport it as absent.
-fn bpf_linker_version() -> Option<String> {
-    let out = Command::new(dev_tool_path("bpf-linker")?)
-        .arg("--version")
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .nth(1)
-        .map(str::to_string)
 }
 
 /// The workspace root (not the cwd), so the commands work from anywhere.
@@ -1847,18 +1522,16 @@ exclude = ["crates/probes", "fuzz"]
         }
     }
 
-    /// The pinned API surface is stated in three places for three audiences, and **`RELEASES.md`
-    /// asserts the three are the same list**. That claim drifted the moment it was written down:
-    /// `bsx-record` joined the surface in `AGENTS.md` and `docs/embedding-scope.md` and was left
-    /// out of `RELEASES.md`, which is the copy a tag freezes.
+    /// The pinned API surface is stated in two places for two audiences, which claim to name the
+    /// same list.
     ///
-    /// Asserts every crate in [`PINNED_SURFACE_CRATES`] is named in all three. The prose around the
+    /// Asserts every crate in [`PINNED_SURFACE_CRATES`] is named in both. The prose around the
     /// names is free to differ (each audience needs a different sentence); only the membership is
-    /// pinned, which is the part the three documents claim to agree on.
+    /// pinned, which is the part the two documents claim to agree on.
     #[test]
     fn pinned_surface_is_named_the_same_in_every_doc() {
         let root = workspace_root();
-        for page in ["AGENTS.md", "RELEASES.md", "docs/embedding-scope.md"] {
+        for page in ["AGENTS.md", "docs/embedding-scope.md"] {
             let text = std::fs::read_to_string(root.join(page)).unwrap();
             let missing: Vec<_> = PINNED_SURFACE_CRATES
                 .iter()
@@ -1866,7 +1539,7 @@ exclude = ["crates/probes", "fuzz"]
                 .collect();
             assert!(
                 missing.is_empty(),
-                "{page} does not name {missing:?} in the pinned API surface, but the three \
+                "{page} does not name {missing:?} in the pinned API surface, but the two \
                  documents claim to name the same one"
             );
         }

@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    build_probes, cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root,
+    cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root,
 };
 
-/// The binaries a self-host installs: the CLI and the driver daemon, both from the `bsx` crate.
+/// The binaries a self-host installs, from the `bsx` crate.
 const BINARIES: &[&str] = &["bsx"];
 
 /// `cargo xtask self-host [--prefix DIR] [--no-run] [--no-probes]`: build the artifacts + binaries
 /// and prove one sandbox boots. `--prefix` is the install dir (default `~/.local/bin`); `--no-run`
 /// skips the boot proof (build + install only); `--no-probes` is the named opt-out for standing the
 /// engine up without its observability half.
-pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool, no_probes: bool) -> Result<()> {
+pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool, _no_probes: bool) -> Result<()> {
     let offline = vendor_dir().is_some();
     println!(
         "self-host: {} build\n",
@@ -46,14 +46,6 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool, no_probes: bool) 
     println!("\n== 2/5  build the guest rootfs (bsx baked in) ==");
     crate::rootfs::build_rootfs(false, false)?;
 
-    println!("\n== 3/5  build the eBPF probe object (the audit half) ==");
-    build_probes()?;
-    // `build_probes` soft-skips without the eBPF toolchain so the everyday gate stays host-safe.
-    // Resolved the way the *installed* engine resolves it, so this answers "will it find an
-    // object", not "did this build write one".
-    let probes_present = bsx_probes_loader::object_path().is_file();
-    probe_object_required(probes_present, no_probes)?;
-
     println!("\n== 4/5  build + install the bsx binary ==");
     cargo(&["build", "--release", "--locked", "-p", "bsx"])?;
     let prefix = resolve_prefix(prefix)?;
@@ -64,34 +56,12 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool, no_probes: bool) 
     println!("\n== 5/5  run a sandbox ==");
     prove(&engine_bin, no_run)?;
 
-    // The qualifier rides on the completion line itself: a reader who sees only the last line must
-    // not read a partial stand-up as a whole one.
-    let half = if probes_present {
-        ""
-    } else {
-        " WITHOUT the observability half (--no-probes): --trace and --watch record a gap, --allow \
-         enforcement refuses"
-    };
     println!(
-        "\n✓ self-host complete{half}. Binary in {}; start the daemon with `bsx serve` (see \
-         `bsx serve --help`).",
+        "\n✓ self-host complete. Binary in {}; run a sandbox with `bsx run` (see \
+         `bsx run --help`).",
         prefix.display()
     );
     Ok(())
-}
-
-/// Refuses a self-host with no eBPF object unless the operator named the opt-out, so a stand-up
-/// never reports success on an engine whose observability half is absent.
-fn probe_object_required(present: bool, opted_out: bool) -> Result<()> {
-    if present || opted_out {
-        return Ok(());
-    }
-    bail!(
-        "no eBPF probe object (the skip reason is printed above), so this would install an engine \
-         without its observability half: --trace and --watch record a gap and --allow enforcement \
-         refuses. Install the pinned eBPF toolchain (`cargo xtask setup` names what is missing), \
-         or pass --no-probes to stand the engine up without it."
-    );
 }
 
 /// Write `~/.bsx.toml` with **absolute** artifact paths, matching what `install.sh` does for a

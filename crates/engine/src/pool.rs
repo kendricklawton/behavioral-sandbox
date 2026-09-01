@@ -5,7 +5,7 @@
 //! path (the console reader is the one exception), and the pool smuggles none in: restores run
 //! inline, in [`new`](Pool::new), in [`refill`](Pool::refill) at the *caller's* chosen moment, and
 //! in [`take`](Pool::take) only as the pool-ran-dry fallback. A self-refilling,
-//! concurrency-managed pool belongs to the daemon, not the library.
+//! concurrency-managed pool belongs to the caller, not the library.
 
 use crate::vm::{Snapshot, Vm};
 use crate::{BootConfig, FDS_PER_VM, RunningVm, VmmError};

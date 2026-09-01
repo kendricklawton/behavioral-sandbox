@@ -99,7 +99,7 @@ two unrelated boots.
 
 ### Boot, by rootfs path (n=100 per series)
 
-Read-only shared base, the posture the CLI and daemon apply:
+Read-only shared base, the posture the CLI applies:
 
 | | min | p50 | p90 | p99 | max |
 |---|---|---|---|---|---|

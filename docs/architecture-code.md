@@ -97,15 +97,3 @@ Some types to have in the back of your head before reading further.
 * **`SandboxProbes`** (`bsx-probes-loader`) and **`RunRecord`** (`bsx-record`) are the observation
   half: the attach bundle for one sandbox, and the record it finalizes. See
   [the eBPF half](./architecture-ebpf.md).
-
-## The daemon
-
-`bsx serve` is the same engine behind a versioned newline-JSON protocol on a unix socket. `bsx-protocol`
-holds the wire types, `bsx-client` is a dependency-light reference client, and `bsx`'s `serve.rs` and
-`session.rs` are the server.
-
-The security-relevant difference from the CLI: a daemon's clients control neither its config file nor
-its environment, so it takes its resource ceilings as **explicit flags** rather than from a discovered
-`.bsx.toml`, and reads neither config layer. A daemon must not read a security control out of whatever
-directory it happened to be started in. The CLI reads two layers for the same reason in miniature: a
-`.bsx.toml` above the cwd sets limits, and the keys reaching host execution come from `~/.bsx.toml`.

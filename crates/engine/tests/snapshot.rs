@@ -508,7 +508,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     assert!(
         !snap.shared_base(),
         "a Sandbox source must yield a private-disk bundle, or this test no longer covers the \
-         daemon's staging path"
+         private-disk staging path"
     );
 
     let mut cfg = guest_rootfs_config();
@@ -526,7 +526,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     assert_eq!(out.exit_code, 0);
     clone.shutdown().expect("clone shutdown");
 
-    // And pooled, the daemon's actual consumer of this path.
+    // And pooled, the other consumer of this path.
     let mut pool = Pool::new(snap, cfg, 2).expect("jailed private-disk pool should prefill");
     assert_eq!(pool.ready(), 2, "both private-disk clones should be pooled");
     let mut vm = pool.take().expect("take a confined clone");
@@ -714,7 +714,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
                 "clone {label}: on a v1.15 VMM the engine withholds `clock_realtime` (it is \
                  v1.16+), so the documented posture is a clock frozen at snapshot time: skew \
                  {skew}s under {tolerance}s means the clock advanced without the flag, and the \
-                 carve-out in RELEASES.md is stale"
+                 documented carve-out is stale"
             );
         }
     }

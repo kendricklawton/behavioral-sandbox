@@ -22,7 +22,6 @@ use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
 use bsx_engine::vcpus_supported;
-use bsx_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
 use crate::policy::Policy;
@@ -58,11 +57,6 @@ pub struct UserConfig {
     resolver: Option<Ipv4Addr>,
     /// Mirrors `BSX_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
-    /// Mirrors `BSX_SIGNING_KEY` (the host record-signing key path). No `BootConfig` field.
-    signing_key: Option<PathBuf>,
-    /// Mirrors `BSX_TRUSTED_KEYS`: extra public keys (`key_id` hex) `bsx verify` trusts, so a key
-    /// rotation doesn't invalidate already-signed records. No `BootConfig` field.
-    trusted_keys: Option<Vec<String>>,
 
     // Operator policy. These do **not** mirror `BSX_*` env keys: they bound what a caller may ask
     // for, and the flags > env precedence would let that caller edit them. The jail ids are the
@@ -95,14 +89,6 @@ pub struct UserConfig {
     jail_gid: Option<u32>,
     /// Whether a caller may attach a guest NIC at all; unset permits it.
     allow_net: Option<bool>,
-    /// Refuse a run without an audit record on this host.
-    require_record: Option<bool>,
-    /// Directory where audit records are saved by default.
-    records_dir: Option<PathBuf>,
-    /// Operator ceiling on allowed IPv4 egress CIDRs.
-    max_egress_v4: Option<Vec<CidrV4>>,
-    /// Operator ceiling on allowed IPv6 egress CIDRs.
-    max_egress_v6: Option<Vec<CidrV6>>,
 }
 
 /// A vCPU count from the file, validated at deserialize time against what the VMM can actually
@@ -132,32 +118,6 @@ fn vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU
 /// to* the ceiling, so an odd `max_vcpus` would turn a legal `vcpus` into an illegal boot count.
 fn max_vcpus_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<NonZeroU8>, D::Error> {
     bootable_vcpus("max_vcpus", d)
-}
-
-/// A `max_egress_v4` entry, validated at deserialize time: a typo'd ceiling entry must be a loud
-/// parse error, because dropping it would *widen* the ceiling (an empty ceiling means
-/// "no restriction" in [`Policy::check_egress`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "String")]
-struct CidrV4(Ipv4Cidr);
-
-impl TryFrom<String> for CidrV4 {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        parse_v4_cidr(&s, &format!("max_egress_v4 entry {s:?}")).map(CidrV4)
-    }
-}
-
-/// The v6 twin of [`CidrV4`], for `max_egress_v6` entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "String")]
-struct CidrV6(Ipv6Cidr);
-
-impl TryFrom<String> for CidrV6 {
-    type Error = String;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        parse_v6_cidr(&s, &format!("max_egress_v6 entry {s:?}")).map(CidrV6)
-    }
 }
 
 impl UserConfig {
@@ -248,18 +208,7 @@ impl UserConfig {
         self.log.as_deref()
     }
 
-    /// The file's `signing_key` path, if set (no `BootConfig` field; folded into
-    /// [`signing_key_path`]'s precedence).
-    #[must_use]
-    pub fn signing_key(&self) -> Option<&Path> {
-        self.signing_key.as_deref()
-    }
 
-    /// The file's `trusted_keys` list (public-key hex), or an empty slice.
-    #[must_use]
-    pub fn trusted_keys(&self) -> &[String] {
-        self.trusted_keys.as_deref().unwrap_or(&[])
-    }
 
     /// The operator policy this file declares. An absent file, or one that sets none
     /// of these keys, yields the default policy, which changes nothing.
@@ -276,22 +225,8 @@ impl UserConfig {
             max_output_cap: self.max_output_cap,
             require_jail: self.require_jail.unwrap_or(false),
             allow_net: self.allow_net,
-            require_record: self.require_record.unwrap_or(false),
-            records_dir: self.records_dir.clone(),
-            max_egress_v4: cidrs_v4(self.max_egress_v4.as_deref()),
-            max_egress_v6: cidrs_v6(self.max_egress_v6.as_deref()),
         }
     }
-}
-
-/// Already validated at deserialize time (`CidrV4`), so this projection cannot drop an entry.
-fn cidrs_v4(list: Option<&[CidrV4]>) -> Vec<Ipv4Cidr> {
-    list.unwrap_or(&[]).iter().map(|c| c.0).collect()
-}
-
-/// The v6 twin of [`cidrs_v4`].
-fn cidrs_v6(list: Option<&[CidrV6]>) -> Vec<Ipv6Cidr> {
-    list.unwrap_or(&[]).iter().map(|c| c.0).collect()
 }
 
 /// What a `.bsx.toml` found above the working directory may set: house defaults a caller could pass
@@ -338,8 +273,6 @@ fn env_mirror(key: &str) -> Option<&'static str> {
         "kernel" => Some("BSX_KERNEL"),
         "rootfs" => Some("BSX_ROOTFS"),
         "scratch_dir" => Some("BSX_SCRATCH_DIR"),
-        "signing_key" => Some("BSX_SIGNING_KEY"),
-        "trusted_keys" => Some("BSX_TRUSTED_KEYS"),
         "gateway" => Some("BSX_GATEWAY"),
         "resolver" => Some("BSX_RESOLVER"),
         "jail_uid" => Some("BSX_JAIL_UID"),
@@ -362,9 +295,6 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         kernel,
         rootfs,
         scratch_dir,
-        signing_key,
-        trusted_keys,
-        records_dir,
         gateway,
         resolver,
         jail_uid,
@@ -383,9 +313,6 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         max_output_cap,
         require_jail,
         allow_net,
-        require_record,
-        max_egress_v4,
-        max_egress_v6,
     } = cfg;
 
     let refused: Vec<&'static str> = [
@@ -393,9 +320,6 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         ("kernel", kernel.is_some()),
         ("rootfs", rootfs.is_some()),
         ("scratch_dir", scratch_dir.is_some()),
-        ("signing_key", signing_key.is_some()),
-        ("trusted_keys", trusted_keys.is_some()),
-        ("records_dir", records_dir.is_some()),
         ("gateway", gateway.is_some()),
         ("resolver", resolver.is_some()),
         ("jail_uid", jail_uid.is_some()),
@@ -421,11 +345,6 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         max_output_cap,
         require_jail,
         allow_net,
-        require_record,
-        // `records_dir` is user-only and was refused above.
-        records_dir: None,
-        max_egress_v4,
-        max_egress_v6,
         ..UserConfig::default()
     };
     Ok(ProjectConfig {
@@ -436,41 +355,6 @@ pub fn project_from(cfg: UserConfig) -> Result<ProjectConfig, Vec<&'static str>>
         require_limits: require_limits.unwrap_or(false),
         policy: honored.policy(),
     })
-}
-
-/// Parse one IPv4 CIDR, `IP` or `IP/PREFIX`. `context` is the whole phrase naming where the
-/// operator wrote it, so one parser serves callers whose locus has a different shape.
-pub(crate) fn parse_v4_cidr(s: &str, context: &str) -> Result<Ipv4Cidr, String> {
-    parse_cidr(s, context, "IPv4")
-}
-
-/// The v6 twin of [`parse_v4_cidr`].
-pub(crate) fn parse_v6_cidr(s: &str, context: &str) -> Result<Ipv6Cidr, String> {
-    parse_cidr(s, context, "IPv6")
-}
-
-/// The one body behind both family parsers; `family` names the address family in the message.
-fn parse_cidr<A>(s: &str, context: &str, family: &str) -> Result<bsx_probes_loader::Cidr<A>, String>
-where
-    A: bsx_probes_loader::CidrAddr + std::str::FromStr,
-{
-    match s.split_once('/') {
-        Some((ip, prefix)) => {
-            let addr: A = ip
-                .parse()
-                .map_err(|_| format!("invalid {family} address {ip:?} in {context}"))?;
-            let prefix: u8 = prefix
-                .parse()
-                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in {context}"))?;
-            bsx_probes_loader::Cidr::new(addr, prefix).map_err(|e| format!("{context}: {e}"))
-        }
-        None => {
-            let addr: A = s
-                .parse()
-                .map_err(|_| format!("invalid {family} address in {context}"))?;
-            Ok(bsx_probes_loader::Cidr::host(addr))
-        }
-    }
 }
 
 /// A `.bsx.toml` the CLI could not use. Every variant names the file, so a message can send the
@@ -660,9 +544,7 @@ fn same_file(path: &Path, other: Option<&Path>) -> bool {
 }
 
 /// The operator policy for this process: the user file's, tightened by the project file's. `run`
-/// and `shell` both source policy here; `serve` deliberately does not (its [`Policy`] comes from
-/// its own flags), because a daemon must not read a security control out of whatever directory it
-/// was started in.
+/// and `shell` both source policy here.
 #[must_use]
 pub fn policy_of(sources: &Sources) -> Policy {
     let user = sources
@@ -674,46 +556,6 @@ pub fn policy_of(sources: &Sources) -> Policy {
         Some(p) => user.tightened_by(p.policy()),
         None => user,
     }
-}
-
-/// Resolve the host record-signing key path, `env (BSX_SIGNING_KEY) > file > default`
-/// ([`bsx_probes_loader::default_key_path`], generated on first use). No `BootConfig` field, so
-/// the precedence is mirrored here.
-#[must_use]
-pub fn signing_key_path(sources: &Sources) -> PathBuf {
-    std::env::var_os("BSX_SIGNING_KEY")
-        .map(PathBuf::from)
-        .or_else(|| {
-            sources
-                .user
-                .as_ref()
-                .and_then(UserConfig::signing_key)
-                .map(Path::to_path_buf)
-        })
-        .unwrap_or_else(bsx_probes_loader::default_key_path)
-}
-
-/// The extra trusted public keys (`key_id` hex) for `bsx verify`: the **union** of
-/// `BSX_TRUSTED_KEYS` (comma-separated) and the user file's list, so a record signed before a key
-/// rotation still verifies. Parsing is the caller's (`TrustedKey::from_hex`).
-#[must_use]
-pub fn trusted_key_hexes(sources: &Sources) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(v) = std::env::var_os("BSX_TRUSTED_KEYS") {
-        out.extend(
-            v.to_string_lossy()
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-        );
-    }
-    // The user file only: this set is additive, so a file that could add to it could make a record
-    // it signed verify against this host.
-    if let Some(f) = sources.user.as_ref() {
-        out.extend(f.trusted_keys().iter().cloned());
-    }
-    out
 }
 
 /// Resolve the stderr log filter, `flag > env (BSX_LOG) > project > user > default`: the one
@@ -838,17 +680,6 @@ mod tests {
             UserConfig::default().signing_key(),
             None,
             "unset falls through"
-        );
-    }
-
-    #[test]
-    fn trusted_keys_parse_as_a_list_from_the_file_layer() {
-        let toml =
-            UserConfig::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
-        assert_eq!(toml.trusted_keys(), ["aa".to_string(), "bb".to_string()]);
-        assert!(
-            UserConfig::default().trusted_keys().is_empty(),
-            "unset is an empty set, not an error"
         );
     }
 

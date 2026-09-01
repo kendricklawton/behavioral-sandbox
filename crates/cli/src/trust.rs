@@ -25,7 +25,7 @@ use std::fs::File;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-use bsx_record::HostIds;
+use crate::ids::HostIds;
 
 /// Who this process would name as the config's expected owner, for a refusal message.
 fn expected(ids: HostIds) -> String {
@@ -123,14 +123,6 @@ fn refusal_message(refusal: &Refusal, path: &Path, dir: &Path, ids: HostIds) -> 
     }
 }
 
-/// This process's effective uid, or `None` if `/proc/self/status` cannot be read.
-// The `fuzzing` library target compiles this module for `open_trusted` alone, without `serve`, which
-// is the caller that makes this live in the binary.
-#[cfg_attr(feature = "fuzzing", allow(dead_code))]
-pub(crate) fn own_euid() -> Option<u32> {
-    HostIds::current().map(HostIds::effective)
-}
-
 /// Open `path` if this user's own config, `Ok(None)` if there is nothing there to read.
 ///
 /// The `metadata` call before `File::open` is load-bearing: without it a planted FIFO named
@@ -185,6 +177,11 @@ pub(crate) fn open_trusted(path: &Path) -> Result<Option<File>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// This euid, for the tests that can only run as real root.
+    fn own_euid() -> Option<u32> {
+        HostIds::current().map(HostIds::effective)
+    }
+
     use bsx_test_support::ScratchDir;
 
     use super::*;

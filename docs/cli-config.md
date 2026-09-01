@@ -175,15 +175,12 @@ The id the jailer switches to after building the chroot. Pick one that owns noth
 host: the jailer chowns the chroot to it, so it needs no `/etc/passwd` entry.
 
 **This is the operator's setting and never a caller's.** Every sandbox an engine starts shares it,
-as does a second `bsx serve` left at the default; therefore, two daemons meant to separate tenants need
-different ids. Processes sharing a uid can signal each other, so a guest that escaped into its own
-VMM would land beside its neighbours' VMMs at the same id (`ptrace` between them is additionally
-gated by Yama, which `bsx doctor` reports). Nothing on the daemon's wire protocol carries an id, by
-design: a client that could name its own could name a neighbour's.
+so two runs meant to separate tenants need different ids. Processes sharing a uid can signal each
+other, so a guest that escaped into its own VMM would land beside its neighbours' VMMs at the same
+id (`ptrace` between them is additionally gated by Yama, which `bsx doctor` reports).
 
 `0` is refused. It is the id the jail exists to leave, and a jailed boot that stayed root would drop
-nothing. The `--jail-uid` / `--jail-gid` flags set it per run on `bsx run`, `bsx shell`, and
-`bsx serve`.
+nothing. The `--jail-uid` / `--jail-gid` flags set it per run on `bsx run` and `bsx shell`.
 
 [`jail_uid`]: #setting-jail_uid-and-jail_gid
 
@@ -273,13 +270,11 @@ rather than project configuration.
 
 ## Setting `BSX_LOG_FORMAT`
 
-- **env**: `BSX_LOG_FORMAT` (**environment only**, daemon-scoped)
+- **env**: `BSX_LOG_FORMAT` (**environment only**)
 - **type**: `json`
 - **default**: human-readable
 
-Switches `bsx serve`'s stderr logs to JSON encoding (`--log-json` is the per-launch flag form);
-the one-shot commands do not read it. The daemon's log fields are documented in
-[Observability for the hoster](./daemon-observability.md).
+Switches stderr logs to JSON encoding (`--log-json` is the per-launch flag form).
 
 [`BSX_LOG_FORMAT`]: #setting-bsx_log_format
 
@@ -458,7 +453,7 @@ would have removed the ceiling entirely (`a_project_egress_ceiling_does_not_repl
 
 ## Where this is enforcement, and where it is a guardrail
 
-Three tiers, not two.
+Two tiers.
 
 **Your own `~/.bsx.toml` is a guardrail.** You wrote it, so the ceilings in it bound you at your own
 request, and [Security](./security.md#what-is-not-a-security-bug) treats a caller harming themselves
@@ -467,10 +462,3 @@ as misuse rather than a vulnerability.
 **A project `.bsx.toml` is not necessarily yours**, which is why the keys that reach host execution
 and host trust are not read from one, and why the keys that are read from one can only tighten what
 your own file already said.
-
-**The real boundary is [`bsx serve`](./daemon.md)**, whose clients control neither the daemon's config
-nor its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
-`--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, `--max-egress`, plus the daemon-wide
-`--max-sessions`, `--max-snapshots`, and committed-resource ceilings) and reads no `.bsx.toml` at
-all, neither layer: a daemon must not read a
-security control out of whatever directory it happened to be started in.

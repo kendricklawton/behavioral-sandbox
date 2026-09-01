@@ -12,7 +12,6 @@
 
 use std::path::{Path, PathBuf};
 
-use bsx_probes_common::{COMM_CAP, DETAIL_CAP, SyscallEvent};
 
 /// The workspace root, from the calling crate's manifest dir, so a test finds `artifacts/` whatever
 /// the cwd. `CARGO_MANIFEST_DIR` expands where this crate is compiled (`crates/test-support`), so
@@ -711,34 +710,6 @@ pub fn process_state(pid: u32) -> Option<String> {
 #[must_use]
 pub fn parse_proc_state(stat: &str) -> Option<&str> {
     stat.rsplit_once(')')?.1.split_whitespace().next()
-}
-
-/// One synthetic [`SyscallEvent`], the record the probe would have written, built field by field so
-/// a test names the bytes without eBPF, KVM, or caps. `syscall` is the **raw discriminant**, not a
-/// `Syscall`, so a caller can feed a value that decodes to nothing and exercise the unknown-kind
-/// path. `detail` and `comm` are truncated to their caps rather than rejected, which is what the
-/// probe's fixed buffers do to an over-long path.
-///
-/// Lives here rather than in `bsx-record` because every consumer is a separate crate from the one
-/// that owns the record types: an integration test, a bench, and the CLI's trace renderer each need
-/// it, and only this crate is reachable from all three.
-#[must_use]
-pub fn syscall_event(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-    let mut d = [0u8; DETAIL_CAP];
-    let n = detail.len().min(d.len());
-    d[..n].copy_from_slice(&detail[..n]);
-    let mut c = [0u8; COMM_CAP];
-    let m = comm.len().min(c.len());
-    c[..m].copy_from_slice(&comm.as_bytes()[..m]);
-    SyscallEvent {
-        cgroup_id: cgroup,
-        pid: 7,
-        tid: 7,
-        syscall,
-        detail_len: n as u32,
-        comm: c,
-        detail: d,
-    }
 }
 
 #[cfg(test)]

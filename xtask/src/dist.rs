@@ -13,17 +13,13 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::sha256_of;
-use crate::{build_probes, cargo_reproducible, guest_rootfs_path, kernel_path, workspace_root};
-
-/// The packaged eBPF object's name inside `share/bsx/` (the loader finds it via
-/// `BSX_PROBES_OBJECT`, which `install.sh` and the container image point here).
-const PROBES_NAME: &str = "probes";
+use crate::{cargo_reproducible, guest_rootfs_path, kernel_path, workspace_root};
 
 /// The artifacts staged under `share/bsx/`, the names an installed host carries. `install.sh`
 /// carries its own copy of this list, because a shell script cannot read this one;
 /// `the_installer_installs_exactly_what_dist_stages` holds the two together, since a divergence
 /// surfaces only when a *released* tarball is installed.
-const SHARE_MEMBERS: [&str; 3] = ["vmlinux", "rootfs-guest.ext4", PROBES_NAME];
+const SHARE_MEMBERS: [&str; 2] = ["vmlinux", "rootfs-guest.ext4"];
 
 /// The target the **shipped** binary is built for: static musl, so the package carries no libc
 /// dependency at all.
@@ -83,18 +79,6 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
     crate::rootfs::build_rootfs(false, false)?;
 
-    println!("\n== 3/5  build the eBPF probe object ==");
-    build_probes()?;
-    let object = workspace_root().join("crates/probes/target/bpfel-unknown-none/release/probes");
-    if !object.is_file() {
-        // `build_probes` soft-skips without the eBPF toolchain so the everyday gate stays
-        // host-safe; a *package* without the observability half is not the product, so hard-fail.
-        bail!(
-            "eBPF object not built ({}) — a dist ships the audit half; install bpf-linker + the \
-             nightly toolchain (see AGENTS.md)",
-            object.display()
-        );
-    }
 
     println!("\n== 4/5  build the release binary (static, {DIST_TARGET}) ==");
     cargo_reproducible(&[
@@ -133,7 +117,6 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     copy_mode(&bin, &stage.join("bin/bsx"), 0o755)?;
     copy_mode(&kernel, &share.join(SHARE_MEMBERS[0]), 0o644)?;
     copy_mode(&guest_rootfs_path(), &share.join(SHARE_MEMBERS[1]), 0o644)?;
-    copy_mode(&object, &share.join(SHARE_MEMBERS[2]), 0o644)?;
     copy_mode(
         &workspace_root().join("install.sh"),
         &stage.join("install.sh"),
@@ -153,7 +136,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     let sums_text = format!("{tar_sha}  {name}.tar.gz\n");
     std::fs::write(&sums, &sums_text).with_context(|| format!("write {}", sums.display()))?;
 
-    let key_id = sign_release_manifest(&dist_dir)?;
+    let key_id: Option<String> = None;
 
     println!("\n✓ dist assembled:");
     println!("    {}", tarball.display());
@@ -198,7 +181,7 @@ fn version_matches_manifest(version: &str, pkg: &str) -> Result<()> {
 }
 
 /// The default package version: the nearest checkpoint tag (`git describe --tags`, the `v0.0.x`
-/// pre-release line RELEASES.md defines, `v` stripped), falling back to `<pkg>-dev.<rev>` in a
+/// pre-release line, `v` stripped), falling back to `<pkg>-dev.<rev>` in a
 /// tagless clone. Release CI passes `--version` from the pushed tag instead.
 ///
 /// The fallback's number comes from the workspace version rather than a literal, which was `0.0.0`
@@ -305,105 +288,6 @@ fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
     ]);
     crate::run_tool("tar", &args)?;
     println!("  packed {}", tarball.display());
-    Ok(())
-}
-
-/// The pinned release **public** key: `release-key.pem` at the repo root, byte-identical to the
-/// PEM `install.sh` embeds (a dist test enforces the two never drift).
-pub(crate) fn release_pubkey_path() -> PathBuf {
-    workspace_root().join("release-key.pem")
-}
-
-/// Sign `dist/SHA256SUMS` with the operator's release key (`BSX_RELEASE_SIGNING_KEY`, a key-file
-/// path; distinct from `BSX_SIGNING_KEY`, the *audit-record* key), writing `dist/SHA256SUMS.sig`:
-/// a raw detached `ed25519` signature over the manifest's exact bytes, so a stock
-/// `openssl pkeyutl -verify -rawin` checks it with no bsx binary in the loop. Fail-closed by
-/// construction: no key means an *unsigned* dist with a loud warning (release CI separately
-/// refuses to publish one), never a generated throwaway key, and never key material under
-/// `dist/`; a key that doesn't match the pinned `release-key.pem` is refused.
-fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
-    let stale = dist_dir.join("release-signing.ed25519");
-    if stale.exists() {
-        bail!(
-            "{} is a private key minted by the old signing scheme: remove it (and rotate the \
-             key if it was ever published) before assembling a dist",
-            stale.display()
-        );
-    }
-
-    let Some(key_path) = std::env::var_os("BSX_RELEASE_SIGNING_KEY") else {
-        println!("  ! dist is UNSIGNED (set BSX_RELEASE_SIGNING_KEY=<key file> to sign)");
-        println!("  ! do not publish an unsigned dist; release CI refuses one");
-        return Ok(None);
-    };
-    let key_path = PathBuf::from(key_path);
-    let key = bsx_probes_loader::HostKey::open(&key_path)
-        .with_context(|| format!("load release signing key from {}", key_path.display()))?;
-
-    // The signing key must be the pinned release identity, not merely *a* key: a dist signed by
-    // anything else fails every installer's pin.
-    let pin_path = release_pubkey_path();
-    let pin_pem = std::fs::read_to_string(&pin_path)
-        .with_context(|| format!("read the pinned release public key {}", pin_path.display()))?;
-    let pin = bsx_probes_loader::TrustedKey::from_spki_pem(&pin_pem)
-        .map_err(|e| anyhow::anyhow!("parse {}: {e}", pin_path.display()))?;
-    if pin.key_id() != key.key_id() {
-        bail!(
-            "signing key {} does not match the pinned release-key.pem ({}): wrong secret, or \
-             the pin was not rotated",
-            key.key_id(),
-            pin.key_id()
-        );
-    }
-
-    sign_manifest_bytes(dist_dir, &key)?;
-    Ok(Some(key.key_id()))
-}
-
-/// The env-free signing core (what the tests call directly): a raw detached signature over the
-/// manifest's exact bytes, nothing re-serialized in between, so the bytes `sha256sum -c` reads
-/// are the bytes the signature covers.
-fn sign_manifest_bytes(dist_dir: &Path, key: &bsx_probes_loader::HostKey) -> Result<()> {
-    let sums_path = dist_dir.join("SHA256SUMS");
-    let content =
-        std::fs::read(&sums_path).with_context(|| format!("read {}", sums_path.display()))?;
-    let sig_path = dist_dir.join("SHA256SUMS.sig");
-    std::fs::write(&sig_path, key.sign_detached(&content))
-        .with_context(|| format!("write {}", sig_path.display()))?;
-    Ok(())
-}
-
-/// `cargo xtask release-key --path <file>`: mint (or show) the release signing key and print the
-/// pin-and-secret ceremony. The private key lives wherever the operator points, never inside the
-/// workspace's `dist/`.
-pub(crate) fn release_key(path: &Path) -> Result<()> {
-    let dist_dir = workspace_root().join("dist");
-    if path.starts_with(&dist_dir) {
-        bail!(
-            "refusing to put the release private key under {} (it would ship with the artifacts)",
-            dist_dir.display()
-        );
-    }
-    let key = bsx_probes_loader::HostKey::load_or_generate(path)
-        .map_err(|e| anyhow::anyhow!("load or generate {}: {e}", path.display()))?;
-    let pem = key
-        .verifying_key()
-        .to_spki_pem()
-        .map_err(|e| anyhow::anyhow!("encode public key: {e}"))?;
-    println!("release signing key: {}", path.display());
-    println!("key_id: {}", key.key_id());
-    println!("\npublic key (SPKI PEM):\n{pem}");
-    println!("ceremony (each step required before the next tagged release):");
-    println!(
-        "  1. pin it:      write the PEM above to {} AND into the install.sh heredoc",
-        release_pubkey_path().display()
-    );
-    println!("                  (the dist test asserts the two match)");
-    println!(
-        "  2. CI secret:   gh secret set BSX_RELEASE_SIGNING_KEY < {}",
-        path.display()
-    );
-    println!("  3. keep custody: the key file stays outside the repo; rotating = repeat 1-2");
     Ok(())
 }
 
@@ -1466,7 +1350,7 @@ mod tests {
     /// `cargo update` can move aya's side with no diff that mentions this line.
     ///
     /// Both ways of being wrong are silent: forgetting a TCX link leaks its fd, one per classifier
-    /// per run, walking a long-lived daemon toward `EMFILE`; dropping a netlink link in the wrong
+    /// per run, walking a long-lived process toward `EMFILE`; dropping a netlink link in the wrong
     /// netns detaches whatever that ifindex names there. So the attach asks for a named option and
     /// reports the kind, which is also what the repo's own rule asks for: probe the capability, do
     /// not compare a version.
@@ -1871,11 +1755,8 @@ mod tests {
     /// load-bearing one: the kernel reads a zero timeout as "block forever", so a copy that arms a
     /// spent budget is the hang the adapter exists to prevent, which is what design rule 5 forbids.
     ///
-    /// The copies cannot share a function. `crates/cli` reaching `bsx-engine`'s adapter would put a
-    /// CLI-shaped convenience type on that crate's pinned public API, which `docs/embedding-scope.md`
-    /// draws out of scope, and `bsx-client` reaching either would void its wire-only dependency
-    /// proof. So the invariant is pinned instead. A site names the method that arms the sockopt
-    /// and, where the budget is computed in a helper rather than inline, that helper too.
+    /// A site names the method that arms the sockopt and, where the budget is computed in a helper
+    /// rather than inline, that helper too.
     #[test]
     fn every_deadline_bounded_socket_refuses_a_spent_budget() {
         /// One bounded direction of one adapter.
@@ -1899,20 +1780,6 @@ mod tests {
         let repo = workspace_root();
         let sites = [
             Site {
-                file: "crates/cli/src/deadline.rs",
-                imp: "impl<S: Read + SetReadTimeout> Read for",
-                method: "read",
-                sockopt: "set_read_timeout",
-                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
-            },
-            Site {
-                file: "crates/cli/src/deadline.rs",
-                imp: "impl<S: Write + SetWriteTimeout> Write for",
-                method: "write",
-                sockopt: "set_write_timeout",
-                budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
-            },
-            Site {
                 file: "crates/engine/src/deadline.rs",
                 imp: "impl<S: Borrow<UnixStream>> Read for",
                 method: "read",
@@ -1925,20 +1792,6 @@ mod tests {
                 method: "write",
                 sockopt: "set_write_timeout",
                 budget: Some(("impl<S> DeadlineStream<S> {", "remaining")),
-            },
-            Site {
-                file: "crates/client/src/deadline.rs",
-                imp: "impl Read for DeadlineStream",
-                method: "read",
-                sockopt: "set_read_timeout",
-                budget: Some(("impl DeadlineStream {", "remaining")),
-            },
-            Site {
-                file: "crates/client/src/deadline.rs",
-                imp: "impl Write for DeadlineStream",
-                method: "write",
-                sockopt: "set_write_timeout",
-                budget: Some(("impl DeadlineStream {", "remaining")),
             },
         ];
         for Site {

@@ -35,12 +35,6 @@ features = ["fuzzing"]
 [dependencies.bsx-record]
 path = "../crates/record"
 
-# The daemon's untrusted-client wire (`read_message` over the newline-JSON contract). The `fuzzing`
-# feature exposes the internal line reader + schema gate behind module `fuzz`.
-[dependencies.bsx-protocol]
-path = "../crates/protocol"
-features = ["fuzzing"]
-
 # The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
 # host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
 [dependencies.bsx-probes-common]
@@ -93,13 +87,6 @@ bench = false
 [[bin]]
 name = "signing_envelope"
 path = "fuzz_targets/signing_envelope.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "protocol_message"
-path = "fuzz_targets/protocol_message.rs"
 test = false
 doc = false
 bench = false

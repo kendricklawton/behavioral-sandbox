@@ -163,7 +163,6 @@ pub fn report(
     let mut out = std::io::stdout();
 
     let mut checks = doctor::checks(config);
-    checks.push(ebpf_check());
     checks.push(config_check(sources));
 
     // The JSON form is the whole stdout result, so it returns before any human framing is written.
@@ -264,28 +263,6 @@ fn tally(checks: &[Check], paint: Paint) -> String {
         parts.push(paint.wrap("1;31", &format!("{fail} missing")));
     }
     parts.join(", ")
-}
-
-/// The eBPF-observability capability row, from the probe loader's own support check (`CAP_BPF` +
-/// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
-/// (recording a coverage gap) and only `--allow` *enforcement* refuses.
-fn ebpf_check() -> Check {
-    let (status, note) = match bsx_probes_loader::check_support() {
-        Ok(()) => (CheckStatus::Ok, None),
-        Err(e) => (
-            CheckStatus::Warn,
-            Some(format!(
-                "--trace/--watch degrade to a coverage gap and --allow enforcement refuses: {e}"
-            )),
-        ),
-    };
-    // One label for both outcomes: an operator greps a `--json` row by name, and a row that
-    // renamed itself on failure is one their filter stops matching exactly when it fires.
-    Check::row(
-        "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        status,
-        note,
-    )
 }
 
 /// Which `.bsx.toml` layers this run read. Always `Ok`: a project file reaching for a user-only key

@@ -8,32 +8,22 @@
 //! as the explicit opt-out, and both point at the env-layered artifacts.
 #![forbid(unsafe_code)]
 
-mod audit;
 mod config;
-mod deadline;
 mod doctor;
-mod metrics;
+mod ids;
 mod policy;
-mod serve;
-mod session;
-mod trace;
 mod trust;
-mod verify;
-mod watch;
 
 use std::io::{IsTerminal, Read, Write};
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::policy::{AllowRule, Policy, Requested, parse_allow};
+use crate::policy::{Policy, Requested};
 use bsx_engine::{
     Artifact, BootConfig, ErrorKind, Limits, MAX_PAYLOAD, Sandbox, VmmError, sweep_orphans,
 };
 use bsx_engine::{MAX_VCPUS, vcpus_supported};
-use bsx_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
@@ -116,7 +106,7 @@ impl From<policy::PolicyError> for CliError {
 #[derive(Parser)]
 #[command(
     name = "bsx",
-    // The crate version, which release tags mirror (`RELEASES.md`): this tells an installed binary
+    // The crate version, which release tags mirror: this tells an installed binary
     // from a stale one, not which release it is.
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
@@ -174,21 +164,6 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     /// on this host. Exits non-zero when a hard prerequisite is missing, so `bsx doctor && bsx
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
-    /// Verify a signed audit record.
-    ///
-    /// Checks a `--record` file's `ed25519` signature against a trusted key (the host's own, or
-    /// `--key <hex>`), so alteration after the producing host is caught. Exits non-zero
-    /// if the record was altered or signed by an untrusted key.
-    Verify(verify::VerifyArgs),
-    /// Run the driver daemon.
-    ///
-    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API), so a
-    /// local client drives microVMs without linking the engine. Access control is the socket
-    /// directory's permissions (no auth, a recorded non-goal).
-    ///
-    /// Every flag here is the operator's: the wire carries no identity, so no client names any of
-    /// them, and a ceiling refuses an `open` that exceeds it rather than quietly clamping it.
-    Serve(Box<serve::ServeArgs>),
 }
 
 #[derive(clap::Args)]
@@ -238,21 +213,13 @@ struct RunArgs {
     /// host end of its /30. What crosses the tap lands in the audit record's network section.
     #[arg(long, conflicts_with = "demo_boot", help_heading = "Network")]
     net: bool,
-    /// Allow one egress destination past the deny-by-default tap (repeatable).
-    /// Given as `IP[/CIDR][:PORT][/PROTO]`, e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`.
-    /// Requires `--net`; the allowances build the run's egress policy, armed before the tap goes
-    /// live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent
-    /// unenforced run.
-    #[arg(long, value_name = "IP[:PORT]", value_parser = parse_allow, requires = "net", help_heading = "Network")]
-    allow: Vec<AllowRule>,
     /// Give the guest a default route via this address (the host end of its /30).
     ///
     /// Must be on the guest's own link, which the shipped /30 narrows to one usable value; anything
     /// else is refused, because the guest could not ARP it and would come up sealed.
     /// Names a path rather than creating one: the engine builds no uplink, so on a host whose per-VM
     /// netns nothing has furnished the guest still reaches nothing. What it changes is that the
-    /// attempt now crosses the tap, so `--allow` can bound it and the record can show it. Normally
-    /// the host end of the guest's /30. Requires `--net`; see design decision 9.
+    /// attempt now crosses the tap. Normally the host end of the guest's /30. Requires `--net`; see design decision 9.
     #[arg(long, value_name = "IP", requires = "net", help_heading = "Network")]
     gateway: Option<std::net::Ipv4Addr>,
     /// Tell the guest to resolve names at this address.
@@ -283,43 +250,6 @@ struct RunArgs {
     /// effective limits, instead of relaying the raw streams.
     #[arg(long, help_heading = "Result and audit trail")]
     json: bool,
-    /// Print the run's audit trail on stdout afterwards.
-    /// Attaches the host-side probes and renders the trail human-readably. Fail-open: a host without
-    /// eBPF caps still runs, with the gaps explained. Machine consumers use `--record` (so this
-    /// conflicts with `--json`).
-    #[arg(long, conflicts_with_all = ["json", "demo_boot"], help_heading = "Result and audit trail")]
-    trace: bool,
-    /// Write the run's deterministic audit record to a file.
-    /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
-    /// inspection or `bsx verify`.
-    #[arg(
-        long,
-        value_name = "FILE",
-        conflicts_with = "demo_boot",
-        help_heading = "Result and audit trail"
-    )]
-    record: Option<PathBuf>,
-    /// Write a model-legible summary of the run to a file.
-    /// One line of JSON: a compact projection of the audit record shaped for an agent's
-    /// observe-then-act loop (what it reached, what egress was denied, its resource envelope, and
-    /// any coverage gap).
-    #[arg(
-        long,
-        value_name = "FILE",
-        conflicts_with = "demo_boot",
-        help_heading = "Result and audit trail"
-    )]
-    record_summary: Option<PathBuf>,
-    /// Watch the run live in a full-screen view on stderr.
-    /// Shows network flows and denials, resources, the VMM's host syscalls, and a timeline while the
-    /// command runs. Needs stderr on a terminal. `q` closes the view (the run continues); after the
-    /// command finishes, the view stays up until closed.
-    #[arg(
-        long,
-        conflicts_with = "demo_boot",
-        help_heading = "Result and audit trail"
-    )]
-    watch: bool,
     /// The command to run in the guest, after `--`.
     #[arg(trailing_var_arg = true)]
     argv: Vec<String>,
@@ -349,12 +279,6 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging and reads no `.bsx.toml` (its config is flags + environment),
-    // so `serve` dispatches *before* the project-file discovery and tracing init below. It still
-    // receives the shared global `--log` filter.
-    if let Cmd::Serve(args) = cli.cmd {
-        return serve::serve(*args, cli.log);
-    }
     // The `.bsx.toml` layers are discovered once: the user's own file, and the nearest one above
     // the cwd. A mistyped key, or a project-local file reaching for a user-only one, fails loudly
     // here, before any boot, rather than silently not applying.
@@ -393,35 +317,31 @@ fn main() -> ExitCode {
 fn run(cmd: Cmd, sources: &config::Sources) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => {
-            sweep_vm_residue(&base_config(sources).scratch_dir, None);
+            sweep_vm_residue(&base_config(sources).scratch_dir);
             run_command(*args, sources)
         }
         Cmd::Shell(args) => {
-            sweep_vm_residue(&base_config(sources).scratch_dir, None);
+            sweep_vm_residue(&base_config(sources).scratch_dir);
             shell(args, sources)
         }
         Cmd::Doctor(args) => Ok(doctor::report(&base_config(sources), &args, sources)),
-        Cmd::Verify(args) => verify::run(args, sources),
-        // `serve` is dispatched in `main` before this point, so this arm is never reached; a typed
-        // error rather than a panic keeps the no-panic discipline for the impossible case.
-        Cmd::Serve(_) => Err(CliError::Cli(
-            "internal: serve is dispatched in main() before run()".into(),
-        )),
     }
+}
+
+/// A [`std::time::Duration`] as whole milliseconds, saturating (a run never realistically
+/// overflows `u64` ms).
+fn ms(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `bsx` left: a
 /// `Ctrl-C`/SIGKILL skips `Drop`, so the lifetime sentinel reaps the VM process but the scratch dir
-/// and netns are out of its scope. Run at startup by every path that boots a VM, the CLI's
-/// subcommands and the daemon alike, which is why it takes `metrics` (`None` off the daemon).
+/// and netns are out of its scope. Run at startup by every path that boots a VM.
 /// [`sweep_orphans`] reclaims only this euid's dead-pid dirs, never a concurrent run's live
 /// sandbox.
-fn sweep_vm_residue(scratch: &std::path::Path, metrics: Option<&metrics::Metrics>) {
+fn sweep_vm_residue(scratch: &std::path::Path) {
     match sweep_orphans(scratch) {
         Ok(r) => {
-            if let Some(m) = metrics {
-                m.record_sweep(&r);
-            }
             if r.dirs_reclaimed + r.netns_reclaimed > 0 {
                 tracing::info!(
                     dirs = r.dirs_reclaimed,
@@ -448,17 +368,15 @@ fn base_config(sources: &config::Sources) -> BootConfig {
 /// Fold the shared posture into `config`: the launch shape these entry points own plus the flag
 /// layer over what env/file already set. `--require-limits` only *strengthens* (an env/file `true`
 /// survives an absent flag, never forced `false`), and `--jail-uid`/`--jail-gid` overlay the folded
-/// ids. Shared by `run`, `shell`, and `serve` so the three cannot drift on which layer wins. The
-/// require_limits/unjailed contradiction is the engine's (`LimitsUnavailable`, before any VMM);
-/// `serve` alone pre-checks it, because a daemon must fail at startup rather than refuse every
-/// session.
+/// ids. Shared by `run` and `shell` so the two cannot drift on which layer wins. The
+/// require_limits/unjailed contradiction is the engine's (`LimitsUnavailable`, before any VMM).
 fn apply_posture(
     config: &mut BootConfig,
     require_limits: bool,
     jail_uid: Option<u32>,
     jail_gid: Option<u32>,
 ) {
-    // The CLI and the daemon boot the agent image as one shared read-only base under a per-run
+    // The CLI boots the agent image as one shared read-only base under a per-run
     // tmpfs overlay rather than copying the base per VM (the copy costs 49 ms/boot of the 149 ms
     // p50, exec-01, 2026-08-16). Set here, not in `BootConfig::default()`: the engine default must
     // boot any rootfs, and the overlay path hands PID 1 to `bsx_channel::GUEST_OVERLAY_INIT`, which
@@ -497,61 +415,10 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
     })?;
     host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
     host_policy.check_net(args.net)?;
-    // The effective signed-record destination: an explicit `--record` wins, else the operator's
-    // `records_dir` records every run there, which is how a `require_record` host is satisfied
-    // without callers remembering a flag.
-    let record_path: Option<PathBuf> = args
-        .record
-        .clone()
-        .or_else(|| host_policy.records_dir.as_deref().map(default_record_path));
-    // `--record-summary` does not count: the summary is an unsigned *projection*, so a summary-only
-    // run leaves nothing verifiable, which is what `require_record` refuses
-    // (`require_record_refuses_a_run_that_would_leave_no_audit_record` pins it).
-    host_policy.check_record(record_path.is_some())?;
-
-    // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
-    if args.watch && !std::io::stderr().is_terminal() {
-        return Err(CliError::Cli(
-            "--watch draws on stderr and needs it to be a terminal; use --trace or --record when \
-             piping"
-                .to_string(),
-        ));
-    }
-    // Enforcement needs the eBPF probes, so a host that plainly cannot load them is refused up
-    // front rather than degraded to an unenforced run. `attach`'s tap cap check catches the
-    // residual CAP_NET_ADMIN case this cheap pre-flight cannot.
-    let egress = if args.allow.is_empty() {
-        None
-    } else {
-        let policy = build_egress(&args.allow)?;
-        if let Err(e) = bsx_probes_loader::check_support() {
-            return Err(CliError::Cli(format!(
-                "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
-            )));
-        }
-        Some(policy)
-    };
-    if let Some(ref pol) = egress {
-        host_policy.check_egress(pol)?;
-    }
-
     // Read the local `--put` files *before* the boot: a bad path is a cheap stat failure, not worth
     // a full boot and teardown.
     let files_in = read_put_files(&args.put)?;
 
-    // Resolve the signing key **before** booting: the signing path rejects a group- or
-    // world-readable key file, and learning that after the guest ran would throw the record away
-    // with the work done. Last of the pre-flight checks, because it is the only one that *creates*
-    // something. Loading is idempotent.
-    if record_path.is_some() {
-        let key_path = config::signing_key_path(sources);
-        bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
-            CliError::Cli(format!(
-                "signing key {} is unusable, so this run could not be recorded: {e}",
-                key_path.display()
-            ))
-        })?;
-    }
     let mut config = base_config(sources).with_limits(limits);
     config.enable_network = args.net;
     // Flags win over the `BSX_GATEWAY`/`BSX_RESOLVER` + file layers `base_config` already resolved.
@@ -568,9 +435,6 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
         args.jail_uid,
         args.jail_gid,
     );
-    // Captured before `config` moves into the boot: the record needs it, and an allowance means
-    // something different with a route behind it than without.
-    let gateway = config.egress.map(|e| e.gateway());
     let mut sandbox = open(config, policy::IsolationMode::from_unjailed(args.unjailed))?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
@@ -586,74 +450,10 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
             .map_err(CliError::from);
     }
 
-    // The audit surface, only when a flag asked for it (a plain `bsx run` pays nothing). `--allow`
-    // pulls the bundle in without an observation flag, since it arms the tap before it goes live.
-    // Observation is fail-open; enforcement is a typed refusal (`attach`).
-    let observing = args.trace
-        || record_path.is_some()
-        || args.record_summary.is_some()
-        || args.watch
-        || egress.is_some();
-    let probes = if observing {
-        let params = audit::attach_params(&sandbox, egress.as_ref(), gateway);
-        Some(audit::Observability::load().attach(sandbox.name(), params)?)
-    } else {
-        None
-    };
-
     let boot_latency = sandbox.boot_latency();
-    let vmm_pid = sandbox.vmm_pid();
     let stdin = piped_stdin()?;
-    let (sandbox, result) = if args.watch {
-        // The worker owns the sandbox; the main thread draws the live view off non-destructive
-        // probe snapshots until the worker flags completion.
-        let done = Arc::new(AtomicBool::new(false));
-        let worker_done = Arc::clone(&done);
-        let (argv, env, get) = (args.argv.clone(), args.env.clone(), args.get.clone());
-        let worker = std::thread::spawn(move || {
-            // Drop-based, not a store after the call: a panicking exec must still flag completion
-            // on unwind, or the view shows "running" forever and only `q` closes it.
-            struct DoneOnExit(Arc<AtomicBool>);
-            impl Drop for DoneOnExit {
-                fn drop(&mut self) {
-                    self.0.store(true, Ordering::Release);
-                }
-            }
-            let _done = DoneOnExit(worker_done);
-            let result = sandbox.exec_with_files(&argv, &stdin, &files_in, &env, &get);
-            (sandbox, result)
-        });
-        if let Some(p) = probes.as_ref() {
-            let meta = watch::WatchMeta {
-                vmm_pid,
-                boot: boot_latency,
-                command: args.argv.join(" "),
-            };
-            // A broken live view must not fail a working run; the view's own guard restores the
-            // terminal either way.
-            if let Err(e) = watch::live(p, &meta, &done) {
-                tracing::warn!(error = %e, "live view failed; run continues headless");
-            }
-        }
-        if !done.load(Ordering::Acquire) {
-            let _ = writeln!(
-                std::io::stderr(),
-                "bsx: live view closed; waiting for the command to finish"
-            );
-        }
-        let (sandbox, result) = worker
-            .join()
-            .map_err(|_| VmmError::Vmm("exec worker thread panicked".to_string()))?;
-        (sandbox, result?)
-    } else {
-        let result =
-            sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
-        (sandbox, result)
-    };
-    // Finalize the audit record **while the sandbox is still alive** (the attached bundle reads the
-    // live cgroup + maps) and **before** the fallible artifact write below: an artifact-write error
-    // must not lose the record for exactly the misbehaving-guest run whose audit you want.
-    let record = probes.map(|p| p.collect(Timing::new(boot_latency, result.metrics.wall)));
+    let result =
+        sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
     write_artifacts(&result.files, &args.get)?;
     // Teardown is best-effort: a shutdown error must not mask the run's real result.
     if let Err(e) = sandbox.shutdown() {
@@ -675,8 +475,8 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
                 .map(|a| serde_json::json!({ "path": a.path, "bytes": a.data.len() }))
                 .collect::<Vec<_>>(),
             "metrics": {
-                "boot_ms": session::ms(boot_latency),
-                "exec_wall_ms": session::ms(result.metrics.wall),
+                "boot_ms": ms(boot_latency),
+                "exec_wall_ms": ms(result.metrics.wall),
             },
             // The limits this run booted with, echoed back so a `--json` caller sees what it got
             // and not just what it asked.
@@ -700,43 +500,6 @@ fn run_command(args: RunArgs, sources: &config::Sources) -> Result<ExitCode, Cli
         // the guest exit code is what this returns.
         let _ = std::io::stdout().write_all(&result.stdout);
         let _ = std::io::stderr().write_all(&result.stderr);
-    }
-    if let Some(record) = record {
-        if args.trace {
-            // A requested run result, so it goes on stdout after the guest's own output. Clap makes
-            // this conflict with `--json`; machine consumers take `--record`.
-            let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
-        }
-        if let Some(path) = &record_path {
-            // One byte-stable line: the deterministic record inside an `ed25519` signature
-            // envelope, so a consumer detects post-hoc alteration off-host. The signing key is
-            // host-side (the guest never sees it), loaded or generated at the config-resolved path.
-            let source = if args.record.is_some() {
-                "--record"
-            } else {
-                // A defaulted destination is operator config, so materialize the directory; an
-                // explicit `--record` path's parent stays the caller's responsibility.
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).map_err(|e| {
-                        VmmError::Artifact(format!("records_dir {}: {e}", dir.display()))
-                    })?;
-                }
-                "records_dir"
-            };
-            let key_path = config::signing_key_path(sources);
-            let key = bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
-                VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
-            })?;
-            std::fs::write(path, key.sign_record(&record) + "\n")
-                .map_err(|e| VmmError::Artifact(format!("{source} {}: {e}", path.display())))?;
-            tracing::info!(path = %path.display(), key_id = %key.key_id(), "wrote signed audit record");
-        }
-        if let Some(path) = &args.record_summary {
-            std::fs::write(path, record.to_summary_json() + "\n").map_err(|e| {
-                VmmError::Artifact(format!("--record-summary {}: {e}", path.display()))
-            })?;
-            tracing::info!(path = %path.display(), "wrote record summary");
-        }
     }
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
@@ -819,35 +582,6 @@ fn open(config: BootConfig, isolation: policy::IsolationMode) -> Result<Sandbox,
     }
 }
 
-/// Fold the `--allow` rules into a deny-by-default [`EgressPolicy`]. Refuses more than the kernel
-/// policy map holds ([`MAX_POLICY_RULES`]) with a typed error naming the cap, rather than letting the
-/// overflow surface as a cryptic attach-time failure.
-fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, CliError> {
-    if allows.len() > MAX_POLICY_RULES {
-        return Err(CliError::Cli(format!(
-            "too many --allow rules: {} given, but the kernel egress policy holds at most \
-             {MAX_POLICY_RULES}",
-            allows.len()
-        )));
-    }
-    let mut policy = EgressPolicy::deny_all();
-    for a in allows {
-        policy = policy.allow(a.cidr, a.port, a.proto);
-    }
-    Ok(policy)
-}
-
-/// The defaulted signed-record destination under the operator's `records_dir`:
-/// `run-<epoch-secs>-<pid>.json`, unique per run (one record write per process) and
-/// time-sortable by name, with no timestamp dependency.
-fn default_record_path(dir: &Path) -> PathBuf {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    dir.join(format!("run-{secs}-{}.json", std::process::id()))
-}
-
 /// Resolve `bsx shell`'s limits and posture against the operator policy: the same boundary
 /// `run_command` enforces, so switching subcommand cannot bypass a ceiling, `require_jail`, or
 /// `require_record`. Operator *defaults* apply too, so an unset `--vcpus`/`--mem` takes the host's
@@ -860,10 +594,6 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
         output_cap: None,
     })?;
     host_policy.check_jail(policy::IsolationMode::from_unjailed(args.unjailed))?;
-    // A shell session writes no audit record, so a record-requiring host refuses it outright.
-    host_policy
-        .check_record(false)
-        .map_err(|e| CliError::Cli(format!("{e} (an interactive shell writes no audit record)")))?;
     Ok(limits)
 }
 
@@ -1068,8 +798,7 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
 }
 
 /// Installs the stderr subscriber for an **already-resolved** `filter`, optionally as one JSON
-/// object per line. The CLI and the daemon share this and each resolves its own precedence first,
-/// because they read different layers (`bsx serve` dispatches before project-file discovery).
+/// object per line.
 ///
 /// A filter `tracing` cannot parse is a **typed refusal**. What this cannot police is `EnvFilter`'s
 /// own grammar, where a bare unknown ident parses as a *target* name, so only what the parser
@@ -1101,36 +830,11 @@ mod tests {
     use super::{
         AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_posture, build_egress,
         parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_output_cap, parse_vcpus,
-        shell_policy, sweep_vm_residue, write_artifacts_in,
+        shell_policy, write_artifacts_in,
     };
     use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use bsx_test_support::ScratchDir;
     use clap::CommandFactory;
-
-    /// The CLI and the daemon reclaim crashed-run residue through the same sweep, differing only in
-    /// whether a metrics registry is there to charge. A registry that stops being charged is a
-    /// gauge reading zero on a host that is leaking.
-    #[test]
-    fn the_daemon_sweep_charges_its_registry_and_the_cli_sweep_needs_none() {
-        let scratch = ScratchDir::created("sweep-seam");
-        // `bsx-<pid>-<seq>`, the per-VM workdir shape, owned by us with a pid that cannot be live.
-        let dead = |seq: u32| scratch.path().join(format!("bsx-{}-{seq}", u32::MAX - 1));
-        std::fs::create_dir(dead(0)).expect("stage a dead run's dir");
-
-        let metrics = crate::metrics::Metrics::default();
-        sweep_vm_residue(scratch.path(), Some(&metrics));
-        assert!(!dead(0).exists(), "a dead run's dir must be reclaimed");
-        let rendered = metrics.render(&crate::metrics::CapacitySample::default());
-        assert!(
-            rendered.contains("bsx_sweep_reclaimed_total{resource=\"dirs\"} 1"),
-            "the daemon's counter must see what the sweep reclaimed:\n{rendered}"
-        );
-
-        // The same call with no registry: the CLI's path, which must reclaim just the same.
-        std::fs::create_dir(dead(1)).expect("stage another");
-        sweep_vm_residue(scratch.path(), None);
-        assert!(!dead(1).exists(), "no registry must not mean no sweep");
-    }
 
     /// The `--vcpus` refusal is the shared rule, anchored to the helper rather than a copy of the
     /// sentence, so the wire's and the config file's refusals cannot drift away from it.
@@ -1359,9 +1063,8 @@ mod tests {
 
     #[test]
     fn an_unparseable_log_filter_names_the_filter_and_both_spellings_that_work() {
-        // The CLI and the daemon share this refusal, so the advice cannot differ between them.
-        // `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` drives both entry points but
-        // asserts only that the filter is named; the hint is what an operator acts on. The error
+        // `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` asserts only that the
+        // filter is named; the hint is what an operator acts on. The error
         // path installs no global subscriber, so this is safe to call from a test.
         let err = super::init_tracing("bsx=notalevel", false).expect_err("unparseable directive");
         assert!(err.contains("bsx=notalevel"), "names the filter: {err}");

@@ -19,8 +19,8 @@ properties established by this document:
    resource bleed between two sandboxes on one host. (*Whose* run is whose is the hoster's concern,
    not the engine's.)
 3. **The audit record's integrity.** What the host reports a run did should reflect what the host
-   observed, and a finalized record can be **host-signed** (the CLI's `--record` and the daemon's
-   `trace` do sign; the library hands back an unsigned record), so a consumer can detect alteration
+   observed, and a finalized record can be **host-signed** (the CLI's `--record` does sign; the
+   library hands back an unsigned record), so a consumer can detect alteration
    made after it leaves the producing host (see [Record integrity beyond the
    guest](#record-integrity-beyond-the-guest) for what that does and does not establish).
 4. **Deny-by-default.** A run with no explicit policy is configured to reach no network and hold
@@ -134,10 +134,10 @@ otherwise assumes: a party that alters the record **after** it leaves the produc
 compromised relay, an operator, or the transport a supervisor reads it over. To close that gap, a
 finalized record is **signed with a host key the guest has no path to** (an `Ed25519` detached
 signature over the canonical record bytes), and a verify path ships with it (`bsx verify`, the
-library `verify`, and the daemon's signed `trace` reply).
+library `verify`).
 
 Signing is the *caller's* step, not the loader's: `SandboxProbes::collect` returns an unsigned
-`RunRecord`, and `HostKey` signs it in the CLI's record path and in the daemon's `trace`. An
+`RunRecord`, and `HostKey` signs it in the CLI's record path. An
 embedder driving `bsx-probes-loader` directly gets no signature. A run signs when it writes a
 record at all, which is `--record` or an operator's `records_dir`.
 
@@ -156,12 +156,12 @@ record at all, which is `--record` or an operator's `records_dir`.
   others can write, and a non-regular file at the path are each a refusal before the boot, on the
   same terms as the config file that names it. See
   [Setting `signing_key`](./cli-config.md#setting-signing_key).
-- **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
-  a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
-  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run — `bsx
-  verify` runs that check on a file holding the sequence one envelope per line, and the library
-  form is `verify_chain` in `bsx-record`. One limit on the chain's reach: only the daemon's
-  `trace` path chains (`bsx run --record` writes one standalone record). What the chain
+- **Append-only, so tail truncation is undetectable in isolation.** Records can form a hash chain:
+  the first is an unchained anchor and each one after it commits to the prior record's hash, so
+  `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `bsx verify` runs
+  that check on a file holding the sequence one envelope per line, and the library form is
+  `verify_chain` in `bsx-record`. One limit on the chain's reach: no path in this repo writes a
+  chain, because `bsx run --record` writes one standalone record. What the chain
   cannot catch even then is **truncation of the tail**: a
   consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
   link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
@@ -220,7 +220,7 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   section, and a reader must actually check that section rather than read an empty axis as quiet.
   Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
 - **Fuzzing is nightly, not continuous.** The libFuzzer targets `FUZZ_TARGETS` in
-  `xtask/src/main.rs` names cover the untrusted-input decoders (the guest channel, the daemon wire,
+  `xtask/src/main.rs` names cover the untrusted-input decoders (the guest channel,
   the signed-record envelope, the eBPF-boundary parsers, the egress rule parser, the guest-written
   output image, and the `.bsx.toml` config parser) on a nightly schedule, bounded per target at
   fifteen minutes. There is no OSS-Fuzz or equivalent

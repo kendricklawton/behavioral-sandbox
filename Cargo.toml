@@ -9,11 +9,6 @@ members = [
     "crates/engine",
     "crates/channel",
     "crates/guest-agent",
-    "crates/probes-common",
-    "crates/probes-loader",
-    "crates/record",
-    "crates/protocol",
-    "crates/client",
     "crates/cli",
     "crates/test-support",
     "xtask",
@@ -67,7 +62,7 @@ zeroize = "1"
 sha2 = "0.11"
 # Structured logging to stderr; stdout stays reserved for a run's result / audit log.
 tracing = "0.1"
-# `json`: the daemon's `--log-json` machine-readable encoding of the same structured events.
+# `json`: the `--log-json` machine-readable encoding of the same structured events.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Statistical micro-benchmarking framework for in-memory operations (record signing, JSON, wire types).
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -76,9 +71,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # in the same memory-safety class as the rest of the driver. Its journal support replays a dirty
 # image, the case a hard-killed guest leaves behind.
 ext4-view = { version = "0.9", features = ["std"] }
-# Thin safe wrappers over libc calls the std library does not expose: `recv(MSG_PEEK)` for the
-# daemon's non-destructive readability check, a bounded `connect`, and `setns` for the tap monitor.
-# Single-sourced here because three crates want it and a per-crate version string is three things to
+# Thin safe wrappers over libc calls the std library does not expose: a bounded `connect` and
+# `setns` for the tap monitor.
+# Single-sourced here because two crates want it and a per-crate version string is two things to
 # bump; each names its own `features`, which is the part that legitimately differs.
 nix = { version = "0.31", default-features = false }
 

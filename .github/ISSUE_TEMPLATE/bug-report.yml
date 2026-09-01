@@ -24,7 +24,7 @@ body:
     attributes:
       label: How to reproduce it
       description: >-
-        The exact command line (`bsx run …` / `bsx shell …` / `bsx serve` + client verbs) or the
+        The exact command line (`bsx run …` / `bsx shell …`) or the
         embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
       placeholder: |
         bsx run --net -- python3 -c '...'
@@ -58,7 +58,6 @@ body:
       options:
         - CLI, jailed (the default)
         - CLI, --unjailed
-        - bsx serve (daemon)
         - embedded (the `bsx` library API)
       multiple: true
     validations:

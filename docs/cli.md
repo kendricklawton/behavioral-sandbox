@@ -58,20 +58,14 @@ out of scope.
 
 ## Deliberately not in the CLI
 
-Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, not omission.
+Embedding-API or platform, by design. Their absence is intent, not omission.
 "The CLI" here means the one-shot commands (`run`, `shell`, `doctor`, `verify`): a process that
-boots one VM, does its work, and exits. The daemon is the **same `bsx` binary** started as
-`bsx serve`, so a daemon-scoped feature is one subcommand away, not a separate install; what
-differs is the operational shape — a long-lived process with its own flags, policy, and wire API.
+boots one VM, does its work, and exits.
 
-- **Snapshots and the pre-warmed pool.** A pre-warmed pool is a long-lived-process concern, so it
-  lives in the [`bsx serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
-- **The wire API.** The programmatic driver surface is
-  [the daemon's](./daemon-protocol.md), not a subcommand.
-- **A storage-shape knob.** The CLI and the daemon boot their VMs on the **shared read-only root**
+- **A storage-shape knob.** The CLI boots its VMs on the **shared read-only root**
   (`BootConfig::read_only_root`: the agent image served `O_RDONLY`, `/` made writable by a per-run
-  tmpfs overlay capped at half the guest's RAM), set in the one posture fold `run`, `shell`, and
-  `serve` share. A one-shot `bsx run` gains no cross-VM sharing from it, but it skips duplicating
+  tmpfs overlay capped at half the guest's RAM), set in the one posture fold `run` and `shell`
+  share. A one-shot `bsx run` gains no cross-VM sharing from it, but it skips duplicating
   the base image per boot (49 ms of a 149 ms p50 cold boot, exec-01, 2026-08-16). There is no flag
   to change the shape: the field stays an embedder's decision on `BootConfig`, and the overlay
   needs the agent image's overlay init, so a `rootfs` override pointing at a foreign image fails at

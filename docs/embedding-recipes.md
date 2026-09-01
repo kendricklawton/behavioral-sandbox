@@ -73,7 +73,7 @@ fn main() -> Result<(), VmmError> {
     // pre-warmed means exec-ready.
     let mut source_cfg = BootConfig::from_env();
     source_cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    // The shared read-only base, what the CLI and the daemon boot: every clone references the one
+    // The shared read-only base, what the CLI boots: every clone references the one
     // pinned base (sharing its page cache) instead of staging its own private disk copy. Needs an
     // image carrying the overlay init (`cargo xtask build-rootfs` bakes it in); without this flag
     // the snapshot carries a private disk, which restores too, just one copy per clone.
@@ -135,5 +135,4 @@ It composes the driver and the loader the way a downstream host application woul
 `bsx run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `bsx shell` holds one sandbox
-open as an interactive stateful session. If you're writing a client, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`bsx-client`), which exists for exactly that.
+open as an interactive stateful session.

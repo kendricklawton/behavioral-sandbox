@@ -9,24 +9,13 @@ authors.workspace = true
 publish = false
 description = "The bsx CLI (`bsx`): drive the Firecracker + aya code-execution sandbox."
 
-# One entrypoint: `bsx`, the canonical command, built from `src/main.rs`. The driver
-# daemon is the `bsx serve` subcommand (`src/serve.rs`, with its `session`/`metrics`
-# modules), not a separate binary.
+# One entrypoint: `bsx`, the canonical command, built from `src/main.rs`.
 [[bin]]
 name = "bsx"
 path = "src/main.rs"
 
 [dependencies]
-# The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
-# tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
-bsx-probes-loader = { path = "../probes-loader" }
-# `bsx verify`'s half of the audit face: the record's signing/verify surface, named directly
-# because verification is the off-host path and depends on no eBPF loader.
-bsx-record = { path = "../record" }
 bsx-engine = { path = "../engine" }
-# The `bsx` daemon's wire protocol: the versioned newline-JSON contract it shares with the
-# reference client and any non-Rust client. A serde-only leaf, no engine internals.
-bsx-protocol = { path = "../protocol" }
 clap = { workspace = true }
 # `bsx run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
@@ -35,10 +24,6 @@ ratatui = { workspace = true }
 serde = { workspace = true }
 # `bsx run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
-# A **non-destructive** readability check on the session socket, so the daemon can notice a
-# `cancel` (or a hang-up) while an exec is in flight, plus the bounded `connect`. `UnixStream::peek`
-# is still unstable and nix's `recv(MSG_PEEK)` is a *safe* function, so this crate needs no `unsafe`.
-nix = { workspace = true, features = ["socket"] }
 # `bsx`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor). Already in
 # the tree transitively via crossterm, so no new crate enters it.
 signal-hook = "0.3"
@@ -52,11 +37,6 @@ tracing-subscriber.workspace = true
 fuzzing = []
 
 [dev-dependencies]
-# The reference client for the versioned wire API (docs/daemon.md), used by the
-# daemon's e2e demo to prove a caller drives `bsx` over the wire alone. A dev-dep so the daemon
-# crate can spawn `bsx` (it owns the artifacts)
-# while the client itself stays free of `bsx`.
-bsx-client = { path = "../client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
 bsx-test-support = { path = "../test-support" }
 

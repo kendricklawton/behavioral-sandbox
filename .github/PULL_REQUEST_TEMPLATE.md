@@ -22,8 +22,8 @@ or write "none" if it is a bug fix or a docs change. This is the first question 
 - [ ] `cargo xtask ci` passes locally
 - [ ] Commits are signed off (`git commit -s`) and use Conventional Commits subjects
 - [ ] New behavior has a test that was watched failing before it passed
-- [ ] A public API change (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the `bsx-channel` framing, the
-      daemon wire types) carries the `api` scope, with `!` if it is incompatible
+- [ ] A public API change (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the `bsx-channel`
+      framing) carries the `api` scope, with `!` if it is incompatible
 
 ## Privileged gate
 

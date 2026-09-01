@@ -202,10 +202,8 @@ version = "0.0.4"
 dependencies = [
  "bsx-engine",
  "bsx-probes-loader",
- "bsx-protocol",
  "bsx-record",
  "clap",
- "nix 0.31.3",
  "ratatui",
  "serde",
  "serde_json",
@@ -247,14 +245,6 @@ dependencies = [
  "bsx-probes-common",
  "bsx-record",
  "nix 0.31.3",
-]
-
-[[package]]
-name = "bsx-protocol"
-version = "0.0.4"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -796,7 +786,6 @@ dependencies = [
  "bsx-channel",
  "bsx-engine",
  "bsx-probes-common",
- "bsx-protocol",
  "bsx-record",
  "ext4-view",
  "libfuzzer-sys",

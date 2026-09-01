@@ -39,16 +39,16 @@ sandbox at this stage, and everything below is written to make that possible.
 ```text
                      CONSUMER ENTRY POINTS & API SURFACES
 
-    [ Rust Embedder ]            [ Daemon Client ]            [ Audit Verifier ]
-            |                            |                             |
-            v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
-     `bsx-engine`                 `bsx-protocol`                `bsx-record`
-   (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (Ed25519 verify/chain)
-            |                            |                             |
-            +----------------------------+-----------------------------+
+    [ Rust Embedder ]                                     [ Audit Verifier ]
+            |                                                     |
+            v (In-Process)                                        v (Off-Host)
+     `bsx-engine`                                          `bsx-record`
+   (Sandbox, BootConfig, Vm)                         (Ed25519 verify/chain)
+            |                                                     |
+            +----------------------------+------------------------+
                                          |
                                          v
-                              `bsx serve` / `bsx` CLI
+                                    `bsx` CLI
                                          |
                +-------------------------+-------------------------+
                | (Driver / Lifecycle)                              | (Observation)
@@ -77,7 +77,7 @@ limit](docs/probes.md#the-hardware-isolation-consequence-the-honest-limit).
 Every run yields a host-observed audit record of what the host was able to see: the
 network flows, the resources used, the VMM's notable host syscalls, and any egress that was denied. That record
 is the product. A run that persists one signs it with a host key (`--record`, or an operator's
-`records_dir`, or the daemon's `trace`), and `bsx verify` checks that signature.
+`records_dir`), and `bsx verify` checks that signature.
 
 ## Installation
 
@@ -184,10 +184,6 @@ The engine is consumed in two shapes, both of which exist today:
   reasoning][embedding-scope]). A change to that API is committed with an `api` scope, so a pin bump
   is auditable from the log alone. The contract is [docs/embedding.md][embedding].
 
-* **Any language**, over the `bsx serve` daemon: a versioned newline-delimited JSON wire protocol
-  on a unix socket, documented in [docs/daemon.md](docs/daemon.md). `bsx-client` (in
-  `crates/client`) is a dependency-light Rust reference client for it.
-
 ## Documentation
 
 The guide is an mdBook in [`docs/`](docs/SUMMARY.md), rendered by the `Docs` workflow at
@@ -199,7 +195,6 @@ Run `mdbook serve docs` to read it locally, or read the Markdown in place.
   integrates with the host, what the crates are for, and the numbered decisions with their
   rationale.
 - **[Using the `bsx` CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
-- **[Using the `bsx serve` daemon](docs/daemon.md)**, the wire API.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each pinned by a
@@ -239,9 +234,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | `bsx-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
 | `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and Ed25519 signing/verification. No aya, so a record verifies off-host. |
-| `crates/protocol` | `bsx-protocol` | The daemon wire types, versioned. |
-| `crates/client` | `bsx-client` | The Rust reference client for `bsx serve`. |
-| `crates/cli` | `bsx` | The `bsx` CLI: `run`, `shell`, `doctor`, `verify`, plus the `bsx serve` daemon. The binary on `PATH` is `bsx`. |
+| `crates/cli` | `bsx` | The `bsx` CLI: `run`, `shell`, `doctor`, `verify`. The binary on `PATH` is `bsx`. |
 | `crates/test-support` | `bsx-test-support` | Shared test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
@@ -262,9 +255,8 @@ been run.
 There is no published roadmap and no promised date. A capability becomes a feature when a test
 exercises it end to end (the privileged suite, for anything that boots a VM or attaches a probe),
 and is not announced before that. The first supported release, `v0.1.0`, will pin
-the driver API and the wire protocol under the support policy in [RELEASES.md](RELEASES.md); until
-then the `Sandbox`/`bsx-engine` API, the daemon protocol, the record format, and the crate names can all
-change without notice.
+the driver API and the host↔guest wire framing; until then the `Sandbox`/`bsx-engine` API, the
+record format, and the crate names can all change without notice.
 
 The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go
 straight to one; anything larger starts with an issue, since the surface above is still moving.
