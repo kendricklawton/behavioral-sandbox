@@ -66,35 +66,6 @@ jobs:
       - name: actionlint
         run: ./actionlint -color
 
-  # Shell linting, same trade as actionlint above: a tool that only inspects the few tracked *.sh
-  # files, so requiring it on every dev box would be the wrong ask. `install.sh` is the reason this job
-  # exists. It ships inside the release tarball and is the documented install path, so it runs on a
-  # stranger's machine with whatever shell that machine has, and until 2026-08-02 nothing checked
-  # it at all. `ubuntu-24.04` carries shellcheck, so there is nothing to install.
-  lint-shell:
-    name: lint shell (shellcheck)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      # The tracked set, from git rather than a glob, so a new script is covered the day it lands
-      # instead of the day someone remembers to extend a list here.
-      # Default severity, deliberately. `--severity=warning` looks tempting, since the only findings
-      # on this tree are style-tier, but it also discards SC2086 (unquoted expansion, so word
-      # splitting and globbing), which is the single rule most worth having on a script that runs on
-      # a stranger's machine. Verified: an unquoted `[ $VAR = x ]` is invisible at `warning` and
-      # caught at the default. The intentional idioms carry a `# shellcheck disable=` at their own
-      # line with the reason, which keeps the exemption next to the code it excuses.
-      - name: shellcheck
-        run: |
-          shellcheck --version
-          mapfile -t scripts < <(git ls-files '*.sh')
-          printf 'checking %s\n' "${scripts[@]}"
-          shellcheck "${scripts[@]}"
-
   # The single check to require in branch protection. Green only if every job above succeeded or
   # was skipped: add a job above and it's covered here automatically, no branch-rule edit needed.
   ci-status:

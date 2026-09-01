@@ -1,7 +1,7 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else compiles
 //! or tests, and four kinds are mechanically checkable.
 //!
-//! 1. **Repo paths in backticks.** A comment naming `` `crates/engine/src/lib.rs` `` must point at
+//! 1. **Repo paths in backticks.** A comment naming `` `crates/channel/src/lib.rs` `` must point at
 //!    something in the tree, or a rename leaves it lying about where things live.
 //! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk, since `mdbook`
 //!    silently *creates* a missing `SUMMARY.md` chapter as an empty stub and a deleted page would ship
@@ -465,11 +465,11 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
 mod tests {
     use super::*;
 
-    /// The engine targets kernels, not distributions (`docs/architecture-decisions.md`, decision 8): a host
+    /// The project targets kernels, not distributions (`AGENTS.md`, under Conventions): a host
     /// difference is probed as a capability, never read off the host's identity papers. This is
     /// the enforcer for that sentence. It scans every tracked source file in the shipped crates
-    /// (plus `install.sh`, which runs before the engine exists to probe anything) for the files
-    /// and commands that answer "which distro is this": if one appears outside a comment, either
+    /// for the files and commands that answer "which distro is this": if one appears outside a
+    /// comment, either
     /// a capability probe exists that should replace it, or this test's list is teaching you what
     /// it is. The `Containerfile` is exempt: package manager use *inside* the image is that
     /// image's own pinned userspace, not host detection.
@@ -492,7 +492,7 @@ mod tests {
         let mut hits = Vec::new();
         for rel in tracked
             .iter()
-            .filter(|p| (p.starts_with("crates/") && p.ends_with(".rs")) || *p == "install.sh")
+            .filter(|p| p.starts_with("crates/") && p.ends_with(".rs"))
         {
             let text = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
             for (i, line) in text.lines().enumerate() {
@@ -520,12 +520,12 @@ mod tests {
         let anchors = path_anchors(&BTreeSet::new());
         // A backticked path outside a fence is a candidate; the same inside a ``` fence is skipped
         // (an illustrative example that needn't exist).
-        let text = "real `crates/engine/src/lib.rs` here.\n\
+        let text = "real `crates/channel/src/lib.rs` here.\n\
                     ```\n`docs/made-up-example.md`\n```\n";
         let got = path_candidates(text, &anchors);
         assert_eq!(
             got,
-            vec![(1, "crates/engine/src/lib.rs".to_string())],
+            vec![(1, "crates/channel/src/lib.rs".to_string())],
             "{got:?}"
         );
     }
@@ -540,8 +540,8 @@ mod tests {
         let anchors = path_anchors(&tracked);
         for good in [
             "crates/engine/src/lib.rs",
-            "docs/probes.md",
-            "crates/probes",
+            "docs/benchmarks.md",
+            "crates/channel",
             "crates/guest-agent/src/lib.rs",
         ] {
             assert!(is_path_candidate(good, &anchors), "{good}");
@@ -553,10 +553,10 @@ mod tests {
             "/dev/kvm",
             "--allow 10.200.0.1:9000/udp",
             "cargo xtask ci",
-            "out/x.txt",             // an illustrative artifact path, not a repo claim
-            "sbin/apk.static",       // a path inside the guest rootfs
-            "artifacts/rootfs.ext4", // build output, exists only after a fetch/build
-            "src/lib.rs",            // un-anchored: ambiguous, so not a checkable claim
+            "out/x.txt",              // an illustrative artifact path, not a repo claim
+            "sbin/apk.static",        // a path inside the guest rootfs
+            "artifacts/rootfs-guest", // build output, exists only after a build
+            "src/lib.rs",             // un-anchored: ambiguous, so not a checkable claim
         ] {
             assert!(!is_path_candidate(bad, &anchors), "{bad}");
         }

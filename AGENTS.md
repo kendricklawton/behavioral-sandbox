@@ -30,9 +30,11 @@ claim about adoption. No one outside this project has run it.
 
 `scratch/ROADMAP.md` is the plan, and its checkboxes are the state. Read it before a large change.
 It is gitignored working state, not a tracked file, so a fresh clone will not have one.
-Two things this manual describes are ahead of the tree: `crates/engine` still drives **Firecracker**
-and is deleted only once the libkrun supervisor boots, and `cargo test` does not compile while the
-observability cut is finished. A checkbox there means done **and** evidenced, never merely attempted.
+A checkbox there means done **and** evidenced, never merely attempted.
+
+**Nothing in the tree boots a VM.** The Firecracker engine was deleted rather than carried alongside
+its replacement, and the libkrun supervisor is phase 2. `bsx` builds and has no verbs. This manual
+describes the rules a change is held to, not a running system.
 
 ## Design rules (every change holds to all six)
 
@@ -71,30 +73,31 @@ shows as a design error, not as a trade-off.
 The project is one workspace. **Directories stay short, and packages carry the `bsx-` prefix.** Thus
 a package name is its directory plus that prefix. There is **exactly one exception**: `crates/cli`
 builds `bsx`, because the bare name is the word that a user types. This one exception is the reason
-that `-p` takes the **package** (`-p bsx-engine`) and that paths take the **directory**
-(`crates/engine`). `cargo xtask ci` checks every `-p` in every tracked text file against the real
+that `-p` takes the **package** (`-p bsx-channel`) and that paths take the **directory**
+(`crates/channel`). `cargo xtask ci` checks every `-p` in every tracked text file against the real
 list of packages. Therefore a stale `-p` fails the gate, not the terminal of a reader.
 
 | Path | Package | What it is |
 |---|---|---|
-| `crates/engine` | `bsx-engine` | The Firecracker engine: microVM lifecycle, jail, networking, snapshots, the pool, and the `Sandbox` API. **Being replaced by the libkrun supervisor.** `#![forbid(unsafe_code)]`. |
 | `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. Both ends share it without change, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO: it binds a socket, accepts a connection, and serves repeated execs from one session directory. It does no init work and is not the security boundary. Static musl, baked into the guest image. Its binary keeps the bare name `guest-agent`, because the image build bakes in that path. |
-| `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not a public API. |
-| `crates/test-support` | `bsx-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, and cgroup helpers. |
+| `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |
+| `crates/test-support` | `bsx-test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook. `SUMMARY.md` is the index. The names are flat `topic-subtopic.md`. The hierarchy is in `SUMMARY.md`, not in directories. |
 
-**Two binaries ship**, from one workspace: `bsx` (the CLI, which also carries the hidden helper
-subcommand that becomes a VM) and the GUI application. Neither is a daemon. A VM registers a socket
+**Two binaries will ship**, from one workspace: `bsx` (the CLI, which also carries the hidden
+helper subcommand that becomes a VM) and the GUI application. Today only `bsx` exists, and it has no
+verbs. Neither is a daemon. A VM registers a socket
 under the runtime directory, and both binaries find live VMs by reading it, so a VM started by one
 is visible to the other. `scratch/ROADMAP.md` holds the reasoning.
 
 ## Building from source
 
-`cargo xtask setup` is the first command on a new machine. libkrun and its guest-kernel payload
-install from the system package manager; they are a C library and a shared object holding a Linux
-kernel, so neither arrives through cargo.
+`cargo xtask setup` is the first command on a new machine. It checks `/dev/kvm` and the dev
+toolchain; it does not yet probe libkrun, because nothing links it (phase 2.1). libkrun and its
+guest-kernel payload install from the system package manager: they are a C library and a shared
+object holding a Linux kernel, so neither arrives through cargo.
 
 ```console
 sudo pacman -S libkrun libkrunfw          # Arch; Fedora and openSUSE package both too
@@ -106,9 +109,9 @@ cargo install cargo-deny                      # run by the gate
 group. No part of the build or the run needs root.
 
 ```console
-cargo xtask setup            # verify the hypervisor, libkrun, and the host tools
-cargo xtask fetch-artifacts  # download the sha-pinned guest artifacts
-cargo xtask build-rootfs     # build the guest image (Alpine + the GUEST_PACKAGES runtimes + static agent)
+cargo xtask setup            # what this host can and cannot do
+cargo xtask ci               # the gate
+cargo xtask build-rootfs     # the guest image (Alpine + the GUEST_PACKAGES runtimes + static agent)
 ```
 
 ## Conventions
@@ -147,7 +150,7 @@ cargo xtask build-rootfs     # build the guest image (Alpine + the GUEST_PACKAGE
   Past-tense narration of earlier code ("the earlier design", "used to", "no longer", "this
   replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them.
   Git keeps them attached to the diff there.
-- `tracing` logs to stderr. A run writes its structured result to stdout, so `bsx run … 2>/dev/null`
+- `tracing` logs to stderr. A run writes its structured result to stdout, so a `bsx … 2>/dev/null`
   stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then the nearest `.bsx.toml` above
   the cwd, then `~/.bsx.toml`, then defaults. The project file carries the house defaults and the
   ceilings. The keys that name a host binary, a guest image, or a write root are read from the user
@@ -169,8 +172,9 @@ cargo xtask build-rootfs     # build the guest image (Alpine + the GUEST_PACKAGE
   imperative and describe **what you did** ("fix: bound session reads by a deadline"). A mixed change
   takes its most significant type (`fix` before `refactor` before `test`). **Public-API changes carry
   the `api` scope** (`feat(api):` or `fix(api)!:`), so you can audit a downstream pin bump from the
-  log alone. The surface is the public API of `bsx-engine` and the wire framing of `bsx-channel`.
-  `docs/embedding-scope.md` names it exactly.
+  log alone. The surface is the wire framing of `bsx-channel`, and `PINNED_SURFACE_CRATES` in
+  `xtask/src/main.rs` is the list `the_manual_names_the_whole_pinned_surface` holds this page to. The
+  supervisor joins it when it exists.
 - **Backwards compatibility follows the direction of the data.** Structs that the caller constructs
   (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and you can still
   check the invariants. Structs that the code returns (`RunResult`, `Artifact`, `ExecMetrics`) keep

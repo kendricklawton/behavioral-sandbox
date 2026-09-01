@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The bsx CLI (`bsx`): drive the code-execution sandbox."
+description = "The bsx CLI (`bsx`)."
 
 # One entrypoint: `bsx`, the canonical command, built from `src/main.rs`.
 [[bin]]
@@ -15,30 +15,12 @@ name = "bsx"
 path = "src/main.rs"
 
 [dependencies]
-bsx-engine = { path = "../engine" }
 clap = { workspace = true }
-# Terminal rendering, drawn on stderr (stdout stays the run's result).
-ratatui = { workspace = true }
-# `.bsx.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
-# denied so a config typo is a typed error, not a silent no-op.
-serde = { workspace = true }
-# `bsx run --json`: the structured run result is one JSON object on stdout.
-serde_json = { workspace = true }
-# `bsx`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor). Already in
-# the tree transitively via crossterm, so no new crate enters it.
-signal-hook = "0.3"
-toml = { workspace = true }
-tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [features]
-# Exposes the attacker-facing parsers (`config`, `policy`) as library items for the fuzz harness
-# in `fuzz/`; without it the library target is empty and the package is just the `bsx` binary.
+# Exposes library items for the fuzz harness in `fuzz/`; without it the library target is empty and
+# the package is just the `bsx` binary. Nothing is behind it today (see `src/lib.rs`).
 fuzzing = []
-
-[dev-dependencies]
-# The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
-bsx-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

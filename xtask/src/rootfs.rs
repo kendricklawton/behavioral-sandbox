@@ -1,5 +1,5 @@
 //! The reproducible guest rootfs build: a pinned Alpine base + the guest
-//! runtimes + the static agent + a vsock init, assembled rootless into an ext4 image that two
+//! runtimes + the static agent, assembled rootless into a directory tree that two
 //! builds reproduce byte-identically.
 
 use std::ffi::{OsStr, OsString};
@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::{Artifact, fetch_one, sha256_of};
-use crate::bench::image_used_bytes;
+
 use crate::guest_bins::build_guest_agent;
-use crate::{artifacts_dir, guest_rootfs_path, run_tool, run_tool_env, vendor_dir, workspace_root};
+use crate::{artifacts_dir, guest_rootfs_path, run_tool, vendor_dir, workspace_root};
 
 /// The apk cache subdirectory (under a build's `artifacts/` or a vendor mirror): the `.apk` closure +
 /// its `APKINDEX`, populated online once and installed from offline thereafter. Defined here with the
@@ -18,89 +18,18 @@ use crate::{artifacts_dir, guest_rootfs_path, run_tool, run_tool_env, vendor_dir
 /// `rootfs`, not a cycle).
 pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 
-/// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
-/// Reused as the ext4 directory-hash seed: the seed only guards against adversarial
-/// directory-hash flooding, which a trusted, pinned build-time image doesn't face, so a fixed seed
-/// costs nothing and buys byte-for-byte determinism.
-const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
-
-/// A fixed build epoch for the rootfs image. `mke2fs` honours `SOURCE_DATE_EPOCH`: it stamps
-/// the filesystem's create/write/check times with it and **clamps every `-d`-copied file mtime down
-/// to it**, so repeated builds don't churn timestamps. A constant, deliberately, a `git log` or
-/// wall-clock date would vary across shallow clones and over time, defeating the purpose. Together
-/// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
-pub(crate) const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
-
-/// The reproducibility floor: `mke2fs` honours `SOURCE_DATE_EPOCH` from e2fsprogs 1.47.1; older
-/// versions silently ignore it and stamp wall-clock times, so two builds of the identical tree
-/// differ. [`build_rootfs`] probes it: a hard error under `--verify` (which claims
-/// reproducibility), a warning on a plain build (the image still boots fine). `cargo xtask setup`
-/// surfaces the same probe as a dev-toolchain row. Which distributions sit below the floor is not
-/// stated here: it moves, and a host is asked what its `mke2fs` does rather than what it is
-/// (decision 8).
-pub(crate) const MKE2FS_SOURCE_DATE_EPOCH_MIN: (u32, u32, u32) = (1, 47, 1);
-
-/// The installed `mke2fs` version, or `None` if the tool is missing or its banner unparseable
-/// (a missing tool fails later at the build step with its own spawn error).
-pub(crate) fn mke2fs_version() -> Option<(u32, u32, u32)> {
-    let out = std::process::Command::new("mke2fs")
-        .arg("-V")
-        .output()
-        .ok()?;
-    // `-V` prints the banner on stderr: `mke2fs 1.47.4 (6-Mar-2025)`.
-    parse_mke2fs_version(&String::from_utf8_lossy(&out.stderr))
-}
-
-/// Parse `mke2fs 1.47.4 (6-Mar-2025)` to `(1, 47, 4)`. Non-digit suffixes in a component
-/// (`-rc1`, `~pre`) are dropped; missing components are zero.
-fn parse_mke2fs_version(banner: &str) -> Option<(u32, u32, u32)> {
-    let token = banner.lines().next()?.split_whitespace().nth(1)?;
-    let mut parts = token.split('.').map(|part| {
-        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse::<u32>().ok()
-    });
-    let major = parts.next().flatten()?;
-    let minor = parts.next().flatten().unwrap_or(0);
-    let patch = parts.next().flatten().unwrap_or(0);
-    Some((major, minor, patch))
-}
-
-/// Image size. Headroom over the payload so `apk.static --root` has room without a re-size. Bumped
-/// 128→256 when Node (its `icu-libs`/`simdjson`/`ada-libs` closure, ~64 MiB) joined python3.
-const ROOTFS_SIZE_MIB: u32 = 256;
-
 /// Soft ceiling on the base rootfs's real footprint ("keep the base small"). `build-rootfs`
-/// fails past it, a regression guard against accidental bloat. The image is ~132 MiB (Alpine +
+/// fails past it, a regression guard against accidental bloat. The tree is ~132 MiB (Alpine +
 /// python3 + **Node** + the agent); this leaves ~28 MiB headroom. Adding another runtime is a
-/// deliberate bump of this *and* `ROOTFS_SIZE_MIB`, not a silent creep, and a prompt to ask whether
-/// the base is still "small."
+/// deliberate bump of this, not a silent creep, and a prompt to ask whether the base is still
+/// "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
 
-/// The guest paths this builder bakes in, each named once. Every one is written from **two** places
-/// below (a file at the path, and an init or script line naming it), so a literal spelled twice is a
-/// rename away from a guest that boots into a missing helper. `verify_guest_contract` reads these
-/// same constants back off the staged tree, so a half-applied rename fails the build rather than
-/// shipping. The one path the *driver* also writes lives in `bsx-channel` instead
-/// ([`bsx_channel::GUEST_OVERLAY_INIT`]), where both sides consume the one definition.
+/// The guest path this builder bakes the agent in at. Phase 3 decides how it is started (libkrun's
+/// init reads its workload from `/.krun_config.json`, so the Firecracker inittab, the overlay init,
+/// the by-label data mounts and the `ip=` resolver link that used to live here all went with the
+/// engine that needed them). `verify_guest_contract` reads this constant back off the staged tree.
 const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
-const MOUNT_DRIVES_PATH: &str = "/sbin/mount-drives";
-const NET_UP_PATH: &str = "/sbin/net-up";
-/// Where the init lines above land. Alpine's own OpenRC file is replaced wholesale.
-const INITTAB_PATH: &str = "/etc/inittab";
-/// The overlay init's own mountpoint, and the two bulk-data mountpoints. Baked as directories
-/// because the guest cannot `mkdir` them: `/` is read-only when `overlay-init` runs, and the bulk
-/// mounts happen before anything writable exists.
-const OVERLAY_DIR: &str = "/overlay";
-const INPUT_DIR: &str = "/input";
-const OUTPUT_DIR: &str = "/output";
-/// The guest resolver config, and the kernel file it is a symlink to. `ip=`'s DNS fields are read
-/// back by the kernel's own `pnp_seq_show`, which prints `nameserver <addr>` lines in resolv.conf
-/// syntax under a `#MANUAL` comment, so pointing the libc's resolver at it needs a link and no
-/// parsing. Baked as a link rather than written at boot for the reason the mountpoints are: `/` is
-/// read-only under the overlay init. A boot with no NIC leaves the target empty, which reads as
-/// "no nameservers" rather than as an error.
-const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
-const KERNEL_PNP_PATH: &str = "/proc/net/pnp";
 
 /// An absolute *guest* path resolved inside the staging tree. The leading `/` has to go, or
 /// `Path::join` would discard the staging root and address the build host's own filesystem.
@@ -108,103 +37,6 @@ fn in_staging(staging: &Path, guest_path: &str) -> PathBuf {
     staging.join(guest_path.trim_start_matches('/'))
 }
 
-/// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
-/// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
-/// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks, a rootless `mke2fs -d` seeds
-/// no device nodes, so `devtmpfs` is what provides `/dev/ttyS0` + the vsock device (the guest kernel
-/// must auto-mount it, `CONFIG_DEVTMPFS_MOUNT`, for PID 1's own console). The agent then respawns on
-/// the contract vsock port (`bsx_channel::VSOCK_PORT`, the same constant the host dials,
-/// so the two sides can't drift), attached to `ttyS0` so its readiness line reaches the serial
-/// console the host scans.
-fn rootfs_inittab() -> String {
-    format!(
-        "\
-# Minimal init for the agent sandbox rootfs (replaces Alpine's OpenRC inittab).
-::sysinit:/bin/mount -t devtmpfs dev /dev
-::sysinit:/bin/mount -t proc proc /proc
-::sysinit:/bin/mount -t sysfs sys /sys
-# cgroup v2: the agent runs each command in its own cgroup and reaps the whole process tree
-# via `cgroup.kill`, so a double-forked grandchild or `setsid` daemon can't outlive the command and
-# wedge the exec connection. `/sys/fs/cgroup` is provided by the sysfs mount above.
-::sysinit:/bin/mount -t cgroup2 cgroup2 /sys/fs/cgroup
-# Bulk input/output block devices: mount whichever the driver attached, by label, so
-# their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
-# unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
-::sysinit:{mount_drives}
-# Static IPv6 on the guest NIC: the kernel `ip=` param configures v4 but has no v6 form, so the
-# driver passes the v6 address as a cmdline token and `{net_up}` applies it. Best-effort (a
-# plain no-NIC boot is a clean no-op). Runs after /proc is mounted (it reads /proc/cmdline).
-::sysinit:{net_up}
-ttyS0::respawn:{agent} {scheme}:{port}
-::ctrlaltdel:/sbin/reboot
-::shutdown:/bin/umount -a -r
-",
-        mount_drives = MOUNT_DRIVES_PATH,
-        net_up = NET_UP_PATH,
-        agent = GUEST_AGENT_PATH,
-        scheme = bsx_channel::VSOCK_SCHEME,
-        port = bsx_channel::VSOCK_PORT
-    )
-}
-
-/// [`MOUNT_DRIVES_PATH`], mounts the driver-attached data block devices (input + output) by
-/// **filesystem label**, so their `/dev/vdX` enumeration order is irrelevant (a boot may attach
-/// input, output, both, or neither). `findfs LABEL=…` resolves each label from the superblock via
-/// busybox's volume_id (no udev / `/dev/disk/by-label` needed); a label with no matching device
-/// yields an empty result, so that mount is silently skipped and a plain boot is unaffected. `-t ext4`
-/// because busybox `mount`'s type autodetection is weaker than util-linux's; the output mount is
-/// `-o sync` so a command's writes are flushed straight to the device, surviving a hard-kill teardown.
-/// Labels come from `bsx-channel`, the one definition the driver (which stamps them) also uses.
-fn mount_drives_script() -> String {
-    format!(
-        "\
-#!/bin/sh
-# Mount driver-attached data block devices by label (order-independent, best-effort).
-in=$(findfs LABEL={in_label} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" {in_dir}
-out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" {out_dir}
-",
-        in_label = bsx_channel::INPUT_LABEL,
-        out_label = bsx_channel::OUTPUT_LABEL,
-        in_dir = INPUT_DIR,
-        out_dir = OUTPUT_DIR,
-    )
-}
-
-/// [`NET_UP_PATH`], the guest's static-IPv6 step, run from the inittab sysinit line.
-///
-/// The kernel's `ip=` param has no IPv6 form, so the driver passes the guest v6 address as a kernel
-/// cmdline token and this reads it back from `/proc/cmdline`. The key is
-/// `bsx_channel::GUEST_IP6_CMDLINE_KEY`, the one definition the driver's writer and this reader share, and
-/// the address is never baked into the image. Best-effort by construction: a no-NIC boot has no `eth0` and
-/// a missing token is a no-op, so a non-networked boot is unaffected.
-///
-/// v6 gets only the connected `/64` and **never** a default route, where v4's is configurable, because
-/// `--allow` parses v4 addresses only and a v6 route would be one no CLI-authored policy could bound. `ip`
-/// first with `ifconfig` as the fallback, so it works whether or not busybox's `ip` applet carries v6
-/// address support. DAD is disabled before the address is added, mirroring the host tap end's `nodad`: the
-/// point-to-point `/64` has exactly one other endpoint owned by the same driver, so detection can find
-/// nothing, and its tentative window makes the address unusable as a source right after boot.
-fn net_up_script() -> String {
-    format!(
-        "\
-#!/bin/sh
-[ -e /sys/class/net/eth0 ] || exit 0
-for tok in $(cat /proc/cmdline); do
-	case \"$tok\" in
-	{key}=*) addr=\"${{tok#{key}=}}\" ;;
-	esac
-done
-[ -n \"$addr\" ] || exit 0
-echo 0 > /proc/sys/net/ipv6/conf/eth0/accept_dad 2>/dev/null
-ip addr add \"$addr\" dev eth0 2>/dev/null || ifconfig eth0 add \"$addr\" 2>/dev/null
-exit 0
-",
-        key = bsx_channel::GUEST_IP6_CMDLINE_KEY,
-    )
-}
-
-/// The Alpine branch the guest userland comes from: the minirootfs base and the package repo the
-/// runtime packages install from. One pin, used by both, so base and packages can't skew branches.
 const ALPINE_BRANCH: &str = "v3.24";
 
 /// The language runtimes baked into the guest image: python3 (the reference runtime) + **nodejs** (its
@@ -218,38 +50,8 @@ const ALPINE_BRANCH: &str = "v3.24";
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 
-/// The overlay init ([`bsx_channel::GUEST_OVERLAY_INIT`]), run as PID 1 when the driver boots this image
-/// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
-/// so `/` is writable but the base is never mutated, then `pivot_root`s in and `exec`s the real
-/// init. `pivot_root` (not `switch_root`): the base stays mounted as the overlay lowerdir, shadowed
-/// at `/rom`, `switch_root` would try to free a root that's still in use. PATH is set explicitly
-/// because the kernel gives PID 1 no PATH; `$overlay_size` arrives from the kernel command line (the
-/// driver appends `overlay_size=<N>M`, which the kernel routes into PID 1's environment).
-///
-/// The tmpfs mountpoint comes from [`OVERLAY_DIR`], the same constant that bakes the directory into
-/// the image; the shell's own `${...}` braces are doubled for `format!`.
-fn overlay_init_script() -> String {
-    format!(
-        "\
-#!/bin/sh
-export PATH=/sbin:/bin:/usr/sbin:/usr/bin
-size=\"${{overlay_size:-64m}}\"
-mount -t tmpfs -o \"size=$size\" tmpfs {dir}
-mkdir -p {dir}/up {dir}/work {dir}/root
-mount -t overlay overlay -o lowerdir=/,upperdir={dir}/up,workdir={dir}/work {dir}/root
-mkdir -p {dir}/root/rom
-cd {dir}/root
-pivot_root . rom
-exec chroot . /sbin/init
-",
-        dir = OVERLAY_DIR,
-    )
-}
-
 /// The pinned Alpine minirootfs, a real musl+busybox userland (so init and a shell just work, and
-/// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
-/// [`artifacts`](crate::artifacts::artifacts) (the boot kernel+rootfs the `ci-privileged`
-/// hash-guard requires present).
+/// `apk` adds the [`GUEST_PACKAGES`] runtimes).
 pub(crate) fn alpine_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
@@ -298,20 +100,12 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     }
 }
 
-/// The `<image>.part` sibling a build writes to before atomically renaming it into place, so a
-/// crash mid-build never leaves a plausible-but-broken image at the canonical path.
-fn part_path(image: &Path) -> PathBuf {
-    let mut p = image.as_os_str().to_owned();
-    p.push(".part");
-    PathBuf::from(p)
-}
-
-/// One full rootfs assembly into `out_image`: extract the pinned Alpine base, install the guest
-/// packages, bake the static agent + init in, and build the ext4 from the staging dir with
-/// `mke2fs -d` (rootless, no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
-/// `rootfs.ext4`, so its hash-guard + the `login:` boot test are untouched. Returns the
-/// image's sha256 and the resolved package closure, so [`build_rootfs`] can check reproducibility.
-fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
+/// One full rootfs assembly into `out_dir`: extract the pinned Alpine base, install the guest
+/// packages, and bake the static agent in. The product is a **directory tree**, which is what
+/// libkrun's virtiofs root takes; there is no image and nothing here needs root or a loopback.
+/// Returns the tree's hash and the resolved package closure, so [`build_rootfs`] can check
+/// reproducibility.
+fn assemble_rootfs(out_dir: &Path) -> Result<RootfsBuild> {
     let agent = build_guest_agent()?;
 
     let base = alpine_artifact()?;
@@ -355,137 +149,112 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
         .with_context(|| format!("copy agent into {}", agent_dest.display()))?;
     set_mode_0755(&agent_dest)?;
 
-    // Replace Alpine's OpenRC inittab with our minimal vsock init.
-    std::fs::write(in_staging(&staging, INITTAB_PATH), rootfs_inittab())
-        .with_context(|| format!("write {INITTAB_PATH}"))?;
-
-    // Bake the overlay init + its mountpoint: when the driver boots this image read-only, the
-    // kernel runs the overlay init (PID 1) at the path it put on the command line, which stacks a
-    // per-run tmpfs over the RO base so `/` is writable, then hands off to the real init. The
-    // mountpoint must exist in the image because the root is read-only at that point, you can't
-    // `mkdir` a mountpoint on a read-only `/`.
-    let overlay_init = in_staging(&staging, bsx_channel::GUEST_OVERLAY_INIT);
-    std::fs::write(&overlay_init, overlay_init_script())
-        .with_context(|| format!("write {}", bsx_channel::GUEST_OVERLAY_INIT))?;
-    set_mode_0755(&overlay_init)?;
-    std::fs::create_dir_all(in_staging(&staging, OVERLAY_DIR))
-        .with_context(|| format!("create {OVERLAY_DIR} mountpoint"))?;
-
-    // The by-label mount helper (input + output) + its mountpoints. Baked, not `mkdir`'d at
-    // runtime, so they're image properties that hold regardless of whether `/` is the writable
-    // overlay or a base. The helper is run from the inittab sysinit line.
-    let mount_drives = in_staging(&staging, MOUNT_DRIVES_PATH);
-    std::fs::write(&mount_drives, mount_drives_script())
-        .with_context(|| format!("write {MOUNT_DRIVES_PATH}"))?;
-    set_mode_0755(&mount_drives)?;
-    for dir in [INPUT_DIR, OUTPUT_DIR] {
-        std::fs::create_dir_all(in_staging(&staging, dir))
-            .with_context(|| format!("create {dir} mountpoint"))?;
-    }
-
-    // The static-IPv6 step: the kernel `ip=` param configures v4 but has no v6 form, so the driver
-    // passes the guest v6 address as a cmdline token and the net-up script (an inittab sysinit
-    // line) applies it. Best-effort, so a non-networked boot is unaffected.
-    let net_up = in_staging(&staging, NET_UP_PATH);
-    std::fs::write(&net_up, net_up_script()).with_context(|| format!("write {NET_UP_PATH}"))?;
-    set_mode_0755(&net_up)?;
-
-    // Point the resolver at the kernel's own record of the `ip=` DNS fields. Dangling in the staging
-    // tree (its target is a runtime procfs file), which `mke2fs -d` stores as the symlink it is.
-    let resolv_conf = in_staging(&staging, RESOLV_CONF_PATH);
-    if let Some(parent) = resolv_conf.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create the parent of {RESOLV_CONF_PATH}"))?;
-    }
-    std::os::unix::fs::symlink(KERNEL_PNP_PATH, &resolv_conf)
-        .with_context(|| format!("link {RESOLV_CONF_PATH} -> {KERNEL_PNP_PATH}"))?;
-
-    // Last gate before the tree becomes an image: everything the driver and the init line depend on
-    // is present, at the mode it needs. Fails the build rather than shipping an image that boots
-    // into a missing helper.
+    // Last gate before the tree is published: everything the guest depends on is present, at the
+    // mode it needs.
     verify_guest_contract(&staging)?;
     verify_staged_ownership(&staging)?;
 
-    // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
-    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` (honoured from e2fsprogs
-    // 1.47.1, probed in `build_rootfs`), which stamps the superblock create/write/check times and
-    // clamps the copied file mtimes down to the epoch, make two builds byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
-    // rather than finished non-deterministically by the guest kernel on first mount.
-    // Build to a `<out>.part` sibling and atomically rename into place only after mke2fs succeeds.
-    // A Ctrl-C or mke2fs failure then leaves an obvious partial at `<out>.part`, never a plausible
-    // 256 MiB non-filesystem at the canonical path that every consumer's `is_file()` would accept
-    // and then boot into a cryptic timeout (mirrors `artifacts.rs`'s download `.part` discipline).
-    let part = part_path(out_image);
-    let _ = std::fs::remove_file(&part);
-    run_tool(
-        "truncate",
-        &[
-            OsStr::new("-s"),
-            OsStr::new(&format!("{ROOTFS_SIZE_MIB}M")),
-            part.as_os_str(),
-        ],
-    )?;
-    // `mke2fs -d` populates the image from the staging tree. e2fsprogs enumerates that tree with
-    // `scandir(., alphasort)`, so inode allocation follows sorted names, not host readdir order:
-    // one source of cross-host layout variance removed. The image sha256 still differs across
-    // hosts, because the baked-in agent binary does (`cargo_reproducible`'s doc in main.rs records
-    // the measured pair); what this buys is `build-rootfs --verify`'s same-host double-build compare.
-    let ext_opts = format!("hash_seed={ROOTFS_UUID},lazy_itable_init=0");
-    run_tool_env(
-        "mke2fs",
-        &[
-            OsStr::new("-F"),
-            OsStr::new("-q"),
-            OsStr::new("-t"),
-            OsStr::new("ext4"),
-            OsStr::new("-b"),
-            OsStr::new("4096"),
-            OsStr::new("-m"),
-            OsStr::new("0"),
-            OsStr::new("-U"),
-            OsStr::new(ROOTFS_UUID),
-            OsStr::new("-E"),
-            OsStr::new(&ext_opts),
-            OsStr::new("-d"),
-            staging.as_os_str(),
-            part.as_os_str(),
-        ],
-        &[("SOURCE_DATE_EPOCH", ROOTFS_SOURCE_DATE_EPOCH)],
-    )?;
-
-    // Record the resolved package closure before the staging tree (with its apk db) is removed.
+    // Record the resolved package closure while the apk db is still in the tree, then drop the db
+    // and the caches: they are build bookkeeping, not part of the image a guest boots.
     let packages = resolved_packages(&staging)?;
-    // The image is the product, don't leave the extracted staging tree behind.
-    std::fs::remove_dir_all(&staging)
-        .with_context(|| format!("clean up staging {}", staging.display()))?;
+    for scratch in ["var/cache/apk", "etc/apk/cache"] {
+        let _ = std::fs::remove_dir_all(staging.join(scratch));
+    }
 
-    // Rename last, so the canonical path only ever appears as a fully-built image.
-    std::fs::rename(&part, out_image).with_context(|| {
+    // Rename last, so the canonical path only ever names a fully-staged tree. A crashed build
+    // leaves an obvious `rootfs-staging.<pid>` under the gitignored `artifacts/` instead of a
+    // half-populated tree at the path every consumer reads.
+    let tree_sha256 = tree_sha256(&staging)?;
+    if out_dir.exists() {
+        std::fs::remove_dir_all(out_dir).with_context(|| format!("clear {}", out_dir.display()))?;
+    }
+    std::fs::rename(&staging, out_dir).with_context(|| {
         format!(
-            "move built rootfs into place: {} -> {}",
-            part.display(),
-            out_image.display()
+            "move the built rootfs into place: {} -> {}",
+            staging.display(),
+            out_dir.display()
         )
     })?;
 
     Ok(RootfsBuild {
-        image_sha256: sha256_of(out_image)?,
+        tree_sha256,
         packages,
     })
 }
 
-/// The guest-image contract, checked against the staged tree before `mke2fs` turns it into an image.
+/// A single hash over the whole staged tree: one `mode kind sha256-or-target path` line per entry,
+/// sorted by path, hashed. This is what `--verify` compares, so it has to cover everything a guest
+/// can observe, which a hash of file *contents* alone would not: an exec bit dropped from the agent,
+/// or a symlink retargeted, changes the image without changing any file's bytes.
+///
+/// Directories contribute their mode and nothing else; their membership is already implied by the
+/// paths beneath them.
+fn tree_sha256(root: &Path) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut entries: Vec<PathBuf> = Vec::new();
+    walk_tree(root, &mut entries)?;
+    entries.sort();
+    let mut manifest = String::new();
+    for path in &entries {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
+        // `symlink_metadata`, never `metadata`: the resolver link points at a runtime procfs path
+        // that does not exist in the tree, and following it would error on a legitimate image.
+        let meta =
+            std::fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
+        let mode = meta.permissions().mode() & 0o7777;
+        let (kind, body) = if meta.is_symlink() {
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("read link {}", path.display()))?;
+            ("l", target.to_string_lossy().into_owned())
+        } else if meta.is_dir() {
+            ("d", String::new())
+        } else {
+            ("f", sha256_of(path)?)
+        };
+        manifest.push_str(&format!("{mode:04o} {kind} {body} {rel}\n"));
+    }
+    let manifest_file = root.with_extension("manifest");
+    std::fs::write(&manifest_file, &manifest)
+        .with_context(|| format!("write {}", manifest_file.display()))?;
+    let hash = sha256_of(&manifest_file)?;
+    let _ = std::fs::remove_file(&manifest_file);
+    Ok(hash)
+}
+
+/// Every path under `root` (files, dirs and symlinks), depth-first. A symlink is recorded, never
+/// followed, so a link out of the tree cannot pull the host's filesystem into the hash.
+fn walk_tree(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let path = entry
+            .with_context(|| format!("read an entry of {}", root.display()))?
+            .path();
+        let meta =
+            std::fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        out.push(path.clone());
+        if meta.is_dir() {
+            walk_tree(&path, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// The guest-image contract, checked against the staged tree before it is published.
 /// Reads back the same constants the writes above use, so a rename applied to only one of a path's
 /// two places (the file, and the init line or command line naming it) fails the build here instead
 /// of producing an image that boots into something absent.
 ///
-/// It proves the tree handed to `mke2fs` carries what the constants promise at the modes the guest needs.
-/// It does not prove the image *boots*, since nothing here runs a kernel; that is the privileged suite's
-/// job (`crates/engine/tests/boot.rs`).
+/// It proves the staged tree carries what the constants promise at the modes the guest needs.
+/// It does not prove the image *boots*, since nothing here runs a kernel, and nothing in the tree
+/// does today.
 ///
 /// The staged tree has to be owned by uid/gid **0**, which is what the Alpine tarball ships and what a
-/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership and `mke2fs -d` copies whatever
-/// the tree has, so without the `fakeroot` re-exec the image hash depends on who ran the build, which the
+/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership, so without the `fakeroot`
+/// re-exec the tree hash depends on who ran the build, which the
 /// reproducibility check cannot see: it builds twice inside one process and so compares two builds sharing
 /// a uid.
 ///
@@ -495,19 +264,17 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
 fn verify_staged_ownership(staging: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    for probe in [GUEST_AGENT_PATH, INITTAB_PATH] {
-        let staged = in_staging(staging, probe);
-        let meta =
-            std::fs::metadata(&staged).with_context(|| format!("stat the staged {probe}"))?;
-        let (uid, gid) = (meta.uid(), meta.gid());
-        if (uid, gid) != (0, 0) {
-            bail!(
-                "the staged {probe} is {uid}:{gid}, not 0:0, so the image would carry the \
-                 builder's identity and hash differently than the same source built by anyone \
-                 else. `build_rootfs` re-execs under `fakeroot` to arrange this; reaching here \
-                 means that did not happen."
-            );
-        }
+    let probe = GUEST_AGENT_PATH;
+    let staged = in_staging(staging, probe);
+    let meta = std::fs::metadata(&staged).with_context(|| format!("stat the staged {probe}"))?;
+    let (uid, gid) = (meta.uid(), meta.gid());
+    if (uid, gid) != (0, 0) {
+        bail!(
+            "the staged {probe} is {uid}:{gid}, not 0:0, so the tree would carry the builder's \
+             identity and hash differently than the same source built by anyone else. \
+             `build_rootfs` re-execs under `fakeroot` to arrange this; reaching here means that \
+             did not happen."
+        );
     }
     Ok(())
 }
@@ -515,129 +282,50 @@ fn verify_staged_ownership(staging: &Path) -> Result<()> {
 fn verify_guest_contract(staging: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    // Each path with the consequence of its absence, so a failure explains itself to whoever renamed
-    // something rather than just naming a file.
-    for (path, consequence) in [
-        (
-            GUEST_AGENT_PATH,
-            "the init line respawns it, so the VM would boot with no exec channel and every run \
-             would time out waiting for the readiness marker",
-        ),
-        (
-            bsx_channel::GUEST_OVERLAY_INIT,
-            "the driver puts `init=<this>` on the kernel command line for a read-only-root boot, so \
-             the kernel would panic on a missing init",
-        ),
-        (
-            MOUNT_DRIVES_PATH,
-            "an inittab sysinit line runs it, so --input/--output would silently never mount",
-        ),
-        (
-            NET_UP_PATH,
-            "an inittab sysinit line runs it, so a networked guest would come up with no IPv6",
-        ),
-    ] {
-        let staged = in_staging(staging, path);
-        let meta = std::fs::metadata(&staged).with_context(|| {
-            format!(
-                "guest-image contract: {path} is missing from the staged rootfs ({consequence})"
-            )
-        })?;
-        if !meta.is_file() {
-            bail!("guest-image contract: {path} is not a regular file ({consequence})");
-        }
-        let mode = meta.permissions().mode() & 0o777;
-        if mode != 0o755 {
-            bail!(
-                "guest-image contract: {path} is mode {mode:04o}, not 0755, so the guest cannot \
-                 execute it ({consequence})"
-            );
-        }
-    }
-
-    // The resolver link, checked with `symlink_metadata` and by target: it dangles here on purpose
-    // (procfs exists only at runtime), so following it would fail, and a link pointing somewhere
-    // else would leave a networked guest resolving nothing while every other check passed.
-    let staged_resolv = in_staging(staging, RESOLV_CONF_PATH);
-    let link = std::fs::symlink_metadata(&staged_resolv).with_context(|| {
-        format!(
-            "guest-image contract: {RESOLV_CONF_PATH} is missing from the staged rootfs, so a \
-             networked guest would resolve no names even with a resolver on its command line"
-        )
+    // The consequence travels with the check, so a failure explains itself to whoever renamed
+    // something rather than just naming a file. One entry today; phase 3 adds whatever starts it.
+    let path = GUEST_AGENT_PATH;
+    let consequence = "a guest would come up with no exec channel, so every run would hang \
+                       waiting for the readiness marker";
+    let staged = in_staging(staging, path);
+    let meta = std::fs::metadata(&staged).with_context(|| {
+        format!("guest-image contract: {path} is missing from the staged rootfs ({consequence})")
     })?;
-    if !link.file_type().is_symlink() {
+    if !meta.is_file() {
+        bail!("guest-image contract: {path} is not a regular file ({consequence})");
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o755 {
         bail!(
-            "guest-image contract: {RESOLV_CONF_PATH} is not a symlink, so it cannot track the \
-             kernel's record of the `ip=` DNS fields"
+            "guest-image contract: {path} is mode {mode:04o}, not 0755, so the guest cannot \
+             execute it ({consequence})"
         );
-    }
-    let target = std::fs::read_link(&staged_resolv)
-        .with_context(|| format!("guest-image contract: read {RESOLV_CONF_PATH}"))?;
-    if target != Path::new(KERNEL_PNP_PATH) {
-        bail!(
-            "guest-image contract: {RESOLV_CONF_PATH} points at {}, not {KERNEL_PNP_PATH}, so the \
-             resolver the driver puts on the command line would never be read",
-            target.display()
-        );
-    }
-
-    // Mountpoints have to be baked: the guest cannot create them. `/` is read-only when the overlay
-    // init runs, and the bulk mounts happen before anything writable exists.
-    for dir in [OVERLAY_DIR, INPUT_DIR, OUTPUT_DIR] {
-        if !in_staging(staging, dir).is_dir() {
-            bail!(
-                "guest-image contract: {dir} is missing from the staged rootfs, and the guest \
-                 cannot create it (the root is read-only under the overlay init, and the bulk \
-                 mounts run before anything writable exists)"
-            );
-        }
-    }
-
-    // The init file has to actually start the agent on the port the host dials. Checked as content,
-    // not as "the file exists": an inittab that parses fine but never spawns the agent is the one
-    // failure that looks healthy right up until a run hangs.
-    let inittab = std::fs::read_to_string(in_staging(staging, INITTAB_PATH))
-        .with_context(|| format!("guest-image contract: read {INITTAB_PATH}"))?;
-    // Both halves from `bsx-channel`, so this spelling and the agent's own parser cannot drift.
-    let vsock_arg = format!("{}:{}", bsx_channel::VSOCK_SCHEME, bsx_channel::VSOCK_PORT);
-    for needle in [
-        GUEST_AGENT_PATH,
-        MOUNT_DRIVES_PATH,
-        NET_UP_PATH,
-        vsock_arg.as_str(),
-    ] {
-        if !inittab.contains(needle) {
-            bail!(
-                "guest-image contract: {INITTAB_PATH} never mentions `{needle}`, so the staged init \
-                 does not match the paths this build wrote"
-            );
-        }
     }
     Ok(())
 }
 
-/// The result of one rootfs assembly: the image's content hash and the exact resolved package
-/// closure (sorted `name-version-rN`), the two things a reproducibility check compares.
+/// The result of one rootfs assembly: the tree's hash ([`tree_sha256`]) and the exact resolved
+/// package closure (sorted `name-version-rN`), the two things a reproducibility check compares.
 struct RootfsBuild {
-    image_sha256: String,
+    tree_sha256: String,
     packages: Vec<String>,
 }
 
 /// `cargo xtask build-rootfs [--verify] [--update-lock]`. The default (no flags) is one command: it
-/// assembles the deterministic image and prints its sha256. `--update-lock` re-records the package
-/// lockfile (the "re-pin" after an upstream bump); `--verify` proves reproducibility, a second build
-/// must be byte-identical. `ci-privileged` runs `--verify` as the CI gate. Every mode reports
-/// package-closure drift and none fails on it, so an Alpine bump never costs a gate run.
+/// assembles the deterministic guest tree and prints its hash. `--update-lock` re-records the
+/// package lockfile (the "re-pin" after an upstream bump); `--verify` proves reproducibility, a
+/// second build must hash identically. Every mode reports package-closure drift and none fails on
+/// it, so an Alpine bump never costs a gate run.
 /// Re-exec this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it ran
 /// the build in a child (so the caller should stop).
 ///
 /// The guest rootfs must be owned by uid/gid **0**, what the Alpine tarball ships and what a guest expects
-/// of its own `/`. Unprivileged `tar` cannot set ownership, `mke2fs -d` copies whatever the staging tree
-/// has, and neither `tar --owner` nor any `mke2fs` flag overrides it, so an unprivileged build without this
-/// yields a tree owned by the builder's uid and an image hash that depends on who ran it.
+/// of its own `/`. Unprivileged `tar` cannot set ownership and `tar --owner` does not override it, so an
+/// unprivileged build without this yields a tree owned by the builder's uid and a hash that depends on
+/// who ran it.
 ///
 /// One `fakeroot` has to wrap the *whole* assembly rather than each command, because the faked ownership
-/// lives in one process's bookkeeping, so extracting under one invocation and running `mke2fs` under
+/// lives in one process's bookkeeping, so extracting under one invocation and staging under
 /// another loses it. `FAKEROOTKEY` is set inside a session, which is what stops this recursing.
 fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bool> {
     if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
@@ -674,43 +362,18 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     if reexec_under_fakeroot_if_needed(verify, update_lock)? {
         return Ok(());
     }
-    // Name the mke2fs floor up front (see `MKE2FS_SOURCE_DATE_EPOCH_MIN`), instead of letting
-    // `--verify` die later on a bare two-hash mismatch a reader can't diagnose.
-    if let Some((major, minor, patch)) = mke2fs_version()
-        && (major, minor, patch) < MKE2FS_SOURCE_DATE_EPOCH_MIN
-    {
-        let msg = format!(
-            "mke2fs {major}.{minor}.{patch} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
-                 1.47.1), so the image will not be byte-reproducible; install e2fsprogs >= 1.47.1"
-        );
-        if verify {
-            bail!("{msg}");
-        }
-        println!("! {msg} (building anyway; the image itself is fine)");
-    }
     let out = guest_rootfs_path();
     let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
-    println!("  sha256: {}", build.image_sha256);
-    // Print the filesystem tool's version beside the hash it produced. Cross-host divergence is an
-    // open problem here (docs/security-threat-model.md), and `mke2fs` is a named suspect that stayed
-    // unmeasured only because no build log recorded which one ran: the hash travels in CI output and
-    // the version did not. Now a reader comparing two logs can rule it in or out from the logs alone.
-    println!(
-        "  mke2fs: {}",
-        mke2fs_version().map_or_else(
-            || "unknown (banner unparseable)".to_string(),
-            |(major, minor, patch)| format!("{major}.{minor}.{patch}")
-        )
-    );
+    println!("  sha256: {} (over the tree manifest)", build.tree_sha256);
 
     // Keep the base small: report the real footprint and fail on bloat past the budget.
-    let used_mib = image_used_bytes(&out)? / (1024 * 1024);
+    let used_mib = tree_used_bytes(&out)? / (1024 * 1024);
     println!("  size:   {used_mib} MiB used / {ROOTFS_BUDGET_MIB} MiB budget");
     if used_mib > ROOTFS_BUDGET_MIB {
         bail!(
             "rootfs base is over budget: {used_mib} MiB > {ROOTFS_BUDGET_MIB} MiB — keep the base \
-             small, or raise ROOTFS_BUDGET_MIB (+ ROOTFS_SIZE_MIB) deliberately"
+             small, or raise ROOTFS_BUDGET_MIB deliberately"
         );
     }
 
@@ -726,32 +389,42 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     }
 
     if verify {
-        // Prove determinism: a second full build must be byte-for-byte identical. Built to a temp
-        // path so the canonical image (which the boot test uses) stays in place. Clean up the temp
-        // (and its `.part`, present if the build failed mid-way) on *every* path, before propagating
-        // a build error, so a failed second build leaks neither.
-        let tmp = artifacts_dir().join("rootfs-guest.verify.ext4");
+        // Prove determinism: a second full build must produce an identical tree. Built to a temp
+        // path so the canonical tree stays in place, and cleaned up on *every* path, before
+        // propagating a build error, so a failed second build leaks nothing.
+        let tmp = artifacts_dir().join("rootfs-guest.verify");
         let result = assemble_rootfs(&tmp);
-        let _ = std::fs::remove_file(&tmp);
-        let _ = std::fs::remove_file(part_path(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
         let again = result?;
-        if again.image_sha256 != build.image_sha256 {
+        if again.tree_sha256 != build.tree_sha256 {
             bail!(
                 "rootfs build is NOT reproducible — two builds differ:\n  {}\n  {}",
-                build.image_sha256,
-                again.image_sha256
+                build.tree_sha256,
+                again.tree_sha256
             );
         }
-        println!("  ✓ reproducible: two builds are byte-identical");
+        println!("  ✓ reproducible: two builds hash identically");
     }
 
-    // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
-        "  exec inside a microVM with:\n  BSX_ROOTFS={} BSX_MARKER={} cargo run -p bsx -- run -- echo hi",
-        out.display(),
-        bsx_channel::GUEST_READY_MARKER
+        "  the tree is a virtiofs root: the supervisor that boots one is `scratch/ROADMAP.md` \
+         phase 2"
     );
     Ok(())
+}
+
+/// Real (non-sparse) bytes the staged tree occupies, matching `du`, so the budget is measured
+/// against what a host actually stores rather than an apparent size.
+fn tree_used_bytes(root: &Path) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let mut paths = Vec::new();
+    walk_tree(root, &mut paths)?;
+    let mut total = 0u64;
+    for p in &paths {
+        let meta = std::fs::symlink_metadata(p).with_context(|| format!("stat {}", p.display()))?;
+        total = total.saturating_add(meta.blocks().saturating_mul(512));
+    }
+    Ok(total)
 }
 
 /// The committed lockfile recording the exact guest package closure. Lives next to the build
@@ -795,7 +468,7 @@ fn write_packages_lock(packages: &[String]) -> Result<()> {
     let path = packages_lock_path();
     let mut body = String::from(
         "# Resolved guest rootfs package closure: the exact Alpine packages baked into\n\
-         # artifacts/rootfs-guest.ext4. Regenerate after an upstream bump with:\n\
+         # artifacts/rootfs-guest. Regenerate after an upstream bump with:\n\
          #   cargo xtask build-rootfs --update-lock\n\
          # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",
     );
@@ -1067,12 +740,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    use super::{
-        GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
-        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH, ROOTFS_SIZE_MIB,
-        in_staging, lock_drift, net_up_script, parse_mke2fs_version, rootfs_inittab,
-        verify_guest_contract,
-    };
+    use super::{GUEST_AGENT_PATH, in_staging, lock_drift, verify_guest_contract};
 
     /// The drift report is the whole of what a gate log says about an Alpine bump, so it names the
     /// packages that moved rather than only that something did: a version bump reads as one `-`/`+`
@@ -1100,82 +768,21 @@ mod tests {
         assert!(!drift.contains("libexpat"), "{drift}");
     }
 
-    /// The engine gives each drive a one-time IO burst that runs before the steady-state cap
-    /// engages, sized so a cold boot's rootfs read cannot reach the cap: a burst at or above the
-    /// whole image bounds that read from above, since boot reads only a subset of the image. This
-    /// builder owns the image size and `firecracker.rs` owns the burst, and its constant is private
-    /// to that crate, so neither can read the other: the two are compared here, exactly as the IPv6
-    /// link's copies are.
-    ///
-    /// Drift is silent in the worst direction. An image grown past the burst throttles every cold
-    /// boot to 256 MiB/s partway through, which looks like a slow host rather than a limiter, and
-    /// the comment on the burst would still claim boot is unthrottled.
-    #[test]
-    fn the_io_burst_covers_the_shipped_rootfs() {
-        let src = std::fs::read_to_string(
-            crate::workspace_root().join("crates/engine/src/firecracker.rs"),
-        )
-        .expect("crates/engine/src/firecracker.rs");
-
-        // `const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;`: take the right-hand
-        // side and multiply out its integer literals, so the pin reads whatever units the engine
-        // finds clearest rather than requiring one spelling.
-        let rhs = src
-            .lines()
-            .find_map(|l| l.split("const GUEST_IO_ONE_TIME_BURST_BYTES: u64 =").nth(1))
-            .map(|r| r.trim().trim_end_matches(';').trim())
-            .expect("firecracker.rs must define GUEST_IO_ONE_TIME_BURST_BYTES");
-        let unreadable = format!(
-            "GUEST_IO_ONE_TIME_BURST_BYTES must stay a product of integer literals for this pin \
-             to read it, got `{rhs}`"
-        );
-        let burst: u64 = rhs
-            .split('*')
-            .map(|f| f.trim().replace('_', "").parse::<u64>().ok())
-            .try_fold(1u64, |acc, n| Some(acc * n?))
-            .expect(&unreadable);
-
-        let image = u64::from(ROOTFS_SIZE_MIB) * 1024 * 1024;
-        assert!(
-            image <= burst,
-            "the guest rootfs is {ROOTFS_SIZE_MIB} MiB but the engine's one-time IO burst is only \
-             {} MiB: a cold boot would hit the steady-state cap. Raise \
-             GUEST_IO_ONE_TIME_BURST_BYTES in crates/engine/src/firecracker.rs, or shrink the image.",
-            burst / (1024 * 1024)
-        );
-    }
-
     /// A per-test scratch tree, removed on drop so a failing assertion can't leave one behind.
     fn temp_dir(name: &str) -> bsx_test_support::ScratchDir {
         bsx_test_support::ScratchDir::created(&format!("contract-{name}"))
     }
 
-    /// A staging tree that satisfies the contract: the four executables at 0755, the three
-    /// mountpoints, the resolver link, and the real inittab. Each negative test breaks exactly one
-    /// thing from here, so what it proves is that *that* fault is what the check catches.
+    /// A staging tree that satisfies the contract: the agent at 0755. Each negative test breaks
+    /// exactly one thing from here, so what it proves is that *that* fault is what the check
+    /// catches.
     fn good_staging(root: &Path) {
-        let resolv = in_staging(root, RESOLV_CONF_PATH);
-        std::fs::create_dir_all(resolv.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(KERNEL_PNP_PATH, &resolv).unwrap();
-        for path in [
-            GUEST_AGENT_PATH,
-            bsx_channel::GUEST_OVERLAY_INIT,
-            MOUNT_DRIVES_PATH,
-            NET_UP_PATH,
-        ] {
-            let staged = in_staging(root, path);
-            std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
-            std::fs::write(&staged, "#!/bin/sh\n").unwrap();
-            let mut perms = std::fs::metadata(&staged).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&staged, perms).unwrap();
-        }
-        for dir in [OVERLAY_DIR, INPUT_DIR, OUTPUT_DIR] {
-            std::fs::create_dir_all(in_staging(root, dir)).unwrap();
-        }
-        let inittab = in_staging(root, INITTAB_PATH);
-        std::fs::create_dir_all(inittab.parent().unwrap()).unwrap();
-        std::fs::write(&inittab, rootfs_inittab()).unwrap();
+        let staged = in_staging(root, GUEST_AGENT_PATH);
+        std::fs::create_dir_all(staged.parent().expect("the agent path has a parent")).unwrap();
+        std::fs::write(&staged, "#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&staged).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&staged, perms).unwrap();
     }
 
     #[test]
@@ -1186,151 +793,64 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_executable_names_itself_and_its_consequence() {
+    fn a_missing_agent_names_itself_and_its_consequence() {
         let tmp = temp_dir("missing");
         good_staging(tmp.path());
-        std::fs::remove_file(in_staging(tmp.path(), NET_UP_PATH)).unwrap();
+        std::fs::remove_file(in_staging(tmp.path(), GUEST_AGENT_PATH)).unwrap();
         let err = verify_guest_contract(tmp.path())
-            .expect_err("a missing net-up must fail the build")
+            .expect_err("a missing agent must fail the build")
             .to_string();
-        assert!(err.contains(NET_UP_PATH), "{err}");
-        assert!(err.contains("no IPv6"), "{err}");
+        assert!(err.contains(GUEST_AGENT_PATH), "{err}");
+        assert!(err.contains("no exec channel"), "{err}");
     }
 
     #[test]
-    fn an_unexecutable_helper_is_caught_before_it_ships() {
+    fn an_unexecutable_agent_is_caught_before_it_ships() {
         let tmp = temp_dir("mode");
         good_staging(tmp.path());
         // The exact fault a forgotten `set_mode_0755` produces: the file is there, so an
         // existence-only check would pass it, and the guest would fail at exec time instead.
-        let staged = in_staging(tmp.path(), MOUNT_DRIVES_PATH);
+        let staged = in_staging(tmp.path(), GUEST_AGENT_PATH);
         let mut perms = std::fs::metadata(&staged).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&staged, perms).unwrap();
         let err = verify_guest_contract(tmp.path())
-            .expect_err("a non-executable helper must fail the build")
+            .expect_err("a non-executable agent must fail the build")
             .to_string();
         assert!(err.contains("0644"), "{err}");
-        assert!(err.contains(MOUNT_DRIVES_PATH), "{err}");
+        assert!(err.contains("cannot"), "{err}");
     }
 
+    /// The tree hash has to see a mode change, not just content: an agent that lost its exec bit is
+    /// byte-identical and would slip past a contents-only hash, which is exactly the drift
+    /// `--verify` exists to catch.
     #[test]
-    fn a_missing_mountpoint_is_caught() {
-        let tmp = temp_dir("mountpoint");
+    fn the_tree_hash_moves_when_only_a_mode_moves() {
+        let tmp = temp_dir("hash-mode");
         good_staging(tmp.path());
-        std::fs::remove_dir_all(in_staging(tmp.path(), OVERLAY_DIR)).unwrap();
-        let err = verify_guest_contract(tmp.path())
-            .expect_err("a missing overlay mountpoint must fail the build")
-            .to_string();
-        assert!(err.contains(OVERLAY_DIR), "{err}");
-        assert!(err.contains("cannot create it"), "{err}");
+        let before = super::tree_sha256(tmp.path()).expect("hash the staged tree");
+        let staged = in_staging(tmp.path(), GUEST_AGENT_PATH);
+        let mut perms = std::fs::metadata(&staged).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&staged, perms).unwrap();
+        let after = super::tree_sha256(tmp.path()).expect("hash the staged tree again");
+        assert_ne!(before, after, "a mode change must move the tree hash");
     }
 
+    /// And a symlink's *target*, for the same reason: retargeting a link changes nothing's bytes.
     #[test]
-    fn an_inittab_that_never_starts_the_agent_is_caught() {
-        let tmp = temp_dir("inittab");
+    fn the_tree_hash_moves_when_a_symlink_is_retargeted() {
+        let tmp = temp_dir("hash-link");
         good_staging(tmp.path());
-        // Syntactically fine, and it would boot. It just never spawns the agent, which is the
-        // failure that looks healthy until a run hangs waiting for the readiness marker.
-        std::fs::write(
-            in_staging(tmp.path(), INITTAB_PATH),
-            "::sysinit:/bin/mount -t proc proc /proc\n",
-        )
-        .unwrap();
-        let err = verify_guest_contract(tmp.path())
-            .expect_err("an inittab that never starts the agent must fail the build")
-            .to_string();
-        assert!(err.contains(GUEST_AGENT_PATH), "{err}");
-    }
-
-    #[test]
-    fn a_missing_resolver_link_is_caught() {
-        let tmp = temp_dir("resolv_missing");
-        good_staging(tmp.path());
-        std::fs::remove_file(in_staging(tmp.path(), RESOLV_CONF_PATH)).unwrap();
-        let err = verify_guest_contract(tmp.path())
-            .expect_err("a missing resolver link must fail the build")
-            .to_string();
-        assert!(err.contains(RESOLV_CONF_PATH), "{err}");
-        assert!(err.contains("resolve no names"), "{err}");
-    }
-
-    #[test]
-    fn a_baked_resolver_file_is_caught_where_a_link_belongs() {
-        let tmp = temp_dir("resolv_file");
-        good_staging(tmp.path());
-        // The fault an "obvious" cleanup produces: a real file with sensible-looking contents. It
-        // exists and it parses, so an existence-only check passes it, and every guest then resolves
-        // against a frozen address regardless of what the driver put on its command line.
-        let staged = in_staging(tmp.path(), RESOLV_CONF_PATH);
-        std::fs::remove_file(&staged).unwrap();
-        std::fs::write(&staged, "nameserver 1.1.1.1\n").unwrap();
-        let err = verify_guest_contract(tmp.path())
-            .expect_err("a baked resolver file must fail the build")
-            .to_string();
-        assert!(err.contains("not a symlink"), "{err}");
-    }
-
-    #[test]
-    fn a_resolver_link_aimed_elsewhere_is_caught() {
-        let tmp = temp_dir("resolv_target");
-        good_staging(tmp.path());
-        // A link, so the symlink check passes; it just points somewhere the kernel never writes.
-        let staged = in_staging(tmp.path(), RESOLV_CONF_PATH);
-        std::fs::remove_file(&staged).unwrap();
-        std::os::unix::fs::symlink("/etc/resolv.conf.static", &staged).unwrap();
-        let err = verify_guest_contract(tmp.path())
-            .expect_err("a resolver link aimed elsewhere must fail the build")
-            .to_string();
-        assert!(err.contains(KERNEL_PNP_PATH), "{err}");
-        assert!(err.contains("never be read"), "{err}");
-    }
-
-    #[test]
-    fn net_up_reads_the_shared_cmdline_key() {
-        let script = net_up_script();
-        let key = bsx_channel::GUEST_IP6_CMDLINE_KEY;
-        // The guest parses the *same* token key the driver writes (single-sourced in `bsx-channel`),
-        // so the two sides can't drift: the case pattern that matches it and the `${tok#…}` that
-        // strips it both carry the key.
-        assert!(script.contains(&format!("{key}=*)")));
-        assert!(script.contains(&format!("${{tok#{key}=}}")));
-        // A no-NIC boot is a clean no-op, and the assignment tries `ip` then falls back to `ifconfig`.
-        assert!(script.contains("[ -e /sys/class/net/eth0 ] || exit 0"));
-        assert!(script.contains("ip addr add"));
-        assert!(script.contains("ifconfig eth0 add"));
-    }
-
-    #[test]
-    fn parses_the_stock_banner() {
-        assert_eq!(
-            parse_mke2fs_version("mke2fs 1.47.4 (6-Mar-2025)\n\tUsing EXT2FS Library 1.47.4\n"),
-            Some((1, 47, 4))
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink("/one", &link).unwrap();
+        let before = super::tree_sha256(tmp.path()).expect("hash the staged tree");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("/two", &link).unwrap();
+        let after = super::tree_sha256(tmp.path()).expect("hash the staged tree again");
+        assert_ne!(
+            before, after,
+            "a retargeted symlink must move the tree hash"
         );
-    }
-
-    #[test]
-    fn the_release_below_the_floor_compares_below_it() {
-        // 1.47.0 is the last release before `mke2fs` honoured SOURCE_DATE_EPOCH, so it is the
-        // boundary the probe has to catch. Named by what it is, not by who ships it: distributions
-        // move, and the comparison is what this pins.
-        let below = parse_mke2fs_version("mke2fs 1.47.0 (5-Feb-2023)").unwrap();
-        assert!(below < MKE2FS_SOURCE_DATE_EPOCH_MIN);
-    }
-
-    #[test]
-    fn suffixed_and_short_versions_parse() {
-        assert_eq!(
-            parse_mke2fs_version("mke2fs 1.47.1-rc2 (x)"),
-            Some((1, 47, 1))
-        );
-        assert_eq!(parse_mke2fs_version("mke2fs 1.47 (x)"), Some((1, 47, 0)));
-    }
-
-    #[test]
-    fn garbage_banners_parse_to_none() {
-        assert_eq!(parse_mke2fs_version(""), None);
-        assert_eq!(parse_mke2fs_version("mke2fs"), None);
-        assert_eq!(parse_mke2fs_version("mke2fs weird-version (x)"), None);
     }
 }

@@ -1,5 +1,5 @@
 # `cargo fuzz` harness for the untrusted-input decoders: the host↔guest wire (channel) and the
-# signed-record envelope (attacker-relayed by design). Kept OUT of the main workspace
+# CLI's config parser. Kept OUT of the main workspace
 # on purpose: it needs a nightly toolchain and libFuzzer, so it must never be pulled into
 # `cargo build` or `cargo xtask ci`. Its own `[workspace]` table below detaches it; run it with
 # `cargo xtask fuzz` (or `cargo fuzz run <target>`).
@@ -14,25 +14,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-# The bulk-output image parser the engine points at guest-authored bytes. Named directly rather than
-# reached through `bsx-engine`, whose readback wraps it in host filesystem writes.
-ext4-view = { version = "0.9", features = ["std"] }
-toml = "0.8"
 
 [dependencies.bsx-channel]
 path = "../crates/channel"
-features = ["fuzzing"]
-
-# The readback's own pre-parse bound, so `output_image` applies exactly what production applies
-# rather than a copy that could drift from it. The `fuzzing` feature exposes that one function.
-[dependencies.bsx-engine]
-path = "../crates/engine"
-features = ["fuzzing"]
-
-# CLI policy and config parsers (`parse_allow`, `BsxToml`).
-[dependencies.bsx]
-path = "../crates/cli"
-# The CLI's library target is empty by default; this exposes the parsers these targets fuzz.
 features = ["fuzzing"]
 
 
@@ -68,20 +52,6 @@ bench = false
 [[bin]]
 name = "channel_handshake"
 path = "fuzz_targets/channel_handshake.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "bsx_config"
-path = "fuzz_targets/bsx_config.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "output_image"
-path = "fuzz_targets/output_image.rs"
 test = false
 doc = false
 bench = false

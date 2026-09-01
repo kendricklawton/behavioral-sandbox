@@ -31,48 +31,18 @@ pub(crate) fn guest_target_installed() -> bool {
 /// gate (it needs the musl target installed and produces an artifact the host doesn't run);
 /// `build-rootfs` bakes the result into the image.
 pub(crate) fn build_guest_agent() -> Result<PathBuf> {
-    build_guest_musl(GuestBin::Agent)
+    build_guest_musl()
 }
 
-/// Build the static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
-/// guest target and return its path. A statically linked musl binary with no interpreter/libc, which
-/// the runtime-agnostic test injects and execs to prove the engine runs *any* Linux binary. Built
-/// like the agent (musl, `--locked`) and verified static.
-pub(crate) fn build_guest_example() -> Result<PathBuf> {
-    build_guest_musl(GuestBin::Example)
-}
-
-/// A static musl guest binary `xtask` builds: the agent itself, or the native-ELF fixture.
-enum GuestBin {
-    Agent,
-    Example,
-}
-
-impl GuestBin {
-    /// The cargo target selector, the built binary's path under `target/<triple>/release/`, and a
-    /// human label, the only things that differ between the two builds.
-    fn spec(&self) -> (&'static [&'static str], &'static str, &'static str) {
-        match self {
-            GuestBin::Agent => (
-                &["--bin", "guest-agent"],
-                "release/guest-agent",
-                "guest agent",
-            ),
-            GuestBin::Example => (
-                &["--example", "writefile"],
-                "release/examples/writefile",
-                "guest example",
-            ),
-        }
-    }
-}
-
-/// Build a static musl guest binary (`--locked`, the guest musl target) and verify it's actually
-/// statically linked before returning its path. The shared body of [`build_guest_agent`] and
-/// [`build_guest_example`], which differ only in [`GuestBin::spec`].
-fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
+/// Build the static musl guest agent (`--locked`, the guest musl target) and verify it's actually
+/// statically linked before returning its path.
+fn build_guest_musl() -> Result<PathBuf> {
     ensure_guest_target()?;
-    let (selector, subpath, label) = kind.spec();
+    let (selector, subpath, label) = (
+        &["--bin", "guest-agent"][..],
+        "release/guest-agent",
+        "guest agent",
+    );
     let mut args = vec!["build", "--release", "--locked", "-p", "bsx-guest-agent"];
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
@@ -86,8 +56,8 @@ fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
 /// Where cargo actually placed the build: `CARGO_TARGET_DIR` when set, else the workspace's default
 /// `target/`. `build_guest_musl` must resolve the built binary from the *same* directory `cargo`
 /// wrote it to; hardcoding `target/` made `verify_static` (and the returned path staged into the
-/// rootfs) read an absent or stale binary whenever `CARGO_TARGET_DIR` pointed elsewhere, exactly the
-/// privileged gate, which sets it to keep a root build from poisoning `./target`.
+/// rootfs) read an absent or stale binary whenever `CARGO_TARGET_DIR` pointed elsewhere, which is
+/// what a root test run sets to keep its artifacts out of `./target`.
 fn guest_target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from)

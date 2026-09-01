@@ -1,19 +1,25 @@
 # Architecture
 
-What the engine is, the rules it holds itself to, and how it is put together. This page carries the
-scope and the design rules; the pages under it carry the host integration, the VMM and its jail,
-the code, a run from boot to teardown, the eBPF half, and the numbered decisions.
+What BSX is, the rules it holds itself to, and what is in the tree today.
 
 ## Scope
 
 ### What this is
 
-`bsx` is an isolated code-execution sandbox. Untrusted code runs inside a microVM, with the
-isolation boundary enforced by the CPU through hardware virtualization. The guest
-drives four crossings, enumerated in the [threat model](./security-threat-model.md), and none of them names a
-BPF program or map.
+BSX is a local-first desktop sandbox. Untrusted code runs inside a virtual machine, with the
+isolation boundary enforced by the CPU through hardware virtualization: KVM on Linux,
+Hypervisor.framework on macOS. It is a GUI application with a CLI beside it, both on one machine.
 
-Every execution yields a host-observed **audit record** of what the host was able to see, and the
+### Where this is, right now
+
+**The tree does not boot anything.** BSX was built on Firecracker with a host-side eBPF observer;
+that design was abandoned, and the engine implementing it was deleted rather than carried alongside
+its replacement. The replacement runs on [libkrun](https://github.com/containers/libkrun), a library
+that makes the calling process the virtual machine monitor, and it is not written yet.
+
+What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest agent
+(`bsx-guest-agent`), the guest image build and the gate (`xtask`), and a `bsx` binary with no verbs.
+This page describes the rules the replacement is being built to, not a running system.
 
 ### Design rules
 
@@ -35,39 +41,14 @@ verified outcome.
 4. **An application, not a platform.** The product is a program on one person's machine. The unit is
    the sandbox; there is no tenant, no account, and no fleet. Mechanism that makes one machine's
    sandboxes work belongs here, and anything that must know who is paying is a different product.
-   See [Where the engine ends](./embedding-scope.md#where-the-engine-ends-the-enginepaas-line).
+   An AI model is a caller, never a component: it drives the app from outside.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, or a helper that dies,
    should surface as a typed error. A leak here is a stranded VM holding somebody's laptop RAM, not
-   a server you can reboot. This is what the code is written against and what the confinement suite
-   exercises; it is an aim, not a proven property.
+   a server you can reboot. This is what the code is written against; it is an aim, not a proven
+   property, and the suite that exercised it went with the engine it tested.
 6. **Measure rather than assert.** Boot, memory, and frame timings are reported as nearest-rank
    percentiles with the host and date they were taken on. Where a number cannot be defended, it is
-   withdrawn rather than published; see [Benchmarks](./benchmarks.md). libkrun has no snapshot
-   surface, so every boot is a cold boot.
-
-## Architecture overview
-
-```text
-                     CONSUMER ENTRY POINTS & API SURFACES
-
-    [ Rust Embedder ]                                     [ Audit Verifier ]
-            |                                                     |
-            v (In-Process)                                        v (Off-Host)
-     `bsx-engine`                                            `bsx` CLI
-  (Sandbox, BootConfig, Vm)                          (ed25519 verify/chain)
-            |
-            v
-        `bsx` CLI
-  (a thin host of the same `bsx-engine`)
-            |
-            |
-            v  (Driver / Lifecycle)
-     Firecracker microVM
-   +-----------------------+
-   | KVM Hardware Isolation|
-   | In-Guest Agent        |  <=== (vsock channel, `bsx-channel` framing)
-   +-----------------------+
-```
+   withdrawn rather than published. libkrun has no snapshot surface, so every boot is a cold boot.
 
 ## Index of crates
 
@@ -77,22 +58,8 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 
 | Crate | Directory | Role |
 |---|---|---|
-| `bsx-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
-| `bsx-channel` | `crates/channel` | The host/guest wire protocol. Nearly dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
-| `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
-| `bsx` | `crates/cli` | The `bsx` binary: `run`, `shell`, `doctor`, `verify`. Package, binary, and command all share the name. |
-| `bsx-test-support` | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
-| `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
-
-## The rest of this section
-
-- **[Host integration](./architecture-host.md)**, where the pieces sit on a host, what the host must
-  provide, and how networking and storage are laid out.
-- **[The VMM and its jail](./architecture-firecracker.md)**, how the driver talks to Firecracker,
-  what the guest ends up holding, and what confines the VMM process itself.
-- **[The code](./architecture-code.md)**, what the crates are for, the types worth knowing before
-  reading code, and the reading order that works.
-- **[A run, start to finish](./architecture-lifecycle.md)**, boot, exec, the four teardown layers,
-  and the snapshot pool.
-- **[Design decisions](./architecture-decisions.md)**, the numbered decisions and the
-  reasoning behind each.
+| `bsx-channel` | `crates/channel` | The host/guest wire protocol. Nearly dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by both ends. |
+| `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the guest image. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
+| `bsx` | `crates/cli` | The `bsx` binary. No verbs today: the supervisor they call is not written. Package, binary, and command all share the name. |
+| `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
+| `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |

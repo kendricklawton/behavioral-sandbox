@@ -2,17 +2,14 @@
 name: Docs
 
 # The paths are every input this workflow reads, not just the book source. `mdbook test` compiles
-# the book's Rust blocks against a freshly built `bsx-engine` under the pinned toolchain, so an
-# engine change can break a page without that page being touched; a redeploy of byte-identical
-# output is cheaper than a book whose examples stopped compiling. `cargo xtask ci` already compiles
-# the embedding recipes on every commit (`EmbeddingRecipes` in `crates/engine/src/lib.rs`), so what
-# this adds is the rest of the book.
+# the book's Rust blocks under the pinned toolchain, so an untagged fence (which rustdoc compiles as
+# Rust) fails here rather than shipping broken. A redeploy of byte-identical output is cheaper than a
+# book whose examples stopped compiling.
 on:
   push:
     branches: [main]
     paths:
       - 'docs/**'
-      - 'crates/engine/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -46,27 +43,17 @@ jobs:
         with:
           tool: mdbook
 
-      # `mdbook build` renders; it never compiles a single Rust block, so every one of them shipped
-      # as unchecked prose. `mdbook test` compiles them, and needs two things a bare invocation
-      # lacks. Its rustdoc must be the *pinned* rustc, because mdbook runs doctests from a temp dir
-      # where rustup can no longer see `rust-toolchain.toml` and silently falls back to the default
-      # toolchain; an rlib built by a different rustc is then rejected as incompatible. And the
-      # library path must hold exactly one `bsx-engine` candidate, which a dedicated target dir
-      # guarantees and a shared `target/debug/deps` does not, since repeated builds leave several.
+      # `mdbook build` renders; it never compiles a single Rust block, so every one of them would
+      # ship as unchecked prose. `mdbook test` compiles them. Its rustdoc must be the *pinned* rustc,
+      # because mdbook runs doctests from a temp dir where rustup can no longer see
+      # `rust-toolchain.toml` and silently falls back to the default toolchain. The toolchain is read
+      # back from rustup rather than restated here, so this cannot drift from `rust-toolchain.toml`.
       #
-      # The toolchain is read back from rustup rather than restated here, so this cannot drift from
-      # `rust-toolchain.toml`.
-      #
-      # The embedding recipes are also compiled by `cargo test` (`EmbeddingRecipes` in
-      # `crates/engine/src/lib.rs`), which is what checks them on every commit; this step's own catch
-      # is the rest of the book, above all an untagged fence, which rustdoc compiles as Rust.
-      - name: Build the engine for the book's doctests
-        run: CARGO_TARGET_DIR=target/docs-check cargo build -p bsx-engine --locked
-
+      # The book has no Rust blocks today; what this catches is an untagged fence, which rustdoc
+      # compiles as Rust.
       - name: Test the book's Rust blocks
         run: |
-          rustup run "$(rustup show active-toolchain | cut -d' ' -f1)" \
-            mdbook test docs -L target/docs-check/debug/deps
+          rustup run "$(rustup show active-toolchain | cut -d' ' -f1)" mdbook test docs
 
       - name: Build mdBook
         run: mdbook build docs

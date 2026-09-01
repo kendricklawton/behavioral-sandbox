@@ -15,7 +15,6 @@ clap.workspace = true
 bsx-channel = { path = "../crates/channel" }
 # The driver, for `bench-boot`: it boots real microVMs and reads `boot_latency`. A dev-only
 # dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
-bsx-engine = { path = "../crates/engine" }
 
 [dev-dependencies]
 # The shared scratch-dir guard for the tests, instead of a hand-rolled TempDir per test module.

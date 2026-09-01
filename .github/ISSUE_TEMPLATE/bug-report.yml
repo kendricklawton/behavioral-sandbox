@@ -24,21 +24,22 @@ body:
     attributes:
       label: How to reproduce it
       description: >-
-        The exact command line (`bsx run …` / `bsx shell …`) or the
-        embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
+        The exact command line, plus anything it needs to trigger. The smaller the repro, the faster
+        the fix. Note that nothing in this tree boots a sandbox today: the engine was deleted in the
+        move to libkrun and its replacement is not written.
       placeholder: |
-        bsx run --net -- python3 -c '...'
+        cargo xtask build-rootfs
       render: shell
     validations:
       required: true
 
   - type: textarea
-    id: doctor
+    id: setup
     attributes:
-      label: "`bsx doctor` output"
+      label: "`cargo xtask setup` output"
       description: >-
-        Paste the full output: it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
-        one shot, which answers most environment questions up front.
+        Paste the full output: it captures the hypervisor and the dev toolchain in one shot, which
+        answers most environment questions up front.
       render: text
     validations:
       required: true

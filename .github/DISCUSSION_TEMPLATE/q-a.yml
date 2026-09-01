@@ -22,9 +22,9 @@ body:
       required: true
 
   - type: textarea
-    id: doctor
+    id: setup
     attributes:
-      label: "`bsx doctor` output"
+      label: "`cargo xtask setup` output"
       description: >
         All of it. BSX probes host capabilities rather than distributions, so these rows
         usually identify the problem outright.
@@ -46,10 +46,10 @@ body:
     attributes:
       label: Which part
       options:
-        - Installing or building
-        - Booting a sandbox (bsx run / bsx shell)
-        - Networking (--net / --allow)
-        - Embedding the bsx-engine library
+        - Building from source
+        - The guest image build (cargo xtask build-rootfs)
+        - The host↔guest wire (bsx-channel) or the in-guest agent
+        - Where the rebuild is going
         - Something else
     validations:
       required: true

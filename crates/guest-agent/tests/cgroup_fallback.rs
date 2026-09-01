@@ -12,7 +12,7 @@ mod common;
 use common::{Agent, Exec};
 
 /// Whether this host lets the agent make a per-exec cgroup, answered by doing it rather than by
-/// guessing from a uid: the privileged gate runs as real root with a writable cgroup v2 mount, an
+/// guessing from a uid: a root test run has a writable cgroup v2 mount, an
 /// ordinary dev box does not, and the agent must be right on both.
 fn can_make_a_cgroup() -> bool {
     let probe = std::path::Path::new("/sys/fs/cgroup")

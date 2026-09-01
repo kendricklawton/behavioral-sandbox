@@ -1,12 +1,10 @@
-# Every member is `publish = false` on purpose: the engine is not distributed through crates.io.
-# The support window is computed from Firecracker's and ends; an immutable registry version would
-# outlive it, looking usable on an unpatched VMM. A name held there under this project is a `0.0.0`
-# placeholder with no code in it, which is why holding one does not contradict this line. Reasoning:
-# docs/embedding-scope.md.
+# Every member is `publish = false` on purpose: this is an application, not a library anyone depends
+# on, and nothing here is stable enough to carry an immutable registry version. A name held there
+# under this project is a `0.0.0` placeholder with no code in it, which is why holding one does not
+# contradict this line.
 [workspace]
 resolver = "2"
 members = [
-    "crates/engine",
     "crates/channel",
     "crates/guest-agent",
     "crates/cli",
@@ -29,64 +27,25 @@ license = "Apache-2.0"
 authors = ["Kendrick Lawton"]
 repository = "https://github.com/kendricklawton/behavioral-sandbox"
 
-# Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
-# over a unix socket (serde), the CLI parses with clap, logs with tracing.
+# Dependency-light by design. The host path is `unsafe`-free and the CLI parses with clap.
 [workspace.dependencies]
 anyhow = "1"
 # `wrap_help` costs one crate (`terminal_size`) and is what makes `--help` legible: without it clap
 # wraps at no width at all, so a flag whose doc comment runs long prints off the right edge of any
 # terminal. That is not hypothetical here, since a `///` on a clap field *is* the user interface,
-# and `bsx run -h` ran 19 lines past 80 columns before this was set.
+# and the CLI's `-h` ran 19 lines past 80 columns before this was set.
 clap = { version = "4", features = ["derive", "wrap_help"] }
-# Terminal rendering for the CLI, drawn on **stderr** so stdout stays pipe-clean.
-# Terminal I/O rides ratatui's re-exported crossterm, so the two can't version-skew.
-ratatui = "0.30"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# The CLI's `.bsx.toml` config file layer. Parse-only; keys mirror the `BSX_*` env names.
-toml = "1"
-# Record integrity: an `ed25519` detached signature over the canonical record bytes,
-# so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a
-# hand-rolled one; keygen randomness is read from `/dev/urandom` (Linux-only engine), so no `rand`.
-# `zeroize` scrubs the secret key from memory on drop.
-ed25519-dalek = { version = "3", features = ["zeroize"] }
-# Scrub transient copies of the signing seed (the hex read from / written to the key file) so the
-# secret doesn't linger in freed memory.
+# Scrubs a secret from memory after `bsx-channel` sends it, so it doesn't linger in freed memory.
 zeroize = "1"
-# SHA-256 for the record hash-chain: each record commits to the previous one's hash.
-# Already pulled in transitively by `ed25519-dalek`; pinned here so the loader names it directly.
-sha2 = "0.11"
-# Structured logging to stderr; stdout stays reserved for a run's result / audit log.
+# Structured logging to stderr; stdout stays reserved for a run's result.
 tracing = "0.1"
 # `json`: the `--log-json` machine-readable encoding of the same structured events.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-# Statistical micro-benchmarking framework for in-memory operations (record signing, JSON, wire types).
-criterion = { version = "0.5", features = ["html_reports"] }
-# Reads the guest-written output image in-process. Read-only by the crate's own stated non-goal, and
-# `#![forbid(unsafe_code)]` like the host path it runs on, which is what puts the bulk-output parser
-# in the same memory-safety class as the rest of the driver. Its journal support replays a dirty
-# image, the case a hard-killed guest leaves behind.
-ext4-view = { version = "0.9", features = ["std"] }
-# Thin safe wrappers over libc calls the std library does not expose: a bounded `connect` and
-# `setns` for the tap monitor.
-# Single-sourced here because two crates want it and a per-crate version string is two things to
-# bump; each names its own `features`, which is the part that legitimately differs.
-nix = { version = "0.31", default-features = false }
 
 # No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`
 # re-allows them in tests. Enforced by the `clippy … -D warnings` step in CI and `cargo xtask ci`.
 # Each crate opts in with `[lints] workspace = true`.
-# The `ed25519`/`sha2` record-signing path. is heavy in an unoptimized build, curve
-# arithmetic runs 10-40x slower, which makes debug tests crawl and `bench-sign` in a dev build report
-# meaningless numbers. Optimize just those crates even in the dev profile (the dalek crates' own
-# recommendation); it leaves everything else debuggable. The definitive `bench-sign` number is still
-# a `--release` run.
-[profile.dev.package.curve25519-dalek]
-opt-level = 3
-[profile.dev.package.sha2]
-opt-level = 3
-
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

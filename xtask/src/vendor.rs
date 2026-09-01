@@ -1,7 +1,7 @@
 //! `cargo xtask vendor`, snapshot every sha-pinned upstream input into a **local mirror**, so a
-//! fresh host builds the engine without the Firecracker S3 bucket or the Alpine CDN staying alive.
+//! fresh host builds the guest image without the Alpine CDN staying alive.
 //!
-//! The boot kernel and rootfs, the Alpine minirootfs, the static `apk` tool, **and** the resolved `.apk`
+//! The Alpine minirootfs, the static `apk` tool, **and** the resolved `.apk`
 //! package closure are fetched once, sha-verified, and written under the vendor dir alongside a
 //! [`MANIFEST_NAME`] recording each file's hash. Setting `BSX_VENDOR_DIR` to that dir then takes every
 //! build path offline: [`fetch_one`](crate::artifacts) restores the binary artifacts from the mirror, and
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::artifacts::{Artifact, artifacts, download_one, sha256_of};
+use crate::artifacts::{Artifact, download_one, sha256_of};
 use crate::rootfs::{APK_CACHE_SUBDIR, alpine_artifact, apk_tools_artifact, populate_apk_cache};
 use crate::workspace_root;
 
@@ -40,11 +40,9 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
         dir.display()
     );
 
-    // The four single-file inputs: the boot kernel + rootfs (Firecracker CI) and the Alpine base +
-    // static apk tool. Retargeted to land in the vendor dir, downloaded raw (bypassing the mirror).
-    let mut inputs = artifacts()?;
-    inputs.push(alpine_artifact()?);
-    inputs.push(apk_tools_artifact()?);
+    // The two single-file inputs: the Alpine base and the static apk tool. Retargeted to land in
+    // the vendor dir, downloaded raw (bypassing the mirror).
+    let inputs = vec![alpine_artifact()?, apk_tools_artifact()?];
     let alpine_tar = dir.join(artifact_name(&alpine_artifact()?));
     let apk_tools_tar = dir.join(artifact_name(&apk_tools_artifact()?));
     for a in inputs {
@@ -65,7 +63,7 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
 
     println!(
         "\n✓ vendored {count} files + manifest in {}\n  build offline with: BSX_VENDOR_DIR={} \
-         cargo xtask self-host",
+         cargo xtask build-rootfs",
         dir.display(),
         dir.display()
     );

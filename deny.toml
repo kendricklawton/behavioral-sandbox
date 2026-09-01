@@ -19,8 +19,7 @@ allow = [
     "Unicode-3.0",
     # `foldhash` is Zlib-licensed: OSI-approved and FSF-free/permissive.
     "Zlib",
-    # The `dalek` record-signing subtree (`ed25519-dalek`, `curve25519-dalek`, `subtle`) is
-    # BSD-3-Clause: OSI-approved and FSF-free/permissive. Added when record signing entered the tree.
+    # BSD-3-Clause: OSI-approved and FSF-free/permissive.
     "BSD-3-Clause",
 ]
 confidence-threshold = 0.9

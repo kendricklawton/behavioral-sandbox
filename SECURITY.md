@@ -1,13 +1,14 @@
 # Security Policy
 
-This project is a sandbox engine: isolation and a trustworthy audit trail are the product, so
-security reports are taken seriously even this early. The security **model** (what is trusted, what
-counts as a security bug and what does not, and how a fix ships) is documented in
+This project is a sandbox: hardware isolation is the product, so security reports are taken
+seriously even this early. The security **model** (what is trusted, what counts as a security bug
+and what does not, and how a fix ships) is documented in
 [`docs/security.md`](docs/security.md).
 
-**There is no supported release yet.** Until the first supported release (`v0.1.0`), every version is
-a development snapshot: no version receives backported fixes, and nothing should be treated as
-production-ready.
+**There is no supported release yet, and nothing in the tree runs a guest.** The engine was deleted
+in the move to libkrun and its replacement is not written. Until the first supported release
+(`v0.1.0`), every version is a development snapshot: no version receives backported fixes, and
+nothing should be treated as production-ready.
 
 ## Reporting a vulnerability
 

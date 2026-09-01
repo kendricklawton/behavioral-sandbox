@@ -384,7 +384,7 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited>
     }
 }
 
-/// The cgroup v2 unified-hierarchy mount inside the guest (mounted by the rootfs `inittab`).
+/// The cgroup v2 unified-hierarchy mount inside the guest.
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self, drop

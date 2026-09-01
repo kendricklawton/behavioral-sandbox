@@ -1,5 +1,5 @@
 # Resolved guest rootfs package closure: the exact Alpine packages baked into
-# artifacts/rootfs-guest.ext4. Regenerate after an upstream bump with:
+# artifacts/rootfs-guest. Regenerate after an upstream bump with:
 #   cargo xtask build-rootfs --update-lock
 # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.
 ada-libs-3.3.0-r0

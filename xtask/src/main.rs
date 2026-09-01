@@ -7,12 +7,10 @@
 #![forbid(unsafe_code)]
 
 mod artifacts;
-mod bench;
-mod dist;
 mod drift;
 mod guest_bins;
+mod lints;
 mod rootfs;
-mod selfhost;
 mod vendor;
 
 use std::ffi::OsStr;
@@ -39,31 +37,8 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
-    /// Privileged integration tests (KVM), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
-    #[command(visible_alias = "ci-priv")]
-    CiPrivileged {
-        /// Run the test phase this many times (setup runs once): the release-readiness soak, so
-        /// "N consecutive clean privileged runs" is one command. Fails fast, naming the run that
-        /// broke.
-        #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
-        repeat: u32,
-    },
     /// Check the host can do KVM; report what's missing.
     Setup,
-    /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image
-    /// object, install the `bsx` binary, and (on a KVM host) boot one sandbox to prove
-    /// it. Offline when `BSX_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
-    SelfHost {
-        /// Where to install the `bsx` binary (default `~/.local/bin`).
-        #[arg(long, value_name = "DIR")]
-        prefix: Option<PathBuf>,
-        /// Build + install only; skip the sandbox boot proof (it just prints the command).
-        #[arg(long)]
-        no_run: bool,
-        /// Reserved: stand the engine up without an optional half.
-        #[arg(long)]
-        no_probes: bool,
-    },
     /// Snapshot every sha-pinned upstream input (guest kernel + rootfs, Alpine base, the `.apk`
     /// closure) into a local mirror, so a fresh host builds offline, no Firecracker S3 bucket, no
     /// Alpine CDN. Writes a sha manifest; re-verify it offline with `--verify`.
@@ -85,23 +60,9 @@ enum Cmd {
         #[arg(long, value_name = "REV")]
         baseline: Option<String>,
     },
-    /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
-    FetchArtifacts,
-    /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
-    /// staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`.
-    /// Vendor-aware via `BSX_VENDOR_DIR`.
-    Dist {
-        /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
-        /// against the `v0.0.x` checkpoint line, `v` stripped.
-        #[arg(long, value_name = "VERSION")]
-        version: Option<String>,
-    },
-    /// Build the static native-ELF fixture (`examples/writefile`) for the guest target, the
-    /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
-    BuildGuestExample,
-    /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
-    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-guest.ext4` (needs `curl`,
-    /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
+    /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the
+    /// static agent, as a directory tree at `artifacts/rootfs-guest` (needs `curl` and `tar`), the
+    /// shape libkrun's virtiofs root takes. Reproducible: two builds hash identically.
     #[command(visible_alias = "rootfs")]
     BuildRootfs {
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
@@ -112,59 +73,6 @@ enum Cmd {
         /// after Alpine's branch repo bumps a package out from under the floating install.
         #[arg(long)]
         update_lock: bool,
-    },
-    /// Measure cold-boot latency (percentiles) on both the read-only shared base and the read-write
-    /// per-VM copy, each split into the wall, the guest boot, and host staging. Needs `/dev/kvm`
-    /// plus the built guest rootfs.
-    BenchBoot {
-        /// How many boots to time per path (more → tighter tail percentiles). Default 100, the
-        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
-        #[arg(long, default_value_t = 100)]
-        runs: usize,
-    },
-    /// Measure the latency (percentiles) of the three start paths: a cold boot (per-VM rootfs copy,
-    /// the full-copy baseline), a prewarmed-snapshot restore, and a prewarmed-pool take, each
-    /// decomposed into its isolated start (begin a sandbox → exec-ready) and its time-to-first-result
-    /// (start + a Python one-liner's output back on the host). Needs `/dev/kvm` + the built agent
-    /// rootfs.
-    BenchWarm {
-        /// How many runs to time per path (more → tighter tail percentiles). Default 100, the
-        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
-        #[arg(long, default_value_t = 100)]
-        runs: usize,
-    },
-    /// Measure memory-sharing under concurrency: restore prewarmed clones one at a time (each sharing
-    /// the read-only base disk and the snapshot memory file) and, keeping them all alive, sample the
-    /// summed Rss (naive) vs Pss (true, shared pages divided) plus host MemAvailable. Reports how many
-    /// concurrent microVMs fit before it degrades (target / restore failure / a memory floor) and the
-    /// sharing density. Needs `/dev/kvm` + the built guest rootfs.
-    BenchDensity {
-        /// Target number of concurrent clones to stack (it stops earlier on a restore failure or the
-        /// memory floor, whichever comes first).
-        #[arg(long, default_value_t = 64)]
-        count: usize,
-    },
-    /// Measure the per-sandbox memory footprint and how the overlay/rootfs choice moves it: bring up a
-    /// cohort per strategy (cold boot with a per-VM RW copy, cold boot on the shared RO base, snapshot
-    /// restore) and report the per-VM Pss (percentiles) plus the whole-host MemAvailable drop per
-    /// sandbox. The RW-copy-vs-shared-base gap is the rootfs choice made a number. Needs `/dev/kvm` +
-    /// the built guest rootfs.
-    BenchFootprint {
-        /// How many identical sandboxes to bring up per strategy (it stops earlier at the memory
-        /// floor). Default 4.
-        #[arg(long, default_value_t = 4)]
-        count: usize,
-    },
-    /// Run the whole benchmark suite as one report to stdout, every section in order, with the
-    /// methodology stated and the host recorded. Sections whose host prerequisite is missing
-    /// (`/dev/kvm`) are skipped with the reason
-    /// printed. `docs/benchmarks.md` explains why no numbers are published at present.
-    #[command(visible_alias = "bench")]
-    BenchAll {
-        /// How many runs/bursts for the percentile benches (the concurrency benches use fixed cohort
-        /// sizes). Default 30 to keep the full suite tractable; bump the individual command for tails.
-        #[arg(long, default_value_t = 30)]
-        runs: usize,
     },
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the
     /// config parser) with `cargo fuzz` (libFuzzer), the deep,
@@ -194,13 +102,7 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Ci => ci(),
-        Cmd::CiPrivileged { repeat } => ci_privileged(repeat),
         Cmd::Setup => setup(),
-        Cmd::SelfHost {
-            prefix,
-            no_run,
-            no_probes,
-        } => selfhost::self_host(prefix, no_run, no_probes),
         Cmd::Vendor { dir, verify } => {
             if verify {
                 vendor::verify(&dir.unwrap_or_else(vendor::default_vendor_dir))
@@ -209,18 +111,10 @@ fn main() -> Result<()> {
             }
         }
         Cmd::SemverCheck { baseline } => semver_check(baseline.as_deref()),
-        Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
-        Cmd::Dist { version } => dist::dist(version),
-        Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {
             verify,
             update_lock,
         } => rootfs::build_rootfs(verify, update_lock),
-        Cmd::BenchBoot { runs } => bench::bench_boot(runs),
-        Cmd::BenchWarm { runs } => bench::bench_warm(runs),
-        Cmd::BenchDensity { count } => bench::bench_density(count),
-        Cmd::BenchFootprint { count } => bench::bench_footprint(count),
-        Cmd::BenchAll { runs } => bench::bench_all(runs),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
     }
@@ -245,8 +139,6 @@ const FUZZ_TARGETS: &[&str] = &[
     "channel_request",
     "channel_frame",
     "channel_handshake",
-    "bsx_config",
-    "output_image",
 ];
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
@@ -375,17 +267,6 @@ fn fuzz_smoke(seconds: u64) -> Result<()> {
 
 /// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
 /// check needs no libc call.
-/// The controllers the cgroup-enforcement tests need but `subtree` (the root
-/// `cgroup.subtree_control` text) does not delegate, or `None` when both are there. A word match,
-/// not a substring one, because `cpuset` must never satisfy `cpu`.
-fn missing_cgroup_controllers(subtree: &str) -> Option<String> {
-    let missing: Vec<&str> = ["cpu", "memory"]
-        .into_iter()
-        .filter(|c| !subtree.split_whitespace().any(|w| w == *c))
-        .collect();
-    (!missing.is_empty()).then(|| missing.join(" and "))
-}
-
 pub(crate) fn effective_uid() -> Result<u32> {
     let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
     status
@@ -692,183 +573,27 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Booting a microVM needs `/dev/kvm` + elevated caps, so those tests are
-/// `#[ignore]`d and run only here, on a machine that has them.
-fn ci_privileged(repeat: u32) -> Result<()> {
-    privileged_preflight()?;
-    // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
-    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
-    // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
-    // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
-    // `--repeat N` loops only this phase (setup above ran once): the soak that makes "N
-    // consecutive clean runs" a single command, for chasing intermittent failures. Fail fast so
-    // the broken run's logs sit right above the error.
-    for run in 1..=repeat {
-        if repeat > 1 {
-            println!("\n== privileged run {run}/{repeat} ==");
-        }
-        cargo(&[
-            "test",
-            "--workspace",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ])
-        .with_context(|| format!("privileged run {run}/{repeat} failed"))?;
-        if repeat > 1 {
-            println!("privileged run {run}/{repeat}: ok");
-        }
-    }
-    println!("\n✓ privileged integration passed");
-    Ok(())
-}
-
-/// Everything a privileged test run needs before a single test executes: the host refusals, then the
-/// artifacts the tests load, split out so what the gate demands of the host stays one readable
-/// block rather than checks scattered through `ci_privileged`.
-fn privileged_preflight() -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
-    }
-    // Every privileged test skip-guards itself, and a skipped body is a *pass* to cargo, so a gate
-    // run without the capabilities would print green while the jailer, cgroup, and network halves
-    // silently test nothing. Refuse loudly instead.
-    if effective_uid()? != 0 {
-        bail!(
-            "cargo xtask ci-privileged needs real root (run it under sudo): without it the \
-             jailer, cgroup, and network tests skip themselves, and a skipped test looks like \
-             a pass"
-        );
-    }
-    // Running as root without CARGO_TARGET_DIR leaves root-owned artifacts in ./target that block
-    // every later non-root `cargo build`. Refuse rather than warn: the redirect has to be on the
-    // *outer* cargo (which built this binary) to keep ./target clean at all, so it can only ever be
-    // the caller's invocation, and a warning here just documents the damage after it starts.
-    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-        bail!(
-            "refusing to run as root without CARGO_TARGET_DIR: the build would leave root-owned \
-             artifacts in ./target and block later non-root `cargo` builds.\n  Re-run as:\n    \
-             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" cargo xtask ci-privileged\n  \
-             (if ./target is already root-owned from this attempt: sudo chown -R \"$USER:$USER\" target)"
-        );
-    }
-    // The cgroup-enforcement tests build their limit cgroup under /sys/fs/cgroup, and real root
-    // (checked above) is not what that needs: it is cgroup v2 with `cpu` and `memory` delegated at
-    // the root. A v1/hybrid host presents that path as ordinary files, so the fixture refuses (and
-    // its callers skip) — and a skipped test looks like a pass. Asked of the kernel, not a distro
-    // list: the delegation file either exists and names the controllers, or the host cannot run
-    // these tests.
-    match std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control") {
-        Err(_) => bail!(
-            "/sys/fs/cgroup is not a cgroup v2 mount (no cgroup.subtree_control) — the cgroup \
-             enforcement tests would skip themselves, and a skipped test looks like a pass \
-             (mount cgroup2 on /sys/fs/cgroup)"
-        ),
-        Ok(subtree) => {
-            if let Some(missing) = missing_cgroup_controllers(&subtree) {
-                bail!(
-                    "{missing} not delegated in /sys/fs/cgroup/cgroup.subtree_control — the \
-                     cgroup enforcement tests would skip themselves, and a skipped test looks \
-                     like a pass.\n  Delegate with:\n    echo '+cpu +memory' | sudo tee \
-                     /sys/fs/cgroup/cgroup.subtree_control"
-                );
-            }
-        }
-    }
-    // The jailed-boot tests build a chroot under the scratch dir (mknod'd /dev/kvm, an exec'd
-    // firecracker copy); on a `nodev` mount (every systemd `/tmp` default) or a `noexec` one
-    // (hardened baselines) they fail *deep in the run* with `ScratchDirNodev`/`ScratchDirNoexec`,
-    // reading like an engine bug rather than the one-line host fix it is (the engine carries its
-    // own boot-time refusal; this is the gate's up-front one). Same loud-up-front discipline as the
-    // checks above, reusing the doctor's tested detector against the exact scratch dir the tests
-    // will resolve (`BootConfig::from_env`, so an `BSX_SCRATCH_DIR` override clears it).
-    let scratch = bsx_engine::BootConfig::from_env().scratch_dir;
-    let flags = bsx_engine::doctor::scratch_mount_flags(&scratch);
-    if flags.is_some_and(bsx_engine::doctor::MountFlags::blocks_jail) {
-        let flag = if flags.is_some_and(|f| f.nodev) {
-            "nodev"
-        } else {
-            "noexec"
-        };
-        bail!(
-            "scratch dir {} is on a `{flag}` mount: the jailer's chroot can't open its /dev/kvm or \
-             exec its firecracker copy there, so the jailed-boot tests fail deep in the run.\n  \
-             Point it off {flag} (e.g. /var/tmp) — or \
-             use ./ci-privileged.sh, which sets all three env concerns:\n    \
-             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
-             BSX_SCRATCH_DIR=/var/tmp/bsx cargo xtask ci-privileged",
-            scratch.display()
-        );
-    }
-    // This gate builds and verifies the static guest agent (below), and that verification is the
-    // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
-    // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
-    // `build-rootfs` still works), so require it *here*, a missing binutils must fail the CI gate
-    // loudly, not quietly disarm the check.
-    if !in_path("readelf") {
-        bail!(
-            "readelf (binutils) not found — the privileged gate verifies the guest agent is \
-               statically linked and won't run that check blind; install binutils"
-        );
-    }
-    // The boot tests need the pinned kernel + rootfs; fail with the fix rather than a cryptic
-    // boot error. `fetch-artifacts` (not this gate) does the network download; here we verify
-    // the hashes too, the sha256 is the contract, and a hand-placed or corrupted artifact
-    // should fail this gate, not the boot inside it.
-    for a in artifacts::artifacts()? {
-        if !a.dest.is_file() {
-            bail!(
-                "missing artifact {} — run `cargo xtask fetch-artifacts` first",
-                a.dest.display()
-            );
-        }
-        let got = artifacts::sha256_of(&a.dest)?;
-        if got != a.sha256 {
-            bail!(
-                "artifact {} does not match its pin (expected {}, got {}) — re-run \
-                 `cargo xtask fetch-artifacts`",
-                a.dest.display(),
-                a.sha256,
-                got
-            );
-        }
-    }
-    // The in-VM exec test boots a rootfs with the agent baked in, build it here (not from inside a
-    // `#[test]`, which mustn't shell out to a musl `cargo build`). Idempotent: the Alpine base is
-    // cached by sha256, so this is a rebuild of the agent + the image, not a re-download. `--verify`
-    // makes this the reproducibility gate: it builds twice and asserts byte-identical. Closure drift
-    // from the lockfile is reported, not fatal: the image is resolved fresh from the Alpine branch
-    // either way, so failing here would forfeit the whole run's test results without buying a
-    // reviewed image. `.github/workflows/rootfs-packages.yml` is what demands the re-pin.
-    rootfs::build_rootfs(true, false)?;
-    // The runtime-agnostic test injects a static native binary; build it here (musl), like the
-    // agent, the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
-    // not part of the image, so it's built separately, not baked into the rootfs.
-    guest_bins::build_guest_example()?;
-    Ok(())
-}
-
 /// Print a checklist of the host prerequisites; read-only, never fails the build.
 fn setup() -> Result<()> {
-    println!("agent: host capability check\n");
+    println!("bsx: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `bsx doctor` renders: one
-    // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
-    // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
-    // matching what a dev boot resolves.
-    let config = bsx_engine::BootConfig::from_env();
-    for c in bsx_engine::doctor::checks(&config) {
-        let ok = c.status == bsx_engine::doctor::CheckStatus::Ok;
-        check(&c.label, ok);
-    }
+    // Asked of the host, not of a distro list: the device either opens read-write or it does not.
+    // This is the whole runtime check today. The engine's checklist went with the engine, and its
+    // libkrun successor arrives with the supervisor (`scratch/ROADMAP.md` phase 2), so this refuses
+    // to print rows it cannot stand behind.
+    check(
+        "/dev/kvm readable and writable (hardware virtualization)",
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok(),
+    );
 
-    // Dev-toolchain checks, only `xtask` needs these (building the guest agent,
-    // verifying static links); an operator running the shipped engine does not, so they are not in
-    // the shared `bsx doctor` set.
+    // Dev-toolchain checks, only `xtask` needs these (building the guest agent, verifying static
+    // links). Verified, not just announced: a row that printed the pin while any version satisfied
+    // it would be the same hollow green this command exists to refuse.
     println!("\ndev toolchain (for building, not running):");
-    // Verified, not just announced: a row that printed the pin while any version satisfied it would
-    // be the same hollow-green this gate exists to refuse.
     check(
         &format!("pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"),
         nightly_ready(),
@@ -890,47 +615,21 @@ fn setup() -> Result<()> {
         "readelf (binutils: static-link verification)",
         dev_tool_path("readelf").is_some(),
     );
-    check(
-        "mke2fs >= 1.47.1 (reproducible rootfs: SOURCE_DATE_EPOCH honoured)",
-        matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
-    );
-
-    // The degradation matrix, the same fails-open-vs-hard split `bsx doctor` prints, from the one
-    // shared source, so a mismatched host explains itself *before* the first boot discovers it.
-    println!("\nDegradation matrix: what a missing item above means at runtime:");
-    for line in bsx_engine::doctor::matrix() {
-        println!("  {line}");
-    }
-
-    // The engine/hoster line: the engine guarantees its own privileged tools can't
-    // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
-    // these are the calls only they can make. Surfaced here, in the host-check tool, because
-    // that's the one place a self-hoster looks before standing the engine up.
-    println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
-    println!("    scratch base: point BSX_SCRATCH_DIR at a dir only the engine user owns (not the");
-    println!(
-        "                  world-writable /tmp default), so no other local user can plant residue"
-    );
-    println!("    run the sweep: schedule bsx_engine::sweep_orphans() (boot-time + periodic), the");
-    println!("                  engine exposes it; when/how often it runs is your ops call");
-    println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
-    println!("                  run drivers as several users, each user must run its own sweep");
 
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
 }
 
 /// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
-/// rule and `docs/embedding-scope.md` both name.
-/// `pinned_surface_is_named_the_same_in_every_doc` holds those two to this list, so a crate can't
-/// join the surface in one document and be missing from the other.
-const PINNED_SURFACE_CRATES: [&str; 2] = ["bsx-engine", "bsx-channel"];
+/// rule names. One today, since the engine that carried the other was deleted; the supervisor that
+/// replaces it joins this list when it exists.
+const PINNED_SURFACE_CRATES: [&str; 1] = ["bsx-channel"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///
 /// **Every crate is named with its own `-p`**, because `cargo-semver-checks` drops
 /// `publish = false` packages from its default set without saying so, and every crate here is
-/// `publish = false` by decision (`docs/embedding-scope.md`). Run bare against this workspace it
+/// `publish = false` by decision. Run bare against this workspace it
 /// prints one "Cloning" line, checks nothing, and exits `0`: a pass that verified nothing, which is
 /// the hollow green the two gates exist to prevent. This refuses that outcome instead of reporting
 /// it, so a green here means checks actually ran.
@@ -1043,37 +742,19 @@ fn artifacts_dir() -> PathBuf {
     workspace_root().join("artifacts")
 }
 
-/// Bail unless `/dev/kvm` is present: the shared guard every VM-booting bench runs first, so the
-/// "needs a KVM host" refusal reads identically across them. `what` names the caller (e.g.
-/// `"bench-boot"`) for the message.
-fn require_kvm(what: &str) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("{what} needs /dev/kvm (run on a KVM-capable host)");
-    }
-    Ok(())
-}
-
 /// The local vendor mirror, if the operator set `BSX_VENDOR_DIR`: the offline source for every
-/// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
-/// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
+/// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Alpine CDN.
+/// `None` means fetch from pinned upstream (the default).
 fn vendor_dir() -> Option<PathBuf> {
     std::env::var_os("BSX_VENDOR_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
 
-/// The artifact filenames under [`artifacts_dir`], defined once so every reader and writer resolves
-/// the same path: the pinned guest kernel, the minimal boot rootfs (fetched), and the guest rootfs
-/// (`build-rootfs` output). Deliberately not a list of the callers, which is a copy that goes stale:
-/// this comment carried one naming four subcommands when seven modules already called these.
-fn kernel_path() -> PathBuf {
-    artifacts_dir().join("vmlinux")
-}
-fn boot_rootfs_path() -> PathBuf {
-    artifacts_dir().join("rootfs.ext4")
-}
+/// The guest rootfs (`build-rootfs` output) under [`artifacts_dir`], defined once so every reader
+/// and writer resolves the same path. A **directory**, which is what libkrun's virtiofs root takes.
 fn guest_rootfs_path() -> PathBuf {
-    artifacts_dir().join("rootfs-guest.ext4")
+    artifacts_dir().join("rootfs-guest")
 }
 
 /// Run an external build tool, echoing the command; fail with context if it's missing or errors.
@@ -1082,7 +763,7 @@ fn run_tool(program: &str, args: &[&OsStr]) -> Result<()> {
 }
 
 /// [`run_tool`] with extra environment scoped to **this child only** (not `std::env::set_var`, which
-/// is process-global and would leak into every later tool). Used to hand `mke2fs` its
+/// is process-global and would leak into every later tool). Used to hand a build tool its
 /// `SOURCE_DATE_EPOCH` without affecting `tar`/`apk`/`truncate`.
 fn run_tool_env(program: &str, args: &[&OsStr], env: &[(&str, &str)]) -> Result<()> {
     let shown: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
@@ -1175,7 +856,7 @@ fn cargo(args: &[&str]) -> Result<()> {
 /// A release build carries no debug info, but `panic!` location strings are baked in regardless, and for
 /// std and every registry dependency those are absolute paths under this host's `CARGO_HOME` and rustup
 /// directory. Two hosts building the same commit therefore emit different bytes, enough on its own to give
-/// `rootfs-guest.ext4` a different hash under the same pinned toolchain and package closure.
+/// the guest tree a different hash under the same pinned toolchain and package closure.
 ///
 /// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS`, so a home directory containing a space cannot
 /// split one flag into two. Either form *replaces* configured `rustflags` rather than appending, which is
@@ -1347,33 +1028,12 @@ exclude = ["fuzz"]
         assert_eq!(major_minor("nightly-2026-01-01"), None);
     }
 
-    /// The delegation gate is a word match: `cpuset` in the root's subtree_control must never
-    /// satisfy `cpu`, or a host with cpuset-only delegation sails past the preflight and the
-    /// cgroup suites skip into a hollow green.
     #[test]
-    fn the_delegation_check_matches_controller_words_not_substrings() {
-        assert_eq!(
-            super::missing_cgroup_controllers("cpuset cpu io memory hugetlb pids"),
-            None,
-            "a typical delegated root passes"
-        );
-        assert_eq!(
-            super::missing_cgroup_controllers("cpuset io memory"),
-            Some("cpu".to_string()),
-            "cpuset must not pass for cpu"
-        );
-        assert_eq!(
-            super::missing_cgroup_controllers(""),
-            Some("cpu and memory".to_string()),
-            "an empty delegation names both"
-        );
-    }
-
-    #[test]
-    fn the_gates_uid_check_reads_through_the_shared_parse() {
+    fn the_fakeroot_decision_reads_through_the_shared_parse() {
         // The field-index discipline (the setuid-shaped line a live read cannot produce) is
         // pinned where the parse lives, in the CLI's ids tests; here only the live read, so
-        // format drift on this host surfaces as a loud gate refusal rather than a silent skip.
+        // format drift on this host surfaces as a loud error rather than a rootfs build that
+        // silently decides it is already root.
         assert!(effective_uid().is_ok());
     }
 
@@ -1424,27 +1084,21 @@ exclude = ["fuzz"]
         }
     }
 
-    /// The pinned API surface is stated in two places for two audiences, which claim to name the
-    /// same list.
-    ///
-    /// Asserts every crate in [`PINNED_SURFACE_CRATES`] is named in both. The prose around the
-    /// names is free to differ (each audience needs a different sentence); only the membership is
-    /// pinned, which is the part the two documents claim to agree on.
+    /// `AGENTS.md` is now the only document naming the pinned surface, so this asserts that one
+    /// membership rather than an agreement between two: the page that tells a contributor which
+    /// change takes the `api` scope must name every crate on the list the scope refers to.
     #[test]
-    fn pinned_surface_is_named_the_same_in_every_doc() {
+    fn the_manual_names_the_whole_pinned_surface() {
         let root = workspace_root();
-        for page in ["AGENTS.md", "docs/embedding-scope.md"] {
-            let text = std::fs::read_to_string(root.join(page)).unwrap();
-            let missing: Vec<_> = PINNED_SURFACE_CRATES
-                .iter()
-                .filter(|krate| !text.contains(**krate))
-                .collect();
-            assert!(
-                missing.is_empty(),
-                "{page} does not name {missing:?} in the pinned API surface, but the two \
-                 documents claim to name the same one"
-            );
-        }
+        let text = std::fs::read_to_string(root.join("AGENTS.md")).expect("AGENTS.md");
+        let missing: Vec<_> = PINNED_SURFACE_CRATES
+            .iter()
+            .filter(|krate| !text.contains(**krate))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "AGENTS.md does not name {missing:?}, but the `api` commit scope refers to them"
+        );
     }
 
     /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.

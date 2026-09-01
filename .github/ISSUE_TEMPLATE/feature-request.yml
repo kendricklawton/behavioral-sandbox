@@ -36,9 +36,10 @@ body:
     attributes:
       label: Which surface does it touch?
       options:
-        - CLI (bsx run / shell / doctor)
-        - engine API (the `bsx` library)
-        - benchmarks / docs / tooling
+        - the CLI
+        - the host↔guest wire (`bsx-channel`) or the in-guest agent
+        - the guest image build
+        - docs / tooling
         - not sure
       multiple: true
     validations:

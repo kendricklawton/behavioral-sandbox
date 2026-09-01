@@ -5,12 +5,12 @@
 # upstream bumps, not reproduce it, see `GUEST_PACKAGES` in `xtask/src/rootfs.rs`), and
 # `xtask/rootfs-packages.lock` records what the last build actually resolved.
 #
-# This job is the only enforcer. The privileged gate rebuilds the rootfs and *reports* closure drift
-# without failing on it, because that build resolves fresh from the branch either way: dying there
-# forfeits the run's test results without producing a reviewed image. It used to fail, and did, on
-# 2026-07-30 (nodejs 24.17.0-r0 -> 24.18.1-r0) and again on 2026-08-15 (python3 3.14.5-r0 ->
-# 3.14.7-r0, plus `expat` entering the closure). Weekly, rebuild and diff the lockfile, so the bump
-# arrives as a scheduled notification instead of an ambush.
+# This job is the only enforcer. Every `build-rootfs` mode *reports* closure drift and none fails on
+# it, because the build resolves fresh from the branch either way: refusing there costs a caller
+# their image without producing a reviewed one. This job fails instead, and did, on 2026-07-30
+# (nodejs 24.17.0-r0 -> 24.18.1-r0) and again on 2026-08-15 (python3 3.14.5-r0 -> 3.14.7-r0, plus
+# `expat` entering the closure). Weekly, rebuild and diff the lockfile, so the bump arrives as a
+# scheduled notification instead of an ambush.
 #
 # Failing rather than opening a PR: the lockfile is a record of the image this project ships, so
 # re-pinning is a human deciding to ship a new guest userland. What moved matters (a runtime
@@ -18,7 +18,7 @@
 # before it goes anywhere.
 #
 # Unprivileged on purpose: `apk.static` installs a closure into `--root` without root and without
-# running maintainer scripts, so this needs no KVM box and no privileged runner.
+# running maintainer scripts, so this needs no KVM box and no root.
 name: rootfs-packages
 
 on:

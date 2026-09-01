@@ -1,8 +1,8 @@
 /target
 # eBPF objects build to their own target dir under the git-ignored root target
 **/target/
-# The privileged gate's throwaway build dir: `sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged"
-# cargo xtask ci-privileged` sends root-owned artifacts here so they never poison `./target`.
+# A throwaway build dir for a root test run: `sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged"
+# cargo test ...` sends root-owned artifacts here so they never poison `./target`.
 /target-privileged
 # `cargo llvm-cov`'s rendered HTML report, if you run one by hand.
 /target-coverage

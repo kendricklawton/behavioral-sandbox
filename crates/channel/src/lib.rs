@@ -68,17 +68,6 @@ pub const VSOCK_PORT: u32 = 1024;
 /// Scheme prefix for the vsock listener spec (`vsock`).
 pub const VSOCK_SCHEME: &str = "vsock";
 
-/// Ext4 volume labels for bulk disk mounts. Must fit within ext4's 16-byte limit.
-pub const INPUT_LABEL: &str = "bsx-input";
-/// See [`INPUT_LABEL`]. Mounted read-write at `/output`.
-pub const OUTPUT_LABEL: &str = "bsx-output";
-
-/// Guest binary path for overlay init.
-pub const GUEST_OVERLAY_INIT: &str = "/sbin/overlay-init";
-
-/// Kernel command-line key for passing the guest IPv6 configuration.
-pub const GUEST_IP6_CMDLINE_KEY: &str = "guest_ip6";
-
 /// Frame discriminants representing wire message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -782,14 +771,6 @@ mod tests {
         let mut buf = Vec::new();
         write_handshake(&mut buf).unwrap();
         read_handshake(&mut buf.as_slice()).unwrap();
-    }
-
-    #[test]
-    fn bulk_device_labels_fit_ext4_and_stay_distinct() {
-        const EXT4_LABEL_MAX: usize = 16;
-        assert!(INPUT_LABEL.len() <= EXT4_LABEL_MAX, "{INPUT_LABEL}");
-        assert!(OUTPUT_LABEL.len() <= EXT4_LABEL_MAX, "{OUTPUT_LABEL}");
-        assert_ne!(INPUT_LABEL, OUTPUT_LABEL);
     }
 
     #[test]

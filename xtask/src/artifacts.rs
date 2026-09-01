@@ -1,12 +1,15 @@
-//! The pinned boot artifacts: download, sha256-verify, and cache the guest kernel + rootfs
-//! under `artifacts/`. The sha256 is the contract; the URL is replaceable.
+//! Obtaining a pinned upstream input: download or restore from the vendor mirror, sha256-verify,
+//! and cache under `artifacts/`. The sha256 is the contract; the URL is replaceable.
+//!
+//! The boot kernel and rootfs rows are gone with the Firecracker engine that booted them. What is
+//! left is the machinery, which `rootfs.rs` uses for the Alpine base and the static `apk`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::{artifacts_dir, boot_rootfs_path, kernel_path, vendor_dir};
+use crate::vendor_dir;
 
 /// A pinned boot artifact: a stable URL, its expected sha256 (the real contract, the URL is
 /// replaceable), and where it lands under `artifacts/`.
@@ -14,50 +17,6 @@ pub(crate) struct Artifact {
     pub(crate) url: String,
     pub(crate) sha256: &'static str,
     pub(crate) dest: PathBuf,
-}
-
-/// The guest kernel and demo rootfs pinned for the host architecture: an uncompressed `vmlinux` and a
-/// minimal Ubuntu ext4, both from Firecracker's public CI artifact bucket. Only x86_64 is pinned.
-///
-/// **The `v1.9` in the URL is a bucket path, not a coupling to the pinned Firecracker release.** Upstream
-/// publishes CI artifacts under per-branch prefixes that do not track release tags, and the newest
-/// prefixes carry a squashfs demo rootfs this boot path does not read. The **sha256 is the contract** and
-/// the URL is replaceable, so moving prefixes buys a newer guest kernel at the cost of a rootfs format
-/// change: bump it as its own decision with its own privileged run, never as a side effect of bumping the
-/// VMM. The 6.1 kernel is well clear of the pinned VMM's floor.
-///
-/// The Firecracker binary itself is never fetched here. The operator installs it, so an upstream security
-/// patch is theirs to apply without waiting on a release of this engine.
-pub(crate) fn artifacts() -> Result<Vec<Artifact>> {
-    let base = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.9";
-    match std::env::consts::ARCH {
-        "x86_64" => Ok(vec![
-            Artifact {
-                url: format!("{base}/x86_64/vmlinux-6.1.102"),
-                sha256: "3b6e45c66d1b66d4fb0a1528107abbe890972f94e902bafe85fdf5108288c575",
-                dest: kernel_path(),
-            },
-            Artifact {
-                url: format!("{base}/x86_64/ubuntu-22.04.ext4"),
-                sha256: "b930af6ed56c5347c200eddfa4ae4701eed6f7d7fb30a6b9b8d2d30bfc2a2ed7",
-                dest: boot_rootfs_path(),
-            },
-        ]),
-        other => bail!(
-            "no pinned artifacts for arch {other} yet (x86_64 only) — set BSX_KERNEL/BSX_ROOTFS \
-             to your own uncompressed vmlinux + ext4 rootfs"
-        ),
-    }
-}
-
-/// Download each pinned kernel/rootfs artifact (skipping any already present with the right hash).
-pub(crate) fn fetch_artifacts() -> Result<()> {
-    let items = artifacts()?;
-    for a in &items {
-        fetch_one(a)?;
-    }
-    println!("\n✓ artifacts ready in {}", artifacts_dir().display());
-    Ok(())
 }
 
 /// Obtain one artifact into place. **Vendor-aware:** if `BSX_VENDOR_DIR` is set, the artifact is
@@ -116,9 +75,8 @@ fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {
 
 /// Download one artifact into place if it isn't already present with the right hash. Downloads to a
 /// `.part` and renames only after the hash verifies, so an interrupted download can never leave a
-/// plausible-looking file at the final path (`ci-privileged` gates on presence alone). This is the
-/// raw upstream fetch; `cargo xtask vendor` calls it directly (bypassing the vendor mirror) to
-/// populate that mirror in the first place.
+/// plausible-looking file at the final path. This is the raw upstream fetch; `cargo xtask vendor`
+/// calls it directly (bypassing the vendor mirror) to populate that mirror in the first place.
 pub(crate) fn download_one(a: &Artifact) -> Result<()> {
     let name = a
         .dest
