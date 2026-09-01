@@ -45,7 +45,7 @@ use std::path::Path;
 
 pub use sys::{
     KRUN_FEATURE_BLK, KRUN_FEATURE_EFI, KRUN_FEATURE_GPU, KRUN_FEATURE_INPUT, KRUN_FEATURE_NET,
-    KRUN_FEATURE_SND, KRUN_FS_ROOT_TAG,
+    KRUN_FEATURE_SND, KRUN_FS_ROOT_TAG, KRUN_TSI_HIJACK_INET, KRUN_TSI_HIJACK_UNIX,
 };
 
 /// A libkrun call that failed, or an argument libkrun could not have been given.
@@ -234,6 +234,24 @@ impl Machine {
         })?;
         self.retained.push(c_tag);
         self.retained.push(c_dir);
+        Ok(self)
+    }
+
+    /// Replaces libkrun's implicit vsock device with an explicit one carrying exactly
+    /// `tsi_features`. `0` is a vsock with **no** transparent socket proxying: the guest's
+    /// network syscalls are not hijacked onto the host, which is the no-network posture. The
+    /// implicit device libkrun would otherwise add enables TSI hijacking by heuristic, so a
+    /// machine that says nothing about the network still gets one; this is how a caller says no.
+    ///
+    /// Must come before [`vsock_port`](Self::vsock_port): the port mapping attaches to the vsock
+    /// device, and libkrun allows only one, so the explicit device has to exist first.
+    pub fn vsock(self, tsi_features: u32) -> Result<Self, Error> {
+        check("krun_disable_implicit_vsock", unsafe {
+            sys::krun_disable_implicit_vsock(self.ctx.id)
+        })?;
+        check("krun_add_vsock", unsafe {
+            sys::krun_add_vsock(self.ctx.id, tsi_features)
+        })?;
         Ok(self)
     }
 

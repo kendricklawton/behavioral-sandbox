@@ -36,6 +36,31 @@ pub const HELPER_SUBCOMMAND: &str = "__vmm";
 /// wasted process and a message naming the mistake.
 const HELPER_MARKER: &str = "BSX_VMM";
 
+/// The guest's network posture, mirrored from the CLI so the supervisor writes the helper flag
+/// from one definition. [`None`](Self::None) is the default because libkrun's own default is a
+/// TSI-hijacking vsock that reaches the host's network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Net {
+    /// No network beyond loopback.
+    #[default]
+    None,
+    /// libkrun's transparent socket impersonation: the guest reaches what the host can.
+    Tsi,
+}
+
+impl Net {
+    /// The `--net` value the helper parses. One definition, checked against the parser by
+    /// `the_helper_flags_match_the_parser` like every other flag spelling.
+    #[must_use]
+    pub fn as_flag(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Tsi => "tsi",
+        }
+    }
+}
+
 /// What a caller asks for when it starts a VM.
 ///
 /// Deliberately not a builder with a typestate: unlike libkrun's own API there is no ordering to
@@ -68,6 +93,9 @@ pub struct VmConfig {
     /// and a host process reaches it by connecting to the socket. One is enough for the agent
     /// channel, which is what it exists for.
     pub vsock: Option<(u32, PathBuf)>,
+    /// The network posture. [`Net::None`] by default, because libkrun's default is not: it adds
+    /// an implicit vsock whose TSI hijacking proxies the guest's sockets onto the host.
+    pub net: Net,
     /// What the guest's console (the helper's stdin and stdout) is attached to.
     pub console: Console,
 }
@@ -114,6 +142,7 @@ impl VmConfig {
             shares: Vec::new(),
             mounts: Vec::new(),
             vsock: None,
+            net: Net::None,
             console: Console::Inherited,
         }
     }
@@ -158,6 +187,8 @@ impl VmConfig {
             spec.push(path);
             argv.push(spec);
         }
+        argv.push("--net".into());
+        argv.push(self.net.as_flag().into());
         for (guest, host) in &self.mounts {
             argv.push("--mount".into());
             let mut spec = OsString::from(guest);
@@ -703,6 +734,7 @@ mod tests {
         c.shares = vec![("data".to_string(), PathBuf::from("/opt/a=b"))];
         c.mounts = vec![(PathBuf::from("/project"), PathBuf::from("/srv/code"))];
         c.vsock = Some((1024, PathBuf::from("/run/agent.sock")));
+        c.net = Net::Tsi;
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -739,6 +771,8 @@ mod tests {
             "/project=/srv/code",
             "--vsock",
             "1024=/run/agent.sock",
+            "--net",
+            "tsi",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),

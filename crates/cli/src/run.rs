@@ -16,9 +16,30 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bsx_supervisor::{Exit, Vm, VmConfig};
+use bsx_supervisor::{Exit, Net, Vm, VmConfig};
 
 use crate::EXIT_OPERATIONAL;
+
+/// The network posture flag, shared by `run` and `shell`. A CLI-side mirror of
+/// [`bsx_supervisor::Net`], because clap's `ValueEnum` cannot derive on a type in another crate;
+/// [`into`](NetArg::into) is the single crossing point and the only place the two can drift.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum NetArg {
+    /// No network beyond loopback. The default, because libkrun's implicit TSI vsock is not.
+    #[default]
+    None,
+    /// libkrun's transparent socket impersonation: the guest reaches what the host can. Opt-in.
+    Tsi,
+}
+
+impl NetArg {
+    pub(crate) fn into_net(self) -> Net {
+        match self {
+            Self::None => Net::None,
+            Self::Tsi => Net::Tsi,
+        }
+    }
+}
 
 /// Run one command in a fresh sandbox.
 #[derive(Args, Debug)]
@@ -44,6 +65,9 @@ pub(crate) struct RunArgs {
     /// Repeatable; `--mount` is the one that also mounts.
     #[arg(long = "share", value_name = "TAG=HOSTPATH")]
     pub(crate) shares: Vec<String>,
+    /// The network posture: `none` (default) or `tsi`. See [`NetArg`].
+    #[arg(long, value_name = "POSTURE", default_value = "none")]
+    pub(crate) net: NetArg,
     /// A `KEY=VALUE` entry for the guest environment. Repeatable.
     #[arg(long = "env", value_name = "KEY=VALUE")]
     pub(crate) env: Vec<String>,
@@ -168,6 +192,7 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
         return Err("no command after `--`".to_string());
     };
     let mut cfg = VmConfig::new(root, program);
+    cfg.net = args.net.into_net();
     if let Some(v) = resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
@@ -329,6 +354,20 @@ mod tests {
                 .expect_err("a set-but-broken limit must refuse");
             assert!(err.contains("BSX_VCPUS"), "names the variable: {err}");
         }
+    }
+
+    /// The CLI's posture enum maps onto the supervisor's, and the default is `None`: the whole
+    /// point of the task is that "say nothing" means no network, against libkrun's own default.
+    #[test]
+    fn the_net_posture_defaults_to_none_and_maps_across() {
+        assert_eq!(NetArg::default(), NetArg::None);
+        assert_eq!(NetArg::None.into_net(), Net::None);
+        assert_eq!(NetArg::Tsi.into_net(), Net::Tsi);
+        let cli = Cli::parse_from(["bsx", "run", "--", "true"]);
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("run must parse");
+        };
+        assert_eq!(args.net, NetArg::None, "no --net means no network");
     }
 
     /// A malformed share is refused here, before a VM is spawned to die on it.

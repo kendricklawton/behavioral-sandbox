@@ -61,6 +61,9 @@ pub(crate) struct ShellArgs {
     /// A `KEY=VALUE` entry for the shell's guest environment. Repeatable.
     #[arg(long = "env", value_name = "KEY=VALUE")]
     pub(crate) env: Vec<String>,
+    /// The network posture: `none` (default) or `tsi`.
+    #[arg(long, value_name = "POSTURE", default_value = "none")]
+    pub(crate) net: crate::run::NetArg,
     /// The VM's name while it runs. Defaults to `shell-<pid>`.
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
@@ -99,6 +102,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
     cfg.env = vec!["BSX_LOG=warn".into()];
     cfg.vsock = Some((VSOCK_PORT, channel_sock.clone()));
     cfg.console = Console::Detached;
+    cfg.net = args.net.into_net();
     if let Some(v) = crate::run::resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }

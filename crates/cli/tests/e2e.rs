@@ -135,6 +135,57 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     );
 }
 
+/// The 3.6 contract, and the finding behind it: by default the guest cannot reach the host's
+/// network. libkrun's own default is an implicit vsock whose TSI hijacking proxies the guest's
+/// sockets onto the host, so a guest with no config could reach a host-only loopback service;
+/// `--net none` (the default) replaces that device with one that does no hijacking. A host HTTP
+/// server on 127.0.0.1 stands in for "the host's network": a network-isolated guest's own
+/// loopback has no such server, so reaching it would prove the isolation is not there.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn the_default_guest_cannot_reach_the_host_network() {
+    if skipped("the_default_guest_cannot_reach_the_host_network") {
+        return;
+    }
+    let server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a host-only server");
+    let port = server.local_addr().expect("addr").port();
+    // A minimal HTTP reply in the background, because the guest probes with `wget`, which reports
+    // failure on a bare connect that carries no response. So the server must actually answer for
+    // a reached connection to read as REACHED; a blocked one never connects at all.
+    std::thread::spawn(move || {
+        use std::io::Write;
+        for mut s in server.incoming().take(4).flatten() {
+            let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n");
+        }
+    });
+
+    let probe = format!(
+        "wget -T 3 -q -O /dev/null http://127.0.0.1:{port}/ && echo REACHED || echo blocked"
+    );
+    let reach = |net: &str| -> String {
+        let out = bsx()
+            .arg("run")
+            .arg("--root")
+            .arg(guest_root())
+            .args(["--net", net, "--", "sh", "-c", &probe])
+            .output()
+            .expect("run bsx");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(
+        reach("none"),
+        "blocked",
+        "the default guest reached the host network"
+    );
+    // The opt-in restores it, which is what proves `none` is doing the blocking rather than the
+    // host simply being unreachable for other reasons.
+    assert_eq!(
+        reach("tsi"),
+        "REACHED",
+        "--net tsi should reach host loopback"
+    );
+}
+
 /// The 3.5 contract: the limits in the config are the machine the guest actually gets. Asked
 /// for 2 vCPUs and 256 MiB, the guest's own `nproc` says 2 and its `MemTotal` sits within a
 /// kernel-overhead band of the ask (measured 271 MiB for a 256 MiB config), not at the 512 MiB

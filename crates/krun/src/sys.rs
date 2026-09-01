@@ -59,6 +59,12 @@ pub const KRUN_LOG_STYLE_ALWAYS: u32 = 1;
 /// See [`KRUN_LOG_STYLE_AUTO`].
 pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
 
+/// `tsi_features` bits for `krun_add_vsock`: TSI transparently proxies the guest's socket calls
+/// through the host, so an explicit `0` is the no-network vsock and these are opt-ins.
+pub const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
+/// See [`KRUN_TSI_HIJACK_INET`].
+pub const KRUN_TSI_HIJACK_UNIX: u32 = 1 << 1;
+
 /// `feature` arguments for [`has_feature`](crate::has_feature). **Ask the library, never a version
 /// number**: which
 /// features a build carries depends on how it was compiled, not on what it is called.
@@ -167,6 +173,13 @@ unsafe extern "C" {
         c_filepath: *const c_char,
         listen: bool,
     ) -> i32;
+
+    /// Disables libkrun's implicit vsock device, whose default TSI hijacking gives the guest a
+    /// path onto the host's network. A machine that wants no network calls this and adds nothing.
+    pub fn krun_disable_implicit_vsock(ctx_id: u32) -> i32;
+    /// Adds an explicit vsock device with an exact `tsi_features` bitmask (`0` for no hijacking).
+    /// Requires [`krun_disable_implicit_vsock`] first; only one vsock device is supported.
+    pub fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32;
 
     // --- network -----------------------------------------------------------------------------
     /// Points the network backend at a gvproxy socket path. Takes a **mutable** `char *` in the
@@ -309,6 +322,8 @@ mod tests {
         ("krun_disable_implicit_init", 1),
         ("krun_add_virtio_console_default", 4),
         ("krun_add_vsock_port2", 4),
+        ("krun_disable_implicit_vsock", 1),
+        ("krun_add_vsock", 2),
         ("krun_set_gvproxy_path", 2),
         ("krun_set_passt_fd", 2),
         ("krun_set_port_map", 2),

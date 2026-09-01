@@ -83,6 +83,26 @@ pub(crate) struct VmmArgs {
     /// `mount` in the guest image, because the workload is wrapped in a mount preamble.
     #[arg(long = "mount", value_name = "GUESTDIR=HOSTDIR")]
     pub(crate) mounts: Vec<String>,
+    /// The network posture: `none` (default), or `tsi` for libkrun's transparent host-socket
+    /// proxying. Off by default, because libkrun's own default (an implicit vsock with TSI
+    /// hijacking) is not.
+    #[arg(long, value_name = "POSTURE", default_value = "none")]
+    pub(crate) net: NetPosture,
+}
+
+/// What the guest's network reaches. The default is [`None`](NetPosture::None) because libkrun's
+/// default is not: it adds an implicit vsock whose TSI hijacking proxies the guest's sockets onto
+/// the host, so "say nothing" means "the guest can reach the host's network" unless this says no.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum NetPosture {
+    /// No network: the implicit vsock is replaced by an explicit one with no TSI hijacking, so
+    /// the guest has loopback and nothing else.
+    #[default]
+    None,
+    /// libkrun's transparent socket impersonation (`KRUN_TSI_HIJACK_INET`): the guest's inet
+    /// socket calls are proxied through the host, so it reaches whatever the host can, including
+    /// host loopback. Opt-in and named, not a silent default.
+    Tsi,
 }
 
 /// A `TAG=HOSTPATH` share split at its **first** `=`, so a host path containing `=` survives.
@@ -369,6 +389,15 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         // The device carrying the host directory; the guest path is the preamble's business.
         machine = machine.share(&mount_tag(i), host)?;
     }
+    // The network posture is set before any port mapping, because the port attaches to the vsock
+    // device and libkrun allows only one. `None` replaces libkrun's TSI-hijacking implicit device
+    // with a plain one; `Tsi` keeps the hijacking but names it. Either way the device is now
+    // explicit, so the agent's port mapping still has one to attach to.
+    let tsi = match args.net {
+        NetPosture::None => 0,
+        NetPosture::Tsi => bsx_krun::KRUN_TSI_HIJACK_INET,
+    };
+    machine = machine.vsock(tsi)?;
     if let Some((port, path)) = vsock {
         // `listen = true` per the header: the guest listens on the port and connections are
         // initiated from the host side, which is the agent-channel direction.
