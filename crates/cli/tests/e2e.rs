@@ -152,9 +152,15 @@ fn the_default_guest_cannot_reach_the_host_network() {
     // A minimal HTTP reply in the background, because the guest probes with `wget`, which reports
     // failure on a bare connect that carries no response. So the server must actually answer for
     // a reached connection to read as REACHED; a blocked one never connects at all.
+    //
+    // The request is **read before the reply is written**. Closing a socket with unread data in
+    // its receive queue sends an RST, which discards the reply the guest had not read yet: the
+    // connection arrives, the answer never does, and a working `tsi` reports as blocked (watched
+    // happen).
     std::thread::spawn(move || {
-        use std::io::Write;
+        use std::io::{Read, Write};
         for mut s in server.incoming().take(4).flatten() {
+            let _ = s.read(&mut [0u8; 4096]);
             let _ = s.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n");
         }
     });
