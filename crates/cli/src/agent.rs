@@ -68,12 +68,31 @@ impl std::fmt::Display for Error {
 
 /// Dials the agent of a VM this process started, failing fast if the helper dies on the way.
 pub(crate) fn dial(sock: &Path, vm: &mut Vm) -> Result<Dialed, Error> {
+    let ended = |vm: &mut Vm| match vm.try_wait() {
+        Ok(Some(exit)) => Some(Error::VmEnded(format!("{exit:?}"))),
+        // A `try_wait` that fails says nothing about the guest, so the dial keeps trying and the
+        // grace is what ends it.
+        _ => None,
+    };
+    dial_while(sock, ended, vm)
+}
+
+/// Dials the agent of a VM this process does not hold: nothing to watch, so only the grace ends
+/// the loop.
+pub(crate) fn connect(sock: &Path) -> Result<Dialed, Error> {
+    dial_while(sock, |()| None, &mut ())
+}
+
+/// The dial loop, with what ends it early left to the caller.
+fn dial_while<W>(
+    sock: &Path,
+    ended: impl Fn(&mut W) -> Option<Error>,
+    watched: &mut W,
+) -> Result<Dialed, Error> {
     let deadline = Instant::now() + DIAL_GRACE;
     loop {
-        // A `try_wait` that fails says nothing about the guest, so only a reported exit ends the
-        // loop early and the grace ends it otherwise.
-        if let Ok(Some(exit)) = vm.try_wait() {
-            return Err(Error::VmEnded(format!("{exit:?}")));
+        if let Some(end) = ended(watched) {
+            return Err(end);
         }
         let last = match try_dial(sock) {
             Ok(pair) => return Ok(pair),

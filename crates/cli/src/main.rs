@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod lifecycle;
 mod run;
 mod shell;
 mod up;
@@ -45,6 +46,12 @@ enum Cmd {
     Shell(shell::ShellArgs),
     /// Start a sandbox that outlives this command, reachable afterwards by name.
     Up(up::UpArgs),
+    /// List the sandboxes running on this machine.
+    Ls(lifecycle::LsArgs),
+    /// Run a command in a sandbox that is already up.
+    Exec(lifecycle::ExecArgs),
+    /// Stop a running sandbox.
+    Stop(lifecycle::StopArgs),
     /// Become a virtual machine. Not a verb: the supervisor re-executes this binary with it.
     ///
     /// Hidden rather than removed from the parser, so a boot that fails can be reproduced by hand
@@ -58,6 +65,9 @@ fn main() -> ExitCode {
         Cmd::Run(args) => run::run(&args),
         Cmd::Shell(args) => shell::run(&args),
         Cmd::Up(args) => up::run(&args),
+        Cmd::Ls(args) => lifecycle::ls(&args),
+        Cmd::Exec(args) => lifecycle::exec(&args),
+        Cmd::Stop(args) => lifecycle::stop(&args),
         Cmd::Vmm(args) => vmm::run(&args),
     }
 }

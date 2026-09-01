@@ -745,6 +745,325 @@ pub mod socket {
     }
 }
 
+/// The request/response grammar a VM's control socket speaks, and the client half of it.
+///
+/// This is how a caller reaches a VM **it did not start**. There is no daemon: the caller connects
+/// to the socket the helper bound, asks one question, and reads the answer, so the VM's own process
+/// is the only authority on its state.
+///
+/// - **One request, one response, then the connection closes.** No session, because there is no
+///   state to keep between two questions and a session would be a thing to leak.
+/// - **The identity is the socket, not a pid.** [`Request::Stop`](control::Request::Stop) asks
+///   the VM to die, and the VM is whatever is listening: no `kill` on a number the kernel may
+///   have handed to somebody else between the lookup and the signal.
+/// - **The grammar is lines of ASCII tokens, and carries no path.** A path can contain a newline,
+///   which a line-based grammar cannot survive; `ps` shows the helper's argv, which has them all.
+pub mod control {
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::num::{NonZeroU8, NonZeroU32};
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::{Net, RootFs};
+
+    /// The grammar's version, reported in every [`Request::Info`] answer so a client meeting an
+    /// older or newer VM can say so instead of misreading its fields.
+    pub const PROTOCOL_VERSION: u8 = 1;
+
+    /// How long a caller waits on a VM's control socket. A VM answers from a thread that does
+    /// nothing else, so anything slower than this is a VM that has stopped answering, and `ls`
+    /// must not hang on one.
+    const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Longest answer a client will read. The reply is a fixed handful of short lines; the cap is
+    /// what stops a socket that is not a VM (or a VM gone wrong) from being read forever.
+    const MAX_REPLY: u64 = 4096;
+
+    /// What a caller can ask a live VM.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum Request {
+        /// Report the machine's shape and posture.
+        Info,
+        /// Stop the VM. It answers first and dies after, so a caller learns the request was
+        /// accepted rather than inferring it from a closed connection.
+        Stop,
+    }
+
+    impl Request {
+        /// The word this request travels as.
+        #[must_use]
+        pub fn as_word(self) -> &'static str {
+            match self {
+                Self::Info => "info",
+                Self::Stop => "stop",
+            }
+        }
+
+        /// The request `word` names, or `None` for one this build does not know.
+        #[must_use]
+        pub fn from_word(word: &str) -> Option<Self> {
+            match word {
+                "info" => Some(Self::Info),
+                "stop" => Some(Self::Stop),
+                _ => None,
+            }
+        }
+    }
+
+    /// Whether a VM carries an agent channel, which is what decides if it can be `exec`ed into.
+    ///
+    /// Reports what the VM was **configured** with, not whether the guest is answering: only a
+    /// completed handshake proves that, and it is the caller doing the exec that finds out.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    #[non_exhaustive]
+    pub enum Channel {
+        /// No channel was mapped: this VM runs one workload and nothing can talk to it.
+        #[default]
+        Absent,
+        /// A vsock port is mapped onto a socket beside this VM's, so a caller can reach the agent.
+        Present,
+    }
+
+    impl Channel {
+        /// The word this travels as.
+        #[must_use]
+        pub fn as_word(self) -> &'static str {
+            match self {
+                Self::Absent => "absent",
+                Self::Present => "present",
+            }
+        }
+    }
+
+    /// What a VM reports about itself.
+    ///
+    /// Public fields, because this is data the code hands back: a caller moves what it needs out,
+    /// and a later measurement arrives as another field.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct Info {
+        /// The helper's process id, which is the VM's.
+        pub pid: u32,
+        /// vCPUs the machine was given.
+        pub vcpus: NonZeroU8,
+        /// Guest RAM in MiB.
+        pub mem_mib: NonZeroU32,
+        /// The network posture.
+        pub net: Net,
+        /// What the guest may do to the image tree it booted from.
+        pub rootfs: RootFs,
+        /// Whether an agent channel was mapped.
+        pub channel: Channel,
+    }
+
+    impl Info {
+        /// An answer for a VM with this shape. A constructor rather than a struct literal because
+        /// the type is `#[non_exhaustive]`, which is what lets a field be added without breaking
+        /// the caller that reads one.
+        #[must_use]
+        pub fn new(
+            pid: u32,
+            vcpus: NonZeroU8,
+            mem_mib: NonZeroU32,
+            net: Net,
+            rootfs: RootFs,
+            channel: Channel,
+        ) -> Self {
+            Self {
+                pid,
+                vcpus,
+                mem_mib,
+                net,
+                rootfs,
+                channel,
+            }
+        }
+
+        /// Writes this as the body of an `ok` reply, one `key value` line each.
+        fn write_body(&self, out: &mut impl Write) -> io::Result<()> {
+            writeln!(out, "proto {PROTOCOL_VERSION}")?;
+            writeln!(out, "pid {}", self.pid)?;
+            writeln!(out, "vcpus {}", self.vcpus)?;
+            writeln!(out, "mem_mib {}", self.mem_mib)?;
+            writeln!(out, "net {}", self.net.as_flag())?;
+            writeln!(out, "rootfs {}", self.rootfs.as_flag())?;
+            writeln!(out, "channel {}", self.channel.as_word())
+        }
+
+        /// Reads back what [`write_body`](Self::write_body) wrote. `pub(crate)` so the round trip
+        /// is testable without exposing half a codec: a caller gets [`info`], not the parser.
+        ///
+        /// Every field is required: a partial answer is a VM this build cannot describe, and
+        /// filling the gaps with defaults would report a machine nobody configured.
+        pub(crate) fn parse_body(text: &str) -> Result<Self, Error> {
+            let mut fields: Vec<(&str, &str)> = Vec::new();
+            for line in text.lines().filter(|l| !l.is_empty()) {
+                let (key, value) = line
+                    .split_once(' ')
+                    .ok_or_else(|| Error::Protocol(format!("{line:?} is not `key value`")))?;
+                fields.push((key, value));
+            }
+            let get = |key: &str| -> Result<&str, Error> {
+                fields
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| *v)
+                    .ok_or_else(|| Error::Protocol(format!("the answer carries no {key}")))
+            };
+            let number = |key: &str| -> Result<u32, Error> {
+                get(key)?
+                    .parse()
+                    .map_err(|_| Error::Protocol(format!("{key} is not a number")))
+            };
+            let proto = number("proto")?;
+            if proto != u32::from(PROTOCOL_VERSION) {
+                return Err(Error::Protocol(format!(
+                    "the VM speaks control protocol {proto}, this build speaks {PROTOCOL_VERSION}"
+                )));
+            }
+            let vcpus = u8::try_from(number("vcpus")?)
+                .ok()
+                .and_then(NonZeroU8::new)
+                .ok_or_else(|| Error::Protocol("vcpus is not a machine".to_string()))?;
+            let mem_mib = NonZeroU32::new(number("mem_mib")?)
+                .ok_or_else(|| Error::Protocol("mem_mib is not a machine".to_string()))?;
+            let net = match get("net")? {
+                w if w == Net::None.as_flag() => Net::None,
+                w if w == Net::Tsi.as_flag() => Net::Tsi,
+                w => return Err(Error::Protocol(format!("unknown net posture {w:?}"))),
+            };
+            let rootfs = match get("rootfs")? {
+                w if w == RootFs::ReadOnly.as_flag() => RootFs::ReadOnly,
+                w if w == RootFs::Writable.as_flag() => RootFs::Writable,
+                w => return Err(Error::Protocol(format!("unknown root posture {w:?}"))),
+            };
+            let channel = match get("channel")? {
+                w if w == Channel::Absent.as_word() => Channel::Absent,
+                w if w == Channel::Present.as_word() => Channel::Present,
+                w => return Err(Error::Protocol(format!("unknown channel state {w:?}"))),
+            };
+            Ok(Self::new(
+                number("pid")?,
+                vcpus,
+                mem_mib,
+                net,
+                rootfs,
+                channel,
+            ))
+        }
+    }
+
+    /// A control exchange that did not produce an answer.
+    #[derive(Debug)]
+    #[non_exhaustive]
+    pub enum Error {
+        /// The socket could not be reached, or the exchange failed on it. A connection refused
+        /// here is the ordinary "that VM has ended", not a broken machine.
+        Io(io::Error),
+        /// The VM answered something this build cannot read.
+        Protocol(String),
+        /// The VM refused the request and said why.
+        Refused(String),
+    }
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Io(e) => write!(f, "the control socket: {e}"),
+                Self::Protocol(m) => write!(f, "the VM answered something unreadable: {m}"),
+                Self::Refused(m) => write!(f, "the VM refused: {m}"),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Self::Io(e) => Some(e),
+                _ => None,
+            }
+        }
+    }
+
+    impl From<io::Error> for Error {
+        fn from(e: io::Error) -> Self {
+            Self::Io(e)
+        }
+    }
+
+    /// Reads one request from a connected caller. `Ok(None)` is a word this build does not know,
+    /// which the server answers rather than treating as a failure.
+    ///
+    /// The server half, called by the helper that **is** the VM.
+    pub fn read_request(stream: impl io::Read) -> io::Result<Option<Request>> {
+        let mut line = String::new();
+        BufReader::new(stream.take(MAX_REPLY)).read_line(&mut line)?;
+        Ok(Request::from_word(line.trim_end()))
+    }
+
+    /// Writes the answer to `request`, or the refusal for a word this build does not know.
+    ///
+    /// The server half. Answering [`Request::Stop`] does not stop anything: the caller writes the
+    /// reply, flushes, and then ends its own process, because what ends a VM is the process
+    /// ending and this crate cannot do that from a library.
+    pub fn write_answer(
+        out: &mut impl Write,
+        request: Option<Request>,
+        info: &Info,
+    ) -> io::Result<()> {
+        match request {
+            Some(Request::Info) => {
+                writeln!(out, "ok")?;
+                info.write_body(out)?;
+            }
+            Some(Request::Stop) => writeln!(out, "ok")?,
+            None => writeln!(
+                out,
+                "err unrecognized request; this VM speaks {} and {}",
+                Request::Info.as_word(),
+                Request::Stop.as_word()
+            )?,
+        }
+        out.flush()
+    }
+
+    /// Asks the VM listening on `socket` for its shape.
+    pub fn info(socket: &Path) -> Result<Info, Error> {
+        Info::parse_body(&exchange(socket, Request::Info)?)
+    }
+
+    /// Asks the VM listening on `socket` to stop, and returns once it has accepted.
+    ///
+    /// **A power cut, not a shutdown**, the same as [`Vm::stop`](super::Vm::stop): libkrun's only
+    /// graceful surface is efi-only and returns `-ENOTSUP`, so there is nothing gentler to ask
+    /// for. Returning means the VM took the request, not that the process is already gone.
+    pub fn stop(socket: &Path) -> Result<(), Error> {
+        exchange(socket, Request::Stop).map(drop)
+    }
+
+    /// One request, one answer: connect, ask, read to EOF, and split the status line off the body.
+    fn exchange(socket: &Path, request: Request) -> Result<String, Error> {
+        let mut stream = UnixStream::connect(socket)?;
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        writeln!(stream, "{}", request.as_word())?;
+        stream.flush()?;
+
+        let mut reply = String::new();
+        (&mut stream).take(MAX_REPLY).read_to_string(&mut reply)?;
+        let (status, body) = reply.split_once('\n').unwrap_or((reply.trim_end(), ""));
+        match status {
+            "ok" => Ok(body.to_string()),
+            other => Err(match other.strip_prefix("err ") {
+                Some(why) => Error::Refused(why.to_string()),
+                None => Error::Protocol(format!("{other:?} is neither ok nor err")),
+            }),
+        }
+    }
+}
+
 /// Every live VM on this machine, found by scanning the runtime directory.
 ///
 /// **There is no daemon and no registry.** The sockets are the state: a VM exists because a helper
@@ -1320,6 +1639,108 @@ mod socket_tests {
         let dir = bsx_test_support::ScratchDir::created("sock-absent");
         let missing = dir.path().join("never-existed.sock");
         assert!(!socket::clear_if_stale(&missing).expect("an absent socket is fine"));
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    #![allow(clippy::panic)]
+
+    use std::num::{NonZeroU8, NonZeroU32};
+
+    use super::control::{Channel, Info, PROTOCOL_VERSION, Request, write_answer};
+    use super::{Net, RootFs};
+
+    fn info() -> Info {
+        Info::new(
+            4242,
+            NonZeroU8::MIN,
+            NonZeroU32::new(512).expect("512 is not zero"),
+            Net::Tsi,
+            RootFs::Writable,
+            Channel::Present,
+        )
+    }
+
+    /// What the VM writes is what a client reads back, field for field. The round trip is the
+    /// whole contract: the two halves are in one crate here and in two processes in life.
+    #[test]
+    fn an_answer_round_trips_through_the_wire_form() {
+        let mut wire = Vec::new();
+        write_answer(&mut wire, Some(Request::Info), &info()).expect("a Vec accepts the answer");
+        let text = String::from_utf8(wire).expect("the answer is text");
+        let body = text
+            .strip_prefix("ok\n")
+            .expect("an answered request leads with ok");
+        assert_eq!(Info::parse_body(body).expect("the body parses"), info());
+    }
+
+    /// Every field is required. A VM whose answer is missing one is a VM this build cannot
+    /// describe, and defaulting the gap would report a machine nobody configured.
+    #[test]
+    fn an_answer_missing_a_field_is_refused_rather_than_defaulted() {
+        let mut wire = Vec::new();
+        write_answer(&mut wire, Some(Request::Info), &info()).expect("a Vec accepts the answer");
+        let text = String::from_utf8(wire).expect("the answer is text");
+        let full = text.strip_prefix("ok\n").expect("leads with ok");
+        for dropped in [
+            "proto", "pid", "vcpus", "mem_mib", "net", "rootfs", "channel",
+        ] {
+            let thinned: String = full
+                .lines()
+                .filter(|l| !l.starts_with(&format!("{dropped} ")))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let err = Info::parse_body(&thinned)
+                .expect_err("a missing field must refuse")
+                .to_string();
+            assert!(err.contains(dropped), "names what was missing: {err}");
+        }
+    }
+
+    /// A VM speaking a different grammar is reported as that, not read as if it were this one.
+    #[test]
+    fn a_different_protocol_version_is_refused_by_number() {
+        let body = format!("proto {}\npid 1\n", u32::from(PROTOCOL_VERSION) + 1);
+        let err = Info::parse_body(&body)
+            .expect_err("a version this build does not speak must refuse")
+            .to_string();
+        assert!(err.contains("control protocol"), "{err}");
+    }
+
+    /// A word this VM does not know is answered, not dropped: a caller learns what the VM speaks
+    /// instead of reading a closed connection and guessing.
+    #[test]
+    fn an_unknown_request_is_answered_with_what_this_vm_speaks() {
+        assert_eq!(Request::from_word("info"), Some(Request::Info));
+        assert_eq!(Request::from_word("stop"), Some(Request::Stop));
+        assert_eq!(Request::from_word("shutdown"), None);
+
+        let mut wire = Vec::new();
+        write_answer(&mut wire, None, &info()).expect("a Vec accepts the refusal");
+        let text = String::from_utf8(wire).expect("the refusal is text");
+        assert!(text.starts_with("err "), "{text}");
+        assert!(text.contains("info") && text.contains("stop"), "{text}");
+    }
+
+    /// Answering a stop does not stop anything: the process ending is what ends a VM, and a
+    /// library cannot do that for its caller.
+    #[test]
+    fn a_stop_is_acknowledged_and_carries_no_body() {
+        let mut wire = Vec::new();
+        write_answer(&mut wire, Some(Request::Stop), &info()).expect("a Vec accepts the answer");
+        assert_eq!(String::from_utf8(wire).expect("text"), "ok\n");
+    }
+
+    /// A request arrives as one line, and a caller that pads it with the rest of a session does
+    /// not confuse the reader.
+    #[test]
+    fn a_request_is_read_off_the_first_line() {
+        let read = |bytes: &str| super::control::read_request(bytes.as_bytes()).expect("no io");
+        assert_eq!(read("info\n"), Some(Request::Info));
+        assert_eq!(read("stop\nleftover\n"), Some(Request::Stop));
+        assert_eq!(read("nonsense\n"), None);
+        assert_eq!(read(""), None, "a caller that says nothing asks nothing");
     }
 }
 

@@ -126,7 +126,25 @@ pub(crate) enum NetPosture {
     Tsi,
 }
 
+impl NetPosture {
+    /// The supervisor's spelling of this posture, for the control socket's answer.
+    fn into_net(self) -> bsx_supervisor::Net {
+        match self {
+            Self::None => bsx_supervisor::Net::None,
+            Self::Tsi => bsx_supervisor::Net::Tsi,
+        }
+    }
+}
+
 impl RootFsPosture {
+    /// The supervisor's spelling of this posture, for the control socket's answer.
+    fn into_rootfs(self) -> bsx_supervisor::RootFs {
+        match self {
+            Self::ReadOnly => bsx_supervisor::RootFs::ReadOnly,
+            Self::Writable => bsx_supervisor::RootFs::Writable,
+        }
+    }
+
     /// The virtiofs device flag this posture is.
     fn into_access(self) -> bsx_krun::FsAccess {
         match self {
@@ -454,7 +472,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     // clean up: the socket file outliving this process is the normal case, and the supervisor's
     // stale check is what handles it.
     if let Some(name) = args.name.as_deref() {
-        bind_control_socket(name)?;
+        bind_control_socket(name, control_info(args))?;
     }
 
     let mut machine = bsx_krun::Context::new()?
@@ -512,12 +530,36 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     Err(HelperError::Krun(machine.enter()))
 }
 
+/// What this VM answers `bsx ls` with: its shape as configured, plus whether a caller can reach an
+/// agent inside it.
+///
+/// Read off the arguments rather than from anything libkrun reports back, because libkrun reports
+/// nothing back: `--vcpus 24` is answered as 24 even though the count is silently clamped to 16
+/// (measured, see [`MEASURED_VCPU_CLAMP`]). This is the ask, which is also what `ps` would show.
+fn control_info(args: &VmmArgs) -> bsx_supervisor::control::Info {
+    use bsx_supervisor::control::{Channel, Info};
+    Info::new(
+        std::process::id(),
+        args.vcpus,
+        args.mem,
+        args.net.into_net(),
+        args.rootfs.into_rootfs(),
+        if args.vsock.is_some() {
+            Channel::Present
+        } else {
+            Channel::Absent
+        },
+    )
+}
+
 /// Binds this VM's control socket and serves it from a background thread.
 ///
-/// Accepts and closes: the verbs that will travel over it are phase 3's (`scratch/ROADMAP.md` 3.8).
-/// What it provides today is exactly what discovery needs, which is a socket that answers while the
-/// VM is alive and refuses once it is not.
-fn bind_control_socket(name: &str) -> Result<(), HelperError> {
+/// The socket is how a caller that did not start this VM reaches it: it answers
+/// [`Request::Info`](bsx_supervisor::control::Request::Info) with `info`, and
+/// [`Request::Stop`](bsx_supervisor::control::Request::Stop) by ending this process, which is what
+/// ending a VM is. Its liveness is also what discovery reads, so a VM is listed for exactly as
+/// long as it can answer.
+fn bind_control_socket(name: &str, info: bsx_supervisor::control::Info) -> Result<(), HelperError> {
     let path = bsx_supervisor::socket::path_for(name).map_err(HelperError::Socket)?;
     // A leftover from a previous helper with this name would make `bind` fail with EADDRINUSE. Only
     // cleared when nothing is listening, so a name genuinely in use still refuses.
@@ -531,17 +573,59 @@ fn bind_control_socket(name: &str) -> Result<(), HelperError> {
 
     std::thread::Builder::new()
         .name(format!("bsx-ctl-{name}"))
-        .spawn(move || {
-            // Accept forever. A caller that connects gets a closed connection, which is enough to
-            // answer "is this VM alive". Errors are ignored rather than logged: this thread has no
-            // way to report anything once the main thread is a guest, and a panic here would take
-            // down a running VM over a failed accept.
-            for stream in listener.incoming() {
-                drop(stream);
-            }
-        })
+        .spawn(move || serve_control(&listener, &info))
         .map_err(HelperError::Socket)?;
     Ok(())
+}
+
+/// Deadline on each control exchange, so a caller that connects and then says nothing cannot park
+/// the one thread that answers for this VM.
+const CONTROL_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Answers on this VM's control socket until the VM ends, which for a stop request is here.
+///
+/// Errors are dropped rather than reported: once the main thread is inside libkrun this thread has
+/// nowhere to report to, and a panic would take a running VM down over one failed accept.
+fn serve_control(
+    listener: &std::os::unix::net::UnixListener,
+    info: &bsx_supervisor::control::Info,
+) {
+    use bsx_supervisor::control::{Request, read_request, write_answer};
+
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let deadline = Some(CONTROL_IO_TIMEOUT);
+        if stream.set_read_timeout(deadline).is_err() || stream.set_write_timeout(deadline).is_err()
+        {
+            continue;
+        }
+        let Ok(request) = read_request(&mut stream) else {
+            continue;
+        };
+        if write_answer(&mut stream, request, info).is_err() {
+            continue;
+        }
+        if request == Some(Request::Stop) {
+            // Closed **after** the request was read, so the answer is delivered: closing a socket
+            // with unread data in its receive queue sends an RST, which would discard the `ok`
+            // the caller is waiting for.
+            drop(stream);
+            stop_this_vm();
+        }
+    }
+}
+
+/// Ends this process, which is what ending a VM is: `krun_start_enter` never returns, so there is
+/// no unwinding to do and nothing to hand back to.
+///
+/// SIGKILL to itself rather than `exit`, for two reasons. It is the same power cut a caller with
+/// the handle gets from `Vm::stop`, so a VM stopped over the socket and one stopped by its parent
+/// end the same way; and `exit` would run libkrun's C atexit handlers on a thread that is not the
+/// one inside the VMM. The signal is sent to this process by pid, which is safe here where the
+/// generic case is not: the process cannot have been reaped and replaced while it is the one
+/// asking.
+fn stop_this_vm() {
+    let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
 }
 
 /// libkrun was **measured** (2026-09-01, 1.19.4, an 8-CPU host) silently clamping the vCPU count
