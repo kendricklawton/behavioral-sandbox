@@ -23,15 +23,18 @@
   </h3>
 </div>
 
-## Nothing here runs yet
+## Where this is
 
-**This tree does not boot a sandbox.** BSX was built on Firecracker with a host-side eBPF observer.
-That design was abandoned in favour of a local-first desktop application on **libkrun**, and the
-engine implementing the old one was **deleted** rather than carried alongside a replacement that
-does not exist. `bsx` builds and has no verbs.
+**Sandboxes run; nothing is released.** BSX was built on Firecracker with a host-side eBPF
+observer. That design was abandoned in favour of a local-first desktop application on **libkrun**,
+and the engine implementing the old one was **deleted** rather than carried alongside a replacement
+that did not exist yet.
 
-What is here: the host/guest wire framing, the in-guest agent, the guest image build, and the gate.
-What is not: anything that starts a VM. If you want the Firecracker engine, it is in git history.
+What is here, on Linux with `/dev/kvm` and a guest image the tree builds: `bsx run` runs one command
+in a sandbox and exits with its status, `bsx shell` opens a session on a pty inside the guest,
+`bsx up` starts a sandbox that outlives the command that started it, and `bsx ls`, `bsx exec` and
+`bsx stop` reach a sandbox this process did not start. What is not here: the GUI, a display path,
+GPU, and macOS. If you want the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
 depend on this yet.

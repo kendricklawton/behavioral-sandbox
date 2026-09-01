@@ -12,14 +12,16 @@ Hypervisor.framework on macOS. It is a GUI application with a CLI beside it, bot
 
 ### Where this is, right now
 
-**The tree does not boot anything.** BSX was built on Firecracker with a host-side eBPF observer;
-that design was abandoned, and the engine implementing it was deleted rather than carried alongside
-its replacement. The replacement runs on [libkrun](https://github.com/containers/libkrun), a library
-that makes the calling process the virtual machine monitor, and it is not written yet.
+**The tree boots sandboxes on Linux, and nothing is released.** BSX was built on Firecracker with a
+host-side eBPF observer; that design was abandoned, and the engine implementing it was deleted
+rather than carried alongside its replacement. The replacement runs on
+[libkrun](https://github.com/containers/libkrun), a library that makes the calling process the
+virtual machine monitor.
 
 What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest agent
-(`bsx-guest-agent`), the guest image build and the gate (`xtask`), and a `bsx` binary with no verbs.
-This page describes the rules the replacement is being built to, not a running system.
+(`bsx-guest-agent`), the safe libkrun wrapper (`bsx-krun`), the process supervisor
+(`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
+(`xtask`). What is not: the GUI, the display path, GPU, and macOS.
 
 ### Design rules
 

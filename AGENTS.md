@@ -32,9 +32,12 @@ claim about adoption. No one outside this project has run it.
 It is gitignored working state, not a tracked file, so a fresh clone will not have one.
 A checkbox there means done **and** evidenced, never merely attempted.
 
-**Nothing in the tree boots a VM.** The Firecracker engine was deleted rather than carried alongside
-its replacement, and the libkrun supervisor is phase 2. `bsx` builds and has no verbs. This manual
-describes the rules a change is held to, not a running system.
+**The tree boots sandboxes, and there is no release.** The Firecracker engine was deleted rather
+than carried alongside its replacement; the libkrun supervisor (phase 2) and the headless verbs
+(phase 3) are in. On a host with `/dev/kvm` and a guest image the tree builds, `bsx run` runs one
+command in a sandbox, `bsx shell` opens a session on a guest pty, `bsx up` starts a sandbox that
+outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this process did not start.
+Pixels, GPU and macOS (phases 4 to 6) are not written, and macOS is unbuilt and untested.
 
 ## Design rules (every change holds to all six)
 
