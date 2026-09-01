@@ -83,6 +83,8 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 name = "bsx"
 version = "0.0.4"
 dependencies = [
+ "bsx-krun",
+ "bsx-supervisor",
  "clap",
 ]
 
@@ -108,6 +110,13 @@ dependencies = [
 [[package]]
 name = "bsx-krun"
 version = "0.0.4"
+
+[[package]]
+name = "bsx-supervisor"
+version = "0.0.4"
+dependencies = [
+ "bsx-test-support",
+]
 
 [[package]]
 name = "bsx-test-support"

@@ -88,4 +88,58 @@ mod tests {
             })
             .collect()
     }
+
+    /// The supervisor writes the helper's argv and the CLI parses it. Neither depends on the other,
+    /// so a flag renamed on one side spawns a VM the other rejects at runtime, and only a boot
+    /// would notice.
+    ///
+    /// Compares the flag *spellings*, which is the part that has to agree. Their meanings are each
+    /// side's own business and are covered by each side's own tests.
+    #[test]
+    fn the_helper_flags_match_the_parser() {
+        let repo = workspace_root();
+        let writer = std::fs::read_to_string(repo.join("crates/supervisor/src/lib.rs"))
+            .expect("crates/supervisor/src/lib.rs");
+        let parser = std::fs::read_to_string(repo.join("crates/cli/src/vmm.rs"))
+            .expect("crates/cli/src/vmm.rs");
+
+        // What the supervisor pushes: every `"--flag".into()` in `helper_argv`.
+        let written = flags(&writer, |line| line.contains(".into()"));
+        assert!(
+            written.len() >= 8,
+            "expected the helper's flag set, found {written:?}"
+        );
+        // What the parser accepts: clap's own `long` spellings, plus the ones it derives from the
+        // field name, which the parser writes as plain `#[arg(long, ...)]`.
+        let mut missing = Vec::new();
+        for flag in &written {
+            let bare = flag.trim_start_matches('-');
+            let declared_explicitly = parser.contains(&format!("long = \"{bare}\""));
+            let derived_from_field = parser.contains(&format!("\n    pub(crate) {bare}:"));
+            if !declared_explicitly && !derived_from_field {
+                missing.push(flag.clone());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "the supervisor writes {missing:?}, which crates/cli/src/vmm.rs does not parse"
+        );
+    }
+
+    /// Every `"--flag"` literal on a line the predicate accepts, deduplicated, in sorted order.
+    fn flags(src: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut out: Vec<String> = src
+            .lines()
+            .filter(|l| keep(l))
+            .filter_map(|l| {
+                let start = l.find("\"--")?;
+                let rest = &l[start + 1..];
+                let end = rest.find('"')?;
+                Some(rest[..end].to_string())
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
 }
