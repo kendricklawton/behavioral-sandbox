@@ -27,7 +27,7 @@ tracing-subscriber = { workspace = true }
 vsock = "0.5.4"
 # The pty half of the interactive shell: allocate the pair, set the winsize, kill an orphaned
 # session. Safe wrappers only; this crate stays `#![forbid(unsafe_code)]`.
-rustix = { workspace = true, features = ["pty", "termios", "process"] }
+rustix = { workspace = true, features = ["pty", "termios", "process", "mount"] }
 
 # The shared scratch-dir guard, so the `PATH`-resolution tests stage a real executable without a
 # hand-rolled temp dir. A dev-dep, so the static musl binary baked into the rootfs is unaffected.

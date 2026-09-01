@@ -101,6 +101,18 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     if skipped("shell_runs_the_command_on_a_guest_pty_and_returns_its_exit") {
         return;
     }
+    // The image tree's /tmp before and after: a session's scratch lives on a guest tmpfs, so a
+    // run must add nothing here. Session dirs used to land in the shared image through the rw
+    // root virtiofs and survive the VM.
+    let image_tmp = || -> Vec<String> {
+        std::fs::read_dir(guest_root().join("tmp"))
+            .map(|d| {
+                d.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tmp_before = image_tmp();
     let out = bsx()
         .arg("shell")
         .arg("--root")
@@ -116,6 +128,11 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     );
     assert!(stdout.contains("24 80"), "not the default size: {stdout:?}");
     assert_eq!(out.status.code(), Some(3), "the guest's code is the verb's");
+    assert_eq!(
+        image_tmp(),
+        tmp_before,
+        "a session left scratch in the shared image tree; the agent's tmpfs over /tmp is gone"
+    );
 }
 
 /// The 3.3 contract: a host directory is read-write at the guest path, and edits land on the

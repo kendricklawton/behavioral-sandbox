@@ -75,6 +75,22 @@ fn run(spec: &str) -> Result<(), String> {
 /// Serves connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on the
 /// console *after* the bind, so the host never dials before we're accepting.
 fn run_vsock(port: u32) -> Result<(), String> {
+    // Serving vsock is the one state that proves this process is inside a guest, so this is
+    // where the guest-only setup belongs: without it, every session directory this agent writes
+    // under `/tmp` goes through the rw root virtiofs into the shared image tree on the host and
+    // survives the VM (found as a pile of `bsx-session-*` dirs in the built image). A tmpfs over
+    // `/tmp` keeps session scratch in guest RAM, bounded by the VM's own memory cap. Best-effort:
+    // a guest that refuses the mount still serves, it just scribbles, which `build-rootfs
+    // --verify` reports as drift.
+    if let Err(e) = rustix::mount::mount(
+        "tmpfs",
+        "/tmp",
+        "tmpfs",
+        rustix::mount::MountFlags::empty(),
+        None::<&std::ffi::CStr>,
+    ) {
+        tracing::warn!("cannot mount a tmpfs over /tmp ({e}); session scratch will hit the root");
+    }
     let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, port)
         .map_err(|e| format!("bind vsock port {port}: {e}"))?;
     tracing::info!(transport = "vsock", port, "guest agent listening");
