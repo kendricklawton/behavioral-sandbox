@@ -99,9 +99,11 @@ pub(crate) fn stop(args: &StopArgs) -> ExitCode {
     }
 }
 
-/// The columns, in order. One definition, so the header and every row are laid out from the same
-/// widths and cannot drift into a table whose header names the wrong column.
-const COLUMNS: [(&str, usize); 7] = [
+/// The columns, in order, with the width each is padded to. One definition, so the header and
+/// every row are laid out from the same widths and cannot drift into a table whose header names
+/// the wrong column. A name longer than its width pushes the row out rather than being
+/// truncated, since a truncated name is not one `bsx exec` would take back.
+const COLUMNS: [(&str, usize); CELLS + 1] = [
     ("NAME", 16),
     ("PID", 8),
     ("VCPUS", 6),
@@ -110,6 +112,9 @@ const COLUMNS: [(&str, usize); 7] = [
     ("ROOTFS", 10),
     ("CHANNEL", 7),
 ];
+
+/// Cells a VM answers with, after the name it was already listed under.
+const CELLS: usize = 6;
 
 /// What a cell says when the VM did not answer. A VM can end between the scan and the ask, and
 /// filling the row with plausible numbers would be inventing a machine.
@@ -123,11 +128,8 @@ fn list(args: &LsArgs, out: &mut impl Write) -> Result<(), String> {
         }
     }
     let found = discover::live().map_err(|e| e.to_string())?;
-    let mut row = String::new();
-    for (title, width) in COLUMNS {
-        row.push_str(&format!("{title:<width$}  "));
-    }
-    writeln!(out, "{}", row.trim_end()).map_err(|e| e.to_string())?;
+    let titles = COLUMNS.map(|(title, _)| title.to_string());
+    writeln!(out, "{}", row(&titles)).map_err(|e| e.to_string())?;
 
     for vm in found {
         // Asked one VM at a time, because each answer comes from that VM's own process: there is
@@ -136,20 +138,30 @@ fn list(args: &LsArgs, out: &mut impl Write) -> Result<(), String> {
             Ok(info) => cells_of(&info),
             Err(e) => {
                 eprintln!("bsx ls: {}: {e}", vm.name);
-                [const { String::new() }; 6].map(|_| UNKNOWN.to_string())
+                [UNKNOWN; CELLS].map(str::to_string)
             }
         };
-        let mut row = format!("{:<width$}  ", vm.name, width = COLUMNS[0].1);
-        for (cell, (_, width)) in cells.iter().zip(COLUMNS.iter().skip(1)) {
-            row.push_str(&format!("{cell:<width$}  "));
-        }
-        writeln!(out, "{}", row.trim_end()).map_err(|e| e.to_string())?;
+        let mut fields = [const { String::new() }; CELLS + 1];
+        fields[0] = vm.name;
+        fields[1..].clone_from_slice(&cells);
+        writeln!(out, "{}", row(&fields)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
+/// One line of the table: each field padded to its column's width, trailing space trimmed. The
+/// header and every VM go through this, so a column added to [`COLUMNS`] cannot reach one and
+/// miss the other.
+fn row(fields: &[String; CELLS + 1]) -> String {
+    let mut line = String::new();
+    for (field, (_, width)) in fields.iter().zip(COLUMNS) {
+        line.push_str(&format!("{field:<width$}  "));
+    }
+    line.trim_end().to_string()
+}
+
 /// One VM's cells, in [`COLUMNS`] order after the name.
-fn cells_of(info: &Info) -> [String; 6] {
+fn cells_of(info: &Info) -> [String; CELLS] {
     [
         info.pid.to_string(),
         info.vcpus.to_string(),
@@ -189,9 +201,13 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
         env.push((key.to_string(), value.to_string()));
     }
 
+    // Read before the dial, because this can wait on whatever is feeding stdin and there is no
+    // reason to hold a connection into the guest open while it does.
+    let stdin = read_stdin()?;
+
     let channel_sock = socket::agent_path_for(&args.name).map_err(|e| e.to_string())?;
     let (mut conn, _stream) = crate::agent::connect(&channel_sock).map_err(|e| e.to_string())?;
-    conn.send_exec(&args.command, &read_stdin()?, &env, &[] as &[&str], None)
+    conn.send_exec(&args.command, &stdin, &env, &[] as &[&str], None)
         .map_err(|e| format!("start the command: {e}"))?;
 
     let mut stdout = std::io::stdout();
@@ -294,4 +310,69 @@ fn end(name: &str) -> Result<String, String> {
 /// way, and a leftover is what the stale check exists for.
 fn tidy(path: &Path) {
     let _ = socket::clear_if_stale(path);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+
+    use std::num::{NonZeroU8, NonZeroU32};
+
+    use bsx_supervisor::{Net, RootFs};
+
+    use super::{CELLS, COLUMNS, Channel, Info, UNKNOWN, cells_of, row};
+
+    /// A VM's row lines up with the header it is printed under, and a VM that did not answer
+    /// still occupies every column: a short row would silently shift the reader's eye onto the
+    /// wrong heading.
+    #[test]
+    fn every_row_carries_one_field_for_every_column() {
+        let info = Info::new(
+            4242,
+            NonZeroU8::MIN,
+            NonZeroU32::new(512).expect("512 is not zero"),
+            Net::Tsi,
+            RootFs::Writable,
+            Channel::Present,
+        );
+        let header = row(&COLUMNS.map(|(title, _)| title.to_string()));
+        let count = |line: &str| line.split_whitespace().count();
+        assert_eq!(count(&header), CELLS + 1);
+
+        for cells in [cells_of(&info), [UNKNOWN; CELLS].map(str::to_string)] {
+            let mut fields = [const { String::new() }; CELLS + 1];
+            fields[0] = "vm-under-test".to_string();
+            fields[1..].clone_from_slice(&cells);
+            assert_eq!(count(&row(&fields)), CELLS + 1, "{fields:?}");
+        }
+    }
+
+    /// The cells are the postures the VM answered with, in the order the header names them, and
+    /// each is the shared spelling rather than a second one written here.
+    #[test]
+    fn the_cells_are_the_postures_in_the_order_the_header_names() {
+        let info = Info::new(
+            7,
+            NonZeroU8::MIN,
+            NonZeroU32::new(256).expect("256 is not zero"),
+            Net::Tsi,
+            RootFs::Writable,
+            Channel::Present,
+        );
+        assert_eq!(
+            cells_of(&info),
+            [
+                "7".to_string(),
+                "1".to_string(),
+                "256".to_string(),
+                Net::Tsi.as_flag().to_string(),
+                RootFs::Writable.as_flag().to_string(),
+                Channel::Present.as_word().to_string(),
+            ]
+        );
+        assert_eq!(
+            COLUMNS.map(|(title, _)| title),
+            ["NAME", "PID", "VCPUS", "MEM", "NET", "ROOTFS", "CHANNEL"]
+        );
+    }
 }

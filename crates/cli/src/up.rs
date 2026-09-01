@@ -54,13 +54,24 @@ pub(crate) struct UpArgs {
     pub(crate) dry_run: bool,
 }
 
+/// What `start` did, so the printer cannot report the name of a VM that was never booted: a dry
+/// run has no name to give, and an empty one printed as a name is a blank line a caller reads as
+/// one.
+enum Outcome {
+    /// A VM is running under this name.
+    Running(String),
+    /// The posture was printed and nothing was booted.
+    Described,
+}
+
 pub(crate) fn run(args: &UpArgs) -> ExitCode {
     match start(args) {
-        Ok(name) => {
+        Ok(Outcome::Running(name)) => {
             // The name is this verb's whole result, and it is what the next command needs.
             println!("{name}");
             ExitCode::SUCCESS
         }
+        Ok(Outcome::Described) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("bsx up: {msg}");
             ExitCode::from(EXIT_OPERATIONAL)
@@ -68,7 +79,7 @@ pub(crate) fn run(args: &UpArgs) -> ExitCode {
     }
 }
 
-fn start(args: &UpArgs) -> Result<String, String> {
+fn start(args: &UpArgs) -> Result<Outcome, String> {
     let root = crate::run::resolve_root(args.root.as_deref())?;
     let name = args
         .name
@@ -128,7 +139,7 @@ fn start(args: &UpArgs) -> Result<String, String> {
     if args.dry_run {
         crate::run::print_posture(&name, &cfg, &mut std::io::stdout())
             .map_err(|e| e.to_string())?;
-        return Ok(String::new());
+        return Ok(Outcome::Described);
     }
 
     let mut vm = Vm::spawn(name.clone(), &cfg).map_err(|e| e.to_string())?;
@@ -138,5 +149,5 @@ fn start(args: &UpArgs) -> Result<String, String> {
         .map_err(|e| format!("{e}; the VM's own report is in {}", log.display()))?;
     drop(dialed);
     vm.detach().map_err(|e| e.to_string())?;
-    Ok(name)
+    Ok(Outcome::Running(name))
 }
