@@ -70,6 +70,15 @@ pub const VSOCK_PORT: u32 = 1024;
 /// dialer live in different crates and a drifted copy boots a machine that runs nothing.
 pub const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
 
+/// The guest `PATH` a sandbox runs with, shared by the host that sets it and the agent that falls
+/// back to it, so a bare program name resolves the same either way.
+///
+/// libkrun's init resolves a *workload's* bare program name against `/sbin:/usr/sbin:/bin:/usr/bin`
+/// (measured, `scratch/ROADMAP.md` 3.1) and exports nothing, so a guest process resolving one for
+/// itself starts with no `PATH` at all. `/usr/local` leads, because that is where the image
+/// installs the agent ([`GUEST_AGENT_PATH`]).
+pub const GUEST_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin";
+
 /// Scheme prefix for the vsock listener spec (`vsock`).
 pub const VSOCK_SCHEME: &str = "vsock";
 

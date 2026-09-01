@@ -21,6 +21,7 @@
 
 use std::ffi::OsString;
 use std::num::{NonZeroU8, NonZeroU32};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -131,6 +132,13 @@ pub struct VmConfig {
     pub rootfs: RootFs,
     /// What the guest's console (the helper's stdin and stdout) is attached to.
     pub console: Console,
+    /// A file to take the helper's own stderr, instead of inheriting the caller's.
+    ///
+    /// **A VM that outlives its caller must not hold the caller's stderr.** Inherited, the helper
+    /// keeps the write end open after the caller has exited, so a caller whose stderr is a pipe
+    /// waits for an EOF that never comes (watched: `bsx up` read through a pipe never returned),
+    /// and anything the guest says later lands in whatever that terminal has since become.
+    pub log: Option<PathBuf>,
 }
 
 /// What the guest's console is attached to: the helper's stdin feeds it and its output is the
@@ -178,6 +186,7 @@ impl VmConfig {
             net: Net::None,
             rootfs: RootFs::ReadOnly,
             console: Console::Inherited,
+            log: None,
         }
     }
 
@@ -261,6 +270,8 @@ pub enum Error {
     Name(String),
     /// Waiting on, signalling, or reaping the helper failed.
     Wait(std::io::Error),
+    /// The file a caller asked to take the helper's stderr could not be opened.
+    Log(std::io::Error),
 }
 
 impl std::fmt::Display for Error {
@@ -281,6 +292,7 @@ impl std::fmt::Display for Error {
                 socket::name_rule()
             ),
             Self::Wait(e) => write!(f, "waiting on the VM helper: {e}"),
+            Self::Log(e) => write!(f, "opening the VM's log: {e}"),
         }
     }
 }
@@ -288,7 +300,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::HelperPath(e) | Self::Spawn(e) | Self::Wait(e) => Some(e),
+            Self::HelperPath(e) | Self::Spawn(e) | Self::Wait(e) | Self::Log(e) => Some(e),
             Self::AlreadyHelper | Self::Name(_) => None,
         }
     }
@@ -407,6 +419,28 @@ impl Vm {
         Ok(exit_of(&status))
     }
 
+    /// Gives up ownership of the helper and returns its process id: the VM keeps running, and
+    /// dropping the returned nothing does not tear it down.
+    ///
+    /// **This is how a VM outlives the command that started it.** Every other path here is built
+    /// so a dropped [`Vm`] cannot strand a helper; this one is the deliberate exception, and it
+    /// consumes `self` so the value that would have reaped it is gone rather than disarmed. What
+    /// takes over is the kernel: the helper is reparented when this process exits, and a caller
+    /// that detaches and then keeps running should exit soon after, since nothing here will reap
+    /// the child if it ends first.
+    ///
+    /// The VM stays reachable by **name**, through the control socket [`discover`] lists. A
+    /// detached VM with no name is unreachable except by pid, which is why
+    /// [`spawn`](Self::spawn) puts the name on the argv.
+    pub fn detach(mut self) -> Result<u32, Error> {
+        let Some(child) = self.child.take() else {
+            return Err(Error::Wait(std::io::Error::other(
+                "the helper was already reaped",
+            )));
+        };
+        Ok(child.id())
+    }
+
     /// Whether the helper has already ended, without blocking. `None` while it is still running.
     ///
     /// Reaps on the way past when it has, so a caller polling this does not leave a zombie.
@@ -477,7 +511,18 @@ fn helper_command_unless_helper(
             Console::Inherited => Stdio::inherit(),
             Console::Detached => Stdio::null(),
         })
-        .stderr(Stdio::inherit());
+        .stderr(match &cfg.log {
+            // 0600 and truncating: one boot, one log, and not a file anyone else can read.
+            Some(path) => std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(Error::Log)?
+                .into(),
+            None => Stdio::inherit(),
+        });
     Ok(cmd)
 }
 
@@ -624,6 +669,54 @@ pub mod socket {
         Ok(runtime_dir()?.join(format!("{name}.sock")))
     }
 
+    /// The agent-channel socket path for `name`, beside its control socket.
+    ///
+    /// A VM's exec channel has to be somewhere a process that did not start the VM can find it,
+    /// which is the same requirement the control socket has, so it lives in the same directory
+    /// under the same name. The **helper** binds this one (libkrun does, for the vsock mapping),
+    /// so its presence says a channel was configured, not that the guest is answering on it.
+    pub fn agent_path_for(name: &str) -> io::Result<PathBuf> {
+        // Through `path_for` for the name check, so an unusable name is refused with the same
+        // message here as there rather than becoming a second rule.
+        let control = path_for(name)?;
+        let dir = control
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        Ok(agent_in(&dir, name))
+    }
+
+    /// The agent socket for `name` inside `dir`, for a caller that already has the directory:
+    /// [`agent_path_for`] resolves the runtime directory and this does not.
+    pub(crate) fn agent_in(dir: &Path, name: &str) -> PathBuf {
+        dir.join(format!("{name}{AGENT_SUFFIX}"))
+    }
+
+    /// Where a detached VM's stderr goes, beside its sockets.
+    ///
+    /// A VM that outlives its caller cannot keep writing to the caller's terminal, and cannot
+    /// hold its pipe either ([`VmConfig::log`](super::VmConfig::log)); this is where the boot's
+    /// own report goes instead, so a VM that came up wrong can still say why.
+    pub fn log_path_for(name: &str) -> io::Result<PathBuf> {
+        let control = path_for(name)?;
+        let dir = control
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        Ok(log_in(&dir, name))
+    }
+
+    /// [`log_path_for`] against a directory already in hand.
+    pub(crate) fn log_in(dir: &Path, name: &str) -> PathBuf {
+        dir.join(format!("{name}{LOG_SUFFIX}"))
+    }
+
+    /// What a detached VM's log is named. Neither this nor [`AGENT_SUFFIX`] is `.sock`, so a scan
+    /// for VMs counts neither.
+    const LOG_SUFFIX: &str = ".log";
+
+    /// What an agent-channel socket is named, given a VM name. Beside [`super::discover`]'s
+    /// `SUFFIX`, and different from it, so a scan for VMs never counts a channel as one.
+    const AGENT_SUFFIX: &str = ".agent";
+
     /// Whether something is listening on `path` right now.
     ///
     /// Connects rather than checking for the file: a socket file is left behind by every helper
@@ -716,9 +809,15 @@ pub mod discover {
     /// [`reap_stale`] against an explicit directory, for the caller [`live_in`] exists for.
     pub fn reap_stale_in(dir: &Path) -> io::Result<usize> {
         let mut removed = 0;
-        for (_, path) in entries_in(dir)? {
+        for (name, path) in entries_in(dir)? {
             if socket::clear_if_stale(&path)? {
                 removed += 1;
+                // The VM is gone, so its agent channel is too: a socket libkrun bound and nothing
+                // is behind. Left in place it would make `exec` connect to a dead VM's channel
+                // and block. Best-effort, because the control socket is the one that decides a
+                // VM exists and this is the tidying that follows it.
+                let _ = std::fs::remove_file(socket::agent_in(dir, &name));
+                let _ = std::fs::remove_file(socket::log_in(dir, &name));
             }
         }
         Ok(removed)
@@ -1097,6 +1196,27 @@ mod tests {
 
     /// Dropping a `Vm` must not leave the helper running. Spawns something long-lived, drops it,
     /// and asks the kernel whether the pid is gone.
+    /// The one path that leaves a helper running. Everything else here exists to make a stranded
+    /// VM impossible, so this asserts the exception works *and* that the value is consumed: after
+    /// a detach there is nothing left that would reap the process.
+    #[test]
+    fn a_detached_vm_outlives_the_handle_that_started_it() {
+        let child = Command::new("/bin/sleep")
+            .arg("300")
+            .spawn()
+            .expect("spawn a long-lived child");
+        let expected = child.id();
+        let vm = Vm {
+            child: Some(child),
+            name: "detached".to_string(),
+        };
+        let pid = vm.detach().expect("a live helper detaches");
+        assert_eq!(pid, expected, "the caller is told which process it let go");
+        assert!(pid_is_live(pid), "detaching must not tear the helper down");
+        // Not the process under test's business to leave running.
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    }
+
     #[test]
     fn dropping_a_vm_kills_and_reaps_its_helper() {
         let child = Command::new("/bin/sleep")
@@ -1235,6 +1355,43 @@ mod discover_tests {
 
     /// Listing must not delete. A caller asking what is running should not quietly change the
     /// directory, so the leftover survives a scan and only `reap_stale` removes it.
+    /// A VM's agent channel sits beside its control socket, under the same name, so a caller with
+    /// only the name can find both. It must **not** look like a VM to a scan: the control socket
+    /// is what says a VM exists, and counting the channel would list every VM twice.
+    #[test]
+    fn the_agent_channel_sits_beside_the_control_socket_and_is_not_a_vm() {
+        let control = socket::path_for("chan-test").expect("a usable name");
+        let agent = socket::agent_path_for("chan-test").expect("a usable name");
+        assert_eq!(control.parent(), agent.parent(), "same directory");
+        assert_ne!(control, agent);
+        assert!(!agent.to_string_lossy().ends_with(".sock"), "{agent:?}");
+
+        let dir = bsx_test_support::ScratchDir::created("agent-socket-scan");
+        let listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join("live.agent")).expect("bind");
+        assert_eq!(
+            discover::live_in(dir.path()).expect("scan"),
+            vec![],
+            "a channel socket is not a VM, however live it is"
+        );
+        drop(listener);
+    }
+
+    /// Reaping a VM's leftover control socket takes its channel with it. A channel left behind is
+    /// a path `exec` would connect to and then wait on forever, for a VM that has ended.
+    #[test]
+    fn reaping_a_dead_vm_takes_its_agent_channel_too() {
+        let dir = bsx_test_support::ScratchDir::created("agent-socket-reap");
+        let control = dir.path().join("gone.sock");
+        let channel = socket::agent_in(dir.path(), "gone");
+        std::fs::write(&control, b"").expect("stage a leftover control socket");
+        std::fs::write(&channel, b"").expect("stage a leftover channel socket");
+
+        assert_eq!(discover::reap_stale_in(dir.path()).expect("reap"), 1);
+        assert!(!control.exists(), "the control socket went");
+        assert!(!channel.exists(), "its channel went with it");
+    }
+
     #[test]
     fn a_scan_does_not_remove_leftovers_but_reaping_does() {
         let dir = bsx_test_support::ScratchDir::created("discover-reap");

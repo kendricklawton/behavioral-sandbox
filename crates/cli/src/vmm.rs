@@ -126,6 +126,16 @@ pub(crate) enum NetPosture {
     Tsi,
 }
 
+impl RootFsPosture {
+    /// The virtiofs device flag this posture is.
+    fn into_access(self) -> bsx_krun::FsAccess {
+        match self {
+            Self::ReadOnly => bsx_krun::FsAccess::ReadOnly,
+            Self::Writable => bsx_krun::FsAccess::ReadWrite,
+        }
+    }
+}
+
 /// A `TAG=HOSTPATH` share split at its **first** `=`, so a host path containing `=` survives.
 /// `None` when there is no separator or either half is empty, which the caller reports rather than
 /// silently mounting something unintended.
@@ -447,12 +457,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         bind_control_socket(name)?;
     }
 
-    let access = match args.rootfs {
-        RootFsPosture::ReadOnly => bsx_krun::FsAccess::ReadOnly,
-        RootFsPosture::Writable => bsx_krun::FsAccess::ReadWrite,
-    };
     let mut machine = bsx_krun::Context::new()?
-        .root(&args.root, access)?
+        .root(&args.root, args.rootfs.into_access())?
         .vm_config(args.vcpus, args.mem)?;
 
     for (tag, path) in shares {

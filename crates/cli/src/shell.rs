@@ -17,22 +17,19 @@
 //!   process's stdin into the guest console*, stealing the session's keystrokes (watched happen),
 //!   and its output would interleave boot noise into a raw terminal.
 use std::io::{IsTerminal, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Args;
 
-use bsx_channel::{ClientConnection, GUEST_AGENT_PATH, Request, Response, VSOCK_PORT};
+use bsx_channel::{
+    ClientConnection, GUEST_AGENT_PATH, GUEST_DEFAULT_PATH, Request, Response, VSOCK_PORT,
+};
 use bsx_supervisor::{Console, Vm, VmConfig};
 
 use crate::EXIT_OPERATIONAL;
-
-/// How long the agent is given to answer on the channel before the boot is called failed. Cold
-/// boot is ~300 ms on the development laptop; this is headroom, not a tuned value.
-const DIAL_GRACE: Duration = Duration::from_secs(10);
 
 /// How often the host terminal's size is polled. The lag a resize can see, and the price of
 /// keeping signal handling out of the crate.
@@ -105,7 +102,12 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
     cfg.args = vec![format!("vsock:{VSOCK_PORT}").into()];
     // The agent's stderr is the guest console; at `info` it narrates every session into the
     // operator's terminal.
-    cfg.env = vec!["BSX_LOG=warn".into()];
+    // A `PATH` for the agent and for everything it runs: libkrun exports none, so
+    // without this a bare program name resolves nowhere inside the guest.
+    cfg.env = vec![
+        "BSX_LOG=warn".into(),
+        format!("PATH={GUEST_DEFAULT_PATH}").into(),
+    ];
     cfg.vsock = Some((VSOCK_PORT, channel_sock.clone()));
     cfg.console = Console::Detached;
     cfg.net = args.net.into_net();
@@ -141,7 +143,8 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         return Ok(0);
     }
     let mut vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
-    let (mut reader, stream) = dial(&channel_sock, &mut vm)?;
+    let (mut reader, stream) =
+        crate::agent::dial(&channel_sock, &mut vm).map_err(|e| e.to_string())?;
 
     // Sized before raw mode, engaged before the request: output starts the moment the agent has
     // the command, and a cooked terminal would re-interpret it.
@@ -234,54 +237,6 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
             Err(e) => return Err(format!("the session ended abnormally: {e}")),
         }
     }
-}
-
-/// Dials the agent: connects to the channel socket and completes the protocol handshake,
-/// retrying until it succeeds or the grace runs out. A completed `connect` alone proves nothing,
-/// because libkrun accepts on the unix socket before the guest is listening on the vsock port
-/// inside and resets when the forward fails (watched happen); **the handshake is the readiness
-/// probe**. A helper that has already died fails fast with its exit, not a timeout.
-///
-/// Returns the handshaken connection (the session's read half) plus the raw stream for the send
-/// half, with the read deadline used against a wedged boot taken back off.
-fn dial(
-    sock: &std::path::Path,
-    vm: &mut Vm,
-) -> Result<(ClientConnection<UnixStream>, UnixStream), String> {
-    let deadline = Instant::now() + DIAL_GRACE;
-    loop {
-        if let Ok(Some(exit)) = vm.try_wait() {
-            return Err(format!(
-                "the VM ended ({exit:?}) before the agent answered: is the guest image one with \
-                 the agent baked in? (`cargo xtask build-rootfs`)"
-            ));
-        }
-        let failed = match try_dial(sock) {
-            Ok(pair) => return Ok(pair),
-            Err(e) => e,
-        };
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "the agent never answered on {} within {DIAL_GRACE:?} (last attempt: {failed})",
-                sock.display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-/// One dial attempt: connect, bound the handshake by a deadline so a wedged guest cannot hang the
-/// dial loop past its grace, and hand back both halves with the deadline cleared.
-fn try_dial(sock: &std::path::Path) -> Result<(ClientConnection<UnixStream>, UnixStream), String> {
-    let stream = UnixStream::connect(sock).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|e| e.to_string())?;
-    let conn = ClientConnection::connect(stream.try_clone().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    // Interactive sessions idle indefinitely; the deadline was for the handshake only.
-    stream.set_read_timeout(None).map_err(|e| e.to_string())?;
-    Ok((conn, stream))
 }
 
 /// The host terminal's `(cols, rows)`, read from stdin: the fd the raw-mode guard owns, so the

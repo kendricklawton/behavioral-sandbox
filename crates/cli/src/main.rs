@@ -10,8 +10,10 @@
 //! in the sandbox writes is what `bsx run` writes.
 #![forbid(unsafe_code)]
 
+mod agent;
 mod run;
 mod shell;
+mod up;
 mod vmm;
 
 use std::process::ExitCode;
@@ -41,6 +43,8 @@ enum Cmd {
     Run(run::RunArgs),
     /// Open an interactive shell (or any command) on a pty in a fresh sandbox.
     Shell(shell::ShellArgs),
+    /// Start a sandbox that outlives this command, reachable afterwards by name.
+    Up(up::UpArgs),
     /// Become a virtual machine. Not a verb: the supervisor re-executes this binary with it.
     ///
     /// Hidden rather than removed from the parser, so a boot that fails can be reproduced by hand
@@ -53,6 +57,7 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Run(args) => run::run(&args),
         Cmd::Shell(args) => shell::run(&args),
+        Cmd::Up(args) => up::run(&args),
         Cmd::Vmm(args) => vmm::run(&args),
     }
 }

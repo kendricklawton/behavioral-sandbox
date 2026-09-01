@@ -115,6 +115,18 @@ impl std::error::Error for AgentError {
     }
 }
 
+impl AgentError {
+    /// Returns `true` if the failure was caused by clean EOF or disconnect.
+    ///
+    /// A caller that completes the handshake and then closes is a **readiness probe**, which is
+    /// how `bsx up` learns the guest is listening; the connection ending there is the probe
+    /// working, not a session going wrong.
+    #[must_use]
+    pub fn is_disconnect(&self) -> bool {
+        matches!(self, Self::Channel(e) if e.is_disconnect())
+    }
+}
+
 impl From<ChannelError> for AgentError {
     fn from(e: ChannelError) -> Self {
         AgentError::Channel(e)
@@ -459,6 +471,10 @@ fn effective_path(env: &[(String, String)]) -> Option<std::ffi::OsString> {
         .find(|(key, _)| key == "PATH")
         .map(|(_, value)| std::ffi::OsString::from(value))
         .or_else(|| std::env::var_os("PATH"))
+        // libkrun's init resolves the *workload's* bare name against its own default and exports
+        // nothing, so an agent it started has no `PATH` to inherit and every bare program name
+        // would be "No such file or directory" (watched happen).
+        .or_else(|| Some(std::ffi::OsString::from(bsx_channel::GUEST_DEFAULT_PATH)))
 }
 
 /// Mirrors `execvp`'s lookup just enough to report a missing or non-executable program as the typed

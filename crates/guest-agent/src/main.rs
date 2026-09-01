@@ -160,8 +160,13 @@ fn serve_one<S: bsx_guest_agent::SplitStream + 'static>(stream: S) {
     let spawned = std::thread::Builder::new()
         .name("bsx-session".to_string())
         .spawn(move || {
-            if let Err(e) = serve_session(stream, &session_dir()) {
-                tracing::warn!("connection failed: {e}");
+            match serve_session(stream, &session_dir()) {
+                Ok(_) => {}
+                // A peer that hands back nothing after the handshake is a readiness probe, not a
+                // failure: reporting it as one would put a warning on the console of every
+                // healthy `bsx up`.
+                Err(e) if e.is_disconnect() => tracing::debug!("connection closed: {e}"),
+                Err(e) => tracing::warn!("connection failed: {e}"),
             }
         });
     if let Err(e) = spawned {
