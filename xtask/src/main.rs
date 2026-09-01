@@ -248,13 +248,9 @@ fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
 /// `fuzz_targets_are_single_sourced` is what holds those three to this list.
 const FUZZ_TARGETS: &[&str] = &[
     "channel_response",
-    "signing_envelope",
     "channel_request",
     "channel_frame",
     "channel_handshake",
-    "syscall_event",
-    "egress_rule",
-    "audit_record",
     "bsx_config",
     "output_image",
 ];
@@ -964,7 +960,7 @@ fn setup() -> Result<()> {
 /// rule and `docs/embedding-scope.md` both name.
 /// `pinned_surface_is_named_the_same_in_every_doc` holds those two to this list, so a crate can't
 /// join the surface in one document and be missing from the other.
-const PINNED_SURFACE_CRATES: [&str; 3] = ["bsx-engine", "bsx-channel", "bsx-record"];
+const PINNED_SURFACE_CRATES: [&str; 2] = ["bsx-engine", "bsx-channel"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///

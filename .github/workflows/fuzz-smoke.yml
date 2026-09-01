@@ -17,9 +17,6 @@ on:
     paths: &fuzz_inputs
       - 'crates/channel/**'
       - 'crates/cli/**'
-      - 'crates/probes-loader/**'
-      - 'crates/record/**'
-      - 'crates/probes-common/**'
       - 'fuzz/**'
       - 'Cargo.lock'
       - '.github/workflows/fuzz-smoke.yml'
@@ -41,7 +38,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The pinned nightly, matching crates/probes/rust-toolchain.toml: `cargo xtask fuzz` selects
+      # The pinned nightly, matching xtask's `FUZZ_NIGHTLY`: `cargo xtask fuzz` selects
       # it explicitly (`cargo +nightly-<date> fuzz`), so installing the floating alias here would
       # leave the run with no toolchain at all. One nightly serves the whole repo.
       - name: Install the pinned nightly toolchain

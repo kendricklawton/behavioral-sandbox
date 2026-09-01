@@ -12,10 +12,10 @@
 # 3.14.7-r0, plus `expat` entering the closure). Weekly, rebuild and diff the lockfile, so the bump
 # arrives as a scheduled notification instead of an ambush.
 #
-# Failing rather than opening a PR, for the same reason as firecracker-pin.yml: the lockfile is a
-# record of the image this project signs and ships, so re-pinning is a human deciding to ship a new
-# guest userland. What moved matters (a runtime security fix reads differently from a patch bump),
-# and the privileged gate should run against the new image before it goes anywhere.
+# Failing rather than opening a PR: the lockfile is a record of the image this project ships, so
+# re-pinning is a human deciding to ship a new guest userland. What moved matters (a runtime
+# security fix reads differently from a patch bump), and a guest should boot against the new image
+# before it goes anywhere.
 #
 # Unprivileged on purpose: `apk.static` installs a closure into `--root` without root and without
 # running maintainer scripts, so this needs no KVM box and no privileged runner.
@@ -23,8 +23,8 @@ name: rootfs-packages
 
 on:
   schedule:
-    # Wednesdays 06:45 UTC, after firecracker-pin.yml's 06:15 and audit.yml's 05:30, so the three
-    # upstream watchers stay three separate signals. This job fails on drift rather than opening a
+    # Wednesdays 06:45 UTC, after audit.yml's 05:30, so the two upstream watchers stay two
+    # separate signals. This job fails on drift rather than opening a
     # PR, so its period is also how often a stale lockfile re-nags: a week's worst-case window is
     # the trade for one notification instead of seven.
     - cron: "45 6 * * 3"
@@ -72,6 +72,5 @@ jobs:
           echo "Re-pinning is a human step, not a bot PR. It means:"
           echo "  1. read the diff above: which package moved, and is it a security fix?"
           echo "  2. run 'cargo xtask build-rootfs --update-lock' locally and commit the lockfile"
-          echo "  3. run 'cargo xtask ci-privileged' against the rebuilt image"
-          echo "  4. remember that released tarballs carry the OLD image until the next release"
+          echo "  3. boot a guest against the rebuilt image before trusting it"
           exit 1

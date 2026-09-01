@@ -38,7 +38,6 @@ body:
       options:
         - CLI (bsx run / shell / doctor)
         - engine API (the `bsx` library)
-        - probes / audit record
         - benchmarks / docs / tooling
         - not sure
       multiple: true

@@ -1,11 +1,8 @@
 # CI: the host-safe gate, one definition. Every job runs `cargo xtask ci`, the same command a dev
 # box runs, so this workflow cannot drift from the local gate: hand-mirroring the steps here is
 # what lets a gate step go missing. x86_64 only, since the supported platform is x86_64 and
-# aarch64 support (with its matrix leg here) needs hardware to test the privileged path on.
-# The privileged tests (booting a microVM, loading/attaching eBPF) need /dev/kvm + elevated caps
-# and run under `cargo xtask ci-privileged` in ci-privileged-hosted.yml (nightly, nested KVM),
-# never gating the everyday loop. Scheduled companions: audit.yml (advisories vs the pinned lock,
-# daily) and fuzz.yml (the deep libFuzzer tier, nightly).
+# aarch64 support (with its matrix leg here) needs hardware to test on. Scheduled companions:
+# audit.yml (advisories vs the pinned lock, daily) and fuzz.yml (the deep libFuzzer tier, nightly).
 name: CI
 
 on:
@@ -34,36 +31,18 @@ jobs:
         with:
           persist-credentials: false
 
-      # Everything `cargo xtask ci` needs, so none of its layers soft-skip here: stable
-      # fmt/clippy, and the probes' pinned nightly + rust-src (`build-std` for bpfel-unknown-none).
-      #
-      # The nightly also carries rustfmt and clippy, because the gate lints the detached workspaces
-      # under the toolchain each one pins, and `--profile minimal` includes neither. Without them
-      # that layer skips, which on this job means a green run that linted the one crate allowed
-      # `unsafe` not at all: the state this step's first line exists to prevent.
-      - name: Install the toolchains
-        run: |
-          rustup component add rustfmt clippy
-          rustup toolchain install nightly-2026-07-20 --profile minimal \
-            --component rust-src --component rustfmt --component clippy
+      # Everything `cargo xtask ci` needs, so none of its layers soft-skip here. The gate lints
+      # the detached `fuzz` workspace too, which builds on this same toolchain.
+      - name: Install the toolchain components
+        run: rustup component add rustfmt clippy
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          # The probes are their own workspace (own toolchain, own target dir); cache both.
-          workspaces: |
-            .
-            crates/probes
 
       # Prebuilt binary, so the gate's `cargo deny check` layer has its tool.
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2.86.3
         with:
           tool: cargo-deny
-
-      # No prebuilt binaries published; compiled once per cache key, then served from the
-      # cached ~/.cargo/bin. Version-pinned to match crates/probes/rust-toolchain.toml's nightly.
-      - name: Install bpf-linker
-        run: cargo install bpf-linker --locked --version 0.10.3
 
       - name: Run the gate
         run: cargo xtask ci

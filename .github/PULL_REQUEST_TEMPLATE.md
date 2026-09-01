@@ -25,10 +25,9 @@ or write "none" if it is a bug fix or a docs change. This is the first question 
 - [ ] A public API change (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the `bsx-channel`
       framing) carries the `api` scope, with `!` if it is incompatible
 
-## Privileged gate
+## Booting a guest
 
 <!--
-`cargo xtask ci-privileged` needs /dev/kvm and real root, and does not run on pull requests from
-forks. Say here whether you were able to run it, and on what host and kernel. If not, a maintainer
-runs it before merge.
+Anything that boots a microVM needs /dev/kvm, which pull requests from forks do not have. Say here
+whether you were able to run it, and on what host and kernel.
 -->

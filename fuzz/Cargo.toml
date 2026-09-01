@@ -29,18 +29,6 @@ features = ["fuzzing"]
 path = "../crates/engine"
 features = ["fuzzing"]
 
-# The signed-record envelope surface (`verify`/`verify_chain`/`TrustedKey::from_hex`); the public
-# API is exactly the fuzz surface, so no feature flag is needed. Named from `bsx-record`, the
-# record's own crate, rather than through the eBPF loader's re-exports.
-[dependencies.bsx-record]
-path = "../crates/record"
-
-# The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
-# host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
-[dependencies.bsx-probes-common]
-path = "../crates/probes-common"
-features = ["std"]
-
 # CLI policy and config parsers (`parse_allow`, `BsxToml`).
 [dependencies.bsx]
 path = "../crates/cli"
@@ -80,34 +68,6 @@ bench = false
 [[bin]]
 name = "channel_handshake"
 path = "fuzz_targets/channel_handshake.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "signing_envelope"
-path = "fuzz_targets/signing_envelope.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "syscall_event"
-path = "fuzz_targets/syscall_event.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "egress_rule"
-path = "fuzz_targets/egress_rule.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "audit_record"
-path = "fuzz_targets/audit_record.rs"
 test = false
 doc = false
 bench = false
