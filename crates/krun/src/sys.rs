@@ -455,6 +455,12 @@ mod stub {
     ) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_disable_implicit_vsock(_ctx_id: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_add_vsock(_ctx_id: u32, _tsi_features: u32) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_add_vsock_port2(
         _ctx_id: u32,
         _port: u32,
@@ -737,6 +743,54 @@ mod tests {
             ["b", "a", "c"]
         );
         assert_eq!(header_struct_fields(header, "absent"), None);
+    }
+
+    /// Every `sys::krun_*` the wrapper calls has a stub twin, and every stub has a caller.
+    ///
+    /// A host with libkrun never compiles the stubs, so a wrapped symbol without one builds and
+    /// links here and fails on the first runner without the library: 3.6's two vsock calls did
+    /// exactly that, three commits and a CI run after they were wrapped. Reads both sources back
+    /// so the check runs wherever the tests do, which is the point.
+    #[test]
+    fn every_wrapped_symbol_has_a_stub_twin_and_every_stub_a_caller() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let lib = std::fs::read_to_string(dir.join("lib.rs")).expect("lib.rs");
+        let sys = std::fs::read_to_string(dir.join("sys.rs")).expect("sys.rs");
+        // Calls, not types: `sys::krun_rect {` is a struct, `sys::krun_add_vsock(` is a symbol.
+        let called: std::collections::BTreeSet<&str> = lib
+            .match_indices("sys::krun_")
+            .filter_map(|(at, _)| {
+                let name = &lib[at + 5..];
+                let end = name.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+                name[end..].starts_with('(').then_some(&name[..end])
+            })
+            .collect();
+        // The module body only, up to its closing brace at column zero: this test's own source
+        // sits later in the file and carries the needle it searches for (watched: it reported
+        // itself as a dead stub).
+        let stubs = sys
+            .split_once("mod stub {")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the stub module");
+        let stubbed: std::collections::BTreeSet<&str> = stubs
+            .match_indices("pub unsafe fn krun_")
+            .map(|(at, _)| {
+                let name = &stubs[at + "pub unsafe fn ".len()..];
+                &name[..name.find('(').unwrap_or(name.len())]
+            })
+            .collect();
+        assert!(called.len() >= 10, "the call scan found only {called:?}");
+        let unstubbed: Vec<_> = called.difference(&stubbed).collect();
+        let uncalled: Vec<_> = stubbed.difference(&called).collect();
+        assert!(
+            unstubbed.is_empty(),
+            "wrapped but not stubbed, so a host without libkrun fails to build: {unstubbed:?}"
+        );
+        assert!(
+            uncalled.is_empty(),
+            "stubbed but nothing calls it; a stub is only for a symbol with a caller: {uncalled:?}"
+        );
     }
 
     /// The library is linked and answers. Compiled out where `build.rs` found no libkrun, because
