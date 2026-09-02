@@ -22,8 +22,12 @@
 //!
 //! No stop path. `krun_get_shutdown_eventfd` is efi-only and returns `-ENOTSUP` against a stock
 //! libkrun, and what stops a running VM is a signal to the helper process (`bsx-supervisor`'s
-//! `Vm::stop`), so there is nothing of libkrun's to wrap. Network and rlimits are phase 3's;
-//! their declarations are already in `sys`.
+//! `Vm::stop`), so there is nothing of libkrun's to wrap.
+//!
+//! No GPU enable. `krun_set_gpu_options` is phase 5's, and its default flags (`0`) were measured
+//! segfaulting the VMM inside `virgl_renderer_init` on this host (2026-09-02, libkrun 1.19.4);
+//! `VIRGLRENDERER_NO_VIRGL` boots. Until it is wrapped, a display backend is configured but never
+//! instantiated, because the device that would instantiate it does not exist.
 //!
 //! # Strings
 //!
@@ -32,6 +36,21 @@
 //! nothing either way for the setters used here. Owning them costs a pointer-sized allocation per
 //! call and removes the question; betting on a copy that is not documented would be a dangling
 //! pointer if the bet is wrong.
+//!
+//! # The display vtable
+//!
+//! [`Machine::display_backend`] hands libkrun a table of C callbacks that call back into a
+//! [`DisplayBackend`], from libkrun's gpu thread, for as long as the VM runs.
+//!
+//! - **A panic must not unwind into libkrun.** Every callback runs the backend under
+//!   `catch_unwind` and reports a panic as `KRUN_DISPLAY_ERR_INTERNAL`.
+//! - **The backend is shared, not moved.** It lives behind a lock the callbacks take, so a
+//!   compositor reading the latest frame holds libkrun off for exactly as long as it reads.
+//! - **libkrun writes into a buffer after the call that handed it out has returned**, which no
+//!   borrow can say: [`DisplayBackend`] is an `unsafe trait` for that one obligation.
+//! - **No frame has crossed it yet.** Measured 2026-09-02: libkrun instantiates the backend and
+//!   the phase-3 guest gets a scanout, but nothing in that image renders, so `configure_scanout`
+//!   onward is exercised only by this crate's tests. `scratch/ROADMAP.md` 0.9 is the frame.
 
 mod sys;
 
@@ -39,7 +58,7 @@ use std::collections::HashMap;
 use std::ffi::{CString, NulError, OsStr};
 use std::fmt;
 use std::marker::PhantomData;
-use std::num::{NonZeroU8, NonZeroU32};
+use std::num::{NonZeroI32, NonZeroU8, NonZeroU32, NonZeroUsize};
 use std::os::raw::{c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -178,26 +197,30 @@ impl FsAccess {
     }
 }
 
-/// Errors returned by display backend callbacks.
+/// What a display callback reports back to libkrun: one of the header's `KRUN_DISPLAY_ERR_*`
+/// codes, or a negative code of the backend's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DisplayError {
-    /// Internal display error (`KRUN_DISPLAY_ERR_INTERNAL`).
+    /// The backend failed for a reason it has no better name for (`KRUN_DISPLAY_ERR_INTERNAL`).
     Internal,
-    /// Method unsupported error (`KRUN_DISPLAY_ERR_METHOD_UNSUPPORTED`).
+    /// The backend does not implement this call (`KRUN_DISPLAY_ERR_METHOD_UNSUPPORTED`).
     MethodUnsupported,
-    /// Invalid scanout ID (`KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID`).
+    /// No such scanout (`KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID`).
     InvalidScanoutId,
-    /// Invalid parameter (`KRUN_DISPLAY_ERR_INVALID_PARAM`).
+    /// An argument the backend cannot act on (`KRUN_DISPLAY_ERR_INVALID_PARAM`).
     InvalidParam,
-    /// Out of buffers (`KRUN_DISPLAY_ERR_OUT_OF_BUFFERS`).
+    /// Every buffer is handed out (`KRUN_DISPLAY_ERR_OUT_OF_BUFFERS`).
     OutOfBuffers,
-    /// A custom negative errno return code.
-    Custom(i32),
+    /// A code of the backend's own. Non-zero by type, because zero is libkrun's success and an
+    /// error that reports success is the one thing this enum must not be able to say.
+    Custom(NonZeroI32),
 }
 
 impl DisplayError {
-    /// Converts this error into libkrun's negative return code.
+    /// The code libkrun reads. Always negative: a positive `Custom` is negated rather than sent
+    /// as a success, so no value of this type crosses the boundary as anything but a failure.
+    #[must_use]
     pub fn to_raw(self) -> i32 {
         match self {
             Self::Internal => sys::KRUN_DISPLAY_ERR_INTERNAL,
@@ -205,55 +228,70 @@ impl DisplayError {
             Self::InvalidScanoutId => sys::KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID,
             Self::InvalidParam => sys::KRUN_DISPLAY_ERR_INVALID_PARAM,
             Self::OutOfBuffers => sys::KRUN_DISPLAY_ERR_OUT_OF_BUFFERS,
-            Self::Custom(code) => {
-                if code < 0 {
-                    code
-                } else {
-                    -code
-                }
-            }
+            // `i32::MIN` has no positive twin, and is already negative.
+            Self::Custom(code) => code.get().checked_abs().map_or(i32::MIN, |a| -a),
         }
     }
 
-    /// Creates a [`DisplayError`] from a raw negative return code.
-    pub fn from_raw(code: i32) -> Self {
-        match code {
+    /// The error a raw code names, or `None` for a code that is not a failure at all.
+    #[must_use]
+    pub fn from_raw(code: i32) -> Option<Self> {
+        Some(match code {
             sys::KRUN_DISPLAY_ERR_INTERNAL => Self::Internal,
             sys::KRUN_DISPLAY_ERR_METHOD_UNSUPPORTED => Self::MethodUnsupported,
             sys::KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID => Self::InvalidScanoutId,
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM => Self::InvalidParam,
             sys::KRUN_DISPLAY_ERR_OUT_OF_BUFFERS => Self::OutOfBuffers,
-            other => Self::Custom(other),
+            other if other < 0 => Self::Custom(NonZeroI32::new(other)?),
+            _ => return None,
+        })
+    }
+}
+
+impl fmt::Display for DisplayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Internal => f.write_str("the display backend failed internally"),
+            Self::MethodUnsupported => {
+                f.write_str("the display backend does not support this call")
+            }
+            Self::InvalidScanoutId => f.write_str("no such scanout"),
+            Self::InvalidParam => f.write_str("the display backend refused an argument"),
+            Self::OutOfBuffers => f.write_str("every frame buffer is handed out"),
+            Self::Custom(code) => write!(f, "the display backend failed with code {code}"),
         }
     }
 }
 
-/// Pixel format returned during scanout configuration.
+impl std::error::Error for DisplayError {}
+
+/// A scanout's pixel layout, as libkrun names it (`KRUN_DISPLAY_FORMAT_*`, the virtio-gpu numbers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PixelFormat {
-    /// `B8G8R8A8_UNORM` pixel format.
+    /// `B8G8R8A8_UNORM`.
     B8G8R8A8Unorm,
-    /// `B8G8R8X8_UNORM` pixel format.
+    /// `B8G8R8X8_UNORM`.
     B8G8R8X8Unorm,
-    /// `A8R8G8B8_UNORM` pixel format.
+    /// `A8R8G8B8_UNORM`.
     A8R8G8B8Unorm,
-    /// `X8R8G8B8_UNORM` pixel format.
+    /// `X8R8G8B8_UNORM`.
     X8R8G8B8Unorm,
-    /// `R8G8B8A8_UNORM` pixel format.
+    /// `R8G8B8A8_UNORM`.
     R8G8B8A8Unorm,
-    /// `X8B8G8R8_UNORM` pixel format.
+    /// `X8B8G8R8_UNORM`.
     X8B8G8R8Unorm,
-    /// `A8B8G8R8_UNORM` pixel format.
+    /// `A8B8G8R8_UNORM`.
     A8B8G8R8Unorm,
-    /// `R8G8B8X8_UNORM` pixel format.
+    /// `R8G8B8X8_UNORM`.
     R8G8B8X8Unorm,
-    /// An unknown format ID.
+    /// A number this build does not know, carried rather than guessed at.
     Unknown(u32),
 }
 
 impl PixelFormat {
-    /// Creates a [`PixelFormat`] from a raw libkrun format ID.
+    /// The format a raw libkrun number names.
+    #[must_use]
     pub fn from_raw(raw: u32) -> Self {
         match raw {
             sys::KRUN_DISPLAY_FORMAT_B8G8R8A8_UNORM => Self::B8G8R8A8Unorm,
@@ -268,7 +306,8 @@ impl PixelFormat {
         }
     }
 
-    /// Returns the raw libkrun format ID for this format.
+    /// The raw libkrun number for this format.
+    #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
             Self::B8G8R8A8Unorm => sys::KRUN_DISPLAY_FORMAT_B8G8R8A8_UNORM,
@@ -283,8 +322,10 @@ impl PixelFormat {
         }
     }
 
-    /// Returns the number of bytes per pixel for this format (defaulting to 4).
-    pub fn bytes_per_pixel(self) -> usize {
+    /// Bytes per pixel, or `None` for a format this build cannot size: a guessed stride is a
+    /// buffer libkrun writes past the end of.
+    #[must_use]
+    pub fn bytes_per_pixel(self) -> Option<NonZeroUsize> {
         match self {
             Self::B8G8R8A8Unorm
             | Self::B8G8R8X8Unorm
@@ -293,37 +334,72 @@ impl PixelFormat {
             | Self::R8G8B8A8Unorm
             | Self::X8B8G8R8Unorm
             | Self::A8B8G8R8Unorm
-            | Self::R8G8B8X8Unorm => 4,
-            Self::Unknown(_) => 4,
+            | Self::R8G8B8X8Unorm => NonZeroUsize::new(4),
+            Self::Unknown(_) => None,
         }
     }
 }
 
-/// A rectangle describing a damage region.
+/// The part of a frame that changed since the last one, as libkrun reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rect {
-    /// X coordinate of rectangle origin.
+    /// Left edge, in pixels.
     pub x: u32,
-    /// Y coordinate of rectangle origin.
+    /// Top edge, in pixels.
     pub y: u32,
-    /// Width of rectangle.
+    /// Width, in pixels.
     pub width: u32,
-    /// Height of rectangle.
+    /// Height, in pixels.
     pub height: u32,
 }
 
-/// An allocated frame buffer handed to libkrun to write pixel data into.
+impl Rect {
+    /// A rectangle at `(x, y)` of `width` by `height`.
+    #[must_use]
+    pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+/// A buffer handed to libkrun to fill, and the id it will present it back under.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct FrameAllocation<'a> {
-    /// The frame identifier assigned to this buffer.
+    /// The id [`DisplayBackend::present_frame`] will name this buffer by. Must fit an `i32`,
+    /// because that is how it crosses the vtable; a larger one is refused as an internal error.
     pub frame_id: u32,
-    /// The mutable byte slice where pixel data will be written.
+    /// Where libkrun writes the pixels, after this call has returned.
     pub buffer: &'a mut [u8],
 }
 
-/// Trait implemented by display backends to render guest scanouts.
-pub trait DisplayBackend: std::fmt::Debug + Send {
-    /// Configures or reconfigures a scanout display.
+impl<'a> FrameAllocation<'a> {
+    /// `buffer`, to be presented back as `frame_id`.
+    #[must_use]
+    pub fn new(frame_id: u32, buffer: &'a mut [u8]) -> Self {
+        Self { frame_id, buffer }
+    }
+}
+
+/// Where the guest's frames land: what libkrun's virtio-gpu device calls, from its own thread, as
+/// the guest configures scanouts and renders into them.
+///
+/// # Safety
+///
+/// libkrun keeps writing into the buffer [`alloc_frame`](Self::alloc_frame) returned **after the
+/// borrow has ended**, until it presents that frame id, disables the scanout, or reconfigures it.
+/// An implementation must not move, shrink, or free that memory in between, and the compiler
+/// cannot check that: a `configure_scanout` that reallocates the `Vec` a frame was handed out of
+/// is safe Rust and a write into freed memory. Implementing this trait is the promise that it does
+/// not happen.
+pub unsafe trait DisplayBackend: Send {
+    /// Configures or reconfigures scanout `scanout_id`. After this, any frame handed out for it
+    /// is abandoned by libkrun and the backend may reuse or free that memory.
     fn configure_scanout(
         &mut self,
         scanout_id: u32,
@@ -334,13 +410,14 @@ pub trait DisplayBackend: std::fmt::Debug + Send {
         format: PixelFormat,
     ) -> Result<(), DisplayError>;
 
-    /// Disables a display scanout.
+    /// Disables scanout `scanout_id`, abandoning any frame handed out for it.
     fn disable_scanout(&mut self, scanout_id: u32) -> Result<(), DisplayError>;
 
-    /// Allocates a new frame buffer for `scanout_id`.
+    /// Hands libkrun a buffer to render the next frame of `scanout_id` into.
     fn alloc_frame(&mut self, scanout_id: u32) -> Result<FrameAllocation<'_>, DisplayError>;
 
-    /// Presents a previously allocated frame to the display.
+    /// Takes back the frame libkrun has finished writing. `damage` is the part that changed, or
+    /// `None` for all of it.
     fn present_frame(
         &mut self,
         scanout_id: u32,
@@ -349,36 +426,72 @@ pub trait DisplayBackend: std::fmt::Debug + Send {
     ) -> Result<(), DisplayError>;
 }
 
-/// Shared wrapper for display backend callback trampolines.
-type SharedDisplayBackend = Arc<Mutex<Option<Box<dyn DisplayBackend>>>>;
+/// The backend as libkrun holds it: behind a lock, because the compositor reading its frames is
+/// on another thread, and boxed, because libkrun holds a pointer and the type is the caller's.
+type Backend = Mutex<Box<dyn DisplayBackend>>;
 
+/// A `Result` of a backend call as the code libkrun reads.
+fn code_of(outcome: Result<(), DisplayError>) -> i32 {
+    match outcome {
+        Ok(()) => 0,
+        Err(e) => e.to_raw(),
+    }
+}
+
+/// Runs `f` on the backend behind `instance`, doing what every callback must do once: refuse a
+/// null instance, take the lock, and catch a panic, which must not unwind into libkrun.
+///
+/// A poisoned lock is recovered rather than refused: the panic that poisoned it was already
+/// reported as `KRUN_DISPLAY_ERR_INTERNAL` on the call that panicked, and a backend that has
+/// stopped working keeps answering that way from its own methods.
+fn with_backend(instance: *mut c_void, f: impl FnOnce(&mut dyn DisplayBackend) -> i32) -> i32 {
+    if instance.is_null() {
+        return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Borrowed, never owned: the count this pointer carries belongs to `c_create`, and a
+        // `from_raw` that was allowed to drop would return it on every call.
+        let shared = std::mem::ManuallyDrop::new(unsafe {
+            Arc::from_raw(instance.cast_const().cast::<Backend>())
+        });
+        let mut guard = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut **guard)
+    }));
+    outcome.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+}
+
+/// `create`: the instance is the userdata, holding one count for as long as libkrun's instance
+/// lives, which `c_destroy` returns.
 unsafe extern "C" fn c_create(
     instance: *mut *mut c_void,
     userdata: *const c_void,
     _reserved: *const c_void,
 ) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if instance.is_null() || userdata.is_null() {
-            return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
-        }
-        unsafe {
-            Arc::increment_strong_count(userdata as *const Mutex<Option<Box<dyn DisplayBackend>>>);
-            *instance = userdata as *mut c_void;
-        }
-        0
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+    if instance.is_null() || userdata.is_null() {
+        return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
+    }
+    unsafe {
+        Arc::increment_strong_count(userdata.cast::<Backend>());
+        *instance = userdata.cast_mut();
+    }
+    0
 }
 
+/// `destroy`: returns the count `c_create` took. A backend's own `Drop` runs here, under the
+/// same panic guard as its methods.
 unsafe extern "C" fn c_destroy(instance: *mut c_void) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if !instance.is_null() {
-            let _ =
-                unsafe { Arc::from_raw(instance as *const Mutex<Option<Box<dyn DisplayBackend>>>) };
-        }
-        0
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+    if instance.is_null() {
+        return 0;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(unsafe { Arc::from_raw(instance.cast_const().cast::<Backend>()) });
+    }));
+    match outcome {
+        Ok(()) => 0,
+        Err(_) => sys::KRUN_DISPLAY_ERR_INTERNAL,
+    }
 }
 
 unsafe extern "C" fn c_configure_scanout(
@@ -390,57 +503,22 @@ unsafe extern "C" fn c_configure_scanout(
     height: u32,
     format: u32,
 ) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if instance.is_null() {
-            return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
-        }
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            Arc::from_raw(instance as *const Mutex<Option<Box<dyn DisplayBackend>>>)
-        });
-        let mut guard = match arc.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-        let Some(backend) = guard.as_mut() else {
-            return sys::KRUN_DISPLAY_ERR_INTERNAL;
-        };
-        let fmt = PixelFormat::from_raw(format);
-        match backend.configure_scanout(
+    with_backend(instance, |backend| {
+        code_of(backend.configure_scanout(
             scanout_id,
             display_width,
             display_height,
             width,
             height,
-            fmt,
-        ) {
-            Ok(()) => 0,
-            Err(err) => err.to_raw(),
-        }
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+            PixelFormat::from_raw(format),
+        ))
+    })
 }
 
 unsafe extern "C" fn c_disable_scanout(instance: *mut c_void, scanout_id: u32) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if instance.is_null() {
-            return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
-        }
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            Arc::from_raw(instance as *const Mutex<Option<Box<dyn DisplayBackend>>>)
-        });
-        let mut guard = match arc.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-        let Some(backend) = guard.as_mut() else {
-            return sys::KRUN_DISPLAY_ERR_INTERNAL;
-        };
-        match backend.disable_scanout(scanout_id) {
-            Ok(()) => 0,
-            Err(err) => err.to_raw(),
-        }
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+    with_backend(instance, |backend| {
+        code_of(backend.disable_scanout(scanout_id))
+    })
 }
 
 unsafe extern "C" fn c_alloc_frame(
@@ -449,30 +527,24 @@ unsafe extern "C" fn c_alloc_frame(
     buffer: *mut *mut u8,
     buffer_size: *mut usize,
 ) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if instance.is_null() || buffer.is_null() || buffer_size.is_null() {
-            return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
+    if buffer.is_null() || buffer_size.is_null() {
+        return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
+    }
+    with_backend(instance, |backend| match backend.alloc_frame(scanout_id) {
+        Ok(frame) => {
+            // The id travels back as the non-negative half of an `i32`; one that does not fit
+            // would arrive as some error code, so it is refused here as the one it really is.
+            let Ok(id) = i32::try_from(frame.frame_id) else {
+                return sys::KRUN_DISPLAY_ERR_INTERNAL;
+            };
+            unsafe {
+                *buffer = frame.buffer.as_mut_ptr();
+                *buffer_size = frame.buffer.len();
+            }
+            id
         }
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            Arc::from_raw(instance as *const Mutex<Option<Box<dyn DisplayBackend>>>)
-        });
-        let mut guard = match arc.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-        let Some(backend) = guard.as_mut() else {
-            return sys::KRUN_DISPLAY_ERR_INTERNAL;
-        };
-        match backend.alloc_frame(scanout_id) {
-            Ok(alloc) => unsafe {
-                *buffer = alloc.buffer.as_mut_ptr();
-                *buffer_size = alloc.buffer.len();
-                alloc.frame_id as i32
-            },
-            Err(err) => err.to_raw(),
-        }
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+        Err(e) => e.to_raw(),
+    })
 }
 
 unsafe extern "C" fn c_present_frame(
@@ -481,113 +553,127 @@ unsafe extern "C" fn c_present_frame(
     frame_id: u32,
     damage_area: *const sys::krun_rect,
 ) -> i32 {
-    let res = std::panic::catch_unwind(move || {
-        if instance.is_null() {
-            return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
-        }
-        let arc = std::mem::ManuallyDrop::new(unsafe {
-            Arc::from_raw(instance as *const Mutex<Option<Box<dyn DisplayBackend>>>)
-        });
-        let mut guard = match arc.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
-        let Some(backend) = guard.as_mut() else {
-            return sys::KRUN_DISPLAY_ERR_INTERNAL;
-        };
-        let damage = if damage_area.is_null() {
-            None
-        } else {
-            let r = unsafe { &*damage_area };
-            Some(Rect {
-                x: r.x,
-                y: r.y,
-                width: r.width,
-                height: r.height,
-            })
-        };
-        match backend.present_frame(scanout_id, frame_id, damage) {
-            Ok(()) => 0,
-            Err(err) => err.to_raw(),
-        }
-    });
-    res.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
+    let damage = if damage_area.is_null() {
+        None
+    } else {
+        let r = unsafe { &*damage_area };
+        Some(Rect::new(r.x, r.y, r.width, r.height))
+    };
+    with_backend(instance, |backend| {
+        code_of(backend.present_frame(scanout_id, frame_id, damage))
+    })
 }
 
-/// A frame presented by a display scanout.
+/// A frame as libkrun left it: the latest one presented on its scanout.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Frame {
-    /// Scanout identifier.
-    pub scanout_id: u32,
-    /// Frame identifier.
+    /// The id it was presented under.
     pub frame_id: u32,
-    /// Width of the frame in pixels.
+    /// Width in pixels.
     pub width: u32,
-    /// Height of the frame in pixels.
+    /// Height in pixels.
     pub height: u32,
-    /// Pixel format of the frame.
+    /// The pixel layout.
     pub format: PixelFormat,
-    /// Raw pixel bytes of the frame.
+    /// `width * height * bytes_per_pixel` bytes, row-major.
     pub pixels: Vec<u8>,
-    /// Optional damage rectangle hint.
+    /// The part libkrun said changed, if it said.
     pub damage: Option<Rect>,
 }
 
-/// Scanout configuration state.
-#[derive(Debug, Clone, Copy)]
+/// A scanout's shape, as libkrun configured it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ScanoutConfig {
-    /// Original width of the display in pixels.
+    /// The display's own width, in pixels.
     pub display_width: u32,
-    /// Original height of the display in pixels.
+    /// The display's own height, in pixels.
     pub display_height: u32,
-    /// Width of the configured scanout in pixels.
+    /// The scanout's width, in pixels.
     pub width: u32,
-    /// Height of the configured scanout in pixels.
+    /// The scanout's height, in pixels.
     pub height: u32,
-    /// Pixel format.
+    /// The pixel layout.
     pub format: PixelFormat,
 }
 
-/// A memory-backed display backend storing presented frames in RAM.
+impl ScanoutConfig {
+    /// Bytes in one frame, or the error for a shape this cannot size.
+    fn frame_size(&self) -> Result<usize, DisplayError> {
+        let bpp = self
+            .format
+            .bytes_per_pixel()
+            .ok_or(DisplayError::InvalidParam)?;
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|px| px.checked_mul(bpp.get()))
+            .ok_or(DisplayError::InvalidParam)
+    }
+}
+
+/// Buffers a scanout can have handed out at once. Two is a guest that renders the next frame
+/// while the last is presented; a third is slack for one that runs ahead of that.
+const RING: usize = 3;
+
+/// The largest frame id handed out: ids cross the vtable as the non-negative half of an `i32`.
+const MAX_FRAME_ID: u32 = i32::MAX as u32;
+
+/// A buffer libkrun may be writing into, and the id it was handed out under.
+#[derive(Debug, Default)]
+struct Slot {
+    /// `Some` while handed out and not yet presented.
+    frame_id: Option<u32>,
+    pixels: Vec<u8>,
+}
+
+/// One scanout: its shape, the buffers libkrun draws into, and the frame it last presented.
+#[derive(Debug)]
+struct Scanout {
+    config: ScanoutConfig,
+    ring: [Slot; RING],
+    latest: Option<Frame>,
+    next_id: u32,
+}
+
+/// A display backend that keeps each scanout's latest frame in host RAM, for a compositor in this
+/// process to read under the lock.
+///
+/// **No history, and no allocation once warm.** A scanout owns `RING` buffers to hand out and
+/// one presented frame; presenting swaps the filled buffer with the previous frame's, so at steady
+/// state the bytes move owners and nothing is allocated or zeroed. A history of frames would be
+/// that many copies of the screen for a reader that wants the newest one.
 #[derive(Debug, Default)]
 pub struct MemoryFramebuffer {
-    scanouts: HashMap<u32, ScanoutConfig>,
-    buffers: HashMap<(u32, u32), Vec<u8>>,
-    next_frame_id: HashMap<u32, u32>,
-    presented: Vec<Frame>,
+    scanouts: HashMap<u32, Scanout>,
 }
 
 impl MemoryFramebuffer {
-    /// Creates a new empty [`MemoryFramebuffer`].
+    /// An empty framebuffer: no scanouts until libkrun configures one.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the scanout configuration for `scanout_id` if configured.
-    pub fn scanout_config(&self, scanout_id: u32) -> Option<&ScanoutConfig> {
-        self.scanouts.get(&scanout_id)
+    /// How `scanout_id` is configured, if it is.
+    #[must_use]
+    pub fn scanout_config(&self, scanout_id: u32) -> Option<ScanoutConfig> {
+        self.scanouts.get(&scanout_id).map(|s| s.config)
     }
 
-    /// Returns all presented frames.
-    pub fn presented_frames(&self) -> &[Frame] {
-        &self.presented
-    }
-
-    /// Returns the latest presented frame for `scanout_id` if any.
+    /// The frame most recently presented on `scanout_id`, if one has been.
+    #[must_use]
     pub fn latest_frame(&self, scanout_id: u32) -> Option<&Frame> {
-        self.presented
-            .iter()
-            .rev()
-            .find(|f| f.scanout_id == scanout_id)
-    }
-
-    /// Clears the presented frame history.
-    pub fn clear_presented(&mut self) {
-        self.presented.clear();
+        self.scanouts.get(&scanout_id)?.latest.as_ref()
     }
 }
 
-impl DisplayBackend for MemoryFramebuffer {
+// SAFETY: the memory handed out is a slot's `pixels`, a heap `Vec` whose allocation changes only
+// in `alloc_frame` for a slot that is not handed out, in `present_frame` for the slot being taken
+// back (a swap moves the allocation between owners and leaves its address alone), and in
+// `configure_scanout` and `disable_scanout`, after which the header says libkrun has abandoned
+// every frame of that scanout. Nothing else touches a handed-out slot.
+unsafe impl DisplayBackend for MemoryFramebuffer {
     fn configure_scanout(
         &mut self,
         scanout_id: u32,
@@ -597,48 +683,56 @@ impl DisplayBackend for MemoryFramebuffer {
         height: u32,
         format: PixelFormat,
     ) -> Result<(), DisplayError> {
-        self.scanouts.insert(
-            scanout_id,
-            ScanoutConfig {
-                display_width,
-                display_height,
-                width,
-                height,
-                format,
-            },
-        );
+        let config = ScanoutConfig {
+            display_width,
+            display_height,
+            width,
+            height,
+            format,
+        };
+        // Refused before anything is recorded, so a shape that cannot be sized leaves the old
+        // one in place rather than a scanout every `alloc_frame` then fails on.
+        config.frame_size()?;
+        let scanout = self.scanouts.entry(scanout_id).or_insert_with(|| Scanout {
+            config,
+            ring: Default::default(),
+            latest: None,
+            next_id: 0,
+        });
+        scanout.config = config;
+        for slot in &mut scanout.ring {
+            slot.frame_id = None;
+        }
         Ok(())
     }
 
     fn disable_scanout(&mut self, scanout_id: u32) -> Result<(), DisplayError> {
-        self.scanouts.remove(&scanout_id);
-        self.next_frame_id.remove(&scanout_id);
-        self.buffers.retain(|(s, _), _| *s != scanout_id);
-        Ok(())
+        self.scanouts
+            .remove(&scanout_id)
+            .map(drop)
+            .ok_or(DisplayError::InvalidScanoutId)
     }
 
     fn alloc_frame(&mut self, scanout_id: u32) -> Result<FrameAllocation<'_>, DisplayError> {
-        let cfg = self
+        let scanout = self
             .scanouts
-            .get(&scanout_id)
+            .get_mut(&scanout_id)
             .ok_or(DisplayError::InvalidScanoutId)?;
-        let size = (cfg.width as usize)
-            .checked_mul(cfg.height as usize)
-            .and_then(|pixels| pixels.checked_mul(cfg.format.bytes_per_pixel()))
+        let size = scanout.config.frame_size()?;
+        let slot = scanout
+            .ring
+            .iter_mut()
+            .find(|s| s.frame_id.is_none())
             .ok_or(DisplayError::OutOfBuffers)?;
-        let fid = self.next_frame_id.entry(scanout_id).or_insert(0);
-        let frame_id = *fid;
-        *fid = fid.wrapping_add(1);
-
-        let buf = self.buffers.entry((scanout_id, frame_id)).or_default();
-        if buf.len() != size {
-            buf.resize(size, 0);
-        }
-
-        Ok(FrameAllocation {
-            frame_id,
-            buffer: buf.as_mut_slice(),
-        })
+        let frame_id = scanout.next_id;
+        scanout.next_id = if frame_id == MAX_FRAME_ID {
+            0
+        } else {
+            frame_id + 1
+        };
+        slot.frame_id = Some(frame_id);
+        slot.pixels.resize(size, 0);
+        Ok(FrameAllocation::new(frame_id, &mut slot.pixels))
     }
 
     fn present_frame(
@@ -647,25 +741,57 @@ impl DisplayBackend for MemoryFramebuffer {
         frame_id: u32,
         damage: Option<Rect>,
     ) -> Result<(), DisplayError> {
-        let cfg = self
+        let scanout = self
             .scanouts
-            .get(&scanout_id)
+            .get_mut(&scanout_id)
             .ok_or(DisplayError::InvalidScanoutId)?;
-        let buf = self
-            .buffers
-            .remove(&(scanout_id, frame_id))
-            .ok_or(DisplayError::OutOfBuffers)?;
-        let frame = Frame {
-            scanout_id,
+        let slot = scanout
+            .ring
+            .iter_mut()
+            .find(|s| s.frame_id == Some(frame_id))
+            .ok_or(DisplayError::InvalidParam)?;
+        slot.frame_id = None;
+        // The filled buffer becomes the frame, and the previous frame's buffer becomes the free
+        // slot: no bytes copied, nothing allocated.
+        let pixels = std::mem::take(&mut slot.pixels);
+        if let Some(previous) = scanout.latest.take() {
+            slot.pixels = previous.pixels;
+        }
+        let config = scanout.config;
+        scanout.latest = Some(Frame {
             frame_id,
-            width: cfg.width,
-            height: cfg.height,
-            format: cfg.format,
-            pixels: buf,
+            width: config.width,
+            height: config.height,
+            format: config.format,
+            pixels,
             damage,
-        };
-        self.presented.push(frame);
+        });
         Ok(())
+    }
+}
+
+/// What [`Machine::display_backend`] hands libkrun and keeps alive: the count behind
+/// `create_userdata`, and the table itself.
+///
+/// The count is taken back if the machine is dropped without starting (a failed `enter`, or a
+/// caller that changed its mind); once started, `c_create` takes its own and the process ends
+/// before this one could matter. The table is retained by the crate's rule for anything libkrun
+/// is given a pointer to, though it was measured copying it (2026-09-02: overwriting the struct
+/// after the call left `create` working).
+struct DisplayHandle {
+    userdata: *const Backend,
+    _table: Box<sys::krun_display_backend>,
+}
+
+impl Drop for DisplayHandle {
+    fn drop(&mut self) {
+        drop(unsafe { Arc::from_raw(self.userdata) });
+    }
+}
+
+impl fmt::Debug for DisplayHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DisplayHandle")
     }
 }
 
@@ -759,7 +885,7 @@ impl Context {
 pub struct Machine {
     ctx: Ctx,
     retained: Vec<CString>,
-    retained_display: Option<SharedDisplayBackend>,
+    retained_display: Option<DisplayHandle>,
 }
 
 impl Machine {
@@ -906,38 +1032,46 @@ impl Machine {
         Ok(self)
     }
 
-    /// Configures a display backend implementation for rendering VM scanouts.
+    /// Hands the guest's frames to `backend`, which libkrun calls from its gpu thread for as long
+    /// as the VM runs. Needs a display ([`add_display`](Self::add_display)) and the virtio-gpu
+    /// device, which nothing here enables yet (see the crate docs).
     pub fn display_backend<B: DisplayBackend + 'static>(
         mut self,
         backend: B,
     ) -> Result<Self, Error> {
-        let shared: SharedDisplayBackend = Arc::new(Mutex::new(Some(Box::new(backend))));
-        let raw_user_data = Arc::into_raw(shared.clone()) as *const c_void;
-
-        let sys_backend = sys::krun_display_backend {
-            features: sys::KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER,
-            create_userdata: raw_user_data,
-            create: Some(c_create),
-            vtable: sys::krun_display_vtable {
-                basic_framebuffer: sys::krun_display_basic_framebuffer_vtable {
-                    destroy: Some(c_destroy),
-                    disable_scanout: Some(c_disable_scanout),
-                    configure_scanout: Some(c_configure_scanout),
-                    alloc_frame: Some(c_alloc_frame),
-                    present_frame: Some(c_present_frame),
+        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(backend)));
+        // Built before the call, so the `?` on a refused call drops it and takes the count back.
+        let handle = DisplayHandle {
+            userdata: Arc::into_raw(shared),
+            _table: Box::new(sys::krun_display_backend {
+                features: sys::KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER,
+                create_userdata: std::ptr::null(),
+                create: Some(c_create),
+                vtable: sys::krun_display_vtable {
+                    basic_framebuffer: sys::krun_display_basic_framebuffer_vtable {
+                        destroy: Some(c_destroy),
+                        disable_scanout: Some(c_disable_scanout),
+                        configure_scanout: Some(c_configure_scanout),
+                        alloc_frame: Some(c_alloc_frame),
+                        present_frame: Some(c_present_frame),
+                    },
                 },
-            },
+            }),
         };
-
+        let mut table = handle._table.clone();
+        table.create_userdata = handle.userdata.cast::<c_void>();
         check("krun_set_display_backend", unsafe {
             sys::krun_set_display_backend(
                 self.ctx.id,
-                &sys_backend as *const _ as *const c_void,
-                std::mem::size_of_val(&sys_backend),
+                std::ptr::from_ref(&*table).cast::<c_void>(),
+                std::mem::size_of::<sys::krun_display_backend>(),
             )
         })?;
-
-        self.retained_display = Some(shared);
+        self.retained_display = Some(DisplayHandle {
+            userdata: handle.userdata,
+            _table: table,
+        });
+        std::mem::forget(handle);
         Ok(self)
     }
 
@@ -1165,179 +1299,444 @@ mod tests {
         }
     }
 
+    /// No value of the error type can reach libkrun as a success, whatever a backend puts in
+    /// `Custom`, and a raw code that is not a failure does not become one.
     #[test]
-    fn display_error_conversion_round_trips() {
-        let errors = [
+    fn a_display_error_never_crosses_as_success() {
+        let nz = |v: i32| NonZeroI32::new(v).expect("non-zero by construction");
+        let all = [
+            DisplayError::Internal,
+            DisplayError::MethodUnsupported,
+            DisplayError::InvalidScanoutId,
+            DisplayError::InvalidParam,
+            DisplayError::OutOfBuffers,
+            DisplayError::Custom(nz(-22)),
+            DisplayError::Custom(nz(22)),
+            DisplayError::Custom(nz(i32::MIN)),
+            DisplayError::Custom(nz(i32::MAX)),
+        ];
+        for err in all {
+            assert!(err.to_raw() < 0, "{err:?} would cross as {}", err.to_raw());
+        }
+        for (err, raw) in [
             (DisplayError::Internal, sys::KRUN_DISPLAY_ERR_INTERNAL),
-            (
-                DisplayError::MethodUnsupported,
-                sys::KRUN_DISPLAY_ERR_METHOD_UNSUPPORTED,
-            ),
-            (
-                DisplayError::InvalidScanoutId,
-                sys::KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID,
-            ),
-            (
-                DisplayError::InvalidParam,
-                sys::KRUN_DISPLAY_ERR_INVALID_PARAM,
-            ),
             (
                 DisplayError::OutOfBuffers,
                 sys::KRUN_DISPLAY_ERR_OUT_OF_BUFFERS,
             ),
-            (DisplayError::Custom(-22), -22),
-        ];
-        for (err, raw) in errors {
+            (DisplayError::Custom(nz(-22)), -22),
+        ] {
             assert_eq!(err.to_raw(), raw);
-            assert_eq!(DisplayError::from_raw(raw), err);
+            assert_eq!(DisplayError::from_raw(raw), Some(err));
         }
+        assert_eq!(
+            DisplayError::from_raw(0),
+            None,
+            "zero is success, not an error"
+        );
+        assert_eq!(
+            DisplayError::from_raw(7),
+            None,
+            "a positive code is not a failure"
+        );
     }
 
     #[test]
-    fn pixel_format_conversion_round_trips() {
-        let formats = [
-            (
-                PixelFormat::B8G8R8A8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_B8G8R8A8_UNORM,
-            ),
-            (
-                PixelFormat::B8G8R8X8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_B8G8R8X8_UNORM,
-            ),
-            (
-                PixelFormat::A8R8G8B8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_A8R8G8B8_UNORM,
-            ),
-            (
-                PixelFormat::X8R8G8B8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_X8R8G8B8_UNORM,
-            ),
-            (
-                PixelFormat::R8G8B8A8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_R8G8B8A8_UNORM,
-            ),
-            (
-                PixelFormat::X8B8G8R8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_X8B8G8R8_UNORM,
-            ),
-            (
-                PixelFormat::A8B8G8R8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_A8B8G8R8_UNORM,
-            ),
-            (
-                PixelFormat::R8G8B8X8Unorm,
-                sys::KRUN_DISPLAY_FORMAT_R8G8B8X8_UNORM,
-            ),
-            (PixelFormat::Unknown(999), 999),
-        ];
-        for (fmt, raw) in formats {
+    fn a_pixel_format_round_trips_and_only_known_ones_have_a_size() {
+        for raw in [1, 2, 3, 4, 67, 68, 121, 134] {
+            let fmt = PixelFormat::from_raw(raw);
+            assert!(
+                !matches!(fmt, PixelFormat::Unknown(_)),
+                "{raw} is in the header"
+            );
             assert_eq!(fmt.to_raw(), raw);
-            assert_eq!(PixelFormat::from_raw(raw), fmt);
-            assert_eq!(fmt.bytes_per_pixel(), 4);
+            assert_eq!(fmt.bytes_per_pixel().map(NonZeroUsize::get), Some(4));
+        }
+        assert_eq!(PixelFormat::from_raw(999), PixelFormat::Unknown(999));
+        assert_eq!(PixelFormat::Unknown(999).bytes_per_pixel(), None);
+    }
+
+    /// A scanout hands out its ring, keeps only the newest frame, and recycles the previous
+    /// frame's buffer into the ring, so a warm scanout moves bytes between owners and allocates
+    /// nothing: the address libkrun wrote frame N into is the address frame N+RING is handed.
+    #[test]
+    fn a_scanout_reuses_its_buffers_and_keeps_only_the_latest_frame() {
+        let mut fb = MemoryFramebuffer::new();
+        assert_eq!(
+            fb.alloc_frame(0).err(),
+            Some(DisplayError::InvalidScanoutId)
+        );
+        assert_eq!(
+            fb.disable_scanout(0).err(),
+            Some(DisplayError::InvalidScanoutId)
+        );
+
+        fb.configure_scanout(0, 4, 4, 4, 4, PixelFormat::B8G8R8A8Unorm)
+            .expect("a shape this can size");
+        assert_eq!(fb.scanout_config(0).map(|c| c.width), Some(4));
+
+        let first = fb.alloc_frame(0).expect("a free slot");
+        assert_eq!(first.frame_id, 0);
+        assert_eq!(first.buffer.len(), 4 * 4 * 4);
+        first.buffer[..4].copy_from_slice(&[1, 2, 3, 4]);
+        let first_addr = first.buffer.as_ptr();
+        assert_eq!(
+            fb.present_frame(0, 9, None).err(),
+            Some(DisplayError::InvalidParam),
+            "an id nobody was handed"
+        );
+        fb.present_frame(0, 0, Some(Rect::new(0, 0, 2, 2)))
+            .expect("the id that was handed out");
+        let latest = fb.latest_frame(0).expect("presented");
+        assert_eq!(
+            (latest.frame_id, &latest.pixels[..4]),
+            (0, &[1, 2, 3, 4][..])
+        );
+        assert_eq!(latest.damage, Some(Rect::new(0, 0, 2, 2)));
+        assert_eq!(
+            latest.pixels.as_ptr(),
+            first_addr,
+            "the frame is the buffer, not a copy"
+        );
+
+        // Run the ring dry: RING allocations may be outstanding, and the next is refused.
+        let mut handed = Vec::new();
+        for _ in 0..RING {
+            handed.push(fb.alloc_frame(0).expect("a free slot").frame_id);
+        }
+        assert_eq!(handed, [1, 2, 3]);
+        assert_eq!(fb.alloc_frame(0).err(), Some(DisplayError::OutOfBuffers));
+        for id in handed {
+            fb.present_frame(0, id, None).expect("each comes back");
+        }
+        assert_eq!(fb.latest_frame(0).map(|f| f.frame_id), Some(3));
+
+        // Warm: the buffer frame 0 was written into has been recycled and comes round again.
+        let mut seen = Vec::new();
+        for _ in 0..RING + 1 {
+            let f = fb.alloc_frame(0).expect("a free slot");
+            seen.push(f.buffer.as_ptr());
+            let id = f.frame_id;
+            fb.present_frame(0, id, None).expect("back");
+        }
+        assert!(
+            seen.contains(&first_addr),
+            "the first buffer never came back round"
+        );
+
+        fb.configure_scanout(0, 8, 8, 8, 8, PixelFormat::B8G8R8A8Unorm)
+            .expect("reconfigure");
+        assert_eq!(fb.alloc_frame(0).expect("resized").buffer.len(), 8 * 8 * 4);
+        assert_eq!(
+            fb.configure_scanout(1, 1, 1, 1, 1, PixelFormat::Unknown(5))
+                .err(),
+            Some(DisplayError::InvalidParam),
+            "a shape this cannot size is refused, not sized by guess"
+        );
+        fb.disable_scanout(0).expect("configured");
+        assert!(fb.scanout_config(0).is_none());
+    }
+
+    /// The ids `MemoryFramebuffer` hands out stay inside what the vtable can carry.
+    #[test]
+    fn frame_ids_wrap_inside_the_i32_range() {
+        let mut fb = MemoryFramebuffer::new();
+        fb.configure_scanout(0, 1, 1, 1, 1, PixelFormat::B8G8R8A8Unorm)
+            .expect("a shape");
+        let scanout = fb.scanouts.get_mut(&0).expect("configured");
+        scanout.next_id = MAX_FRAME_ID;
+        let id = fb.alloc_frame(0).expect("a slot").frame_id;
+        assert_eq!(id, MAX_FRAME_ID);
+        fb.present_frame(0, id, None).expect("back");
+        assert_eq!(fb.alloc_frame(0).expect("a slot").frame_id, 0);
+    }
+
+    /// A backend for the trampoline tests: records every call, answers with whatever it was told
+    /// to, and lends a buffer it never resizes while a frame is out.
+    struct Recorder {
+        calls: Vec<String>,
+        answer: Result<(), DisplayError>,
+        frame_id: u32,
+        buffer: Vec<u8>,
+        panic_next: bool,
+    }
+
+    impl Default for Recorder {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                answer: Ok(()),
+                frame_id: 0,
+                buffer: Vec::new(),
+                panic_next: false,
+            }
         }
     }
 
-    #[test]
-    fn memory_framebuffer_lifecycle() {
-        let mut mfb = MemoryFramebuffer::new();
-        assert!(mfb.scanout_config(0).is_none());
-
-        mfb.configure_scanout(0, 640, 480, 640, 480, PixelFormat::B8G8R8A8Unorm)
-            .expect("configure succeeds");
-        let cfg = mfb.scanout_config(0).expect("scanout 0 configured");
-        assert_eq!(cfg.width, 640);
-        assert_eq!(cfg.height, 480);
-        assert_eq!(cfg.format, PixelFormat::B8G8R8A8Unorm);
-
-        let alloc = mfb.alloc_frame(0).expect("alloc frame succeeds");
-        assert_eq!(alloc.frame_id, 0);
-        assert_eq!(alloc.buffer.len(), 640 * 480 * 4);
-        alloc.buffer[0..4].copy_from_slice(&[10, 20, 30, 40]);
-
-        let damage = Some(Rect {
-            x: 0,
-            y: 0,
-            width: 10,
-            height: 10,
-        });
-        mfb.present_frame(0, 0, damage)
-            .expect("present frame succeeds");
-
-        let presented = mfb.presented_frames();
-        assert_eq!(presented.len(), 1);
-        let frame = mfb.latest_frame(0).expect("latest frame exists");
-        assert_eq!(frame.scanout_id, 0);
-        assert_eq!(frame.frame_id, 0);
-        assert_eq!(frame.pixels[0..4], [10, 20, 30, 40]);
-        assert_eq!(frame.damage, damage);
-
-        mfb.disable_scanout(0).expect("disable scanout succeeds");
-        assert!(mfb.scanout_config(0).is_none());
+    // SAFETY: `buffer` is resized nowhere; the slice handed out is stable until the recorder is
+    // destroyed, which happens after every frame is presented in these tests.
+    unsafe impl DisplayBackend for Recorder {
+        fn configure_scanout(
+            &mut self,
+            id: u32,
+            dw: u32,
+            dh: u32,
+            w: u32,
+            h: u32,
+            format: PixelFormat,
+        ) -> Result<(), DisplayError> {
+            if self.panic_next {
+                self.panic_next = false;
+                #[allow(clippy::panic)]
+                {
+                    panic!("a backend that panics");
+                }
+            }
+            self.calls
+                .push(format!("configure {id} {dw}x{dh} {w}x{h} {format:?}"));
+            self.answer
+        }
+        fn disable_scanout(&mut self, id: u32) -> Result<(), DisplayError> {
+            self.calls.push(format!("disable {id}"));
+            self.answer
+        }
+        fn alloc_frame(&mut self, id: u32) -> Result<FrameAllocation<'_>, DisplayError> {
+            self.calls.push(format!("alloc {id}"));
+            self.answer?;
+            Ok(FrameAllocation::new(self.frame_id, &mut self.buffer))
+        }
+        fn present_frame(
+            &mut self,
+            id: u32,
+            frame: u32,
+            damage: Option<Rect>,
+        ) -> Result<(), DisplayError> {
+            self.calls.push(format!("present {id} {frame} {damage:?}"));
+            self.answer
+        }
     }
 
-    #[test]
-    fn display_vtable_ffi_trampolines_work() {
-        let backend = MemoryFramebuffer::new();
-        let shared: SharedDisplayBackend = Arc::new(Mutex::new(Some(Box::new(backend))));
-        let raw_userdata = Arc::into_raw(shared.clone()) as *const c_void;
-
+    /// A recorder as libkrun would hold it: the shared handle, the raw userdata, and an instance
+    /// created through the real `c_create`.
+    fn instance_of(recorder: Recorder) -> (Arc<Backend>, *const c_void, *mut c_void) {
+        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(recorder)));
+        let userdata = Arc::into_raw(Arc::clone(&shared)).cast::<c_void>();
         let mut instance: *mut c_void = std::ptr::null_mut();
-        let rc = unsafe { c_create(&mut instance, raw_userdata, std::ptr::null()) };
-        assert_eq!(rc, 0);
-        assert_eq!(instance, raw_userdata as *mut c_void);
+        assert_eq!(
+            unsafe { c_create(&mut instance, userdata, std::ptr::null()) },
+            0
+        );
+        (shared, userdata, instance)
+    }
 
-        let rc = unsafe { c_configure_scanout(instance, 0, 320, 240, 320, 240, 1) };
-        assert_eq!(rc, 0);
+    /// Finishes with the recorder: destroys the instance, returns the userdata count, and hands
+    /// back what was recorded.
+    fn calls_of(
+        shared: Arc<Backend>,
+        userdata: *const c_void,
+        instance: *mut c_void,
+    ) -> Vec<String> {
+        assert_eq!(unsafe { c_destroy(instance) }, 0);
+        drop(unsafe { Arc::from_raw(userdata.cast::<Backend>()) });
+        assert_eq!(Arc::strong_count(&shared), 1, "every count came back");
+        // Recovered, not required: a backend that panicked poisoned it, and reading what
+        // it recorded before that is the point.
+        let guard = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let boxed: &dyn DisplayBackend = &**guard;
+        // The recorder is the only implementor behind this pointer in these tests.
+        let recorder =
+            unsafe { &*std::ptr::from_ref::<dyn DisplayBackend>(boxed).cast::<Recorder>() };
+        recorder.calls.clone()
+    }
 
-        let mut buf_ptr: *mut u8 = std::ptr::null_mut();
-        let mut buf_size: usize = 0;
-        let frame_id = unsafe { c_alloc_frame(instance, 0, &mut buf_ptr, &mut buf_size) };
-        assert_eq!(frame_id, 0);
-        assert!(!buf_ptr.is_null());
-        assert_eq!(buf_size, 320 * 240 * 4);
-
-        unsafe {
-            let slice = std::slice::from_raw_parts_mut(buf_ptr, 4);
-            slice.copy_from_slice(&[99, 88, 77, 66]);
-        }
-
+    /// Each callback reaches the backend with its arguments intact, hands libkrun the buffer and
+    /// id it was given, and carries a backend's error back as the code it named.
+    #[test]
+    fn the_trampolines_carry_calls_and_answers_across_the_boundary() {
+        let (shared, userdata, instance) = instance_of(Recorder {
+            frame_id: 42,
+            buffer: vec![0; 16],
+            ..Recorder::default()
+        });
+        assert_eq!(
+            unsafe { c_configure_scanout(instance, 0, 320, 240, 32, 24, 1) },
+            0
+        );
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        assert_eq!(
+            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            42
+        );
+        assert_eq!(len, 16);
+        unsafe { std::slice::from_raw_parts_mut(buf, 4) }.copy_from_slice(&[9, 8, 7, 6]);
         let damage = sys::krun_rect {
-            x: 0,
-            y: 0,
-            width: 5,
-            height: 5,
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
         };
-        let rc = unsafe { c_present_frame(instance, 0, frame_id as u32, &damage) };
-        assert_eq!(rc, 0);
-
+        assert_eq!(unsafe { c_present_frame(instance, 0, 42, &damage) }, 0);
+        assert_eq!(
+            unsafe { c_present_frame(instance, 0, 42, std::ptr::null()) },
+            0
+        );
+        assert_eq!(unsafe { c_disable_scanout(instance, 0) }, 0);
         {
-            let guard = shared.lock().expect("lock shared display");
-            let trait_obj = guard.as_ref().expect("backend present");
-            // Cast or inspect the underlying MemoryFramebuffer via raw ptr safely since we created it above
-            let mfb_ptr = &**trait_obj as *const dyn DisplayBackend as *const MemoryFramebuffer;
-            let mfb = unsafe { &*mfb_ptr };
-            let frame = mfb.latest_frame(0).expect("frame presented");
-            assert_eq!(frame.pixels[0..4], [99, 88, 77, 66]);
+            // Recovered, not required: a backend that panicked poisoned it, and reading what
+            // it recorded before that is the point.
+            let guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let boxed: &dyn DisplayBackend = &**guard;
+            let recorder =
+                unsafe { &*std::ptr::from_ref::<dyn DisplayBackend>(boxed).cast::<Recorder>() };
             assert_eq!(
-                frame.damage,
-                Some(Rect {
-                    x: 0,
-                    y: 0,
-                    width: 5,
-                    height: 5
-                })
+                &recorder.buffer[..4],
+                &[9, 8, 7, 6],
+                "libkrun's write landed"
             );
         }
+        assert_eq!(
+            calls_of(shared, userdata, instance),
+            [
+                "configure 0 320x240 32x24 B8G8R8A8Unorm",
+                "alloc 0",
+                "present 0 42 Some(Rect { x: 1, y: 2, width: 3, height: 4 })",
+                "present 0 42 None",
+                "disable 0",
+            ]
+        );
 
-        let rc = unsafe { c_disable_scanout(instance, 0) };
-        assert_eq!(rc, 0);
+        let custom = NonZeroI32::new(-9).expect("non-zero");
+        let (shared, userdata, instance) = instance_of(Recorder {
+            answer: Err(DisplayError::Custom(custom)),
+            ..Recorder::default()
+        });
+        assert_eq!(unsafe { c_disable_scanout(instance, 3) }, -9);
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        assert_eq!(
+            unsafe { c_alloc_frame(instance, 3, &mut buf, &mut len) },
+            -9
+        );
+        assert!(
+            buf.is_null() && len == 0,
+            "a refused alloc writes nothing back"
+        );
+        calls_of(shared, userdata, instance);
+    }
 
-        let rc = unsafe { c_destroy(instance) };
-        assert_eq!(rc, 0);
+    /// What the trampolines refuse before the backend is asked: a null instance, a null output
+    /// pointer, and a frame id the vtable cannot carry.
+    #[test]
+    fn the_trampolines_refuse_what_the_boundary_cannot_carry() {
+        let null = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { c_configure_scanout(null, 0, 1, 1, 1, 1, 1) },
+            sys::KRUN_DISPLAY_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { c_disable_scanout(null, 0) },
+            sys::KRUN_DISPLAY_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { c_present_frame(null, 0, 0, std::ptr::null()) },
+            sys::KRUN_DISPLAY_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { c_destroy(null) },
+            0,
+            "nothing to destroy is not an error"
+        );
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { c_create(&mut instance, std::ptr::null(), std::ptr::null()) },
+            sys::KRUN_DISPLAY_ERR_INVALID_PARAM
+        );
 
-        // Reclaim the original Arc created by Arc::into_raw.
-        unsafe {
-            let _ = Arc::from_raw(raw_userdata as *const Mutex<Option<Box<dyn DisplayBackend>>>);
-        }
+        // `1 << 31`, not `u32::MAX`: the latter sign-flips to -1, which is `ERR_INTERNAL` too,
+        // and the assertion held with the cap removed (watched). This one flips to `i32::MIN`.
+        let (shared, userdata, instance) = instance_of(Recorder {
+            frame_id: 1 << 31,
+            buffer: vec![0; 4],
+            ..Recorder::default()
+        });
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        assert_eq!(
+            unsafe { c_alloc_frame(instance, 0, std::ptr::null_mut(), &mut len) },
+            sys::KRUN_DISPLAY_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            sys::KRUN_DISPLAY_ERR_INTERNAL,
+            "an id above i32::MAX would arrive as some other error; it is refused as this one"
+        );
+        calls_of(shared, userdata, instance);
+
+        // The largest id that fits is not refused: the cap is exactly the type's edge.
+        let (shared, userdata, instance) = instance_of(Recorder {
+            frame_id: MAX_FRAME_ID,
+            buffer: vec![0; 4],
+            ..Recorder::default()
+        });
+        assert_eq!(
+            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            i32::MAX
+        );
+        calls_of(shared, userdata, instance);
+    }
+
+    /// A panic in the backend is reported as an internal error, not unwound into libkrun, and
+    /// the backend keeps answering afterwards: the lock it poisoned is recovered, not refused.
+    #[test]
+    fn a_panicking_backend_reports_internal_and_keeps_answering() {
+        let (shared, userdata, instance) = instance_of(Recorder {
+            panic_next: true,
+            ..Recorder::default()
+        });
+        assert_eq!(
+            unsafe { c_configure_scanout(instance, 0, 1, 1, 1, 1, 1) },
+            sys::KRUN_DISPLAY_ERR_INTERNAL
+        );
+        assert_eq!(
+            unsafe { c_configure_scanout(instance, 0, 1, 1, 1, 1, 1) },
+            0
+        );
+        assert_eq!(
+            calls_of(shared, userdata, instance),
+            ["configure 0 1x1 1x1 B8G8R8A8Unorm"],
+            "the panicking call recorded nothing; the next recorded normally"
+        );
+    }
+
+    /// The count a machine hands libkrun as userdata comes back when the machine goes without
+    /// starting, so a backend is not held forever by a `display_backend` that never booted.
+    #[test]
+    fn a_display_handle_returns_its_count_when_dropped() {
+        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(MemoryFramebuffer::new())));
+        let handle = DisplayHandle {
+            userdata: Arc::into_raw(Arc::clone(&shared)),
+            _table: Box::new(sys::krun_display_backend {
+                features: 0,
+                create_userdata: std::ptr::null(),
+                create: None,
+                vtable: sys::krun_display_vtable {
+                    basic_framebuffer: sys::krun_display_basic_framebuffer_vtable {
+                        destroy: None,
+                        disable_scanout: None,
+                        configure_scanout: None,
+                        alloc_frame: None,
+                        present_frame: None,
+                    },
+                },
+            }),
+        };
+        assert_eq!(Arc::strong_count(&shared), 2);
+        drop(handle);
+        assert_eq!(Arc::strong_count(&shared), 1);
     }
 }

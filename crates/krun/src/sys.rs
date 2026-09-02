@@ -15,7 +15,9 @@
 //!   emit the whole 66-symbol surface; the app uses a fraction of it, and a declaration a human
 //!   wrote against the header is a declaration a human can review.
 //! - **The subset is what phases 2, 3 and 4 need**, plus the capability probes. The display
-//!   vtables (`libkrun_display.h`) are added in phase 4.1.
+//!   vtable (`libkrun_display.h`) is a callback table libkrun reads by **layout**, so
+//!   `the_display_structs_match_the_installed_header` checks its field order the way the arity
+//!   test checks signatures. The input vtable (`libkrun_input.h`) is 4.3's and is not declared.
 //! - **A wrong signature is undefined behaviour, not a compile error.** The C header is the only
 //!   authority; `the_declared_arity_matches_the_installed_header` reads the installed header back
 //!   and compares, so a libkrun bump that changes an argument fails the gate on a host that has it.
@@ -638,6 +640,85 @@ mod tests {
             4,
             "uid_t/gid_t are 32-bit on Linux and macOS"
         );
+    }
+
+    /// The header the display structs were transcribed from.
+    const DISPLAY_HEADER: &str = "/usr/include/libkrun_display.h";
+
+    /// The structs libkrun reads by layout, with their field names in the order declared above.
+    /// A callback table is the one binding where a wrong *order* is undefined behaviour with a
+    /// correct arity: libkrun would call `disable_scanout` where it meant `destroy`.
+    const DISPLAY_STRUCTS: &[(&str, &[&str])] = &[
+        ("krun_rect", &["x", "y", "width", "height"]),
+        (
+            "krun_display_basic_framebuffer_vtable",
+            &[
+                "destroy",
+                "disable_scanout",
+                "configure_scanout",
+                "alloc_frame",
+                "present_frame",
+            ],
+        ),
+        (
+            "krun_display_backend",
+            &["features", "create_userdata", "create", "vtable"],
+        ),
+    ];
+
+    /// The field names of `struct name { ... }` in `header`, in order: the last word of each
+    /// `;`-terminated declaration with `//` comments stripped and a leading `*` dropped.
+    fn header_struct_fields(header: &str, name: &str) -> Option<Vec<String>> {
+        let at = header.find(&format!("struct {name} {{"))?;
+        let open = at + header[at..].find('{')?;
+        let close = open + header[open..].find('}')?;
+        let mut fields = Vec::new();
+        for decl in header[open + 1..close].split(';') {
+            let code: Vec<&str> = decl
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect();
+            if let Some(last) = code.join(" ").split_whitespace().last() {
+                fields.push(last.trim_start_matches('*').to_string());
+            }
+        }
+        Some(fields)
+    }
+
+    #[test]
+    fn the_display_structs_match_the_installed_header() {
+        let Ok(header) = std::fs::read_to_string(DISPLAY_HEADER) else {
+            println!(
+                "SKIPPED the_display_structs_match_the_installed_header: {DISPLAY_HEADER} is \
+                 absent, so the struct layouts were compared against nothing. Install libkrun to \
+                 run it."
+            );
+            return;
+        };
+        for (name, declared) in DISPLAY_STRUCTS {
+            let actual = header_struct_fields(&header, name)
+                .unwrap_or_else(|| Vec::from([format!("<{name} not found>")]));
+            assert_eq!(
+                actual, *declared,
+                "struct {name} in {DISPLAY_HEADER} is laid out differently from the declaration \
+                 above it, which is undefined behaviour at the first callback"
+            );
+        }
+    }
+
+    /// The struct parser has to be able to fail, in both directions.
+    #[test]
+    fn the_struct_check_rejects_a_reordered_field_and_a_missing_struct() {
+        let header = "struct two {\n    int a; // first\n    void *b;\n    struct x c;\n};\n";
+        assert_eq!(
+            header_struct_fields(header, "two").expect("found"),
+            ["a", "b", "c"]
+        );
+        assert_ne!(
+            header_struct_fields(header, "two").expect("found"),
+            ["b", "a", "c"]
+        );
+        assert_eq!(header_struct_fields(header, "absent"), None);
     }
 
     /// The library is linked and answers. Compiled out where `build.rs` found no libkrun, because
