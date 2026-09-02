@@ -1773,10 +1773,12 @@ mod discover_tests {
 
         let _listener = UnixListener::bind(d.join("alive.sock")).expect("bind the live one");
         // A leftover: bound, then closed, exactly as a helper leaves it.
-        drop(UnixListener::bind(d.join("ended.sock")).expect("bind then drop"));
+        let ended = UnixListener::bind(d.join("ended.sock")).expect("bind then drop");
+        drop(ended);
         // Not a socket at all, and a socket whose name could not be passed back into the API.
         std::fs::write(d.join("notes.txt"), b"not a vm").expect("write a stray file");
-        drop(UnixListener::bind(d.join("bad name.sock")).expect("bind a badly named socket"));
+        let bad = UnixListener::bind(d.join("bad name.sock")).expect("bind a badly named socket");
+        drop(bad);
 
         let found = discover::live_in(d).expect("scan the directory");
         let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();

@@ -22,7 +22,7 @@ pub(crate) struct Artifact {
 /// Obtain one artifact into place. **Vendor-aware:** if `BSX_VENDOR_DIR` is set, the artifact is
 /// restored from the local vendor mirror (a sha-verified copy, no network); otherwise it is
 /// downloaded from its pinned upstream URL. Either way the sha256 is the contract, so a corrupt or
-/// substituted file fails here. Every build path (`build-rootfs`, `fetch-artifacts`, `self-host`)
+/// substituted file fails here. Every build path (`build-rootfs`)
 /// goes through here, so setting `BSX_VENDOR_DIR` takes all of them offline at once.
 pub(crate) fn fetch_one(a: &Artifact) -> Result<()> {
     match vendor_dir() {

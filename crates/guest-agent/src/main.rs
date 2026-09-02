@@ -1,7 +1,7 @@
 //! The `guest-agent` binary: listens for connections and serves one command each.
 //!
 //! - **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the channel
-//!   the host reaches through Firecracker's vsock socket. For host-side development it also listens on
+//!   the host reaches through libkrun's vsock mapping. For host-side development it also listens on
 //!   a **unix socket** (`unix:<path>`), which makes the whole exec path runnable with no VM. Only the
 //!   listener differs, since `serve` takes any `Read`+`Write`.
 //! - **Streams.** `tracing` goes to stderr. Exactly one line goes to **stdout**, the readiness

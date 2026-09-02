@@ -21,7 +21,7 @@ path = "src/main.rs"
 bsx-channel = { path = "../channel" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only: the host reaches Firecracker's
+# The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only: the host reaches libkrun's
 # vsock over a plain `UnixStream`, not `AF_VSOCK`. The crate's internal `unsafe` is the dep's, not
 # ours (this crate stays `#![forbid(unsafe_code)]`). Pinned; all of its tree is MIT/Apache.
 vsock = "0.5.4"

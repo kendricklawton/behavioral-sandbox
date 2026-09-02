@@ -14,10 +14,8 @@
 //! - **Hand-written, not generated.** `bindgen` would add a build-time dependency on libclang and
 //!   emit the whole 66-symbol surface; the app uses a fraction of it, and a declaration a human
 //!   wrote against the header is a declaration a human can review.
-//! - **The subset is what phases 2 and 3 need**, plus the capability probes. The display and input
-//!   vtables (`libkrun_display.h`, `libkrun_input.h`) are phase 4's and are not declared here,
-//!   because a callback table is a different kind of binding and guessing at it now would be
-//!   unreviewable.
+//! - **The subset is what phases 2, 3 and 4 need**, plus the capability probes. The display
+//!   vtables (`libkrun_display.h`) are added in phase 4.1.
 //! - **A wrong signature is undefined behaviour, not a compile error.** The C header is the only
 //!   authority; `the_declared_arity_matches_the_installed_header` reads the installed header back
 //!   and compares, so a libkrun bump that changes an argument fails the gate on a host that has it.
@@ -29,7 +27,7 @@
 // what stops a running VM, and `krun_get_shutdown_eventfd` is efi-only, so neither is wrapped here.
 #![allow(dead_code)]
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 
 /// The virtiofs tag libkrun's init treats as the root filesystem (`KRUN_FS_ROOT_TAG`). Passing it
 /// to `krun_add_virtiofs3` is the long form of `krun_set_root`, with the DAX window and the
@@ -91,6 +89,149 @@ pub const KRUN_FEATURE_AWS_NITRO: u64 = 9;
 pub const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u64 = 10;
 /// See [`KRUN_FEATURE_NET`].
 pub const KRUN_FEATURE_INIT_BLOB: u64 = 11;
+
+// --- display backend constants and vtable types (libkrun_display.h) --------------------------
+/// Display backend internal error code.
+pub const KRUN_DISPLAY_ERR_INTERNAL: i32 = -1;
+/// Display backend method unsupported error code.
+pub const KRUN_DISPLAY_ERR_METHOD_UNSUPPORTED: i32 = -2;
+/// Display backend invalid scanout ID error code.
+pub const KRUN_DISPLAY_ERR_INVALID_SCANOUT_ID: i32 = -3;
+/// Display backend invalid parameter error code.
+pub const KRUN_DISPLAY_ERR_INVALID_PARAM: i32 = -4;
+/// Display backend out of buffers error code.
+pub const KRUN_DISPLAY_ERR_OUT_OF_BUFFERS: i32 = -5;
+
+/// Pixel format B8G8R8A8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+/// Pixel format B8G8R8X8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_B8G8R8X8_UNORM: u32 = 2;
+/// Pixel format A8R8G8B8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_A8R8G8B8_UNORM: u32 = 3;
+/// Pixel format X8R8G8B8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_X8R8G8B8_UNORM: u32 = 4;
+/// Pixel format R8G8B8A8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_R8G8B8A8_UNORM: u32 = 67;
+/// Pixel format X8B8G8R8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_X8B8G8R8_UNORM: u32 = 68;
+/// Pixel format A8B8G8R8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_A8B8G8R8_UNORM: u32 = 121;
+/// Pixel format R8G8B8X8_UNORM.
+pub const KRUN_DISPLAY_FORMAT_R8G8B8X8_UNORM: u32 = 134;
+
+/// Feature bit for basic framebuffer display operations.
+pub const KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER: u64 = 1;
+
+/// A rectangle describing a frame damage region.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub struct krun_rect {
+    /// X coordinate of rectangle origin.
+    pub x: u32,
+    /// Y coordinate of rectangle origin.
+    pub y: u32,
+    /// Width of rectangle.
+    pub width: u32,
+    /// Height of rectangle.
+    pub height: u32,
+}
+
+/// Callback to create a display backend instance.
+#[allow(non_camel_case_types)]
+pub type krun_display_create_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut *mut c_void,
+        userdata: *const c_void,
+        reserved: *const c_void,
+    ) -> i32,
+>;
+
+/// Callback to destroy a display backend instance.
+#[allow(non_camel_case_types)]
+pub type krun_display_destroy_fn = Option<unsafe extern "C" fn(instance: *mut c_void) -> i32>;
+
+/// Callback to configure or reconfigure a display scanout.
+#[allow(non_camel_case_types)]
+pub type krun_display_configure_scanout_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut c_void,
+        scanout_id: u32,
+        display_width: u32,
+        display_height: u32,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> i32,
+>;
+
+/// Callback to disable a display scanout.
+#[allow(non_camel_case_types)]
+pub type krun_display_disable_scanout_fn =
+    Option<unsafe extern "C" fn(instance: *mut c_void, scanout_id: u32) -> i32>;
+
+/// Callback to allocate a frame buffer for a scanout.
+#[allow(non_camel_case_types)]
+pub type krun_display_alloc_frame_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut c_void,
+        scanout_id: u32,
+        buffer: *mut *mut u8,
+        buffer_size: *mut usize,
+    ) -> i32,
+>;
+
+/// Callback to present a frame to the display.
+#[allow(non_camel_case_types)]
+pub type krun_display_present_frame_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut c_void,
+        scanout_id: u32,
+        frame_id: u32,
+        damage_area: *const krun_rect,
+    ) -> i32,
+>;
+
+/// Basic framebuffer vtable callbacks.
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_display_basic_framebuffer_vtable {
+    /// Optional destroy callback.
+    pub destroy: krun_display_destroy_fn,
+    /// Callback to disable scanout.
+    pub disable_scanout: krun_display_disable_scanout_fn,
+    /// Callback to configure scanout.
+    pub configure_scanout: krun_display_configure_scanout_fn,
+    /// Callback to allocate frame buffer.
+    pub alloc_frame: krun_display_alloc_frame_fn,
+    /// Callback to present frame.
+    pub present_frame: krun_display_present_frame_fn,
+}
+
+/// Union of display vtable implementations.
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub union krun_display_vtable {
+    /// Basic framebuffer vtable.
+    pub basic_framebuffer: krun_display_basic_framebuffer_vtable,
+}
+
+/// Display backend configuration handed to [`krun_set_display_backend`].
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_display_backend {
+    /// Bitmask of supported display features.
+    pub features: u64,
+    /// Userdata passed to `create`.
+    pub create_userdata: *const c_void,
+    /// Optional instance constructor callback.
+    pub create: krun_display_create_fn,
+    /// Callback vtable implementations.
+    pub vtable: krun_display_vtable,
+}
 
 // Every declaration is transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`
 // and `gid_t` are `u32` on both targets this project builds for; naming them as such keeps this
@@ -209,6 +350,34 @@ unsafe extern "C" {
         flags: u32,
     ) -> i32;
 
+    // --- display -----------------------------------------------------------------------------
+    /// Configures a display output for the microVM.
+    pub fn krun_add_display(ctx_id: u32, width: u32, height: u32) -> i32;
+    /// Configures a custom EDID blob for a display.
+    pub fn krun_display_set_edid(
+        ctx_id: u32,
+        display_id: u32,
+        edid_blob: *const u8,
+        blob_size: usize,
+    ) -> i32;
+    /// Configures DPI of the display reported to the guest.
+    pub fn krun_display_set_dpi(ctx_id: u32, display_id: u32, dpi: u32) -> i32;
+    /// Configures physical size of the display reported to the guest.
+    pub fn krun_display_set_physical_size(
+        ctx_id: u32,
+        display_id: u32,
+        width_mm: u16,
+        height_mm: u16,
+    ) -> i32;
+    /// Configures refresh rate for a display.
+    pub fn krun_display_set_refresh_rate(ctx_id: u32, display_id: u32, refresh_rate: u32) -> i32;
+    /// Configures a display backend struct for display output.
+    pub fn krun_set_display_backend(
+        ctx_id: u32,
+        display_backend: *const c_void,
+        backend_size: usize,
+    ) -> i32;
+
     // --- lifecycle and probes ----------------------------------------------------------------
     /// Returns an eventfd that stops the VM when written to. The stop path, since the thread that
     /// called `krun_start_enter` never comes back to be asked.
@@ -289,6 +458,42 @@ mod stub {
     ) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_add_display(_ctx_id: u32, _width: u32, _height: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_display_set_edid(
+        _ctx_id: u32,
+        _display_id: u32,
+        _edid_blob: *const u8,
+        _blob_size: usize,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_display_set_dpi(_ctx_id: u32, _display_id: u32, _dpi: u32) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_display_set_physical_size(
+        _ctx_id: u32,
+        _display_id: u32,
+        _width_mm: u16,
+        _height_mm: u16,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_display_set_refresh_rate(
+        _ctx_id: u32,
+        _display_id: u32,
+        _refresh_rate: u32,
+    ) -> i32 {
+        NOT_LINKED
+    }
+    pub unsafe fn krun_set_display_backend(
+        _ctx_id: u32,
+        _display_backend: *const super::c_void,
+        _backend_size: usize,
+    ) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_start_enter(_ctx_id: u32) -> i32 {
         NOT_LINKED
     }
@@ -345,6 +550,12 @@ mod tests {
         ("krun_set_passt_fd", 2),
         ("krun_set_port_map", 2),
         ("krun_add_net_unixstream", 6),
+        ("krun_add_display", 3),
+        ("krun_display_set_edid", 4),
+        ("krun_display_set_dpi", 3),
+        ("krun_display_set_physical_size", 4),
+        ("krun_display_set_refresh_rate", 3),
+        ("krun_set_display_backend", 3),
         ("krun_get_shutdown_eventfd", 1),
         ("krun_start_enter", 1),
         ("krun_has_feature", 1),
