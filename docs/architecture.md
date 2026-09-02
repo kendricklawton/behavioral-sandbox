@@ -22,7 +22,8 @@ What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest a
 (`bsx-guest-agent`), the safe libkrun wrapper (`bsx-krun`), the process supervisor
 (`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
 (`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
-the VM's own process opens. What is not: the GUI application, GPU acceleration, and macOS.
+the VM's own process opens, with that window's keyboard and pointer going back as two virtio-input
+devices. What is not: the GUI application, GPU acceleration, and macOS.
 
 ### Design rules
 

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod input;
 mod lifecycle;
 mod run;
 mod shell;

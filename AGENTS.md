@@ -37,8 +37,9 @@ than carried alongside its replacement; the libkrun supervisor (phase 2) and the
 (phase 3) are in. On a host with `/dev/kvm` and a guest image the tree builds, `bsx run` runs one
 command in a sandbox, `bsx shell` opens a session on a guest pty, `bsx up` starts a sandbox that
 outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this process did not start.
-`--display` gives a guest a virtio-gpu display shown in a window (4.2). GPU acceleration and macOS
-(phases 5 and 6) are not written, and macOS is unbuilt and untested.
+`--display` gives a guest a virtio-gpu display shown in a window, and the window's keyboard and
+pointer reach the guest as two virtio-input devices (4.2, 4.3). GPU acceleration and macOS (phases
+5 and 6) are not written, and macOS is unbuilt and untested.
 
 ## Design rules (every change holds to all six)
 

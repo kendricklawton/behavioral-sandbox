@@ -93,8 +93,9 @@ pub(crate) struct VmmArgs {
     /// guest editing what the next guest starts from.
     #[arg(long, value_name = "POSTURE", default_value = "read-only")]
     pub(crate) rootfs: RootFsPosture,
-    /// A display for the guest as `WIDTHxHEIGHT`, shown in a window this process opens. Without
-    /// a display server the display still runs and the window is skipped, with a warning.
+    /// A display for the guest as `WIDTHxHEIGHT`, shown in a window this process opens, whose
+    /// keyboard and pointer go to the guest as two input devices. Without a display server the
+    /// display still runs and the window is skipped, with a warning.
     #[arg(long, value_name = "WIDTHxHEIGHT")]
     pub(crate) display: Option<String>,
     /// Keep this file holding the display's latest frame as a binary PPM. Needs `--display`.
@@ -377,6 +378,8 @@ enum HelperError {
     ScreenshotNeedsDisplay,
     /// The display's window thread could not be started.
     Window(std::io::Error),
+    /// The input replay thread could not be started.
+    Input(std::io::Error),
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -443,6 +446,7 @@ impl std::fmt::Display for HelperError {
                 write!(f, "--screenshot needs a --display to take a frame from")
             }
             Self::Window(e) => write!(f, "the display window: {e}"),
+            Self::Input(e) => write!(f, "the input replay: {e}"),
             Self::Socket(e) => write!(f, "the control socket: {e}"),
             Self::Krun(e) => write!(f, "{e}"),
         }
@@ -555,20 +559,28 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         machine = machine.vsock_port(port, path, true)?;
         restrict_when_bound(path);
     }
-    // The display: the device, the scanout's size, and where its frames land. The window that
-    // shows them runs on its own thread from here on, because the one this is on is about to
-    // become the guest.
+    // The display: the device, the scanout's size, where its frames land, and the keyboard and
+    // pointer that come with it. The window that shows the frames and feeds the devices runs on
+    // its own thread from here on, because the one this is on is about to become the guest.
     if let Some((width, height)) = display {
         machine = machine.gpu_device()?;
         let (with_display, _display_id) = machine.add_display(width.get(), height.get())?;
         let (with_backend, framebuffer) =
             with_display.display_backend(bsx_krun::MemoryFramebuffer::new())?;
-        machine = with_backend;
+        let (with_keyboard, keyboard) = with_backend.input_device(crate::input::keyboard())?;
+        let (with_pointer, pointer) = with_keyboard.input_device(crate::input::pointer())?;
+        machine = with_pointer;
+        let inputs = crate::input::Inputs { keyboard, pointer };
+        if let Some(path) = std::env::var_os(crate::input::REPLAY_ENV) {
+            crate::input::replay(PathBuf::from(path), inputs.clone())
+                .map_err(HelperError::Input)?;
+        }
         crate::window::spawn(
             framebuffer,
             (width, height),
             args.name.as_deref().unwrap_or("sandbox"),
             args.screenshot.clone(),
+            inputs,
         )
         .map_err(HelperError::Window)?;
     }

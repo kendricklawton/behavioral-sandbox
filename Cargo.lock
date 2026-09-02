@@ -193,6 +193,9 @@ dependencies = [
 [[package]]
 name = "bsx-krun"
 version = "0.0.4"
+dependencies = [
+ "rustix 1.1.4",
+]
 
 [[package]]
 name = "bsx-supervisor"

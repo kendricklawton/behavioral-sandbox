@@ -17,7 +17,8 @@
 //! - **The subset is what phases 2, 3 and 4 need**, plus the capability probes. The display
 //!   vtable (`libkrun_display.h`) is a callback table libkrun reads by **layout**, so
 //!   `the_display_structs_match_the_installed_header` checks its field order the way the arity
-//!   test checks signatures. The input vtable (`libkrun_input.h`) is 4.3's and is not declared.
+//!   test checks signatures. The input tables (`libkrun_input.h`) are checked the same way by
+//!   `the_input_structs_match_the_installed_header`.
 //! - **A wrong signature is undefined behaviour, not a compile error.** The C header is the only
 //!   authority; `the_declared_arity_matches_the_installed_header` reads the installed header back
 //!   and compares, so a libkrun bump that changes an argument fails the gate on a host that has it.
@@ -247,6 +248,197 @@ pub struct krun_display_backend {
     pub vtable: krun_display_vtable,
 }
 
+// --- input backend constants and vtable types (libkrun_input.h) ------------------------------
+/// Input backend internal error code.
+pub const KRUN_INPUT_ERR_INTERNAL: i32 = -1;
+/// Input backend would-block error code.
+pub const KRUN_INPUT_ERR_EAGAIN: i32 = -2;
+/// Input backend method unsupported error code.
+pub const KRUN_INPUT_ERR_METHOD_UNSUPPORTED: i32 = -3;
+/// Input backend invalid parameter error code.
+pub const KRUN_INPUT_ERR_INVALID_PARAM: i32 = -4;
+
+/// Feature bit: the config object answers the `query_*` callbacks.
+pub const KRUN_INPUT_CONFIG_FEATURE_QUERY: u64 = 1;
+/// Feature bit: the event provider is a queue behind a ready fd.
+pub const KRUN_INPUT_EVENT_PROVIDER_FEATURE_QUEUE: u64 = 1;
+
+/// One event as virtio-input carries it. `type_` is the header's `type`, a Rust keyword.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_event {
+    /// Event type (`EV_KEY`, `EV_REL`, `EV_ABS`, ...).
+    pub type_: u16,
+    /// Event code (a key code, an axis, ...).
+    pub code: u16,
+    /// Event value; libkrun reinterprets it as the `i32` the guest reads.
+    pub value: u32,
+}
+
+/// The evdev identity of a device.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_device_ids {
+    /// Bus type (`BUS_VIRTUAL`, ...).
+    pub bustype: u16,
+    /// Vendor id.
+    pub vendor: u16,
+    /// Product id.
+    pub product: u16,
+    /// Version.
+    pub version: u16,
+}
+
+/// The range of one absolute axis.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_absinfo {
+    /// Smallest value.
+    pub min: u32,
+    /// Largest value.
+    pub max: u32,
+    /// Noise the driver should filter.
+    pub fuzz: u32,
+    /// Dead zone around the centre.
+    pub flat: u32,
+    /// Resolution, units per millimetre.
+    pub res: u32,
+}
+
+/// Callback to create an input config or event-provider instance.
+#[allow(non_camel_case_types)]
+pub type krun_input_create_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut *mut c_void,
+        userdata: *const c_void,
+        reserved: *const c_void,
+    ) -> i32,
+>;
+
+/// Callback to destroy an input instance.
+#[allow(non_camel_case_types)]
+pub type krun_input_destroy_fn = Option<unsafe extern "C" fn(instance: *mut c_void) -> i32>;
+
+/// Callback returning the fd that is readable while events wait.
+#[allow(non_camel_case_types)]
+pub type krun_input_get_ready_efd_fn = Option<unsafe extern "C" fn(instance: *mut c_void) -> c_int>;
+
+/// Callback fetching the next event: `1` with one written, `0` with none waiting.
+#[allow(non_camel_case_types)]
+pub type krun_input_next_event_fn =
+    Option<unsafe extern "C" fn(instance: *mut c_void, out_event: *mut krun_input_event) -> i32>;
+
+/// Callback copying the device name into `name_buf`; returns the length written.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_device_name_fn = Option<
+    unsafe extern "C" fn(instance: *mut c_void, name_buf: *mut u8, name_buf_len: usize) -> i32,
+>;
+
+/// Callback copying the serial into `name_buf`; returns the length written.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_serial_name_fn = Option<
+    unsafe extern "C" fn(instance: *mut c_void, name_buf: *mut u8, name_buf_len: usize) -> i32,
+>;
+
+/// Callback filling in the device ids.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_device_ids_fn =
+    Option<unsafe extern "C" fn(instance: *mut c_void, ids: *mut krun_input_device_ids) -> i32>;
+
+/// Callback writing the bitmap of codes a device emits for `event_type`; returns its length.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_event_capabilities_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut c_void,
+        event_type: u8,
+        bitmap_buf: *mut u8,
+        bitmap_buf_len: usize,
+    ) -> i32,
+>;
+
+/// Callback filling in the range of absolute axis `abs_axis`.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_abs_info_fn = Option<
+    unsafe extern "C" fn(
+        instance: *mut c_void,
+        abs_axis: u8,
+        abs_info: *mut krun_input_absinfo,
+    ) -> i32,
+>;
+
+/// Callback writing the bitmap of `INPUT_PROP_*` bits; returns its length.
+#[allow(non_camel_case_types)]
+pub type krun_input_query_properties_fn = Option<
+    unsafe extern "C" fn(instance: *mut c_void, bitmap_buf: *mut u8, bitmap_buf_len: usize) -> i32,
+>;
+
+/// The event provider's callbacks.
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_event_provider_vtable {
+    /// Optional destroy callback.
+    pub destroy: krun_input_destroy_fn,
+    /// Required: the ready fd.
+    pub get_ready_efd: krun_input_get_ready_efd_fn,
+    /// Required: the next event.
+    pub next_event: krun_input_next_event_fn,
+}
+
+/// The config object's callbacks.
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_config_vtable {
+    /// Optional destroy callback.
+    pub destroy: krun_input_destroy_fn,
+    /// Device name.
+    pub query_device_name: krun_input_query_device_name_fn,
+    /// Serial name.
+    pub query_serial_name: krun_input_query_serial_name_fn,
+    /// Device ids.
+    pub query_device_ids: krun_input_query_device_ids_fn,
+    /// Codes per event type.
+    pub query_event_capabilities: krun_input_query_event_capabilities_fn,
+    /// Absolute axis ranges.
+    pub query_abs_info: krun_input_query_abs_info_fn,
+    /// Device properties.
+    pub query_properties: krun_input_query_properties_fn,
+}
+
+/// The config object handed to [`krun_add_input_device`].
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_config {
+    /// Bitmask of `KRUN_INPUT_CONFIG_FEATURE_*`.
+    pub features: u64,
+    /// Userdata passed to `create`.
+    pub create_userdata: *const c_void,
+    /// Optional instance constructor callback.
+    pub create: krun_input_create_fn,
+    /// Callback vtable.
+    pub vtable: krun_input_config_vtable,
+}
+
+/// The event provider handed to [`krun_add_input_device`].
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(non_camel_case_types)]
+pub struct krun_input_event_provider {
+    /// Bitmask of `KRUN_INPUT_EVENT_PROVIDER_FEATURE_*`.
+    pub features: u64,
+    /// Userdata passed to `create`.
+    pub create_userdata: *const c_void,
+    /// Optional instance constructor callback.
+    pub create: krun_input_create_fn,
+    /// Callback vtable.
+    pub vtable: krun_input_event_provider_vtable,
+}
+
 // Every declaration is transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`
 // and `gid_t` are `u32` on both targets this project builds for; naming them as such keeps this
 // crate free of a libc dependency, and `the_uid_type_is_the_width_the_header_uses` pins the
@@ -394,6 +586,17 @@ unsafe extern "C" {
         backend_size: usize,
     ) -> i32;
 
+    // --- input -------------------------------------------------------------------------------
+    /// Adds a virtio-input device whose identity and events come from two callback tables.
+    /// Declared `int` in the header, where its neighbours are `int32_t`.
+    pub fn krun_add_input_device(
+        ctx_id: u32,
+        config_backend: *const c_void,
+        config_backend_size: usize,
+        events_backend: *const c_void,
+        events_backend_size: usize,
+    ) -> i32;
+
     // --- lifecycle and probes ----------------------------------------------------------------
     /// Returns an eventfd that stops the VM when written to. The stop path, since the thread that
     /// called `krun_start_enter` never comes back to be asked.
@@ -519,6 +722,15 @@ mod stub {
     ) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_add_input_device(
+        _ctx_id: u32,
+        _config_backend: *const super::c_void,
+        _config_backend_size: usize,
+        _events_backend: *const super::c_void,
+        _events_backend_size: usize,
+    ) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_start_enter(_ctx_id: u32) -> i32 {
         NOT_LINKED
     }
@@ -582,6 +794,7 @@ mod tests {
         ("krun_display_set_physical_size", 4),
         ("krun_display_set_refresh_rate", 3),
         ("krun_set_display_backend", 3),
+        ("krun_add_input_device", 5),
         ("krun_get_shutdown_eventfd", 1),
         ("krun_start_enter", 1),
         ("krun_has_feature", 1),
@@ -591,16 +804,18 @@ mod tests {
 
     /// The argument list of `fn` in the header text, or `None` if it declares no such function.
     ///
-    /// Anchored on the `int32_t` return type, not on the bare name: the header mentions functions
-    /// inside comments (`/* Feature constants for krun_has_feature() */`), and a search for the
-    /// name alone reads that comment's empty parens as a zero-argument declaration. A return type
-    /// this header stops using would surface as "not declared", which is loud, rather than as a
-    /// match against prose.
+    /// Anchored on the return type, not on the bare name: the header mentions functions inside
+    /// comments (`/* Feature constants for krun_has_feature() */`), and a search for the name
+    /// alone reads that comment's empty parens as a zero-argument declaration. `int32_t` is the
+    /// header's usual spelling and `int` is the input calls'; a return type this header stops
+    /// using would surface as "not declared", which is loud, rather than as a match against prose.
     ///
     /// Declarations wrap across lines, so this joins from the opening paren to the matching close
     /// rather than reading one line.
     fn header_arity(header: &str, name: &str) -> Option<usize> {
-        let at = header.find(&format!("int32_t {name}("))?;
+        let at = header
+            .find(&format!("int32_t {name}("))
+            .or_else(|| header.find(&format!("int {name}(")))?;
         let open = at + header[at..].find('(')?;
         let close = open + header[open..].find(')')?;
         let args = header[open + 1..close].trim();
@@ -647,9 +862,11 @@ mod tests {
     fn the_header_check_rejects_a_wrong_arity_and_a_missing_symbol() {
         let header = "/* See krun_two() for details */\n\
                       int32_t krun_two(uint32_t a, const char *b);\n\
-                      int32_t krun_none(void);\n";
+                      int32_t krun_none(void);\n\
+                      int krun_plain(uint32_t a);\n";
         assert_eq!(header_arity(header, "krun_two"), Some(2));
         assert_eq!(header_arity(header, "krun_none"), Some(0));
+        assert_eq!(header_arity(header, "krun_plain"), Some(1));
         assert_eq!(header_arity(header, "krun_absent"), None);
         assert_ne!(header_arity(header, "krun_two"), Some(3));
     }
@@ -709,25 +926,80 @@ mod tests {
         Some(fields)
     }
 
-    #[test]
-    fn the_display_structs_match_the_installed_header() {
-        let Ok(header) = std::fs::read_to_string(DISPLAY_HEADER) else {
+    /// The header the input structs were transcribed from.
+    const INPUT_HEADER: &str = "/usr/include/libkrun_input.h";
+
+    /// The input tables, checked like [`DISPLAY_STRUCTS`]. `type` is `type_` in the declaration.
+    const INPUT_STRUCTS: &[(&str, &[&str])] = &[
+        ("krun_input_event", &["type", "code", "value"]),
+        (
+            "krun_input_event_provider_vtable",
+            &["destroy", "get_ready_efd", "next_event"],
+        ),
+        (
+            "krun_input_device_ids",
+            &["bustype", "vendor", "product", "version"],
+        ),
+        ("krun_input_absinfo", &["min", "max", "fuzz", "flat", "res"]),
+        (
+            "krun_input_config_vtable",
+            &[
+                "destroy",
+                "query_device_name",
+                "query_serial_name",
+                "query_device_ids",
+                "query_event_capabilities",
+                "query_abs_info",
+                "query_properties",
+            ],
+        ),
+        (
+            "krun_input_config",
+            &["features", "create_userdata", "create", "vtable"],
+        ),
+        (
+            "krun_input_event_provider",
+            &["features", "create_userdata", "create", "vtable"],
+        ),
+    ];
+
+    /// Compares each struct in `structs` against its body in the header at `path`, or prints why
+    /// it could not when the header is absent.
+    fn assert_structs_match(test: &str, path: &str, structs: &[(&str, &[&str])]) {
+        let Ok(header) = std::fs::read_to_string(path) else {
             println!(
-                "SKIPPED the_display_structs_match_the_installed_header: {DISPLAY_HEADER} is \
-                 absent, so the struct layouts were compared against nothing. Install libkrun to \
-                 run it."
+                "SKIPPED {test}: {path} is absent, so the struct layouts were compared against \
+                 nothing. Install libkrun to run it."
             );
             return;
         };
-        for (name, declared) in DISPLAY_STRUCTS {
+        for (name, declared) in structs {
             let actual = header_struct_fields(&header, name)
                 .unwrap_or_else(|| Vec::from([format!("<{name} not found>")]));
             assert_eq!(
                 actual, *declared,
-                "struct {name} in {DISPLAY_HEADER} is laid out differently from the declaration \
-                 above it, which is undefined behaviour at the first callback"
+                "struct {name} in {path} is laid out differently from the declaration above it, \
+                 which is undefined behaviour at the first callback"
             );
         }
+    }
+
+    #[test]
+    fn the_display_structs_match_the_installed_header() {
+        assert_structs_match(
+            "the_display_structs_match_the_installed_header",
+            DISPLAY_HEADER,
+            DISPLAY_STRUCTS,
+        );
+    }
+
+    #[test]
+    fn the_input_structs_match_the_installed_header() {
+        assert_structs_match(
+            "the_input_structs_match_the_installed_header",
+            INPUT_HEADER,
+            INPUT_STRUCTS,
+        );
     }
 
     /// The struct parser has to be able to fail, in both directions.

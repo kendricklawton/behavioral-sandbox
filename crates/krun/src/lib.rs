@@ -50,15 +50,24 @@
 //! - **A frame has crossed it.** Measured 2026-09-02: a guest drawing through a DRM dumb buffer
 //!   arrives as `configure_scanout` (B8G8R8X8) and a `present_frame` per flush, pixels intact
 //!   (`a_frame_the_guest_draws_reaches_the_host` in `crates/cli/tests/e2e.rs`).
+//!
+//! # The input tables
+//!
+//! [`Machine::input_device`] hands libkrun two more tables: one answering the identity queries
+//! the guest's virtio-input driver makes at probe, one handing over queued events. The same rules
+//! hold (panics caught, instances shared by count), and the provider is a queue behind an eventfd
+//! that is readable exactly while an event waits, because libkrun polls the fd level-triggered
+//! and never reads it: a fd left armed on an empty queue is a worker thread spinning.
 
 mod sys;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::{CString, NulError, OsStr};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::{NonZeroI32, NonZeroU8, NonZeroU32, NonZeroUsize};
-use std::os::raw::{c_char, c_void};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -79,11 +88,12 @@ pub use sys::{
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// A libkrun call returned a negative errno, carried here as the `io::Error` it names.
+    /// A libkrun call returned a negative errno, or a host call a device needs failed, carried
+    /// here as the `io::Error` it names.
     Call {
-        /// The `krun_*` function that failed, so a message names the call rather than the wrapper.
+        /// The function that failed, so a message names the call rather than the wrapper.
         call: &'static str,
-        /// The errno libkrun returned, negated back into positive form.
+        /// The errno, in positive form.
         source: std::io::Error,
     },
     /// A path or string the caller passed contains an interior NUL, so it cannot cross into C.
@@ -97,6 +107,15 @@ pub enum Error {
     NotLinked {
         /// The `krun_*` function that was asked for.
         call: &'static str,
+    },
+    /// A value libkrun's tables cannot carry, refused before the call that would have carried it.
+    OutOfRange {
+        /// Which value.
+        what: &'static str,
+        /// The value given.
+        value: u32,
+        /// The largest the table holds.
+        max: u32,
     },
 }
 
@@ -115,6 +134,12 @@ impl fmt::Display for Error {
                 "{call} cannot be called: this build links no libkrun (install libkrun, or set \
                  BSX_KRUN_LIB_DIR, and rebuild)"
             ),
+            Self::OutOfRange { what, value, max } => {
+                write!(
+                    f,
+                    "{what} is {value}, above the {max} libkrun's tables can hold"
+                )
+            }
         }
     }
 }
@@ -123,7 +148,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Call { source, .. } => Some(source),
-            Self::InteriorNul { .. } | Self::NotLinked { .. } => None,
+            Self::InteriorNul { .. } | Self::NotLinked { .. } | Self::OutOfRange { .. } => None,
         }
     }
 }
@@ -811,6 +836,495 @@ impl fmt::Debug for DisplayHandle {
     }
 }
 
+// --- input -----------------------------------------------------------------------------------
+
+/// The bits a capability bitmap holds: libkrun hands every query a 128-byte buffer.
+const CAPABILITY_BITS: u16 = 128 * 8;
+
+/// Events one device holds unread before [`InputSender::send`] refuses more, which bounds what a
+/// guest that never reads its device can make this process keep.
+pub const INPUT_QUEUE_CAP: usize = 4096;
+
+/// `EV_SYN`: the type of the event that ends a report.
+pub const EV_SYN: u16 = 0;
+/// `EV_KEY`: a key or button.
+pub const EV_KEY: u16 = 1;
+/// `EV_REL`: a relative axis.
+pub const EV_REL: u16 = 2;
+/// `EV_ABS`: an absolute axis.
+pub const EV_ABS: u16 = 3;
+/// `SYN_REPORT`: the code that ends a report.
+pub const SYN_REPORT: u16 = 0;
+
+/// One evdev event as the guest receives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InputEvent {
+    /// `EV_KEY`, `EV_REL`, `EV_ABS`, or `EV_SYN`; the header's `type`.
+    pub type_: u16,
+    /// A key code, an axis, or a `SYN_*` code.
+    pub code: u16,
+    /// Pressed or released, a delta, a position.
+    pub value: i32,
+}
+
+impl InputEvent {
+    /// An event of `type_`, `code` and `value`.
+    #[must_use]
+    pub const fn new(type_: u16, code: u16, value: i32) -> Self {
+        Self { type_, code, value }
+    }
+
+    /// The `SYN_REPORT` that ends a report, so the guest applies what came before it together.
+    #[must_use]
+    pub const fn syn_report() -> Self {
+        Self::new(EV_SYN, SYN_REPORT, 0)
+    }
+}
+
+/// The range of an absolute axis, as `struct input_absinfo` has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct AbsInfo {
+    /// Smallest value.
+    pub min: u32,
+    /// Largest value.
+    pub max: u32,
+    /// Noise the driver filters.
+    pub fuzz: u32,
+    /// Dead zone around the centre.
+    pub flat: u32,
+    /// Units per millimetre, or zero for none.
+    pub res: u32,
+}
+
+impl AbsInfo {
+    /// An axis running from `min` to `max`, with no fuzz, flat, or resolution.
+    #[must_use]
+    pub const fn range(min: u32, max: u32) -> Self {
+        Self {
+            min,
+            max,
+            fuzz: 0,
+            flat: 0,
+            res: 0,
+        }
+    }
+}
+
+/// What a device tells the guest it is, in the terms the virtio-input driver queries at probe:
+/// a name, an identity, and the codes it emits for each event type. A device with no codes is
+/// one the guest sees and never hears from.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct InputDevice {
+    name: Vec<u8>,
+    serial: Vec<u8>,
+    ids: sys::krun_input_device_ids,
+    keys: BTreeSet<u16>,
+    relative: BTreeSet<u16>,
+    absolute: BTreeMap<u16, AbsInfo>,
+    properties: BTreeSet<u16>,
+}
+
+impl InputDevice {
+    /// A device called `name`, cut to what the guest's name buffer holds, with nothing else set.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.as_bytes().to_vec(),
+            serial: Vec::new(),
+            ids: sys::krun_input_device_ids {
+                bustype: 0,
+                vendor: 0,
+                product: 0,
+                version: 0,
+            },
+            keys: BTreeSet::new(),
+            relative: BTreeSet::new(),
+            absolute: BTreeMap::new(),
+            properties: BTreeSet::new(),
+        }
+    }
+
+    /// Sets the serial the guest reports.
+    #[must_use]
+    pub fn serial(mut self, serial: &str) -> Self {
+        self.serial = serial.as_bytes().to_vec();
+        self
+    }
+
+    /// Sets the evdev identity: bus type, vendor, product, version.
+    #[must_use]
+    pub fn ids(mut self, bustype: u16, vendor: u16, product: u16, version: u16) -> Self {
+        self.ids = sys::krun_input_device_ids {
+            bustype,
+            vendor,
+            product,
+            version,
+        };
+        self
+    }
+
+    /// Adds `EV_KEY` codes the device emits: keys and buttons.
+    #[must_use]
+    pub fn keys(mut self, codes: impl IntoIterator<Item = u16>) -> Self {
+        self.keys.extend(codes);
+        self
+    }
+
+    /// Adds `EV_REL` axes the device emits.
+    #[must_use]
+    pub fn relative_axes(mut self, codes: impl IntoIterator<Item = u16>) -> Self {
+        self.relative.extend(codes);
+        self
+    }
+
+    /// Adds an `EV_ABS` axis and its range.
+    #[must_use]
+    pub fn absolute_axis(mut self, axis: u16, info: AbsInfo) -> Self {
+        self.absolute.insert(axis, info);
+        self
+    }
+
+    /// Adds `INPUT_PROP_*` bits.
+    #[must_use]
+    pub fn properties(mut self, bits: impl IntoIterator<Item = u16>) -> Self {
+        self.properties.extend(bits);
+        self
+    }
+
+    /// The codes of `event_type`, empty for a type the device does not emit.
+    fn codes_of(&self, event_type: u16) -> Vec<u16> {
+        match event_type {
+            EV_KEY => self.keys.iter().copied().collect(),
+            EV_REL => self.relative.iter().copied().collect(),
+            EV_ABS => self.absolute.keys().copied().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The largest code or property bit any query would have to set.
+    fn largest_bit(&self) -> Option<u16> {
+        [
+            self.keys.last(),
+            self.relative.last(),
+            self.absolute.keys().next_back(),
+            self.properties.last(),
+        ]
+        .into_iter()
+        .flatten()
+        .copied()
+        .max()
+    }
+
+    /// Refuses a device whose bitmaps would not fit the buffers libkrun hands the queries, which
+    /// is the one way its tables can answer wrong.
+    fn check_fits(&self) -> Result<(), Error> {
+        match self.largest_bit() {
+            Some(bit) if bit >= CAPABILITY_BITS => Err(Error::OutOfRange {
+                what: "an input code",
+                value: u32::from(bit),
+                max: u32::from(CAPABILITY_BITS - 1),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Sets `bits` in `bitmap` and returns the bytes that covers, or `None` when one does not fit.
+fn write_bitmap(bitmap: &mut [u8], bits: impl IntoIterator<Item = u16>) -> Option<usize> {
+    let mut len = 0;
+    for bit in bits {
+        let byte = usize::from(bit / 8);
+        *bitmap.get_mut(byte)? |= 1 << (bit % 8);
+        len = len.max(byte + 1);
+    }
+    Some(len)
+}
+
+/// Copies as much of `src` as `dst` holds and returns how much that was.
+fn copy_name(src: &[u8], dst: &mut [u8]) -> usize {
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
+    n
+}
+
+/// A length as the code libkrun reads it: the length, or `KRUN_INPUT_ERR_INTERNAL` for one an
+/// `i32` cannot say, which no 128-byte buffer produces.
+fn length_code(len: usize) -> i32 {
+    i32::try_from(len).unwrap_or(sys::KRUN_INPUT_ERR_INTERNAL)
+}
+
+/// Runs `f` on the `T` behind `instance`, doing what every input callback must do once: refuse a
+/// null instance and catch a panic, which must not unwind into libkrun.
+fn with_input<T>(instance: *mut c_void, f: impl FnOnce(&T) -> i32) -> i32 {
+    if instance.is_null() {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Borrowed, never owned: the count belongs to `c_input_create`.
+        let shared = std::mem::ManuallyDrop::new(unsafe {
+            Arc::from_raw(instance.cast_const().cast::<T>())
+        });
+        f(&shared)
+    }));
+    outcome.unwrap_or(sys::KRUN_INPUT_ERR_INTERNAL)
+}
+
+/// `create` for either table: the instance is the userdata, holding one count that
+/// `c_input_destroy` returns.
+unsafe extern "C" fn c_input_create<T>(
+    instance: *mut *mut c_void,
+    userdata: *const c_void,
+    _reserved: *const c_void,
+) -> i32 {
+    if instance.is_null() || userdata.is_null() {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    }
+    unsafe {
+        Arc::increment_strong_count(userdata.cast::<T>());
+        *instance = userdata.cast_mut();
+    }
+    0
+}
+
+/// `destroy` for either table: returns the count `c_input_create` took.
+unsafe extern "C" fn c_input_destroy<T>(instance: *mut c_void) -> i32 {
+    if instance.is_null() {
+        return 0;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(unsafe { Arc::from_raw(instance.cast_const().cast::<T>()) });
+    }));
+    match outcome {
+        Ok(()) => 0,
+        Err(_) => sys::KRUN_INPUT_ERR_INTERNAL,
+    }
+}
+
+/// The `buf`/`len` pair of a query as a slice, or `None` for a null buffer.
+unsafe fn query_buffer<'a>(buf: *mut u8, len: usize) -> Option<&'a mut [u8]> {
+    if buf.is_null() {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts_mut(buf, len) })
+}
+
+unsafe extern "C" fn c_query_device_name(instance: *mut c_void, buf: *mut u8, len: usize) -> i32 {
+    let Some(dst) = (unsafe { query_buffer(buf, len) }) else {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    };
+    with_input::<InputDevice>(instance, |d| length_code(copy_name(&d.name, dst)))
+}
+
+unsafe extern "C" fn c_query_serial_name(instance: *mut c_void, buf: *mut u8, len: usize) -> i32 {
+    let Some(dst) = (unsafe { query_buffer(buf, len) }) else {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    };
+    with_input::<InputDevice>(instance, |d| length_code(copy_name(&d.serial, dst)))
+}
+
+unsafe extern "C" fn c_query_device_ids(
+    instance: *mut c_void,
+    ids: *mut sys::krun_input_device_ids,
+) -> i32 {
+    if ids.is_null() {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    }
+    with_input::<InputDevice>(instance, |d| {
+        unsafe { *ids = d.ids };
+        0
+    })
+}
+
+unsafe extern "C" fn c_query_event_capabilities(
+    instance: *mut c_void,
+    event_type: u8,
+    buf: *mut u8,
+    len: usize,
+) -> i32 {
+    let Some(dst) = (unsafe { query_buffer(buf, len) }) else {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    };
+    with_input::<InputDevice>(instance, |d| {
+        match write_bitmap(dst, d.codes_of(u16::from(event_type))) {
+            Some(n) => length_code(n),
+            None => sys::KRUN_INPUT_ERR_INVALID_PARAM,
+        }
+    })
+}
+
+unsafe extern "C" fn c_query_abs_info(
+    instance: *mut c_void,
+    axis: u8,
+    info: *mut sys::krun_input_absinfo,
+) -> i32 {
+    if info.is_null() {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    }
+    with_input::<InputDevice>(instance, |d| {
+        let a = d
+            .absolute
+            .get(&u16::from(axis))
+            .copied()
+            .unwrap_or_default();
+        unsafe {
+            *info = sys::krun_input_absinfo {
+                min: a.min,
+                max: a.max,
+                fuzz: a.fuzz,
+                flat: a.flat,
+                res: a.res,
+            };
+        }
+        0
+    })
+}
+
+unsafe extern "C" fn c_query_properties(instance: *mut c_void, buf: *mut u8, len: usize) -> i32 {
+    let Some(dst) = (unsafe { query_buffer(buf, len) }) else {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    };
+    with_input::<InputDevice>(instance, |d| {
+        match write_bitmap(dst, d.properties.iter().copied()) {
+            Some(n) => length_code(n),
+            None => sys::KRUN_INPUT_ERR_INVALID_PARAM,
+        }
+    })
+}
+
+/// The events waiting for one device, and the fd libkrun waits on, which is readable exactly
+/// while an event waits.
+#[derive(Debug)]
+struct InputQueue {
+    events: VecDeque<InputEvent>,
+    ready: OwnedFd,
+}
+
+impl InputQueue {
+    fn new() -> std::io::Result<Self> {
+        use rustix::event::EventfdFlags;
+        let ready = rustix::event::eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
+        Ok(Self {
+            events: VecDeque::new(),
+            ready,
+        })
+    }
+
+    /// Queues `events` whole, or none of them, and arms the fd. Armed under the same lock `pop`
+    /// disarms under, so a pop that finds the queue empty cannot slip between the two.
+    fn push(&mut self, events: &[InputEvent]) -> Result<(), QueueFull> {
+        if self.events.len().saturating_add(events.len()) > INPUT_QUEUE_CAP {
+            return Err(QueueFull);
+        }
+        self.events.extend(events);
+        let _ = rustix::io::write(&self.ready, &1u64.to_ne_bytes());
+        Ok(())
+    }
+
+    /// The next event, disarming the fd when there is none.
+    fn pop(&mut self) -> Option<InputEvent> {
+        let next = self.events.pop_front();
+        if next.is_none() {
+            let mut counter = [0u8; 8];
+            let _ = rustix::io::read(&self.ready, &mut counter);
+        }
+        next
+    }
+}
+
+/// The queue holds [`INPUT_QUEUE_CAP`] events the guest has not read, and the batch was refused
+/// whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueFull;
+
+impl fmt::Display for QueueFull {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the guest has {INPUT_QUEUE_CAP} input events unread, so no more are queued"
+        )
+    }
+}
+
+impl std::error::Error for QueueFull {}
+
+/// The sending half of a device's event queue: what a window feeds. Cloneable and `Send`, so it
+/// can go to the thread that has the events.
+#[derive(Debug, Clone)]
+pub struct InputSender(Arc<Mutex<InputQueue>>);
+
+impl InputSender {
+    /// Queues `events` for the guest as one batch, all of them or none, so a report is never
+    /// split.
+    pub fn send(&self, events: &[InputEvent]) -> Result<(), QueueFull> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(events)
+    }
+}
+
+unsafe extern "C" fn c_get_ready_efd(instance: *mut c_void) -> c_int {
+    with_input::<Mutex<InputQueue>>(instance, |q| {
+        q.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ready
+            .as_raw_fd()
+    })
+}
+
+unsafe extern "C" fn c_next_event(instance: *mut c_void, out: *mut sys::krun_input_event) -> i32 {
+    if out.is_null() {
+        return sys::KRUN_INPUT_ERR_INVALID_PARAM;
+    }
+    with_input::<Mutex<InputQueue>>(instance, |q| {
+        let next = q
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop();
+        match next {
+            Some(e) => {
+                unsafe {
+                    *out = sys::krun_input_event {
+                        type_: e.type_,
+                        code: e.code,
+                        value: u32::from_ne_bytes(e.value.to_ne_bytes()),
+                    };
+                }
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// What [`Machine::input_device`] hands libkrun and keeps alive: the counts behind the two
+/// tables' userdata, and the tables. libkrun copies the tables (`krun_add_input_device`
+/// dereferences both before it returns); they are retained anyway, by the crate's rule.
+struct InputHandle {
+    device: *const c_void,
+    queue: *const c_void,
+    _config: Box<sys::krun_input_config>,
+    _events: Box<sys::krun_input_event_provider>,
+}
+
+impl Drop for InputHandle {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Arc::from_raw(self.device.cast::<InputDevice>()));
+            drop(Arc::from_raw(self.queue.cast::<Mutex<InputQueue>>()));
+        }
+    }
+}
+
+impl fmt::Debug for InputHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InputHandle")
+    }
+}
+
 /// The context id, freed on drop.
 ///
 /// `PhantomData<*const ()>` makes every handle `!Send` and `!Sync`. libkrun documents no
@@ -892,6 +1406,7 @@ impl Context {
             ctx: self.ctx,
             retained: std::mem::take(&mut self.retained),
             retained_display: None,
+            retained_inputs: Vec::new(),
         })
     }
 }
@@ -902,6 +1417,7 @@ pub struct Machine {
     ctx: Ctx,
     retained: Vec<CString>,
     retained_display: Option<DisplayHandle>,
+    retained_inputs: Vec<InputHandle>,
 }
 
 impl Machine {
@@ -1105,6 +1621,59 @@ impl Machine {
         });
         std::mem::forget(handle);
         Ok((self, shared))
+    }
+
+    /// Adds an input device the guest sees as `device`, and returns the sender its events go
+    /// through. libkrun queries the identity at boot from its own thread and pulls events from
+    /// another for as long as the VM runs.
+    pub fn input_device(mut self, device: InputDevice) -> Result<(Self, InputSender), Error> {
+        device.check_fits()?;
+        let queue = InputQueue::new().map_err(|source| Error::Call {
+            call: "eventfd",
+            source,
+        })?;
+        let device = Arc::new(device);
+        let shared = Arc::new(Mutex::new(queue));
+        // Built before the call, so the `?` on a refused call drops it and takes the counts back.
+        let handle = InputHandle {
+            device: Arc::into_raw(Arc::clone(&device)).cast::<c_void>(),
+            queue: Arc::into_raw(Arc::clone(&shared)).cast::<c_void>(),
+            _config: Box::new(sys::krun_input_config {
+                features: sys::KRUN_INPUT_CONFIG_FEATURE_QUERY,
+                create_userdata: Arc::as_ptr(&device).cast::<c_void>(),
+                create: Some(c_input_create::<InputDevice>),
+                vtable: sys::krun_input_config_vtable {
+                    destroy: Some(c_input_destroy::<InputDevice>),
+                    query_device_name: Some(c_query_device_name),
+                    query_serial_name: Some(c_query_serial_name),
+                    query_device_ids: Some(c_query_device_ids),
+                    query_event_capabilities: Some(c_query_event_capabilities),
+                    query_abs_info: Some(c_query_abs_info),
+                    query_properties: Some(c_query_properties),
+                },
+            }),
+            _events: Box::new(sys::krun_input_event_provider {
+                features: sys::KRUN_INPUT_EVENT_PROVIDER_FEATURE_QUEUE,
+                create_userdata: Arc::as_ptr(&shared).cast::<c_void>(),
+                create: Some(c_input_create::<Mutex<InputQueue>>),
+                vtable: sys::krun_input_event_provider_vtable {
+                    destroy: Some(c_input_destroy::<Mutex<InputQueue>>),
+                    get_ready_efd: Some(c_get_ready_efd),
+                    next_event: Some(c_next_event),
+                },
+            }),
+        };
+        check("krun_add_input_device", unsafe {
+            sys::krun_add_input_device(
+                self.ctx.id,
+                std::ptr::from_ref(&*handle._config).cast::<c_void>(),
+                std::mem::size_of::<sys::krun_input_config>(),
+                std::ptr::from_ref(&*handle._events).cast::<c_void>(),
+                std::mem::size_of::<sys::krun_input_event_provider>(),
+            )
+        })?;
+        self.retained_inputs.push(handle);
+        Ok((self, InputSender(shared)))
     }
 
     /// Starts the microVM, **and does not return.**
@@ -1762,5 +2331,268 @@ mod tests {
         assert_eq!(Arc::strong_count(&shared), 2);
         drop(handle);
         assert_eq!(Arc::strong_count(&shared), 1);
+    }
+
+    /// A device instance as libkrun would hold it: the shared handle, the raw userdata, and an
+    /// instance created through the real `c_input_create`.
+    fn input_instance<T>(shared: &Arc<T>) -> (*const c_void, *mut c_void) {
+        let userdata = Arc::into_raw(Arc::clone(shared)).cast::<c_void>();
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { c_input_create::<T>(&mut instance, userdata, std::ptr::null()) },
+            0
+        );
+        (userdata, instance)
+    }
+
+    /// Destroys the instance and returns the userdata count, then checks both came back.
+    fn input_finish<T>(shared: &Arc<T>, userdata: *const c_void, instance: *mut c_void) {
+        assert_eq!(unsafe { c_input_destroy::<T>(instance) }, 0);
+        drop(unsafe { Arc::from_raw(userdata.cast::<T>()) });
+        assert_eq!(Arc::strong_count(shared), 1, "every count came back");
+    }
+
+    /// Whether `fd` is readable now, which for the ready fd means an event waits.
+    fn readable(fd: &OwnedFd) -> bool {
+        use rustix::event::{PollFd, PollFlags};
+        let mut fds = [PollFd::new(fd, PollFlags::IN)];
+        let now = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        rustix::event::poll(&mut fds, Some(&now)).expect("poll") == 1
+    }
+
+    /// The identity queries the guest's driver makes at probe come back through the table with
+    /// the device's answers: names cut to the buffer, ids, bitmaps with the right bits and the
+    /// right length, and axis ranges.
+    #[test]
+    fn an_input_device_answers_the_probe_queries_through_its_table() {
+        let device = Arc::new(
+            InputDevice::new("bsx test device")
+                .serial("SERIAL-1")
+                .ids(6, 0x1234, 0x5678, 2)
+                .keys([1, 30, 0x110])
+                .relative_axes([8])
+                .absolute_axis(0, AbsInfo::range(0, 32767))
+                .properties([1]),
+        );
+        let (userdata, instance) = input_instance(&device);
+
+        let mut name = [0u8; 4];
+        let got = unsafe { c_query_device_name(instance, name.as_mut_ptr(), name.len()) };
+        assert_eq!((got, &name[..]), (4, &b"bsx "[..]), "cut to the buffer");
+        let mut serial = [0u8; 128];
+        let got = unsafe { c_query_serial_name(instance, serial.as_mut_ptr(), serial.len()) };
+        assert_eq!((got, &serial[..8]), (8, &b"SERIAL-1"[..]));
+
+        let mut ids = sys::krun_input_device_ids {
+            bustype: 0,
+            vendor: 0,
+            product: 0,
+            version: 0,
+        };
+        assert_eq!(unsafe { c_query_device_ids(instance, &mut ids) }, 0);
+        assert_eq!(
+            (ids.bustype, ids.vendor, ids.product, ids.version),
+            (6, 0x1234, 0x5678, 2)
+        );
+
+        let mut bitmap = [0u8; 128];
+        let got =
+            unsafe { c_query_event_capabilities(instance, 1, bitmap.as_mut_ptr(), bitmap.len()) };
+        assert_eq!(got, 0x110 / 8 + 1, "the length covers the highest key");
+        assert_eq!(bitmap[0], 0b10, "key 1");
+        assert_eq!(bitmap[3], 1 << 6, "key 30");
+        assert_eq!(bitmap[0x110 / 8], 1, "BTN_LEFT");
+        let mut bitmap = [0u8; 128];
+        let got =
+            unsafe { c_query_event_capabilities(instance, 3, bitmap.as_mut_ptr(), bitmap.len()) };
+        assert_eq!((got, bitmap[0]), (1, 1), "ABS_X alone");
+        let mut bitmap = [0u8; 128];
+        let got =
+            unsafe { c_query_event_capabilities(instance, 5, bitmap.as_mut_ptr(), bitmap.len()) };
+        assert_eq!(got, 0, "a type the device does not emit");
+        let mut small = [0u8; 1];
+        let got = unsafe { c_query_event_capabilities(instance, 1, small.as_mut_ptr(), 1) };
+        assert_eq!(
+            got,
+            sys::KRUN_INPUT_ERR_INVALID_PARAM,
+            "a code past the buffer"
+        );
+
+        let mut info = sys::krun_input_absinfo {
+            min: 9,
+            max: 9,
+            fuzz: 9,
+            flat: 9,
+            res: 9,
+        };
+        assert_eq!(unsafe { c_query_abs_info(instance, 0, &mut info) }, 0);
+        assert_eq!((info.min, info.max, info.fuzz), (0, 32767, 0));
+        assert_eq!(unsafe { c_query_abs_info(instance, 1, &mut info) }, 0);
+        assert_eq!(info.max, 0, "an axis the device lacks reads as nothing");
+
+        let mut props = [0u8; 128];
+        let got = unsafe { c_query_properties(instance, props.as_mut_ptr(), props.len()) };
+        assert_eq!((got, props[0]), (1, 0b10));
+
+        assert_eq!(
+            unsafe { c_query_device_name(instance, std::ptr::null_mut(), 8) },
+            sys::KRUN_INPUT_ERR_INVALID_PARAM
+        );
+        input_finish(&device, userdata, instance);
+    }
+
+    /// Events cross in the order sent, a batch arrives whole or not at all, and the ready fd is
+    /// readable exactly while one waits: libkrun polls it level-triggered and never reads it.
+    #[test]
+    fn queued_events_cross_in_order_and_arm_the_fd_only_while_one_waits() {
+        let queue = Arc::new(Mutex::new(InputQueue::new().expect("an eventfd")));
+        let sender = InputSender(Arc::clone(&queue));
+        let (userdata, instance) = input_instance(&queue);
+        let fd = unsafe { c_get_ready_efd(instance) };
+        let ready = queue.lock().expect("unpoisoned").ready.as_raw_fd();
+        assert_eq!(fd, ready, "the fd libkrun polls is the queue's");
+        let fd_of = |q: &Arc<Mutex<InputQueue>>| {
+            let guard = q.lock().expect("unpoisoned");
+            guard.ready.try_clone().expect("dup")
+        };
+        assert!(!readable(&fd_of(&queue)), "nothing waits yet");
+
+        sender
+            .send(&[InputEvent::new(EV_KEY, 30, 1), InputEvent::syn_report()])
+            .expect("queued");
+        assert!(readable(&fd_of(&queue)), "armed by the send");
+        let mut out = sys::krun_input_event {
+            type_: 9,
+            code: 9,
+            value: 9,
+        };
+        assert_eq!(unsafe { c_next_event(instance, &mut out) }, 1);
+        assert_eq!((out.type_, out.code, out.value), (EV_KEY, 30, 1));
+        assert!(readable(&fd_of(&queue)), "still armed: one waits");
+        assert_eq!(unsafe { c_next_event(instance, &mut out) }, 1);
+        assert_eq!((out.type_, out.code, out.value), (EV_SYN, 0, 0));
+        assert_eq!(unsafe { c_next_event(instance, &mut out) }, 0);
+        assert!(
+            !readable(&fd_of(&queue)),
+            "disarmed by the pop that found nothing"
+        );
+
+        sender
+            .send(&[InputEvent::new(EV_REL, 8, -1)])
+            .expect("queued");
+        assert!(readable(&fd_of(&queue)), "armed again");
+        assert_eq!(unsafe { c_next_event(instance, &mut out) }, 1);
+        assert_eq!(out.value, u32::MAX, "a negative value crosses as its bits");
+
+        let filler = vec![InputEvent::syn_report(); INPUT_QUEUE_CAP];
+        sender.send(&filler).expect("exactly the cap fits");
+        assert_eq!(
+            sender.send(&[InputEvent::syn_report()]),
+            Err(QueueFull),
+            "one more is refused"
+        );
+        assert_eq!(
+            queue.lock().expect("unpoisoned").events.len(),
+            INPUT_QUEUE_CAP,
+            "and nothing of the refused batch was queued"
+        );
+        assert_eq!(
+            unsafe { c_next_event(instance, std::ptr::null_mut()) },
+            sys::KRUN_INPUT_ERR_INVALID_PARAM
+        );
+        drop(sender);
+        input_finish(&queue, userdata, instance);
+    }
+
+    /// `with_input` refuses a null instance and turns a panic into the internal code.
+    #[test]
+    fn an_input_callback_refuses_a_null_and_contains_a_panic() {
+        assert_eq!(
+            with_input::<InputDevice>(std::ptr::null_mut(), |_| 0),
+            sys::KRUN_INPUT_ERR_INVALID_PARAM
+        );
+        let device = Arc::new(InputDevice::new("p"));
+        let (userdata, instance) = input_instance(&device);
+        #[allow(clippy::panic)]
+        let got = with_input::<InputDevice>(instance, |_| panic!("a callback that panics"));
+        assert_eq!(got, sys::KRUN_INPUT_ERR_INTERNAL);
+        assert_eq!(
+            with_input::<InputDevice>(instance, |_| 7),
+            7,
+            "still answers"
+        );
+        input_finish(&device, userdata, instance);
+    }
+
+    /// A code the 128-byte bitmap cannot hold is refused before libkrun is asked, as the typed
+    /// error, and one that just fits is not.
+    #[test]
+    fn an_input_code_past_the_bitmap_is_refused_before_the_call() {
+        let fits = InputDevice::new("k").keys([CAPABILITY_BITS - 1]);
+        assert!(fits.check_fits().is_ok());
+        let over = InputDevice::new("k").properties([CAPABILITY_BITS]);
+        let refused = over.check_fits();
+        assert!(
+            matches!(
+                refused,
+                Err(Error::OutOfRange {
+                    value: 1024,
+                    max: 1023,
+                    ..
+                })
+            ),
+            "expected OutOfRange, got {refused:?}"
+        );
+        assert_eq!(write_bitmap(&mut [0u8; 2], [15]), Some(2));
+        assert_eq!(write_bitmap(&mut [0u8; 2], [16]), None);
+        assert_eq!(write_bitmap(&mut [0u8; 2], []), Some(0));
+    }
+
+    /// An input handle returns both counts when dropped, which is the path a refused
+    /// `krun_add_input_device` takes.
+    #[test]
+    fn an_input_handle_returns_its_counts_when_dropped() {
+        let device = Arc::new(InputDevice::new("h"));
+        let queue = Arc::new(Mutex::new(InputQueue::new().expect("an eventfd")));
+        let handle = InputHandle {
+            device: Arc::into_raw(Arc::clone(&device)).cast::<c_void>(),
+            queue: Arc::into_raw(Arc::clone(&queue)).cast::<c_void>(),
+            _config: Box::new(sys::krun_input_config {
+                features: 0,
+                create_userdata: std::ptr::null(),
+                create: None,
+                vtable: sys::krun_input_config_vtable {
+                    destroy: None,
+                    query_device_name: None,
+                    query_serial_name: None,
+                    query_device_ids: None,
+                    query_event_capabilities: None,
+                    query_abs_info: None,
+                    query_properties: None,
+                },
+            }),
+            _events: Box::new(sys::krun_input_event_provider {
+                features: 0,
+                create_userdata: std::ptr::null(),
+                create: None,
+                vtable: sys::krun_input_event_provider_vtable {
+                    destroy: None,
+                    get_ready_efd: None,
+                    next_event: None,
+                },
+            }),
+        };
+        assert_eq!(
+            (Arc::strong_count(&device), Arc::strong_count(&queue)),
+            (2, 2)
+        );
+        drop(handle);
+        assert_eq!(
+            (Arc::strong_count(&device), Arc::strong_count(&queue)),
+            (1, 1)
+        );
     }
 }

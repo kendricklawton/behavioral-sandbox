@@ -523,6 +523,118 @@ fn a_frame_the_guest_draws_reaches_the_host() {
     assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
 }
 
+/// A key on the keyboard device and a click on the pointer device arrive in the guest as the
+/// evdev events a process there reads, under the names the devices were given (roadmap 0.10).
+/// The events go in through the replay hook, since a runner has no window to type into; the
+/// guest side is the same either way.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_synthetic_key_and_click_reach_a_guest_process() {
+    use std::io::{BufRead, BufReader, Write};
+    if skipped("a_synthetic_key_and_click_reach_a_guest_process") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-input");
+    std::fs::write(dir.path().join("read.py"), include_str!("input_read.py"))
+        .expect("stage the reader");
+    let fifo = dir.path().join("events");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo")
+            .success(),
+        "a FIFO for the replay"
+    );
+    let mount = format!("/mnt={}", dir.path().display());
+    let mut child = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--display", "320x240", "--mount", &mount])
+        .env("BSX_INPUT_REPLAY", &fifo)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["--", "python3", "/mnt/read.py", "20"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run bsx");
+    let stderr = child.stderr.take().expect("piped");
+    let stderr = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut BufReader::new(stderr), &mut s);
+        s
+    });
+    let mut stdout = BufReader::new(child.stdout.take().expect("piped"));
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read the guest") == 0 {
+            break;
+        }
+        let ready = line.starts_with("INPUT ready");
+        lines.push(line);
+        if ready {
+            break;
+        }
+    }
+    assert!(
+        lines.last().is_some_and(|l| l.starts_with("INPUT ready")),
+        "the guest never got to its devices: {lines:?}\nstderr: {}",
+        stderr.join().unwrap_or_default()
+    );
+    // Only now is the guest listening. The FIFO's reader has been waiting in the helper since
+    // it started, so this open completes the pair and the lines flow.
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .expect("open the FIFO for writing");
+    writer
+        .write_all(
+            b"kbd 1 30 1\nkbd 0 0 0\nkbd 1 30 0\nkbd 0 0 0\n\
+              ptr 3 0 16384\nptr 3 1 8192\nptr 0 0 0\n\
+              ptr 1 272 1\nptr 0 0 0\nptr 1 272 0\nptr 0 0 0\n",
+        )
+        .expect("write the events");
+    drop(writer);
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).expect("read the rest");
+    let status = child.wait().expect("wait for bsx");
+    let out = lines.concat() + &rest;
+    let err = stderr.join().unwrap_or_default();
+    assert!(status.success(), "stdout: {out}\nstderr: {err}");
+    assert!(
+        out.contains("bsx keyboard") && out.contains("bsx pointer"),
+        "the guest names both devices: {out}"
+    );
+    let events: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("INPUT ") && l.split_whitespace().count() == 5)
+        .map(|l| l.split_once(' ').map_or("", |(_, rest)| rest))
+        .map(|l| l.split_once(' ').map_or("", |(_, rest)| rest))
+        .collect();
+    for expected in [
+        "1 30 1",
+        "1 30 0",
+        "3 0 16384",
+        "3 1 8192",
+        "1 272 1",
+        "1 272 0",
+    ] {
+        assert!(
+            events.contains(&expected),
+            "the guest read `{expected}`; it read {events:?}"
+        );
+    }
+    let position = |needle: &str| events.iter().position(|e| *e == needle).expect("present");
+    assert!(
+        position("1 30 1") < position("1 30 0") && position("1 272 1") < position("1 272 0"),
+        "presses before releases: {events:?}"
+    );
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

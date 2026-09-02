@@ -15,6 +15,8 @@ links = "krun"
 build = "build.rs"
 
 [dependencies]
+# The eventfd an input queue is polled through, and the reads and writes that arm and clear it.
+rustix = { workspace = true, features = ["event"] }
 
 [lints]
 workspace = true

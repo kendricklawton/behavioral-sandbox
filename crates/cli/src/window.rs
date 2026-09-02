@@ -10,6 +10,8 @@
 //!   knowing anything about windows, at the price of up to one poll of latency.
 //! - **The window is the sandbox's lifetime, not the other way round.** Closing it ends the VM
 //!   the way `bsx stop` does; the VM ending takes the window with it, because the process exits.
+//! - **Its keyboard and pointer are the guest's.** Every key, motion, button and wheel event the
+//!   window gets is translated (`crate::input`) and queued for the guest; nothing is kept back.
 //! - **No display server is not an error.** The event loop is a capability probe: where it cannot
 //!   be built the display runs without a window, warned once, and a `--screenshot` still works.
 //!   That is what lets the end-to-end test read a frame on a headless runner.
@@ -24,9 +26,11 @@ use std::time::{Duration, Instant};
 
 use bsx_krun::{Frame, MemoryFramebuffer, PixelFormat};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
+
+use crate::input::{self, Held, Inputs};
 
 /// How often the framebuffer is checked for a new frame: the latency a frame can see, and the
 /// most redraws a second this will drive.
@@ -35,6 +39,9 @@ const FRAME_POLL: Duration = Duration::from_millis(16);
 /// The scanout shown. libkrun numbers them from zero and one display makes one.
 const SCANOUT: u32 = 0;
 
+/// Window pixels of wheel travel that count as one line, for a device that reports pixels.
+const WHEEL_LINE_PIXELS: f64 = 20.0;
+
 /// Starts the display thread: a window when a display server answers, the screenshot sink either
 /// way. Returns once the thread is running, not once the window is up.
 pub(crate) fn spawn(
@@ -42,6 +49,7 @@ pub(crate) fn spawn(
     size: (NonZeroU32, NonZeroU32),
     title: &str,
     screenshot: Option<PathBuf>,
+    inputs: Inputs,
 ) -> io::Result<()> {
     let title = format!("bsx: {title}");
     std::thread::Builder::new()
@@ -67,6 +75,9 @@ pub(crate) fn spawn(
                 size,
                 title,
                 screenshot,
+                inputs,
+                held: Held::default(),
+                placement: Placement::NONE,
                 window: None,
                 shown: None,
             };
@@ -121,12 +132,36 @@ fn new_frame(framebuffer: &Mutex<MemoryFramebuffer>, shown: &mut Option<u32>) ->
     Some(frame.clone())
 }
 
+/// Where the frame sits in the window, in window pixels: what the pointer is measured against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Placement {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl Placement {
+    /// No frame on screen.
+    pub(crate) const NONE: Self = Self {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+}
+
 /// The window's state, driven by winit's callbacks.
 struct App {
     framebuffer: Arc<Mutex<MemoryFramebuffer>>,
     size: (NonZeroU32, NonZeroU32),
     title: String,
     screenshot: Option<PathBuf>,
+    inputs: Inputs,
+    /// What the guest thinks is down, released when the window loses focus.
+    held: Held,
+    /// Where the last paint put the frame.
+    placement: Placement,
     window: Option<Shown>,
     /// The id of the frame on screen, so a poll that finds the same one does nothing.
     shown: Option<u32>,
@@ -139,12 +174,17 @@ struct Shown {
 }
 
 impl App {
-    /// Draws the latest frame, one to one from the top-left corner.
+    /// Draws the latest frame fitted to the window as it is now, and remembers where it went.
     fn paint(&mut self) {
         let Some(shown) = self.window.as_mut() else {
             return;
         };
-        let (width, height) = self.size;
+        let size = shown.window.inner_size();
+        let (Some(width), Some(height)) =
+            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        else {
+            return;
+        };
         if shown.surface.resize(width, height).is_err() {
             return;
         }
@@ -160,9 +200,26 @@ impl App {
         };
         pixels.fill(0);
         if let Some(frame) = &frame {
-            composite(frame, width.get(), height.get(), &mut pixels);
+            self.placement = Placement {
+                x: 0,
+                y: 0,
+                width: frame.width.min(width.get()),
+                height: frame.height.min(height.get()),
+            };
+            composite(frame, self.placement, width.get(), &mut pixels);
         }
         let _ = pixels.present();
+    }
+
+    /// Releases everything the guest thinks is down.
+    fn release_all(&mut self) {
+        let (keys, buttons) = self.held.release_all();
+        if !keys.is_empty() {
+            let _ = self.inputs.keyboard.send(&keys);
+        }
+        if !buttons.is_empty() {
+            let _ = self.inputs.pointer.send(&buttons);
+        }
     }
 }
 
@@ -194,9 +251,45 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        use winit::platform::scancode::PhysicalKeyExtScancode;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::Focused(false) => self.release_all(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state.is_pressed();
+                if let Some(code) = event.physical_key.to_scancode()
+                    && let Some(report) = input::key(code, pressed, event.repeat)
+                {
+                    self.held.key(report[0].code, pressed);
+                    let _ = self.inputs.keyboard.send(&report);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let report = input::position(position.x, position.y, self.placement);
+                let _ = self.inputs.pointer.send(&report);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(code) = input::button_code(button) {
+                    let pressed = state.is_pressed();
+                    self.held.button(code, pressed);
+                    let _ = self.inputs.pointer.send(&input::button(code, pressed));
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    // The window's pixel count as a line; clamped so the cast is exact.
+                    MouseScrollDelta::PixelDelta(p) => (
+                        (p.x / WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        (p.y / WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                    ),
+                };
+                let report = input::wheel(dx, dy);
+                if !report.is_empty() {
+                    let _ = self.inputs.pointer.send(&report);
+                }
+            }
             _ => {}
         }
     }
@@ -227,26 +320,40 @@ pub(crate) fn rgb_offsets(format: PixelFormat) -> Option<[usize; 3]> {
     })
 }
 
-/// Copies `frame` into `out`, a `width` by `height` surface of `0x00RRGGBB` pixels (softbuffer's
-/// layout), one to one from the top-left; the rest of `out` is left as it was, and a frame in a
-/// format this cannot read leaves all of it. Pure, so the conversion is testable without a
+/// Draws `frame` into the `place` rectangle of `out`, a surface `width` pixels wide of
+/// `0x00RRGGBB` pixels (softbuffer's layout), nearest-neighbour when the sizes differ and one
+/// to one when they do not. The rest of `out` is left as it was, as is all of it for a place that
+/// does not fit or a format this cannot read. Pure, so the conversion is testable without a
 /// window.
-pub(crate) fn composite(frame: &Frame, width: u32, height: u32, out: &mut [u32]) {
+pub(crate) fn composite(frame: &Frame, place: Placement, width: u32, out: &mut [u32]) {
     let Some([r, g, b]) = rgb_offsets(frame.format) else {
         return;
     };
-    let cols = frame.width.min(width) as usize;
-    let rows = frame.height.min(height) as usize;
-    let stride = frame.width as usize * 4;
-    for y in 0..rows {
-        let Some(src_row) = frame.pixels.get(y * stride..y * stride + cols * 4) else {
+    if frame.width == 0 || frame.height == 0 || place.width == 0 || place.height == 0 {
+        return;
+    }
+    let (fw, fh) = (frame.width as usize, frame.height as usize);
+    let (pw, ph) = (place.width as usize, place.height as usize);
+    let stride = fw * 4;
+    let pixel = |px: &[u8]| (u32::from(px[r]) << 16) | (u32::from(px[g]) << 8) | u32::from(px[b]);
+    for dy in 0..ph {
+        let sy = dy * fh / ph;
+        let Some(src_row) = frame.pixels.get(sy * stride..sy * stride + stride) else {
             return;
         };
-        let Some(dst_row) = out.get_mut(y * width as usize..y * width as usize + cols) else {
+        let start = (place.y as usize + dy) * width as usize + place.x as usize;
+        let Some(dst_row) = out.get_mut(start..start + pw) else {
             return;
         };
-        for (dst, px) in dst_row.iter_mut().zip(src_row.chunks_exact(4)) {
-            *dst = (u32::from(px[r]) << 16) | (u32::from(px[g]) << 8) | u32::from(px[b]);
+        if pw == fw {
+            for (dst, px) in dst_row.iter_mut().zip(src_row.chunks_exact(4)) {
+                *dst = pixel(px);
+            }
+        } else {
+            for (dx, dst) in dst_row.iter_mut().enumerate() {
+                let sx = dx * fw / pw;
+                *dst = pixel(&src_row[sx * 4..sx * 4 + 4]);
+            }
         }
     }
 }
@@ -288,6 +395,16 @@ mod tests {
         fb.latest_frame(0).expect("presented").clone()
     }
 
+    /// The frame as it sits, one to one.
+    fn whole(f: &Frame) -> Placement {
+        Placement {
+            x: 0,
+            y: 0,
+            width: f.width,
+            height: f.height,
+        }
+    }
+
     /// Every format the header names lands its channels where softbuffer reads them, checked
     /// with a pixel whose four bytes all differ so a swapped offset cannot pass.
     #[test]
@@ -305,46 +422,96 @@ mod tests {
         for (format, bytes) in cases {
             let f = frame(format, 1, 1, &bytes);
             let mut out = [0xDEAD_BEEF];
-            composite(&f, 1, 1, &mut out);
+            composite(&f, whole(&f), 1, &mut out);
             assert_eq!(out, [0x0011_2233], "{format:?}: R=11 G=22 B=33");
         }
     }
 
-    /// A frame larger than the window is clipped and one smaller leaves the rest untouched, and
-    /// neither reads or writes past a row.
+    /// Scaling picks the nearest source pixel: doubled, each pixel becomes a 2x2 block; halved,
+    /// every other one survives; and the placement's offset lands the frame where it says.
     #[test]
-    fn compositing_clips_to_the_smaller_of_frame_and_window() {
+    fn compositing_scales_by_nearest_pixel_into_the_placement() {
         let f = frame(
             PixelFormat::R8G8B8X8Unorm,
-            3,
+            2,
             2,
             &[
-                1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, //
-                4, 0, 0, 0, 5, 0, 0, 0, 6, 0, 0, 0,
+                1, 0, 0, 0, 2, 0, 0, 0, //
+                3, 0, 0, 0, 4, 0, 0, 0,
             ],
         );
-        let mut small = [9u32; 2];
-        composite(&f, 2, 1, &mut small);
-        assert_eq!(small, [0x0001_0000, 0x0002_0000]);
-        let mut big = [9u32; 4 * 3];
-        composite(&f, 4, 3, &mut big);
+        let (r1, r2, r3, r4) = (0x0001_0000, 0x0002_0000, 0x0003_0000, 0x0004_0000);
+        let mut doubled = [9u32; 4 * 4];
+        composite(
+            &f,
+            Placement {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+            4,
+            &mut doubled,
+        );
         assert_eq!(
-            big,
+            doubled,
             [
-                0x0001_0000,
-                0x0002_0000,
-                0x0003_0000,
-                9, //
-                0x0004_0000,
-                0x0005_0000,
-                0x0006_0000,
-                9, //
-                9,
-                9,
-                9,
-                9,
+                r1, r1, r2, r2, //
+                r1, r1, r2, r2, //
+                r3, r3, r4, r4, //
+                r3, r3, r4, r4,
             ]
         );
+        let mut halved = [9u32; 1];
+        composite(
+            &f,
+            Placement {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            1,
+            &mut halved,
+        );
+        assert_eq!(halved, [r1]);
+        let mut offset = [9u32; 4 * 3];
+        composite(
+            &f,
+            Placement {
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 2,
+            },
+            4,
+            &mut offset,
+        );
+        assert_eq!(
+            offset,
+            [
+                9, 9, 9, 9, //
+                9, r1, r2, 9, //
+                9, r3, r4, 9,
+            ]
+        );
+    }
+
+    /// A placement that runs past the surface writes nothing past it, row by row, and a
+    /// zero-sized one writes nothing at all.
+    #[test]
+    fn compositing_stops_at_the_surface_edge() {
+        let f = frame(PixelFormat::R8G8B8X8Unorm, 1, 2, &[1, 0, 0, 0, 2, 0, 0, 0]);
+        let mut short = [9u32; 1];
+        composite(&f, whole(&f), 1, &mut short);
+        assert_eq!(
+            short,
+            [0x0001_0000],
+            "the first row landed, the second had nowhere"
+        );
+        let mut none = [9u32; 2];
+        composite(&f, Placement::NONE, 1, &mut none);
+        assert_eq!(none, [9, 9]);
     }
 
     /// A format this cannot read composites nothing and refuses to be written, rather than
@@ -355,7 +522,7 @@ mod tests {
         let mut f = frame(PixelFormat::R8G8B8X8Unorm, 1, 1, &[1, 2, 3, 4]);
         f.format = PixelFormat::Unknown(77);
         let mut out = [7u32];
-        composite(&f, 1, 1, &mut out);
+        composite(&f, whole(&f), 1, &mut out);
         assert_eq!(out, [7]);
         let dir = bsx_test_support::ScratchDir::created("ppm-unknown");
         assert!(write_ppm(&f, &dir.path().join("x.ppm")).is_err());
