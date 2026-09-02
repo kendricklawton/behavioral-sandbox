@@ -10,6 +10,11 @@
 //!   knowing anything about windows, at the price of up to one poll of latency.
 //! - **The window is the sandbox's lifetime, not the other way round.** Closing it ends the VM
 //!   the way `bsx stop` does; the VM ending takes the window with it, because the process exits.
+//! - **The frame follows the window.** A window the user resizes shows the frame scaled to fit,
+//!   its aspect kept, and the pointer is measured against where the frame landed. The other
+//!   direction does not exist: libkrun 1.19.4 answers the guest's display-info query from a fixed
+//!   table and exports nothing that changes it, so a resized window cannot ask the guest for a
+//!   new mode, and the scanout stays the size `--display` gave it.
 //! - **Its keyboard and pointer are the guest's.** Every key, motion, button and wheel event the
 //!   window gets is translated (`crate::input`) and queued for the guest; nothing is kept back.
 //! - **No display server is not an error.** The event loop is a capability probe: where it cannot
@@ -200,12 +205,7 @@ impl App {
         };
         pixels.fill(0);
         if let Some(frame) = &frame {
-            self.placement = Placement {
-                x: 0,
-                y: 0,
-                width: frame.width.min(width.get()),
-                height: frame.height.min(height.get()),
-            };
+            self.placement = fit((frame.width, frame.height), (width.get(), height.get()));
             composite(frame, self.placement, width.get(), &mut pixels);
         }
         let _ = pixels.present();
@@ -232,7 +232,7 @@ impl ApplicationHandler for App {
         let attributes = Window::default_attributes()
             .with_title(self.title.clone())
             .with_inner_size(winit::dpi::PhysicalSize::new(width.get(), height.get()))
-            .with_resizable(false);
+            .with_resizable(true);
         let Ok(window) = event_loop.create_window(attributes) else {
             event_loop.exit();
             return;
@@ -255,6 +255,11 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::Resized(_) => {
+                if let Some(shown) = &self.window {
+                    shown.window.request_redraw();
+                }
+            }
             WindowEvent::Focused(false) => self.release_all(),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state.is_pressed();
@@ -304,6 +309,29 @@ impl ApplicationHandler for App {
             }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_POLL));
+    }
+}
+
+/// Where a `frame` of that size sits in a `window` of that size: scaled to the largest size that
+/// fits with its aspect kept, and centred. A frame or window with a zero side places nothing.
+pub(crate) fn fit(frame: (u32, u32), window: (u32, u32)) -> Placement {
+    let (fw, fh) = (u64::from(frame.0), u64::from(frame.1));
+    let (ww, wh) = (u64::from(window.0), u64::from(window.1));
+    if fw == 0 || fh == 0 || ww == 0 || wh == 0 {
+        return Placement::NONE;
+    }
+    // Which side binds: the window is wider than the frame's aspect or it is not.
+    let (width, height) = if ww * fh <= wh * fw {
+        (ww, (ww * fh / fw).max(1))
+    } else {
+        ((wh * fw / fh).max(1), wh)
+    };
+    // Every value is at most a window side, which came in as a `u32`.
+    Placement {
+        x: ((ww - width) / 2) as u32,
+        y: ((wh - height) / 2) as u32,
+        width: width as u32,
+        height: height as u32,
     }
 }
 
@@ -425,6 +453,43 @@ mod tests {
             composite(&f, whole(&f), 1, &mut out);
             assert_eq!(out, [0x0011_2233], "{format:?}: R=11 G=22 B=33");
         }
+    }
+
+    /// A frame fits the window at the largest size that keeps its aspect, centred on the axis
+    /// with room to spare; the same size is the identity, and a zero side places nothing.
+    #[test]
+    fn a_frame_fits_the_window_with_its_aspect_kept_and_centred() {
+        let p = |x, y, width, height| Placement {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(fit((320, 240), (320, 240)), p(0, 0, 320, 240), "as is");
+        assert_eq!(fit((320, 240), (640, 480)), p(0, 0, 640, 480), "doubled");
+        assert_eq!(
+            fit((320, 240), (640, 240)),
+            p(160, 0, 320, 240),
+            "wide: bars beside"
+        );
+        assert_eq!(
+            fit((320, 240), (320, 480)),
+            p(0, 120, 320, 240),
+            "tall: bars above"
+        );
+        assert_eq!(fit((320, 240), (160, 120)), p(0, 0, 160, 120), "halved");
+        assert_eq!(
+            fit((320, 240), (100, 100)),
+            p(0, 12, 100, 75),
+            "shrunk to the width"
+        );
+        assert_eq!(
+            fit((4000, 1), (2, 2)),
+            p(0, 0, 2, 1),
+            "never thinner than a pixel"
+        );
+        assert_eq!(fit((0, 240), (320, 240)), Placement::NONE);
+        assert_eq!(fit((320, 240), (320, 0)), Placement::NONE);
     }
 
     /// Scaling picks the nearest source pixel: doubled, each pixel becomes a 2x2 block; halved,
