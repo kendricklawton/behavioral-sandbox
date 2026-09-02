@@ -38,8 +38,9 @@ than carried alongside its replacement; the libkrun supervisor (phase 2) and the
 command in a sandbox, `bsx shell` opens a session on a guest pty, `bsx up` starts a sandbox that
 outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this process did not start.
 `--display` gives a guest a virtio-gpu display shown in a window, and the window's keyboard and
-pointer reach the guest as two virtio-input devices (4.2, 4.3). GPU acceleration and macOS (phases
-5 and 6) are not written, and macOS is unbuilt and untested.
+pointer reach the guest as two virtio-input devices (4.2, 4.3), and the desktop image boots to a
+terminal in a Wayland session under it (4.5). GPU acceleration and macOS (phases 5 and 6) are not
+written, and macOS is unbuilt and untested.
 
 ## Design rules (every change holds to all six)
 
@@ -119,6 +120,7 @@ group. No part of the build or the run needs root.
 cargo xtask setup            # what this host can and cannot do
 cargo xtask ci               # the gate
 cargo xtask build-rootfs     # the guest image (Alpine + the GUEST_PACKAGES runtimes + static agent)
+cargo xtask build-rootfs --desktop   # the desktop image (+ cage, foot, seatd, udev, and bsx-session)
 ```
 
 ## Conventions

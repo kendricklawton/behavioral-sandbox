@@ -5,7 +5,7 @@
 //! a skipped test as a pass. Run with `cargo test -p bsx --test e2e -- --ignored`.
 
 // A test binary: `expect` is the idiomatic assertion in helpers outside `#[test]`.
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -632,6 +632,174 @@ fn a_synthetic_key_and_click_reach_a_guest_process() {
     assert!(
         position("1 30 1") < position("1 30 0") && position("1 272 1") < position("1 272 0"),
         "presses before releases: {events:?}"
+    );
+}
+
+/// The desktop image under `build-rootfs --desktop`, or `None` with the reason it cannot be used.
+fn desktop_root() -> Result<PathBuf, String> {
+    let root = guest_root().with_file_name("rootfs-desktop");
+    if root.is_dir() {
+        Ok(root)
+    } else {
+        Err(format!(
+            "no desktop tree at {} (run `cargo xtask build-rootfs --desktop`)",
+            root.display()
+        ))
+    }
+}
+
+/// The evdev code of a character on a US keyboard, for the few a test types.
+fn scancode(ch: char) -> u16 {
+    const ROW1: &str = "qwertyuiop";
+    const ROW2: &str = "asdfghjkl";
+    const ROW3: &str = "zxcvbnm";
+    const DIGITS: &str = "1234567890";
+    if let Some(i) = ROW1.find(ch) {
+        return 16 + i as u16;
+    }
+    if let Some(i) = ROW2.find(ch) {
+        return 30 + i as u16;
+    }
+    if let Some(i) = ROW3.find(ch) {
+        return 44 + i as u16;
+    }
+    if let Some(i) = DIGITS.find(ch) {
+        return 2 + i as u16;
+    }
+    match ch {
+        ' ' => 57,
+        '\n' => 28,
+        '-' => 12,
+        other => panic!("no scancode for {other:?}"),
+    }
+}
+
+/// Replay lines that type `text` on the keyboard device: press, release, and a report each.
+fn typed(text: &str) -> String {
+    text.chars()
+        .map(scancode)
+        .map(|k| format!("kbd 1 {k} 1\nkbd 0 0 0\nkbd 1 {k} 0\nkbd 0 0 0\n"))
+        .collect()
+}
+
+/// The desktop image boots to a Wayland session (cage) whose terminal (foot) runs a shell the
+/// window's keyboard reaches (roadmap 4.5): a command typed through the replay hook writes a
+/// sentinel to a mounted directory, and the `exit` that follows ends the terminal, the compositor
+/// and the run. The root is read-only; the sentinel lands on the writable mount.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the desktop tree"]
+fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
+    use std::io::{Read, Write};
+    if skipped("the_desktop_image_boots_to_a_session_the_keyboard_reaches") {
+        return;
+    }
+    let desktop = match desktop_root() {
+        Ok(root) => root,
+        Err(why) => {
+            println!("SKIPPED the_desktop_image_boots_to_a_session_the_keyboard_reaches: {why}");
+            return;
+        }
+    };
+    let dir = bsx_test_support::ScratchDir::created("e2e-desktop");
+    let fifo = dir.path().join("keys");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo")
+            .success()
+    );
+    // The terminal runs a shell that reads one line and runs it: the session is the compositor,
+    // and what a real user would type at foot's prompt is fed the same way. Reading one line keeps
+    // the shell simple and ends it deterministically.
+    let mount = format!("/mnt={}", dir.path().display());
+    let mut child = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(&desktop)
+        .args(["--display", "640x480", "--mount", &mount])
+        .env("BSX_INPUT_REPLAY", &fifo)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        // `timeout` bounds a session that never gets its keystrokes; the sentinel is the pass.
+        .args([
+            "--",
+            "timeout",
+            "60",
+            "bsx-session",
+            "foot",
+            "sh",
+            "-c",
+            // No double-quote-space in the arg: libkrun's cmdline codec corrupts that,
+            // and the sentinel word has no spaces, so it needs no quoting.
+            // Signal readiness on the mount, then read one line and write it back: the wait on
+            // the ready file replaces a fixed sleep, so the test types only once the shell is at
+            // its read. No double-quote-space in the arg (libkrun's cmdline codec corrupts that),
+            // and the words have no spaces, so they need no quoting.
+            "echo ready > /mnt/ready; read word; printf %s $word > /mnt/typed",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run bsx");
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = pipe.read_to_string(&mut buf);
+            buf
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().expect("piped")));
+    let stderr = drain(Box::new(child.stderr.take().expect("piped")));
+
+    // Wait for the shell to reach its read, signalled by the ready file it writes on the mount,
+    // so the keys are typed into a shell that is listening rather than after a guessed delay.
+    let ready = dir.path().join("ready");
+    let up = std::time::Instant::now() + std::time::Duration::from_secs(40);
+    while std::time::Instant::now() < up && !ready.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        ready.exists(),
+        "the session's terminal never reached its shell within 40 s\nstderr so far: (see below)"
+    );
+    // The FIFO handle stays open across the loop: the replay thread reads until EOF, so closing
+    // it would end input after one batch. The shell reads one line and the rest buffer, so
+    // retyping is safe, which is what lets the loop ride out the second or so cage needs to route
+    // keyboard focus to foot's surface after the shell is already at its read.
+    let sentinel = dir.path().join("typed");
+    let mut keys = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&fifo)
+        .expect("open the FIFO for writing");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut landed = None;
+    while std::time::Instant::now() < deadline {
+        keys.write_all(typed("bsx-typed-this\n").as_bytes())
+            .expect("type the command");
+        keys.flush().expect("flush the keys");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if let Ok(text) = std::fs::read_to_string(&sentinel) {
+            landed = Some(text);
+            break;
+        }
+    }
+    drop(keys);
+    let status = child.wait().expect("wait for bsx");
+    let (out, err) = (
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default(),
+    );
+    assert_eq!(
+        landed.as_deref(),
+        Some("bsx-typed-this"),
+        "the keys typed at the session's terminal never reached its shell\nstdout: {out}\nstderr: {err}"
+    );
+    assert!(
+        status.success(),
+        "the typed `exit`-equivalent (the read loop ending) tears the session down: {status}\n\
+         stdout: {out}\nstderr: {err}"
     );
 }
 

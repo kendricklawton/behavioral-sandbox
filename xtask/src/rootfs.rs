@@ -1,6 +1,7 @@
-//! The reproducible guest rootfs build: a pinned Alpine base + the guest
-//! runtimes + the static agent, assembled rootless into a directory tree that two
-//! builds reproduce byte-identically.
+//! The reproducible guest image builds: a pinned Alpine base + an image's packages + the static
+//! agent, assembled rootless into a directory tree that two builds reproduce byte-identically.
+//! Two images share the machinery ([`IMAGES`]): the headless one every verb boots by default, and
+//! the desktop one that boots to a Wayland session.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use crate::artifacts::{Artifact, fetch_one, sha256_of};
 
 use crate::guest_bins::build_guest_agent;
-use crate::{artifacts_dir, guest_rootfs_path, run_tool, vendor_dir, workspace_root};
+use crate::{artifacts_dir, run_tool, vendor_dir, workspace_root};
 
 /// The apk cache subdirectory (under a build's `artifacts/` or a vendor mirror): the `.apk` closure +
 /// its `APKINDEX`, populated online once and installed from offline thereafter. Defined here with the
@@ -24,6 +25,11 @@ pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 /// deliberate bump of this, not a silent creep, and a prompt to ask whether the base is still
 /// "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
+
+/// The desktop image's ceiling. Measured 2026-09-02: 291 MiB, of which `libLLVM` is 182 and
+/// `libgallium` 42, both arriving through wlroots' EGL dependency on Mesa and both what phase 5's
+/// virgl driver needs, so they are carried rather than pruned.
+const DESKTOP_BUDGET_MIB: u64 = 320;
 
 /// The guest path this builder bakes the agent in at, shared with the host that boots it as a
 /// VM's workload (`bsx shell`): the definition lives in `bsx-channel` beside the port they also
@@ -48,6 +54,77 @@ const ALPINE_BRANCH: &str = "v3.24";
 /// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
+
+/// The desktop image's packages: a single-window Wayland compositor (`cage`, on wlroots), a
+/// terminal for it, the seat daemon and udev the compositor finds its devices through, the keymaps
+/// xkbcommon reads, and one font. No Mesa driver: the session renders with pixman.
+const DESKTOP_PACKAGES: &[&str] = &[
+    "cage",
+    "foot",
+    "seatd",
+    "eudev",
+    "xkeyboard-config",
+    "font-dejavu",
+];
+
+/// Where the desktop image carries its session program, on the guest's default `PATH`.
+pub(crate) const SESSION_PATH: &str = "/usr/local/bin/bsx-session";
+
+/// One guest image: its name under `artifacts/`, what goes into it beyond the base and the agent,
+/// and the ceiling it is held to.
+pub(crate) struct ImageSpec {
+    /// The directory under `artifacts/`, and what a person calls it.
+    pub(crate) name: &'static str,
+    /// The `build-rootfs` flags that select it, for the re-exec under `fakeroot`.
+    flags: &'static [&'static str],
+    /// The Alpine repositories `apk` resolves against, in order.
+    repos: &'static [&'static str],
+    /// The packages installed on top of the base.
+    packages: &'static [&'static str],
+    /// Programs this builder writes into the tree beyond the agent: guest path and contents,
+    /// mode 0755.
+    programs: &'static [(&'static str, &'static str)],
+    /// Paths a package must have provided, checked before the tree is published.
+    required: &'static [&'static str],
+    /// The footprint ceiling.
+    budget_mib: u64,
+    /// The committed lockfile's name under `xtask/`.
+    lock: &'static str,
+}
+
+/// The headless image every verb boots by default.
+pub(crate) const GUEST: ImageSpec = ImageSpec {
+    name: "rootfs-guest",
+    flags: &[],
+    repos: &["main"],
+    packages: GUEST_PACKAGES,
+    programs: &[],
+    required: &[],
+    budget_mib: ROOTFS_BUDGET_MIB,
+    lock: "rootfs-packages.lock",
+};
+
+/// The desktop image: `bsx run --display WxH --root artifacts/rootfs-desktop -- bsx-session`
+/// boots to a terminal in a Wayland session.
+pub(crate) const DESKTOP: ImageSpec = ImageSpec {
+    name: "rootfs-desktop",
+    flags: &["--desktop"],
+    repos: &["main", "community"],
+    packages: DESKTOP_PACKAGES,
+    programs: &[(SESSION_PATH, include_str!("../guest/bsx-session"))],
+    required: &[
+        "/usr/bin/cage",
+        "/usr/bin/foot",
+        "/usr/bin/seatd",
+        "/sbin/udevd",
+        "/bin/udevadm",
+    ],
+    budget_mib: DESKTOP_BUDGET_MIB,
+    lock: "rootfs-desktop-packages.lock",
+};
+
+/// Every image, for the `vendor` snapshot that has to carry both closures.
+pub(crate) const IMAGES: &[&ImageSpec] = &[&GUEST, &DESKTOP];
 
 /// The pinned Alpine minirootfs, a real musl+busybox userland (so init and a shell just work, and
 /// `apk` adds the [`GUEST_PACKAGES`] runtimes).
@@ -104,7 +181,7 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
 /// libkrun's virtiofs root takes; there is no image and nothing here needs root or a loopback.
 /// Returns the tree's hash and the resolved package closure, so [`build_rootfs`] can check
 /// reproducibility.
-fn assemble_rootfs(out_dir: &Path) -> Result<RootfsBuild> {
+fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
     let agent = build_guest_agent()?;
 
     let base = alpine_artifact()?;
@@ -137,7 +214,7 @@ fn assemble_rootfs(out_dir: &Path) -> Result<RootfsBuild> {
     // rootless, on any host distro. Packages are signature-verified against the keys the minirootfs
     // itself ships (`/etc/apk/keys`). `--no-scripts` because pre/post-install scripts need a chroot
     // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
-    install_guest_packages(&staging)?;
+    install_guest_packages(image, &staging)?;
 
     // Bake the static agent in at the path the init line respawns.
     let agent_dest = in_staging(&staging, GUEST_AGENT_PATH);
@@ -148,9 +225,20 @@ fn assemble_rootfs(out_dir: &Path) -> Result<RootfsBuild> {
         .with_context(|| format!("copy agent into {}", agent_dest.display()))?;
     set_mode_0755(&agent_dest)?;
 
+    // The image's own programs, from this repo rather than a package.
+    for (guest_path, contents) in image.programs {
+        let dest = in_staging(&staging, guest_path);
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&dest, contents)
+            .with_context(|| format!("write {guest_path} into the staged tree"))?;
+        set_mode_0755(&dest)?;
+    }
+
     // Last gate before the tree is published: everything the guest depends on is present, at the
     // mode it needs.
-    verify_guest_contract(&staging)?;
+    verify_guest_contract(image, &staging)?;
     verify_staged_ownership(&staging)?;
 
     // Record the resolved package closure while the apk db is still in the tree, then drop the db
@@ -278,7 +366,7 @@ fn verify_staged_ownership(staging: &Path) -> Result<()> {
     Ok(())
 }
 
-fn verify_guest_contract(staging: &Path) -> Result<()> {
+fn verify_guest_contract(image: &ImageSpec, staging: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     // The consequence travels with the check, so a failure explains itself to whoever renamed
@@ -310,6 +398,25 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
              sessions spawn through it; `bsx shell` would get a refusal for every command)"
         );
     }
+    for path in image.required {
+        if !in_staging(staging, path).exists() {
+            bail!(
+                "guest-image contract: {path} is missing from the staged {} tree (a package the \
+                 image lists no longer provides it)",
+                image.name
+            );
+        }
+    }
+    for (path, _) in image.programs {
+        let mode = std::fs::metadata(in_staging(staging, path))
+            .with_context(|| format!("guest-image contract: {path} was not written"))?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o755 {
+            bail!("guest-image contract: {path} is mode {mode:04o}, not 0755");
+        }
+    }
     Ok(())
 }
 
@@ -336,7 +443,11 @@ struct RootfsBuild {
 /// One `fakeroot` has to wrap the *whole* assembly rather than each command, because the faked ownership
 /// lives in one process's bookkeeping, so extracting under one invocation and staging under
 /// another loses it. `FAKEROOTKEY` is set inside a session, which is what stops this recursing.
-fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bool> {
+fn reexec_under_fakeroot_if_needed(
+    image: &ImageSpec,
+    verify: bool,
+    update_lock: bool,
+) -> Result<bool> {
     if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
         return Ok(false);
     }
@@ -360,6 +471,7 @@ fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bo
     if update_lock {
         args.push("--update-lock");
     }
+    args.extend(image.flags.iter().copied());
     println!("  (re-exec under fakeroot: the guest rootfs must be uid 0)");
     let mut cmd_args: Vec<&std::ffi::OsStr> = vec![exe.as_os_str()];
     cmd_args.extend(args.iter().map(std::ffi::OsStr::new));
@@ -367,42 +479,48 @@ fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bo
     Ok(true)
 }
 
-pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
-    if reexec_under_fakeroot_if_needed(verify, update_lock)? {
+pub(crate) fn build_rootfs(image: &ImageSpec, verify: bool, update_lock: bool) -> Result<()> {
+    if reexec_under_fakeroot_if_needed(image, verify, update_lock)? {
         return Ok(());
     }
-    let out = guest_rootfs_path();
-    let build = assemble_rootfs(&out)?;
-    println!("\n✓ rootfs built (agent baked in): {}", out.display());
+    let out = artifacts_dir().join(image.name);
+    let build = assemble_rootfs(image, &out)?;
+    println!(
+        "\n✓ {} built (agent baked in): {}",
+        image.name,
+        out.display()
+    );
     println!("  sha256: {} (over the tree manifest)", build.tree_sha256);
 
-    // Keep the base small: report the real footprint and fail on bloat past the budget.
+    // Keep the image small: report the real footprint and fail on bloat past the budget.
     let used_mib = tree_used_bytes(&out)? / (1024 * 1024);
-    println!("  size:   {used_mib} MiB used / {ROOTFS_BUDGET_MIB} MiB budget");
-    if used_mib > ROOTFS_BUDGET_MIB {
+    let budget = image.budget_mib;
+    println!("  size:   {used_mib} MiB used / {budget} MiB budget");
+    if used_mib > budget {
         bail!(
-            "rootfs base is over budget: {used_mib} MiB > {ROOTFS_BUDGET_MIB} MiB — keep the base \
-             small, or raise ROOTFS_BUDGET_MIB deliberately"
+            "{} is over budget: {used_mib} MiB > {budget} MiB — keep the image small, or raise \
+             its budget deliberately",
+            image.name
         );
     }
 
     if update_lock {
-        write_packages_lock(&build.packages)?;
+        write_packages_lock(image, &build.packages)?;
         println!(
             "  ✓ recorded {} packages in {}",
             build.packages.len(),
-            packages_lock_path().display()
+            packages_lock_path(image).display()
         );
     } else {
-        report_packages_lock_drift(&build.packages);
+        report_packages_lock_drift(image, &build.packages);
     }
 
     if verify {
         // Prove determinism: a second full build must produce an identical tree. Built to a temp
         // path so the canonical tree stays in place, and cleaned up on *every* path, before
         // propagating a build error, so a failed second build leaks nothing.
-        let tmp = artifacts_dir().join("rootfs-guest.verify");
-        let result = assemble_rootfs(&tmp);
+        let tmp = artifacts_dir().join(format!("{}.verify", image.name));
+        let result = assemble_rootfs(image, &tmp);
         let _ = std::fs::remove_dir_all(&tmp);
         let again = result?;
         if again.tree_sha256 != build.tree_sha256 {
@@ -439,8 +557,8 @@ fn tree_used_bytes(root: &Path) -> Result<u64> {
 /// The committed lockfile recording the exact guest package closure. Lives next to the build
 /// code, **not** in the gitignored `artifacts/`, so it's version-controlled and a diff shows
 /// exactly when Alpine's branch repo moved a package under the floating install.
-fn packages_lock_path() -> PathBuf {
-    workspace_root().join("xtask/rootfs-packages.lock")
+fn packages_lock_path(image: &ImageSpec) -> PathBuf {
+    workspace_root().join("xtask").join(image.lock)
 }
 
 /// The resolved package closure from a staging tree's apk database: every installed package (the
@@ -473,13 +591,19 @@ fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
 }
 
 /// Write the committed package lockfile (the `--update-lock` action).
-fn write_packages_lock(packages: &[String]) -> Result<()> {
-    let path = packages_lock_path();
-    let mut body = String::from(
-        "# Resolved guest rootfs package closure: the exact Alpine packages baked into\n\
-         # artifacts/rootfs-guest. Regenerate after an upstream bump with:\n\
-         #   cargo xtask build-rootfs --update-lock\n\
+fn write_packages_lock(image: &ImageSpec, packages: &[String]) -> Result<()> {
+    let path = packages_lock_path(image);
+    let flags = image
+        .flags
+        .iter()
+        .map(|f| format!("{f} "))
+        .collect::<String>();
+    let mut body = format!(
+        "# Resolved guest image package closure: the exact Alpine packages baked into\n\
+         # artifacts/{}. Regenerate after an upstream bump with:\n\
+         #   cargo xtask build-rootfs {flags}--update-lock\n\
          # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",
+        image.name
     );
     for p in packages {
         body.push_str(p);
@@ -493,11 +617,16 @@ fn write_packages_lock(packages: &[String]) -> Result<()> {
 /// failing here costs a whole gate run without producing a reviewed image (the build already
 /// resolved fresh from the branch either way). `.github/workflows/rootfs-packages.yml` is the
 /// enforcer, where re-pinning is a person reading the diff.
-fn report_packages_lock_drift(built: &[String]) {
-    let path = packages_lock_path();
+fn report_packages_lock_drift(image: &ImageSpec, built: &[String]) {
+    let path = packages_lock_path(image);
+    let flags = image
+        .flags
+        .iter()
+        .map(|f| format!("{f} "))
+        .collect::<String>();
     let Ok(text) = std::fs::read_to_string(&path) else {
         println!(
-            "  ! no package lockfile at {} — run `cargo xtask build-rootfs --update-lock`",
+            "  ! no package lockfile at {} — run `cargo xtask build-rootfs {flags}--update-lock`",
             path.display()
         );
         return;
@@ -510,7 +639,7 @@ fn report_packages_lock_drift(built: &[String]) {
     if let Some(drift) = lock_drift(&recorded, built) {
         println!(
             "  ! guest package closure drifted from {} (Alpine bumped a package):\n{drift}  \
-             run `cargo xtask build-rootfs --update-lock` and commit the lockfile to re-pin",
+             run `cargo xtask build-rootfs {flags}--update-lock` and commit the lockfile to re-pin",
             path.display()
         );
     }
@@ -552,8 +681,8 @@ enum ApkSource<'a> {
 /// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
 /// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
 /// `staging`, the tool is ephemeral).
-fn install_guest_packages(staging: &Path) -> Result<()> {
-    if GUEST_PACKAGES.is_empty() {
+fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
+    if image.packages.is_empty() {
         return Ok(());
     }
     let tools = apk_tools_artifact()?;
@@ -566,7 +695,7 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
         Some(dir) => ApkSource::VendorCache(dir),
         None => ApkSource::Network,
     };
-    let result = run_apk_add(&apk, staging, &source);
+    let result = run_apk_add(&apk, staging, &source, image);
 
     // The tool is scratch either way, clean it before propagating any install failure.
     let _ = std::fs::remove_dir_all(&tooldir);
@@ -607,24 +736,33 @@ fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf,
     Ok((tooldir, apk))
 }
 
-/// Run `apk.static add` for [`GUEST_PACKAGES`] into `staging`, sourced per [`ApkSource`]. The
-/// package set, arch, and repo are identical across sources, only the fetch/cache flags differ, so
-/// the resolved closure (and thus [`resolved_packages`]) is the same whether built online or from the
-/// vendored cache, keeping the lockfile contract intact.
-fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
-    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
-    // The host's arch, not a literal: Alpine's arch names match Rust's for the arches we pin
-    // (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned, so this stays
-    // correct by itself when a second arch lands, not silently installing x86_64 into an aarch64 image.
-    let mut args: Vec<OsString> = vec![
+/// The `--root`, `--arch` and `--repository` arguments every `apk.static` call for `image` starts
+/// with. The host's arch, not a literal: Alpine's arch names match Rust's for the arches we pin
+/// (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned, so this stays correct
+/// by itself when a second arch lands, not silently installing x86_64 into an aarch64 image.
+fn apk_base_args(image: &ImageSpec, staging: &Path) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("--root"),
         staging.as_os_str().to_owned(),
         OsString::from("--arch"),
         OsString::from(std::env::consts::ARCH),
-        OsString::from("--repository"),
-        OsString::from(&repo),
-        OsString::from("--no-scripts"),
     ];
+    for repo in image.repos {
+        args.push(OsString::from("--repository"));
+        args.push(OsString::from(format!(
+            "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/{repo}"
+        )));
+    }
+    args
+}
+
+/// Run `apk.static add` for the image's packages into `staging`, sourced per [`ApkSource`]. The
+/// package set, arch, and repos are identical across sources, only the fetch/cache flags differ, so
+/// the resolved closure (and thus [`resolved_packages`]) is the same whether built online or from the
+/// vendored cache, keeping the lockfile contract intact.
+fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource, image: &ImageSpec) -> Result<()> {
+    let mut args = apk_base_args(image, staging);
+    args.push(OsString::from("--no-scripts"));
     match source {
         // `--no-cache`: don't leave apk's cache behind on an ordinary online build.
         ApkSource::Network => args.push(OsString::from("--no-cache")),
@@ -641,7 +779,7 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
         }
     }
     args.push(OsString::from("add"));
-    args.extend(GUEST_PACKAGES.iter().map(|p| OsString::from(*p)));
+    args.extend(image.packages.iter().map(|p| OsString::from(*p)));
 
     let apk_str = apk.to_string_lossy().into_owned();
     let arg_refs: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
@@ -651,19 +789,11 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
 /// `apk.static update` into `cache_dir`, fetch + cache the repo's `APKINDEX` so a later offline
 /// `add --no-network` can resolve against it. A plain `add --cache-dir` caches the packages it pulls
 /// but not necessarily the index, so the vendor snapshot seeds it explicitly.
-fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
-    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
-    let args: Vec<OsString> = vec![
-        OsString::from("--root"),
-        staging.as_os_str().to_owned(),
-        OsString::from("--arch"),
-        OsString::from(std::env::consts::ARCH),
-        OsString::from("--repository"),
-        OsString::from(&repo),
-        OsString::from("--cache-dir"),
-        absolute(cache_dir)?.into_os_string(),
-        OsString::from("update"),
-    ];
+fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path, image: &ImageSpec) -> Result<()> {
+    let mut args = apk_base_args(image, staging);
+    args.push(OsString::from("--cache-dir"));
+    args.push(absolute(cache_dir)?.into_os_string());
+    args.push(OsString::from("update"));
     let apk_str = apk.to_string_lossy().into_owned();
     let arg_refs: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
     run_tool(&apk_str, &arg_refs)
@@ -697,7 +827,21 @@ pub(crate) fn populate_apk_cache(
     base_tar: &Path,
     apk_tools_tar: &Path,
 ) -> Result<()> {
-    if GUEST_PACKAGES.is_empty() {
+    for image in IMAGES {
+        populate_apk_cache_for(image, cache_dir, base_tar, apk_tools_tar)?;
+    }
+    Ok(())
+}
+
+/// One image's closure into the shared cache: the `.apk` files are per package and the index per
+/// repository, so two images' snapshots overlap where their closures do.
+fn populate_apk_cache_for(
+    image: &ImageSpec,
+    cache_dir: &Path,
+    base_tar: &Path,
+    apk_tools_tar: &Path,
+) -> Result<()> {
+    if image.packages.is_empty() {
         return Ok(());
     }
     std::fs::create_dir_all(cache_dir)
@@ -727,8 +871,8 @@ pub(crate) fn populate_apk_cache(
     let (tooldir, apk) = extract_apk_static(apk_tools_tar, scratch)?;
     // Seed the index first (`update`), then the packages (`add`), both into the cache, so a later
     // offline `add --no-network` can resolve the closure against the cached `APKINDEX`.
-    let result = run_apk_update(&apk, &staging, cache_dir)
-        .and_then(|()| run_apk_add(&apk, &staging, &ApkSource::PopulateCache(cache_dir)));
+    let result = run_apk_update(&apk, &staging, cache_dir, image)
+        .and_then(|()| run_apk_add(&apk, &staging, &ApkSource::PopulateCache(cache_dir), image));
     let _ = std::fs::remove_dir_all(&tooldir);
     let _ = std::fs::remove_dir_all(&staging);
     result
@@ -749,7 +893,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    use super::{GUEST_AGENT_PATH, in_staging, lock_drift, verify_guest_contract};
+    use super::{GUEST, GUEST_AGENT_PATH, in_staging, lock_drift, verify_guest_contract};
 
     /// The drift report is the whole of what a gate log says about an Alpine bump, so it names the
     /// packages that moved rather than only that something did: a version bump reads as one `-`/`+`
@@ -801,7 +945,8 @@ mod tests {
     fn a_complete_staging_tree_satisfies_the_contract() {
         let tmp = temp_dir("ok");
         good_staging(tmp.path());
-        verify_guest_contract(tmp.path()).expect("a fully staged tree satisfies the contract");
+        verify_guest_contract(&GUEST, tmp.path())
+            .expect("a fully staged tree satisfies the contract");
     }
 
     #[test]
@@ -809,7 +954,7 @@ mod tests {
         let tmp = temp_dir("missing");
         good_staging(tmp.path());
         std::fs::remove_file(in_staging(tmp.path(), GUEST_AGENT_PATH)).unwrap();
-        let err = verify_guest_contract(tmp.path())
+        let err = verify_guest_contract(&GUEST, tmp.path())
             .expect_err("a missing agent must fail the build")
             .to_string();
         assert!(err.contains(GUEST_AGENT_PATH), "{err}");
@@ -826,7 +971,7 @@ mod tests {
         let mut perms = std::fs::metadata(&staged).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&staged, perms).unwrap();
-        let err = verify_guest_contract(tmp.path())
+        let err = verify_guest_contract(&GUEST, tmp.path())
             .expect_err("a non-executable agent must fail the build")
             .to_string();
         assert!(err.contains("0644"), "{err}");

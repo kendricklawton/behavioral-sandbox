@@ -52,25 +52,27 @@ jobs:
         # `--update-lock` rewrites the lockfile from what this build resolved; the diff below is
         # then the answer. Asking the build to *check* instead would only reprint the warning the
         # gate already prints, without naming which package moved.
-        run: cargo xtask build-rootfs --update-lock
+        run: |
+          cargo xtask build-rootfs --update-lock
+          cargo xtask build-rootfs --desktop --update-lock
 
       - name: Did the closure move?
         run: |
           set -euo pipefail
 
-          if git diff --quiet -- xtask/rootfs-packages.lock; then
-            echo "The guest package closure still matches the lockfile."
+          if git diff --quiet -- xtask/rootfs-packages.lock xtask/rootfs-desktop-packages.lock; then
+            echo "Both image closures still match their lockfiles."
             exit 0
           fi
 
-          echo "The resolved closure differs from the committed lockfile:"
+          echo "A resolved closure differs from its committed lockfile:"
           echo ""
-          git --no-pager diff -- xtask/rootfs-packages.lock
+          git --no-pager diff -- xtask/rootfs-packages.lock xtask/rootfs-desktop-packages.lock
           echo ""
           echo "::error::Alpine moved a package in the guest image's closure."
           echo ""
           echo "Re-pinning is a human step, not a bot PR. It means:"
           echo "  1. read the diff above: which package moved, and is it a security fix?"
-          echo "  2. run 'cargo xtask build-rootfs --update-lock' locally and commit the lockfile"
+          echo "  2. run 'cargo xtask build-rootfs --update-lock' (and '--desktop --update-lock') locally and commit the lockfile"
           echo "  3. boot a guest against the rebuilt image before trusting it"
           exit 1

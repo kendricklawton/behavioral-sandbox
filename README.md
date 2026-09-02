@@ -34,7 +34,8 @@ What is here, on Linux with `/dev/kvm` and a guest image the tree builds: `bsx r
 in a sandbox and exits with its status, `bsx shell` opens a session on a pty inside the guest,
 `bsx up` starts a sandbox that outlives the command that started it, and `bsx ls`, `bsx exec` and
 `bsx stop` reach a sandbox this process did not start, and `--display WIDTHxHEIGHT` shows a guest's
-screen in a window whose keyboard and pointer go to the guest. What is not here: the GUI application, GPU acceleration, and macOS. If you want
+screen in a window whose keyboard and pointer go to the guest, and the desktop image boots to a
+terminal in a Wayland session there. What is not here: the GUI application, GPU acceleration, and macOS. If you want
 the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
@@ -80,6 +81,7 @@ group. No part of the build needs root.
 cargo xtask setup            # what this host can and cannot do
 cargo xtask ci               # the gate: fmt, prose drift, clippy, build, test, docs, deny
 cargo xtask build-rootfs     # the guest image (Alpine + runtimes + the static agent)
+cargo xtask build-rootfs --desktop   # the desktop image (+ a Wayland compositor and a terminal)
 ```
 
 ## Repo layout

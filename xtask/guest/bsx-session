@@ -1,0 +1,35 @@
+#!/bin/sh
+# The desktop image's session: udev for the input devices, seatd for the seat, and cage, a
+# single-window Wayland compositor, on the virtio-gpu with the pixman renderer, running the
+# command given (a foot terminal by default). Ends when that command does.
+#
+# - `/run` is a tmpfs, because the root is read-only by default and everything here writes under
+#   `/run`: udev's database, seatd's socket, the Wayland socket, and foot's font cache.
+# - The pixman renderer draws on the CPU into DRM dumb buffers, which is the one path measured
+#   to carry a frame out of this guest (roadmap 0.9); no GPU is claimed or needed.
+# - `WLR_BACKENDS=drm,libinput` names the two backends: the display and the devices. Naming
+#   only `drm` is a compositor with no input at all. `LIBSEAT_BACKEND=seatd` names the seat
+#   daemon started just before.
+# - `WLR_NO_HARDWARE_CURSORS=1` because the virtio-gpu here has no cursor plane the pixman
+#   renderer drives; without it wlroots logs a cursor failure on every pointer move.
+
+export XDG_RUNTIME_DIR=/run/user/0 XDG_CACHE_HOME=/run/user/0/cache HOME=/root
+export XKB_DEFAULT_LAYOUT=us WLR_RENDERER=pixman WLR_BACKENDS=drm,libinput LIBSEAT_BACKEND=seatd
+export WLR_NO_HARDWARE_CURSORS=1
+
+mount -t tmpfs -o mode=755 tmpfs /run || exit 1
+mkdir -p /run/user/0 /run/udev && chmod 700 /run/user/0
+
+udevd --daemon && udevadm trigger --action=add && udevadm settle
+
+seatd -g root &
+i=0
+while [ ! -S /run/seatd.sock ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+
+if [ "$#" -eq 0 ]; then
+    set -- foot
+fi
+exec cage -- "$@"

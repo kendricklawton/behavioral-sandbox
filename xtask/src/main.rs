@@ -66,6 +66,11 @@ enum Cmd {
     /// shape libkrun's virtiofs root takes. Reproducible: two builds hash identically.
     #[command(visible_alias = "rootfs")]
     BuildRootfs {
+        /// Build the desktop image instead, at `artifacts/rootfs-desktop`: the base plus a
+        /// Wayland compositor (cage), a terminal (foot), seatd and udev, and the `bsx-session`
+        /// program that starts them under `--display`.
+        #[arg(long)]
+        desktop: bool,
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
         /// package closure has drifted from the committed lockfile. The reproducibility gate.
         #[arg(long)]
@@ -130,9 +135,18 @@ fn main() -> Result<()> {
         }
         Cmd::SemverCheck { baseline } => semver_check(baseline.as_deref()),
         Cmd::BuildRootfs {
+            desktop,
             verify,
             update_lock,
-        } => rootfs::build_rootfs(verify, update_lock),
+        } => rootfs::build_rootfs(
+            if desktop {
+                &rootfs::DESKTOP
+            } else {
+                &rootfs::GUEST
+            },
+            verify,
+            update_lock,
+        ),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchFootprint { count } => bench::bench_footprint(count),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
@@ -774,7 +788,7 @@ fn vendor_dir() -> Option<PathBuf> {
 /// The guest rootfs (`build-rootfs` output) under [`artifacts_dir`], defined once so every reader
 /// and writer resolves the same path. A **directory**, which is what libkrun's virtiofs root takes.
 fn guest_rootfs_path() -> PathBuf {
-    artifacts_dir().join("rootfs-guest")
+    artifacts_dir().join(rootfs::GUEST.name)
 }
 
 /// Run an external build tool, echoing the command; fail with context if it's missing or errors.
