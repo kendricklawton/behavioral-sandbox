@@ -33,8 +33,9 @@ that did not exist yet.
 What is here, on Linux with `/dev/kvm` and a guest image the tree builds: `bsx run` runs one command
 in a sandbox and exits with its status, `bsx shell` opens a session on a pty inside the guest,
 `bsx up` starts a sandbox that outlives the command that started it, and `bsx ls`, `bsx exec` and
-`bsx stop` reach a sandbox this process did not start. What is not here: the GUI, a display path,
-GPU, and macOS. If you want the Firecracker engine, it is in git history.
+`bsx stop` reach a sandbox this process did not start, and `--display WIDTHxHEIGHT` shows a guest's
+screen in a window. What is not here: the GUI application, GPU acceleration, and macOS. If you want
+the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
 depend on this yet.

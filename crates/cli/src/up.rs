@@ -52,6 +52,13 @@ pub(crate) struct UpArgs {
     /// Print what this sandbox would share and exit, without booting anything.
     #[arg(long)]
     pub(crate) dry_run: bool,
+    /// Give the guest a display of `WIDTHxHEIGHT`, shown in a window for as long as the sandbox
+    /// runs. Closing the window stops the sandbox.
+    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    pub(crate) display: Option<String>,
+    /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) screenshot: Option<std::path::PathBuf>,
 }
 
 /// What `start` did, so the printer cannot report the name of a VM that was never booted: a dry
@@ -115,6 +122,11 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     cfg.log = Some(log.clone());
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
+    crate::run::apply_display(
+        &mut cfg,
+        args.display.as_deref(),
+        args.screenshot.as_deref(),
+    )?;
     if let Some(v) = crate::run::resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }

@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bsx_supervisor::{Exit, Net, RootFs, Vm, VmConfig};
+use bsx_supervisor::{Display, Exit, Net, RootFs, Vm, VmConfig};
 
 use crate::EXIT_OPERATIONAL;
 
@@ -101,6 +101,13 @@ pub(crate) struct RunArgs {
     /// Print what this sandbox would share and exit, without booting anything.
     #[arg(long)]
     pub(crate) dry_run: bool,
+    /// Give the guest a display of `WIDTHxHEIGHT`, shown in a window for as long as the sandbox
+    /// runs. Closing the window stops the sandbox.
+    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    pub(crate) display: Option<String>,
+    /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) screenshot: Option<PathBuf>,
     /// The command, after `--`. The first word is resolved by the guest (its `PATH`, not the
     /// host's), so `echo` runs the guest's `echo`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
@@ -165,6 +172,12 @@ pub(crate) fn print_posture(
     }
     if let Some((port, path)) = &cfg.vsock {
         writeln!(out, "channel  guest vsock {port} <- {}", path.display())?;
+    }
+    if let Some(display) = cfg.display {
+        writeln!(out, "display  {} in a window", display.as_spec())?;
+    }
+    if let Some(path) = &cfg.screenshot {
+        writeln!(out, "screenshot {}", path.display())?;
     }
     writeln!(out, "network  {}", cfg.net.as_flag())?;
     writeln!(
@@ -257,6 +270,30 @@ fn data_dir(xdg_data: Option<OsString>, home: Option<OsString>) -> Option<PathBu
         .or(home.map(|h| PathBuf::from(h).join(".local/share")))
 }
 
+/// Puts a `--display` and `--screenshot` on `cfg`, refusing the spellings the helper would.
+/// Shared by every verb that boots, so the refusal is one message.
+pub(crate) fn apply_display(
+    cfg: &mut VmConfig,
+    display: Option<&str>,
+    screenshot: Option<&Path>,
+) -> Result<(), String> {
+    if let Some(spec) = display {
+        let Some((width, height)) = crate::vmm::split_display(spec) else {
+            return Err(format!(
+                "--display {spec:?} is not WIDTHxHEIGHT, both non-zero"
+            ));
+        };
+        cfg.display = Some(Display::new(width, height));
+    }
+    match (screenshot, cfg.display) {
+        (Some(_), None) => Err("--screenshot needs a --display to take a frame from".to_string()),
+        (shot, _) => {
+            cfg.screenshot = shot.map(Path::to_path_buf);
+            Ok(())
+        }
+    }
+}
+
 /// The [`VmConfig`] for `args`, against `root`. Split from [`run`] so the flag-to-field mapping is
 /// testable without booting anything.
 fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
@@ -266,6 +303,11 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
     let mut cfg = VmConfig::new(root, program);
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
+    apply_display(
+        &mut cfg,
+        args.display.as_deref(),
+        args.screenshot.as_deref(),
+    )?;
     if let Some(v) = resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;
     }
@@ -496,6 +538,29 @@ mod tests {
         ] {
             assert!(text.contains(line), "{line:?} missing from:\n{text}");
         }
+    }
+
+    /// A display lands in the config as two non-zero numbers, a screenshot needs one, and the
+    /// posture print names both: a window is a way out of the sandbox a reader should see.
+    #[test]
+    fn a_display_and_screenshot_land_in_the_config_and_the_posture() {
+        let mut cfg = VmConfig::new("/r", "true");
+        let err = apply_display(&mut cfg, None, Some(Path::new("/tmp/f.ppm")))
+            .expect_err("a screenshot with no display");
+        assert!(err.contains("--display"), "{err}");
+        let err = apply_display(&mut cfg, Some("0x600"), None).expect_err("zero is not a display");
+        assert!(err.contains("0x600"), "{err}");
+        apply_display(&mut cfg, Some("800x600"), Some(Path::new("/tmp/f.ppm"))).expect("both");
+        assert_eq!(
+            cfg.display.map(|d| d.as_spec()),
+            Some("800x600".to_string())
+        );
+        assert_eq!(cfg.screenshot.as_deref(), Some(Path::new("/tmp/f.ppm")));
+        let mut out = Vec::new();
+        print_posture("vm", &cfg, &mut out).expect("a Vec never fails");
+        let text = String::from_utf8(out).expect("UTF-8");
+        assert!(text.contains("display  800x600 in a window"), "{text}");
+        assert!(text.contains("screenshot /tmp/f.ppm"), "{text}");
     }
 
     /// A malformed share is refused here, before a VM is spawned to die on it.

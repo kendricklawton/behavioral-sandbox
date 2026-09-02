@@ -45,6 +45,12 @@ zeroize = "1"
 rustix = { version = "1", default-features = false, features = ["std"] }
 # Structured logging to stderr; stdout stays reserved for a run's result.
 tracing = "0.1"
+# The window a sandbox's `--display` is shown in, and the CPU-side blit that puts a frame on it.
+# Both open their display server at run time (`*-dlopen`), so a host without one still builds and
+# runs everything but the window. No host-side GPU is involved: the guest's frames arrive in RAM.
+# `wayland-csd-adwaita-notitle` draws window decorations without pulling in a font stack.
+winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle", "rwh_06"] }
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 # `json`: the `--log-json` machine-readable encoding of the same structured events.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

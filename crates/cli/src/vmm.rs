@@ -93,6 +93,13 @@ pub(crate) struct VmmArgs {
     /// guest editing what the next guest starts from.
     #[arg(long, value_name = "POSTURE", default_value = "read-only")]
     pub(crate) rootfs: RootFsPosture,
+    /// A display for the guest as `WIDTHxHEIGHT`, shown in a window this process opens. Without
+    /// a display server the display still runs and the window is skipped, with a warning.
+    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    pub(crate) display: Option<String>,
+    /// Keep this file holding the display's latest frame as a binary PPM. Needs `--display`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) screenshot: Option<PathBuf>,
 }
 
 /// What the guest may do to its root filesystem. The default is
@@ -173,6 +180,12 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
         return None;
     }
     Some((port.parse().ok()?, Path::new(path)))
+}
+
+/// A `WIDTHxHEIGHT` display spec, or `None` for anything that is not two non-zero numbers.
+pub(crate) fn split_display(spec: &str) -> Option<(NonZeroU32, NonZeroU32)> {
+    let (w, h) = spec.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
 }
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
@@ -358,6 +371,12 @@ enum HelperError {
         /// Where that lands in the host's image tree.
         in_image: PathBuf,
     },
+    /// A `--display` that is not `WIDTHxHEIGHT`.
+    Display(String),
+    /// A `--screenshot` with no display to take one of.
+    ScreenshotNeedsDisplay,
+    /// The display's window thread could not be started.
+    Window(std::io::Error),
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -419,6 +438,11 @@ impl std::fmt::Display for HelperError {
                 guest.display(),
                 in_image.display()
             ),
+            Self::Display(d) => write!(f, "--display {d:?} is not WIDTHxHEIGHT, both non-zero"),
+            Self::ScreenshotNeedsDisplay => {
+                write!(f, "--screenshot needs a --display to take a frame from")
+            }
+            Self::Window(e) => write!(f, "the display window: {e}"),
             Self::Socket(e) => write!(f, "the control socket: {e}"),
             Self::Krun(e) => write!(f, "{e}"),
         }
@@ -457,6 +481,14 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         .as_deref()
         .map(|spec| split_vsock(spec).ok_or_else(|| HelperError::Vsock(spec.to_string())))
         .transpose()?;
+    let display = args
+        .display
+        .as_deref()
+        .map(|spec| split_display(spec).ok_or_else(|| HelperError::Display(spec.to_string())))
+        .transpose()?;
+    if args.screenshot.is_some() && display.is_none() {
+        return Err(HelperError::ScreenshotNeedsDisplay);
+    }
     require_backable_mem(args.mem.get())?;
     if args.vcpus.get() > MEASURED_VCPU_CLAMP {
         eprintln!(
@@ -522,6 +554,23 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         // initiated from the host side, which is the agent-channel direction.
         machine = machine.vsock_port(port, path, true)?;
         restrict_when_bound(path);
+    }
+    // The display: the device, the scanout's size, and where its frames land. The window that
+    // shows them runs on its own thread from here on, because the one this is on is about to
+    // become the guest.
+    if let Some((width, height)) = display {
+        machine = machine.gpu_device()?;
+        let (with_display, _display_id) = machine.add_display(width.get(), height.get())?;
+        let (with_backend, framebuffer) =
+            with_display.display_backend(bsx_krun::MemoryFramebuffer::new())?;
+        machine = with_backend;
+        crate::window::spawn(
+            framebuffer,
+            (width, height),
+            args.name.as_deref().unwrap_or("sandbox"),
+            args.screenshot.clone(),
+        )
+        .map_err(HelperError::Window)?;
     }
     if let Some(dir) = &args.workdir {
         machine = machine.workdir(dir)?;
@@ -647,7 +696,7 @@ fn serve_control(
 /// one inside the VMM. The signal is sent to this process by pid, which is safe here where the
 /// generic case is not: the process cannot have been reaped and replaced while it is the one
 /// asking.
-fn stop_this_vm() {
+pub(crate) fn stop_this_vm() {
     let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
 }
 
@@ -815,6 +864,25 @@ mod tests {
                 .starts_with(RESERVED_TAG_PREFIX),
             "an ordinary tag is untouched by the rule"
         );
+    }
+
+    /// A display is two non-zero numbers; anything else is refused where it can still be named.
+    #[test]
+    fn a_display_spec_is_two_non_zero_numbers() {
+        let (w, h) = split_display("800x600").expect("well-formed");
+        assert_eq!((w.get(), h.get()), (800, 600));
+        for bad in [
+            "800",
+            "800x",
+            "x600",
+            "0x600",
+            "800x0",
+            "800 x 600",
+            "800X600",
+            "-8x6",
+        ] {
+            assert!(split_display(bad).is_none(), "{bad:?} must be refused");
+        }
     }
 
     /// A vsock spec is a port and a socket path; half of one, or a port that is not a number, is
@@ -988,6 +1056,10 @@ mod tests {
             "1024=/run/agent.sock",
             "--rootfs",
             "writable",
+            "--display",
+            "800x600",
+            "--screenshot",
+            "/tmp/frame.ppm",
         ];
         let parsed = Cli::parse_from(argv);
         let Cmd::Vmm(got) = parsed.cmd else {
@@ -1007,6 +1079,8 @@ mod tests {
             split_vsock(got.vsock.as_deref().expect("the vsock spec parses")).expect("well-formed");
         assert_eq!((port, sock), (1024, Path::new("/run/agent.sock")));
         assert_eq!(got.rootfs, RootFsPosture::Writable);
+        assert_eq!(got.display.as_deref(), Some("800x600"));
+        assert_eq!(got.screenshot.as_deref(), Some(Path::new("/tmp/frame.ppm")));
     }
 
     /// Saying nothing about the filesystem asks for a root the guest cannot write, which is the

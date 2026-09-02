@@ -92,6 +92,33 @@ impl RootFs {
     }
 }
 
+/// A display the guest gets, and the window it is shown in: the same size, one to one.
+///
+/// Non-zero by type: a zero-sized display is not a display, and libkrun would report the failure
+/// after the boot rather than before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Display {
+    /// Width in pixels.
+    pub width: NonZeroU32,
+    /// Height in pixels.
+    pub height: NonZeroU32,
+}
+
+impl Display {
+    /// A display `width` by `height` pixels.
+    #[must_use]
+    pub fn new(width: NonZeroU32, height: NonZeroU32) -> Self {
+        Self { width, height }
+    }
+
+    /// The `WIDTHxHEIGHT` spelling the helper parses.
+    #[must_use]
+    pub fn as_spec(self) -> String {
+        format!("{}x{}", self.width, self.height)
+    }
+}
+
 /// What a caller asks for when it starts a VM.
 ///
 /// Deliberately not a builder with a typestate: unlike libkrun's own API there is no ordering to
@@ -132,6 +159,12 @@ pub struct VmConfig {
     pub rootfs: RootFs,
     /// What the guest's console (the helper's stdin and stdout) is attached to.
     pub console: Console,
+    /// A display for the guest, shown in a window the VM's own process opens. `None` is a guest
+    /// with no display device at all, which is every headless sandbox.
+    pub display: Option<Display>,
+    /// A file kept holding the display's latest frame as a binary PPM, rewritten on every change.
+    /// A development knob: it is what lets a test read the pixels a guest drew.
+    pub screenshot: Option<PathBuf>,
     /// A file to take everything this VM says, instead of the caller's stderr.
     ///
     /// **A VM that outlives its caller must not hold the caller's stderr.** Inherited, the helper
@@ -192,6 +225,8 @@ impl VmConfig {
             rootfs: RootFs::ReadOnly,
             console: Console::Inherited,
             log: None,
+            display: None,
+            screenshot: None,
         }
     }
 
@@ -252,6 +287,14 @@ impl VmConfig {
             spec.push("=");
             spec.push(path);
             argv.push(spec);
+        }
+        if let Some(display) = self.display {
+            argv.push("--display".into());
+            argv.push(display.as_spec().into());
+        }
+        if let Some(path) = &self.screenshot {
+            argv.push("--screenshot".into());
+            argv.push(path.clone().into());
         }
         argv
     }
@@ -1204,6 +1247,11 @@ mod tests {
         c.vsock = Some((1024, PathBuf::from("/run/agent.sock")));
         c.net = Net::Tsi;
         c.rootfs = RootFs::Writable;
+        c.display = Some(Display::new(
+            NonZeroU32::new(800).expect("non-zero"),
+            NonZeroU32::new(600).expect("non-zero"),
+        ));
+        c.screenshot = Some(PathBuf::from("/tmp/frame.ppm"));
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -1244,6 +1292,10 @@ mod tests {
             "tsi",
             "--rootfs",
             "writable",
+            "--display",
+            "800x600",
+            "--screenshot",
+            "/tmp/frame.ppm",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),

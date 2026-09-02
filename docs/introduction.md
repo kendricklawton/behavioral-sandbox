@@ -16,8 +16,9 @@ eBPF observer. That design was abandoned in favour of a local-first application 
 [libkrun](https://github.com/containers/libkrun), and the engine implementing the old one was
 deleted rather than carried alongside a replacement that did not exist yet. The replacement runs one
 command in a sandbox (`bsx run`), a session on a guest pty (`bsx shell`), and a sandbox that
-outlives the command that started it (`bsx up`, reached afterwards with `ls`, `exec` and `stop`).
-The GUI, the display path, GPU and macOS are not written.
+outlives the command that started it (`bsx up`, reached afterwards with `ls`, `exec` and `stop`),
+and shows a guest's display in a window (`--display`). The GUI application, GPU acceleration and
+macOS are not written.
 
 This book is short, and deliberately so: it describes the rules the project is built to and the
 crates that are actually in the tree. Pages describing the previous design were removed rather than

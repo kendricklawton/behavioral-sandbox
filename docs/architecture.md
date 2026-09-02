@@ -21,7 +21,8 @@ virtual machine monitor.
 What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest agent
 (`bsx-guest-agent`), the safe libkrun wrapper (`bsx-krun`), the process supervisor
 (`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
-(`xtask`). What is not: the GUI, the display path, GPU, and macOS.
+(`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
+the VM's own process opens. What is not: the GUI application, GPU acceleration, and macOS.
 
 ### Design rules
 

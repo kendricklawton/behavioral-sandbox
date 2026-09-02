@@ -92,6 +92,18 @@ pub const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u64 = 10;
 /// See [`KRUN_FEATURE_NET`].
 pub const KRUN_FEATURE_INIT_BLOB: u64 = 11;
 
+/// virglrenderer flags for `krun_set_gpu_options`, the subset this crate names. Transcribed from
+/// the header's `VIRGLRENDERER_*` defines.
+pub const VIRGLRENDERER_USE_EGL: u32 = 1 << 0;
+/// See [`VIRGLRENDERER_USE_EGL`].
+pub const VIRGLRENDERER_THREAD_SYNC: u32 = 1 << 1;
+/// See [`VIRGLRENDERER_USE_EGL`].
+pub const VIRGLRENDERER_USE_SURFACELESS: u32 = 1 << 3;
+/// See [`VIRGLRENDERER_USE_EGL`].
+pub const VIRGLRENDERER_USE_GLES: u32 = 1 << 4;
+/// See [`VIRGLRENDERER_USE_EGL`].
+pub const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
+
 // --- display backend constants and vtable types (libkrun_display.h) --------------------------
 /// Display backend internal error code.
 pub const KRUN_DISPLAY_ERR_INTERNAL: i32 = -1;
@@ -353,6 +365,8 @@ unsafe extern "C" {
     ) -> i32;
 
     // --- display -----------------------------------------------------------------------------
+    /// Enables the virtio-gpu device with virglrenderer `flags` (`VIRGLRENDERER_*`).
+    pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
     /// Configures a display output for the microVM.
     pub fn krun_add_display(ctx_id: u32, width: u32, height: u32) -> i32;
     /// Configures a custom EDID blob for a display.
@@ -460,6 +474,9 @@ mod stub {
     ) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_set_gpu_options(_ctx_id: u32, _virgl_flags: u32) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_add_display(_ctx_id: u32, _width: u32, _height: u32) -> i32 {
         NOT_LINKED
     }
@@ -552,6 +569,7 @@ mod tests {
         ("krun_set_passt_fd", 2),
         ("krun_set_port_map", 2),
         ("krun_add_net_unixstream", 6),
+        ("krun_set_gpu_options", 2),
         ("krun_add_display", 3),
         ("krun_display_set_edid", 4),
         ("krun_display_set_dpi", 3),

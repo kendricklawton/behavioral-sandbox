@@ -24,10 +24,9 @@
 //! libkrun, and what stops a running VM is a signal to the helper process (`bsx-supervisor`'s
 //! `Vm::stop`), so there is nothing of libkrun's to wrap.
 //!
-//! No GPU enable. `krun_set_gpu_options` is phase 5's, and its default flags (`0`) were measured
-//! segfaulting the VMM inside `virgl_renderer_init` on this host (2026-09-02, libkrun 1.19.4);
-//! `VIRGLRENDERER_NO_VIRGL` boots. Until it is wrapped, a display backend is configured but never
-//! instantiated, because the device that would instantiate it does not exist.
+//! No accelerated GPU. [`Machine::gpu_device`] enables virtio-gpu with the one virglrenderer flag
+//! set measured to carry a frame, because a display needs the device; a posture that lets the
+//! guest use the host GPU for its own rendering is phase 5's, behind `krun_has_feature`.
 //!
 //! # Strings
 //!
@@ -48,9 +47,9 @@
 //!   compositor reading the latest frame holds libkrun off for exactly as long as it reads.
 //! - **libkrun writes into a buffer after the call that handed it out has returned**, which no
 //!   borrow can say: [`DisplayBackend`] is an `unsafe trait` for that one obligation.
-//! - **No frame has crossed it yet.** Measured 2026-09-02: libkrun instantiates the backend and
-//!   the phase-3 guest gets a scanout, but nothing in that image renders, so `configure_scanout`
-//!   onward is exercised only by this crate's tests. `scratch/ROADMAP.md` 0.9 is the frame.
+//! - **A frame has crossed it.** Measured 2026-09-02: a guest drawing through a DRM dumb buffer
+//!   arrives as `configure_scanout` (B8G8R8X8) and a `present_frame` per flush, pixels intact
+//!   (`a_frame_the_guest_draws_reaches_the_host` in `crates/cli/tests/e2e.rs`).
 
 mod sys;
 
@@ -427,8 +426,9 @@ pub unsafe trait DisplayBackend: Send {
 }
 
 /// The backend as libkrun holds it: behind a lock, because the compositor reading its frames is
-/// on another thread, and boxed, because libkrun holds a pointer and the type is the caller's.
-type Backend = Mutex<Box<dyn DisplayBackend>>;
+/// on another thread. The callbacks are monomorphic over `B`, so the caller gets its own type
+/// back from [`Machine::display_backend`] rather than a `dyn` it would have to downcast.
+type Backend<B> = Mutex<B>;
 
 /// A `Result` of a backend call as the code libkrun reads.
 fn code_of(outcome: Result<(), DisplayError>) -> i32 {
@@ -444,7 +444,7 @@ fn code_of(outcome: Result<(), DisplayError>) -> i32 {
 /// A poisoned lock is recovered rather than refused: the panic that poisoned it was already
 /// reported as `KRUN_DISPLAY_ERR_INTERNAL` on the call that panicked, and a backend that has
 /// stopped working keeps answering that way from its own methods.
-fn with_backend(instance: *mut c_void, f: impl FnOnce(&mut dyn DisplayBackend) -> i32) -> i32 {
+fn with_backend<B: DisplayBackend>(instance: *mut c_void, f: impl FnOnce(&mut B) -> i32) -> i32 {
     if instance.is_null() {
         return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
     }
@@ -452,19 +452,19 @@ fn with_backend(instance: *mut c_void, f: impl FnOnce(&mut dyn DisplayBackend) -
         // Borrowed, never owned: the count this pointer carries belongs to `c_create`, and a
         // `from_raw` that was allowed to drop would return it on every call.
         let shared = std::mem::ManuallyDrop::new(unsafe {
-            Arc::from_raw(instance.cast_const().cast::<Backend>())
+            Arc::from_raw(instance.cast_const().cast::<Backend<B>>())
         });
         let mut guard = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&mut **guard)
+        f(&mut guard)
     }));
     outcome.unwrap_or(sys::KRUN_DISPLAY_ERR_INTERNAL)
 }
 
 /// `create`: the instance is the userdata, holding one count for as long as libkrun's instance
 /// lives, which `c_destroy` returns.
-unsafe extern "C" fn c_create(
+unsafe extern "C" fn c_create<B: DisplayBackend>(
     instance: *mut *mut c_void,
     userdata: *const c_void,
     _reserved: *const c_void,
@@ -473,7 +473,7 @@ unsafe extern "C" fn c_create(
         return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
     }
     unsafe {
-        Arc::increment_strong_count(userdata.cast::<Backend>());
+        Arc::increment_strong_count(userdata.cast::<Backend<B>>());
         *instance = userdata.cast_mut();
     }
     0
@@ -481,12 +481,12 @@ unsafe extern "C" fn c_create(
 
 /// `destroy`: returns the count `c_create` took. A backend's own `Drop` runs here, under the
 /// same panic guard as its methods.
-unsafe extern "C" fn c_destroy(instance: *mut c_void) -> i32 {
+unsafe extern "C" fn c_destroy<B: DisplayBackend>(instance: *mut c_void) -> i32 {
     if instance.is_null() {
         return 0;
     }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        drop(unsafe { Arc::from_raw(instance.cast_const().cast::<Backend>()) });
+        drop(unsafe { Arc::from_raw(instance.cast_const().cast::<Backend<B>>()) });
     }));
     match outcome {
         Ok(()) => 0,
@@ -494,7 +494,7 @@ unsafe extern "C" fn c_destroy(instance: *mut c_void) -> i32 {
     }
 }
 
-unsafe extern "C" fn c_configure_scanout(
+unsafe extern "C" fn c_configure_scanout<B: DisplayBackend>(
     instance: *mut c_void,
     scanout_id: u32,
     display_width: u32,
@@ -503,7 +503,7 @@ unsafe extern "C" fn c_configure_scanout(
     height: u32,
     format: u32,
 ) -> i32 {
-    with_backend(instance, |backend| {
+    with_backend::<B>(instance, |backend| {
         code_of(backend.configure_scanout(
             scanout_id,
             display_width,
@@ -515,13 +515,16 @@ unsafe extern "C" fn c_configure_scanout(
     })
 }
 
-unsafe extern "C" fn c_disable_scanout(instance: *mut c_void, scanout_id: u32) -> i32 {
-    with_backend(instance, |backend| {
+unsafe extern "C" fn c_disable_scanout<B: DisplayBackend>(
+    instance: *mut c_void,
+    scanout_id: u32,
+) -> i32 {
+    with_backend::<B>(instance, |backend| {
         code_of(backend.disable_scanout(scanout_id))
     })
 }
 
-unsafe extern "C" fn c_alloc_frame(
+unsafe extern "C" fn c_alloc_frame<B: DisplayBackend>(
     instance: *mut c_void,
     scanout_id: u32,
     buffer: *mut *mut u8,
@@ -530,7 +533,7 @@ unsafe extern "C" fn c_alloc_frame(
     if buffer.is_null() || buffer_size.is_null() {
         return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
     }
-    with_backend(instance, |backend| match backend.alloc_frame(scanout_id) {
+    with_backend::<B>(instance, |backend| match backend.alloc_frame(scanout_id) {
         Ok(frame) => {
             // The id travels back as the non-negative half of an `i32`; one that does not fit
             // would arrive as some error code, so it is refused here as the one it really is.
@@ -547,7 +550,7 @@ unsafe extern "C" fn c_alloc_frame(
     })
 }
 
-unsafe extern "C" fn c_present_frame(
+unsafe extern "C" fn c_present_frame<B: DisplayBackend>(
     instance: *mut c_void,
     scanout_id: u32,
     frame_id: u32,
@@ -559,7 +562,7 @@ unsafe extern "C" fn c_present_frame(
         let r = unsafe { &*damage_area };
         Some(Rect::new(r.x, r.y, r.width, r.height))
     };
-    with_backend(instance, |backend| {
+    with_backend::<B>(instance, |backend| {
         code_of(backend.present_frame(scanout_id, frame_id, damage))
     })
 }
@@ -611,6 +614,11 @@ impl ScanoutConfig {
             .ok_or(DisplayError::InvalidParam)
     }
 }
+
+/// The virglrenderer flags [`Machine::gpu_device`] sets: virgl on a surfaceless EGL/GLES context,
+/// the one combination measured carrying a frame (see that method for the two that do not).
+const DISPLAY_GPU_FLAGS: u32 =
+    sys::VIRGLRENDERER_USE_EGL | sys::VIRGLRENDERER_USE_SURFACELESS | sys::VIRGLRENDERER_USE_GLES;
 
 /// Buffers a scanout can have handed out at once. Two is a guest that renders the next frame
 /// while the last is presented; a third is slack for one that runs ahead of that.
@@ -779,13 +787,21 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
 /// is given a pointer to, though it was measured copying it (2026-09-02: overwriting the struct
 /// after the call left `create` working).
 struct DisplayHandle {
-    userdata: *const Backend,
+    userdata: *const c_void,
+    /// Returns the count for the concrete `B` the pointer was made from; the handle itself is
+    /// type-erased so [`Machine`] can hold one without knowing the backend.
+    release: unsafe fn(*const c_void),
     _table: Box<sys::krun_display_backend>,
+}
+
+/// [`DisplayHandle::release`] for a backend of type `B`.
+unsafe fn release_backend<B: DisplayBackend>(userdata: *const c_void) {
+    drop(unsafe { Arc::from_raw(userdata.cast::<Backend<B>>()) });
 }
 
 impl Drop for DisplayHandle {
     fn drop(&mut self) {
-        drop(unsafe { Arc::from_raw(self.userdata) });
+        unsafe { (self.release)(self.userdata) }
     }
 }
 
@@ -1032,34 +1048,49 @@ impl Machine {
         Ok(self)
     }
 
+    /// Adds the virtio-gpu device a display needs, with the one flag set measured to carry frames.
+    ///
+    /// Three were tried on this host (2026-09-02, libkrun 1.19.4): `0` segfaults the VMM inside
+    /// `virgl_renderer_init`; `NO_VIRGL` boots but every guest `ResourceCreate2d` fails with
+    /// rutabaga `ComponentError(22)`, so no scanout is ever configured; virgl on a surfaceless
+    /// EGL/GLES context carries a dumb-buffer frame end to end. Only the last is offered. Phase
+    /// 5's accelerated posture is a separate call, gated on `krun_has_feature`.
+    pub fn gpu_device(self) -> Result<Self, Error> {
+        check("krun_set_gpu_options", unsafe {
+            sys::krun_set_gpu_options(self.ctx.id, DISPLAY_GPU_FLAGS)
+        })?;
+        Ok(self)
+    }
+
     /// Hands the guest's frames to `backend`, which libkrun calls from its gpu thread for as long
-    /// as the VM runs. Needs a display ([`add_display`](Self::add_display)) and the virtio-gpu
-    /// device, which nothing here enables yet (see the crate docs).
+    /// as the VM runs, and returns the shared handle a compositor reads them through. Needs a
+    /// display ([`add_display`](Self::add_display)) and [`gpu_device`](Self::gpu_device).
     pub fn display_backend<B: DisplayBackend + 'static>(
         mut self,
         backend: B,
-    ) -> Result<Self, Error> {
-        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(backend)));
+    ) -> Result<(Self, Arc<Mutex<B>>), Error> {
+        let shared: Arc<Backend<B>> = Arc::new(Mutex::new(backend));
         // Built before the call, so the `?` on a refused call drops it and takes the count back.
         let handle = DisplayHandle {
-            userdata: Arc::into_raw(shared),
+            userdata: Arc::into_raw(Arc::clone(&shared)).cast::<c_void>(),
+            release: release_backend::<B>,
             _table: Box::new(sys::krun_display_backend {
                 features: sys::KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER,
                 create_userdata: std::ptr::null(),
-                create: Some(c_create),
+                create: Some(c_create::<B>),
                 vtable: sys::krun_display_vtable {
                     basic_framebuffer: sys::krun_display_basic_framebuffer_vtable {
-                        destroy: Some(c_destroy),
-                        disable_scanout: Some(c_disable_scanout),
-                        configure_scanout: Some(c_configure_scanout),
-                        alloc_frame: Some(c_alloc_frame),
-                        present_frame: Some(c_present_frame),
+                        destroy: Some(c_destroy::<B>),
+                        disable_scanout: Some(c_disable_scanout::<B>),
+                        configure_scanout: Some(c_configure_scanout::<B>),
+                        alloc_frame: Some(c_alloc_frame::<B>),
+                        present_frame: Some(c_present_frame::<B>),
                     },
                 },
             }),
         };
         let mut table = handle._table.clone();
-        table.create_userdata = handle.userdata.cast::<c_void>();
+        table.create_userdata = handle.userdata;
         check("krun_set_display_backend", unsafe {
             sys::krun_set_display_backend(
                 self.ctx.id,
@@ -1069,10 +1100,11 @@ impl Machine {
         })?;
         self.retained_display = Some(DisplayHandle {
             userdata: handle.userdata,
+            release: handle.release,
             _table: table,
         });
         std::mem::forget(handle);
-        Ok(self)
+        Ok((self, shared))
     }
 
     /// Starts the microVM, **and does not return.**
@@ -1518,12 +1550,12 @@ mod tests {
 
     /// A recorder as libkrun would hold it: the shared handle, the raw userdata, and an instance
     /// created through the real `c_create`.
-    fn instance_of(recorder: Recorder) -> (Arc<Backend>, *const c_void, *mut c_void) {
-        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(recorder)));
+    fn instance_of(recorder: Recorder) -> (Arc<Backend<Recorder>>, *const c_void, *mut c_void) {
+        let shared: Arc<Backend<Recorder>> = Arc::new(Mutex::new(recorder));
         let userdata = Arc::into_raw(Arc::clone(&shared)).cast::<c_void>();
         let mut instance: *mut c_void = std::ptr::null_mut();
         assert_eq!(
-            unsafe { c_create(&mut instance, userdata, std::ptr::null()) },
+            unsafe { c_create::<Recorder>(&mut instance, userdata, std::ptr::null()) },
             0
         );
         (shared, userdata, instance)
@@ -1532,23 +1564,19 @@ mod tests {
     /// Finishes with the recorder: destroys the instance, returns the userdata count, and hands
     /// back what was recorded.
     fn calls_of(
-        shared: Arc<Backend>,
+        shared: Arc<Backend<Recorder>>,
         userdata: *const c_void,
         instance: *mut c_void,
     ) -> Vec<String> {
-        assert_eq!(unsafe { c_destroy(instance) }, 0);
-        drop(unsafe { Arc::from_raw(userdata.cast::<Backend>()) });
+        assert_eq!(unsafe { c_destroy::<Recorder>(instance) }, 0);
+        drop(unsafe { Arc::from_raw(userdata.cast::<Backend<Recorder>>()) });
         assert_eq!(Arc::strong_count(&shared), 1, "every count came back");
-        // Recovered, not required: a backend that panicked poisoned it, and reading what
-        // it recorded before that is the point.
+        // Recovered, not required: a backend that panicked poisoned it, and reading what it
+        // recorded before that is the point.
         let guard = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let boxed: &dyn DisplayBackend = &**guard;
-        // The recorder is the only implementor behind this pointer in these tests.
-        let recorder =
-            unsafe { &*std::ptr::from_ref::<dyn DisplayBackend>(boxed).cast::<Recorder>() };
-        recorder.calls.clone()
+        guard.calls.clone()
     }
 
     /// Each callback reaches the backend with its arguments intact, hands libkrun the buffer and
@@ -1561,13 +1589,13 @@ mod tests {
             ..Recorder::default()
         });
         assert_eq!(
-            unsafe { c_configure_scanout(instance, 0, 320, 240, 32, 24, 1) },
+            unsafe { c_configure_scanout::<Recorder>(instance, 0, 320, 240, 32, 24, 1) },
             0
         );
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut len: usize = 0;
         assert_eq!(
-            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            unsafe { c_alloc_frame::<Recorder>(instance, 0, &mut buf, &mut len) },
             42
         );
         assert_eq!(len, 16);
@@ -1578,26 +1606,20 @@ mod tests {
             width: 3,
             height: 4,
         };
-        assert_eq!(unsafe { c_present_frame(instance, 0, 42, &damage) }, 0);
         assert_eq!(
-            unsafe { c_present_frame(instance, 0, 42, std::ptr::null()) },
+            unsafe { c_present_frame::<Recorder>(instance, 0, 42, &damage) },
             0
         );
-        assert_eq!(unsafe { c_disable_scanout(instance, 0) }, 0);
+        assert_eq!(
+            unsafe { c_present_frame::<Recorder>(instance, 0, 42, std::ptr::null()) },
+            0
+        );
+        assert_eq!(unsafe { c_disable_scanout::<Recorder>(instance, 0) }, 0);
         {
-            // Recovered, not required: a backend that panicked poisoned it, and reading what
-            // it recorded before that is the point.
             let guard = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let boxed: &dyn DisplayBackend = &**guard;
-            let recorder =
-                unsafe { &*std::ptr::from_ref::<dyn DisplayBackend>(boxed).cast::<Recorder>() };
-            assert_eq!(
-                &recorder.buffer[..4],
-                &[9, 8, 7, 6],
-                "libkrun's write landed"
-            );
+            assert_eq!(&guard.buffer[..4], &[9, 8, 7, 6], "libkrun's write landed");
         }
         assert_eq!(
             calls_of(shared, userdata, instance),
@@ -1615,11 +1637,11 @@ mod tests {
             answer: Err(DisplayError::Custom(custom)),
             ..Recorder::default()
         });
-        assert_eq!(unsafe { c_disable_scanout(instance, 3) }, -9);
+        assert_eq!(unsafe { c_disable_scanout::<Recorder>(instance, 3) }, -9);
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut len: usize = 0;
         assert_eq!(
-            unsafe { c_alloc_frame(instance, 3, &mut buf, &mut len) },
+            unsafe { c_alloc_frame::<Recorder>(instance, 3, &mut buf, &mut len) },
             -9
         );
         assert!(
@@ -1635,25 +1657,25 @@ mod tests {
     fn the_trampolines_refuse_what_the_boundary_cannot_carry() {
         let null = std::ptr::null_mut();
         assert_eq!(
-            unsafe { c_configure_scanout(null, 0, 1, 1, 1, 1, 1) },
+            unsafe { c_configure_scanout::<Recorder>(null, 0, 1, 1, 1, 1, 1) },
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM
         );
         assert_eq!(
-            unsafe { c_disable_scanout(null, 0) },
+            unsafe { c_disable_scanout::<Recorder>(null, 0) },
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM
         );
         assert_eq!(
-            unsafe { c_present_frame(null, 0, 0, std::ptr::null()) },
+            unsafe { c_present_frame::<Recorder>(null, 0, 0, std::ptr::null()) },
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM
         );
         assert_eq!(
-            unsafe { c_destroy(null) },
+            unsafe { c_destroy::<Recorder>(null) },
             0,
             "nothing to destroy is not an error"
         );
         let mut instance: *mut c_void = std::ptr::null_mut();
         assert_eq!(
-            unsafe { c_create(&mut instance, std::ptr::null(), std::ptr::null()) },
+            unsafe { c_create::<Recorder>(&mut instance, std::ptr::null(), std::ptr::null()) },
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM
         );
 
@@ -1667,11 +1689,11 @@ mod tests {
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut len: usize = 0;
         assert_eq!(
-            unsafe { c_alloc_frame(instance, 0, std::ptr::null_mut(), &mut len) },
+            unsafe { c_alloc_frame::<Recorder>(instance, 0, std::ptr::null_mut(), &mut len) },
             sys::KRUN_DISPLAY_ERR_INVALID_PARAM
         );
         assert_eq!(
-            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            unsafe { c_alloc_frame::<Recorder>(instance, 0, &mut buf, &mut len) },
             sys::KRUN_DISPLAY_ERR_INTERNAL,
             "an id above i32::MAX would arrive as some other error; it is refused as this one"
         );
@@ -1684,7 +1706,7 @@ mod tests {
             ..Recorder::default()
         });
         assert_eq!(
-            unsafe { c_alloc_frame(instance, 0, &mut buf, &mut len) },
+            unsafe { c_alloc_frame::<Recorder>(instance, 0, &mut buf, &mut len) },
             i32::MAX
         );
         calls_of(shared, userdata, instance);
@@ -1699,11 +1721,11 @@ mod tests {
             ..Recorder::default()
         });
         assert_eq!(
-            unsafe { c_configure_scanout(instance, 0, 1, 1, 1, 1, 1) },
+            unsafe { c_configure_scanout::<Recorder>(instance, 0, 1, 1, 1, 1, 1) },
             sys::KRUN_DISPLAY_ERR_INTERNAL
         );
         assert_eq!(
-            unsafe { c_configure_scanout(instance, 0, 1, 1, 1, 1, 1) },
+            unsafe { c_configure_scanout::<Recorder>(instance, 0, 1, 1, 1, 1, 1) },
             0
         );
         assert_eq!(
@@ -1717,9 +1739,11 @@ mod tests {
     /// starting, so a backend is not held forever by a `display_backend` that never booted.
     #[test]
     fn a_display_handle_returns_its_count_when_dropped() {
-        let shared: Arc<Backend> = Arc::new(Mutex::new(Box::new(MemoryFramebuffer::new())));
+        let shared: Arc<Backend<MemoryFramebuffer>> =
+            Arc::new(Mutex::new(MemoryFramebuffer::new()));
         let handle = DisplayHandle {
-            userdata: Arc::into_raw(Arc::clone(&shared)),
+            userdata: Arc::into_raw(Arc::clone(&shared)).cast::<c_void>(),
+            release: release_backend::<MemoryFramebuffer>,
             _table: Box::new(sys::krun_display_backend {
                 features: 0,
                 create_userdata: std::ptr::null(),

@@ -16,6 +16,7 @@ mod run;
 mod shell;
 mod up;
 mod vmm;
+mod window;
 
 use std::process::ExitCode;
 

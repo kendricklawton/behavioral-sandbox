@@ -469,6 +469,60 @@ fn a_share_tag_that_would_shadow_a_mount_is_refused_before_boot() {
     assert!(err.contains("reserved"), "names the rule: {err}");
 }
 
+/// Roadmap 0.9 and the whole of 4.2's frame path: a guest that draws through a DRM dumb buffer
+/// puts a known pattern on its scanout, and the pixels arrive on the host. The drawer needs no
+/// libdrm (`drm_draw.py`, ioctls by hand), runs on the phase-3 image because `python3` is in it,
+/// and paints red, green, blue and white corners on grey. The display runs headless here, so a
+/// runner with no display server can read the frame too; the window is the same path with a
+/// surface on the end.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_frame_the_guest_draws_reaches_the_host() {
+    if skipped("a_frame_the_guest_draws_reaches_the_host") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-frame");
+    std::fs::write(dir.path().join("draw.py"), include_str!("drm_draw.py"))
+        .expect("stage the drawer");
+    let shot = dir.path().join("frame.ppm");
+    let mount = format!("/mnt={}", dir.path().display());
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--display", "320x240", "--mount", &mount])
+        .arg("--screenshot")
+        .arg(&shot)
+        // No display server for this one: the headless branch is the one every runner has.
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["--", "python3", "/mnt/draw.py", "4"])
+        .output()
+        .expect("run bsx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("DRAW setcrtc ok"),
+        "the guest never got its mode set: {stderr}"
+    );
+    let ppm = std::fs::read(&shot).expect("a frame was written");
+    let mut parts = ppm.splitn(4, |&b| b == b'\n');
+    assert_eq!(parts.next(), Some(&b"P6"[..]));
+    assert_eq!(
+        parts.next(),
+        Some(&b"320 240"[..]),
+        "the scanout is the display's size"
+    );
+    parts.next();
+    let px = parts.next().expect("pixels");
+    let at = |x: usize, y: usize| &px[(y * 320 + x) * 3..(y * 320 + x) * 3 + 3];
+    assert_eq!(at(2, 2), [255, 0, 0], "top-left is red");
+    assert_eq!(at(317, 2), [0, 255, 0], "top-right is green");
+    assert_eq!(at(2, 237), [0, 0, 255], "bottom-left is blue");
+    assert_eq!(at(317, 237), [255, 255, 255], "bottom-right is white");
+    assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

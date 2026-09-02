@@ -23,6 +23,9 @@ clap = { workspace = true }
 # Raw mode and window size for the interactive shell, the self-signal a VM stops itself with, and
 # the readiness wait on a non-blocking stdin. Safe wrappers only.
 rustix = { workspace = true, features = ["event", "pipe", "process", "termios"] }
+# The `--display` window, on a thread of the helper that is the VM (`src/window.rs`).
+winit = { workspace = true }
+softbuffer = { workspace = true }
 
 [dev-dependencies]
 # The `/dev/kvm` probe, so the end-to-end tests skip with the same message everywhere.
