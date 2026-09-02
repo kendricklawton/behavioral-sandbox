@@ -77,6 +77,11 @@ pub(crate) struct ShellArgs {
     /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
+    /// Give the guest a virtio-snd sound card, backed by the host's audio server. Off by default:
+    /// audio is a two-way hole, so the guest playing to your speakers and capturing from your
+    /// microphone is opened only when asked.
+    #[arg(long)]
+    pub(crate) sound: bool,
     /// The command to run on the pty, after `--`. Defaults to `/bin/sh`.
     #[arg(last = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -119,6 +124,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
     cfg.console = Console::Detached;
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
+    cfg.sound = args.sound;
     crate::run::apply_display(
         &mut cfg,
         args.display.as_deref(),

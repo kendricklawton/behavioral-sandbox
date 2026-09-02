@@ -1578,6 +1578,22 @@ impl Machine {
         Ok(self)
     }
 
+    /// Adds a virtio-snd device, backed by the host audio server libkrun links (pipewire on this
+    /// build). One boolean, so the guest gets a full sound card: **playback to the host's output
+    /// and capture from its input**, the microphone included. libkrun's API cannot split the two,
+    /// so a caller enabling audio opens both directions; the posture that keeps it off by default
+    /// lives above this, in the supervisor's config and the CLI's `--sound` flag.
+    ///
+    /// Gated by the caller on [`has_feature`]`(`[`KRUN_FEATURE_SND`]`)`: a libkrun built without
+    /// snd exports this symbol but adds no device, so a caller that did not probe would enable
+    /// nothing and not know it.
+    pub fn sound_device(self) -> Result<Self, Error> {
+        check("krun_set_snd_device", unsafe {
+            sys::krun_set_snd_device(self.ctx.id, true)
+        })?;
+        Ok(self)
+    }
+
     /// Hands the guest's frames to `backend`, which libkrun calls from its gpu thread for as long
     /// as the VM runs, and returns the shared handle a compositor reads them through. Needs a
     /// display ([`add_display`](Self::add_display)) and [`gpu_device`](Self::gpu_device).

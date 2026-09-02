@@ -59,6 +59,11 @@ pub(crate) struct UpArgs {
     /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<std::path::PathBuf>,
+    /// Give the guest a virtio-snd sound card, backed by the host's audio server. Off by default:
+    /// audio is a two-way hole, so the guest playing to your speakers and capturing from your
+    /// microphone is opened only when asked.
+    #[arg(long)]
+    pub(crate) sound: bool,
 }
 
 /// What `start` did, so the printer cannot report the name of a VM that was never booted: a dry
@@ -122,6 +127,7 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     cfg.log = Some(log.clone());
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
+    cfg.sound = args.sound;
     crate::run::apply_display(
         &mut cfg,
         args.display.as_deref(),

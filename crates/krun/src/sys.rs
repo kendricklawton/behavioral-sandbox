@@ -559,6 +559,8 @@ unsafe extern "C" {
     // --- display -----------------------------------------------------------------------------
     /// Enables the virtio-gpu device with virglrenderer `flags` (`VIRGLRENDERER_*`).
     pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
+    /// Enables or disables a virtio-snd device, backed by the host audio server libkrun links.
+    pub fn krun_set_snd_device(ctx_id: u32, enable: bool) -> i32;
     /// Configures a display output for the microVM.
     pub fn krun_add_display(ctx_id: u32, width: u32, height: u32) -> i32;
     /// Configures a custom EDID blob for a display.
@@ -686,6 +688,9 @@ mod stub {
     pub unsafe fn krun_set_gpu_options(_ctx_id: u32, _virgl_flags: u32) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_set_snd_device(_ctx_id: u32, _enable: bool) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_add_display(_ctx_id: u32, _width: u32, _height: u32) -> i32 {
         NOT_LINKED
     }
@@ -788,6 +793,7 @@ mod tests {
         ("krun_set_port_map", 2),
         ("krun_add_net_unixstream", 6),
         ("krun_set_gpu_options", 2),
+        ("krun_set_snd_device", 2),
         ("krun_add_display", 3),
         ("krun_display_set_edid", 4),
         ("krun_display_set_dpi", 3),

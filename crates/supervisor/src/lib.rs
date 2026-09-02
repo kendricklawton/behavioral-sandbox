@@ -165,6 +165,11 @@ pub struct VmConfig {
     /// A file kept holding the display's latest frame as a binary PPM, rewritten on every change.
     /// A development knob: it is what lets a test read the pixels a guest drew.
     pub screenshot: Option<PathBuf>,
+    /// Whether the guest gets a virtio-snd sound card, backed by the host's audio server. `false`
+    /// by default (design rule 3): audio is a two-way hole (the guest plays to the host's output
+    /// and can capture from its input), so it is opened only by an explicit `--sound`, never
+    /// ambient.
+    pub sound: bool,
     /// A file to take everything this VM says, instead of the caller's stderr.
     ///
     /// **A VM that outlives its caller must not hold the caller's stderr.** Inherited, the helper
@@ -227,6 +232,7 @@ impl VmConfig {
             log: None,
             display: None,
             screenshot: None,
+            sound: false,
         }
     }
 
@@ -295,6 +301,9 @@ impl VmConfig {
         if let Some(path) = &self.screenshot {
             argv.push("--screenshot".into());
             argv.push(path.clone().into());
+        }
+        if self.sound {
+            argv.push("--sound".into());
         }
         argv
     }
@@ -1252,6 +1261,7 @@ mod tests {
             NonZeroU32::new(600).expect("non-zero"),
         ));
         c.screenshot = Some(PathBuf::from("/tmp/frame.ppm"));
+        c.sound = true;
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -1296,6 +1306,7 @@ mod tests {
             "800x600",
             "--screenshot",
             "/tmp/frame.ppm",
+            "--sound",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),
@@ -1339,6 +1350,9 @@ mod tests {
             "--share",
             "--vsock",
             "--mount",
+            "--display",
+            "--screenshot",
+            "--sound",
         ] {
             assert!(
                 !flat.contains(&absent.to_string()),

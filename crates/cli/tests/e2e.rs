@@ -803,6 +803,44 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
     );
 }
 
+/// `--sound` gives the guest a virtio-snd card and nothing else does (roadmap 4.7): the guest
+/// reads its card list, and the card is present exactly when the flag is. The card is a two-way
+/// device (`playback 1 : capture 1`), which is why the flag is opt-in. Headless: `/proc/asound`
+/// needs no tools and no host audio, so a runner with no sound server still decides it.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn sound_gives_the_guest_a_card_and_nothing_else_does() {
+    if skipped("sound_gives_the_guest_a_card_and_nothing_else_does") {
+        return;
+    }
+    let cards = |flags: &[&str]| -> String {
+        let out = bsx()
+            .arg("run")
+            .arg("--root")
+            .arg(guest_root())
+            .args(flags)
+            .args(["--", "sh", "-c", "cat /proc/asound/cards"])
+            .output()
+            .expect("run bsx");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let without = cards(&[]);
+    assert!(
+        without.contains("no soundcards"),
+        "a guest with no --sound has no card: {without:?}"
+    );
+    let with = cards(&["--sound"]);
+    assert!(
+        with.to_lowercase().contains("virtio"),
+        "a guest with --sound has a virtio-snd card: {with:?}"
+    );
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

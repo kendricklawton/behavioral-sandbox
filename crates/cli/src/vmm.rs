@@ -101,6 +101,11 @@ pub(crate) struct VmmArgs {
     /// Keep this file holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
+    /// Give the guest a virtio-snd sound card, backed by the host's audio server. Off by default:
+    /// audio is a two-way hole (the guest plays to your output and can capture from your input),
+    /// so it is opened only when asked. Refused before boot if this libkrun has no snd feature.
+    #[arg(long)]
+    pub(crate) sound: bool,
 }
 
 /// What the guest may do to its root filesystem. The default is
@@ -380,6 +385,8 @@ enum HelperError {
     Window(std::io::Error),
     /// The input replay thread could not be started.
     Input(std::io::Error),
+    /// `--sound` on a libkrun built without the snd feature.
+    SoundUnsupported,
     /// The control socket could not be placed or bound.
     Socket(std::io::Error),
     /// libkrun refused a call, including the one that was supposed to never return.
@@ -447,6 +454,10 @@ impl std::fmt::Display for HelperError {
             }
             Self::Window(e) => write!(f, "the display window: {e}"),
             Self::Input(e) => write!(f, "the input replay: {e}"),
+            Self::SoundUnsupported => write!(
+                f,
+                "--sound needs a libkrun built with the snd feature, which this one lacks"
+            ),
             Self::Socket(e) => write!(f, "the control socket: {e}"),
             Self::Krun(e) => write!(f, "{e}"),
         }
@@ -583,6 +594,16 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
             inputs,
         )
         .map_err(HelperError::Window)?;
+    }
+    // Audio is off unless asked (design rule 3): the device is a two-way path to the host's
+    // sound server, so it is a named hole, not ambient. Probed, not assumed: a libkrun without
+    // the snd feature exports the symbol but adds no device, so `--sound` there would enable
+    // nothing silently.
+    if args.sound {
+        if !bsx_krun::has_feature(bsx_krun::KRUN_FEATURE_SND)? {
+            return Err(HelperError::SoundUnsupported);
+        }
+        machine = machine.sound_device()?;
     }
     if let Some(dir) = &args.workdir {
         machine = machine.workdir(dir)?;
@@ -1072,6 +1093,7 @@ mod tests {
             "800x600",
             "--screenshot",
             "/tmp/frame.ppm",
+            "--sound",
         ];
         let parsed = Cli::parse_from(argv);
         let Cmd::Vmm(got) = parsed.cmd else {
@@ -1093,6 +1115,7 @@ mod tests {
         assert_eq!(got.rootfs, RootFsPosture::Writable);
         assert_eq!(got.display.as_deref(), Some("800x600"));
         assert_eq!(got.screenshot.as_deref(), Some(Path::new("/tmp/frame.ppm")));
+        assert!(got.sound, "--sound parses as the sound flag");
     }
 
     /// Saying nothing about the filesystem asks for a root the guest cannot write, which is the
