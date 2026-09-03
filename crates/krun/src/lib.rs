@@ -676,9 +676,20 @@ struct Scanout {
 /// one presented frame; presenting swaps the filled buffer with the previous frame's, so at steady
 /// state the bytes move owners and nothing is allocated or zeroed. A history of frames would be
 /// that many copies of the screen for a reader that wants the newest one.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemoryFramebuffer {
     scanouts: HashMap<u32, Scanout>,
+    /// Called on each present, from libkrun's thread, under the backend's lock.
+    wake: Option<Box<dyn Fn() + Send>>,
+}
+
+impl fmt::Debug for MemoryFramebuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryFramebuffer")
+            .field("scanouts", &self.scanouts)
+            .field("wake", &self.wake.as_ref().map(|_| "set"))
+            .finish()
+    }
 }
 
 impl MemoryFramebuffer {
@@ -698,6 +709,13 @@ impl MemoryFramebuffer {
     #[must_use]
     pub fn latest_frame(&self, scanout_id: u32) -> Option<&Frame> {
         self.scanouts.get(&scanout_id)?.latest.as_ref()
+    }
+
+    /// Calls `wake` each time a frame is presented, from libkrun's gpu thread while the backend's
+    /// lock is held, so it must return at once and must not take that lock. It is how a
+    /// compositor learns of a frame the moment it lands instead of polling for it.
+    pub fn set_wake(&mut self, wake: impl Fn() + Send + 'static) {
+        self.wake = Some(Box::new(wake));
     }
 }
 
@@ -799,6 +817,9 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
             pixels,
             damage,
         });
+        if let Some(wake) = &self.wake {
+            wake();
+        }
         Ok(())
     }
 }
@@ -2131,6 +2152,32 @@ mod tests {
             self.calls.push(format!("present {id} {frame} {damage:?}"));
             self.answer
         }
+    }
+
+    /// The wake runs once per present and for nothing else, so a compositor woken by it has a
+    /// frame to show every time and is never woken for a configure or an allocation.
+    #[test]
+    fn a_present_wakes_the_listener_and_nothing_else_does() {
+        let woken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut fb = MemoryFramebuffer::new();
+        let count = Arc::clone(&woken);
+        fb.set_wake(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        fb.configure_scanout(0, 2, 2, 2, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured");
+        let first = fb.alloc_frame(0).expect("a slot").frame_id;
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 0);
+        fb.present_frame(0, first, None).expect("presented");
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let second = fb.alloc_frame(0).expect("a slot").frame_id;
+        fb.present_frame(0, second, None).expect("presented");
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            fb.present_frame(0, 999, None).is_err(),
+            "a refused present wakes nobody"
+        );
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// A recorder as libkrun would hold it: the shared handle, the raw userdata, and an instance

@@ -93,14 +93,19 @@ pub(crate) struct VmmArgs {
     /// guest editing what the next guest starts from.
     #[arg(long, value_name = "POSTURE", default_value = "read-only")]
     pub(crate) rootfs: RootFsPosture,
-    /// A display for the guest as `WIDTHxHEIGHT`, shown in a window this process opens, whose
-    /// keyboard and pointer go to the guest as two input devices. Without a display server the
-    /// display still runs and the window is skipped, with a warning.
-    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    /// A display for the guest as `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`, shown in a window this
+    /// process opens, whose keyboard and pointer go to the guest as two input devices. `@HZ` is
+    /// the refresh rate the guest is told. Without a display server the display still runs and
+    /// the window is skipped, with a warning.
+    #[arg(long, value_name = "WIDTHxHEIGHT[@HZ]")]
     pub(crate) display: Option<String>,
     /// Keep this file holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
+    /// Append one `frame_id<TAB>nanoseconds` line to this file per frame the display thread
+    /// sees. Needs `--display`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) frame_log: Option<PathBuf>,
     /// Give the guest a virtio-snd sound card, backed by the host's audio server. Off by default:
     /// audio is a two-way hole (the guest plays to your output and can capture from your input),
     /// so it is opened only when asked. Refused before boot if this libkrun has no snd feature.
@@ -188,10 +193,15 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
     Some((port.parse().ok()?, Path::new(path)))
 }
 
-/// A `WIDTHxHEIGHT` display spec, or `None` for anything that is not two non-zero numbers.
-pub(crate) fn split_display(spec: &str) -> Option<(NonZeroU32, NonZeroU32)> {
-    let (w, h) = spec.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?))
+/// A `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ` display spec as `(width, height, refresh)`, or `None`
+/// for anything whose numbers are not all non-zero.
+pub(crate) fn split_display(spec: &str) -> Option<(NonZeroU32, NonZeroU32, Option<NonZeroU32>)> {
+    let (size, refresh) = match spec.split_once('@') {
+        Some((size, hz)) => (size, Some(hz.parse().ok()?)),
+        None => (spec, None),
+    };
+    let (w, h) = size.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?, refresh))
 }
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
@@ -377,10 +387,12 @@ enum HelperError {
         /// Where that lands in the host's image tree.
         in_image: PathBuf,
     },
-    /// A `--display` that is not `WIDTHxHEIGHT`.
+    /// A `--display` that is not `WIDTHxHEIGHT[@HZ]`.
     Display(String),
     /// A `--screenshot` with no display to take one of.
     ScreenshotNeedsDisplay,
+    /// A `--frame-log` with no display to log frames of.
+    FrameLogNeedsDisplay,
     /// The display's window thread could not be started.
     Window(std::io::Error),
     /// The input replay thread could not be started.
@@ -448,9 +460,15 @@ impl std::fmt::Display for HelperError {
                 guest.display(),
                 in_image.display()
             ),
-            Self::Display(d) => write!(f, "--display {d:?} is not WIDTHxHEIGHT, both non-zero"),
+            Self::Display(d) => write!(
+                f,
+                "--display {d:?} is not WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, all non-zero"
+            ),
             Self::ScreenshotNeedsDisplay => {
                 write!(f, "--screenshot needs a --display to take a frame from")
+            }
+            Self::FrameLogNeedsDisplay => {
+                write!(f, "--frame-log needs a --display to log frames of")
             }
             Self::Window(e) => write!(f, "the display window: {e}"),
             Self::Input(e) => write!(f, "the input replay: {e}"),
@@ -503,6 +521,9 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         .transpose()?;
     if args.screenshot.is_some() && display.is_none() {
         return Err(HelperError::ScreenshotNeedsDisplay);
+    }
+    if args.frame_log.is_some() && display.is_none() {
+        return Err(HelperError::FrameLogNeedsDisplay);
     }
     require_backable_mem(args.mem.get())?;
     if args.vcpus.get() > MEASURED_VCPU_CLAMP {
@@ -573,9 +594,14 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     // The display: the device, the scanout's size, where its frames land, and the keyboard and
     // pointer that come with it. The window that shows the frames and feeds the devices runs on
     // its own thread from here on, because the one this is on is about to become the guest.
-    if let Some((width, height)) = display {
+    if let Some((width, height, refresh)) = display {
         machine = machine.gpu_device()?;
-        let (with_display, _display_id) = machine.add_display(width.get(), height.get())?;
+        let (mut with_display, display_id) = machine.add_display(width.get(), height.get())?;
+        // The rate the guest paces its flips to; libkrun's own default otherwise. Host-side
+        // nothing changes: frames arrive when the guest flushes them, at whatever rate that is.
+        if let Some(hz) = refresh {
+            with_display = with_display.display_set_refresh_rate(display_id, hz.get())?;
+        }
         let (with_backend, framebuffer) =
             with_display.display_backend(bsx_krun::MemoryFramebuffer::new())?;
         let (with_keyboard, keyboard) = with_backend.input_device(crate::input::keyboard())?;
@@ -591,6 +617,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
             (width, height),
             args.name.as_deref().unwrap_or("sandbox"),
             args.screenshot.clone(),
+            args.frame_log.clone(),
             inputs,
         )
         .map_err(HelperError::Window)?;
@@ -902,7 +929,10 @@ mod tests {
     /// A display is two non-zero numbers; anything else is refused where it can still be named.
     #[test]
     fn a_display_spec_is_two_non_zero_numbers() {
-        let (w, h) = split_display("800x600").expect("well-formed");
+        let (w, h, hz) = split_display("800x600").expect("well-formed");
+        assert_eq!(hz, None);
+        let (_, _, hz) = split_display("800x600@120").expect("with a rate");
+        assert_eq!(hz.map(NonZeroU32::get), Some(120));
         assert_eq!((w.get(), h.get()), (800, 600));
         for bad in [
             "800",
@@ -1093,6 +1123,8 @@ mod tests {
             "800x600",
             "--screenshot",
             "/tmp/frame.ppm",
+            "--frame-log",
+            "/tmp/frames.tsv",
             "--sound",
         ];
         let parsed = Cli::parse_from(argv);
@@ -1116,6 +1148,7 @@ mod tests {
         assert_eq!(got.display.as_deref(), Some("800x600"));
         assert_eq!(got.screenshot.as_deref(), Some(Path::new("/tmp/frame.ppm")));
         assert!(got.sound, "--sound parses as the sound flag");
+        assert_eq!(got.frame_log.as_deref(), Some(Path::new("/tmp/frames.tsv")));
     }
 
     /// Saying nothing about the filesystem asks for a root the guest cannot write, which is the

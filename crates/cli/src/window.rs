@@ -5,9 +5,11 @@
 //! without copying every frame across a boundary. So the window lives here too, on a thread
 //! spawned before `krun_start_enter` takes the main one, the way the control socket's does.
 //!
-//! - **The compositor polls.** Every [`FRAME_POLL`] it locks the framebuffer, and a new frame id
-//!   is a redraw and, if asked, a screenshot. Polling keeps the callback libkrun calls from
-//!   knowing anything about windows, at the price of up to one poll of latency.
+//! - **Frames are pushed, not polled.** The framebuffer's wake hook fires on every present, from
+//!   libkrun's gpu thread; with a window it posts a user event to the loop, and without one it
+//!   signals the headless sink's condvar. Either way the thread does nothing until a frame lands
+//!   and sees it the moment it does, so this thread adds no interval of its own to a frame's
+//!   path. The callback libkrun calls still knows nothing about windows.
 //! - **The window is the sandbox's lifetime, not the other way round.** Closing it ends the VM
 //!   the way `bsx stop` does; the VM ending takes the window with it, because the process exits.
 //! - **The frame follows the window.** A window the user resizes shows the frame scaled to fit,
@@ -18,28 +20,25 @@
 //! - **Its keyboard and pointer are the guest's.** Every key, motion, button and wheel event the
 //!   window gets is translated (`crate::input`) and queued for the guest; nothing is kept back.
 //! - **No display server is not an error.** The event loop is a capability probe: where it cannot
-//!   be built the display runs without a window, warned once, and a `--screenshot` still works.
-//!   That is what lets the end-to-end test read a frame on a headless runner.
+//!   be built the display runs without a window, warned once, and a `--screenshot` and a
+//!   `--frame-log` still work. That is what lets the end-to-end tests and `bench-frames` read
+//!   frames on a headless runner.
 //! - **Linux only, for now.** winit lets the loop run off the main thread on X11 and Wayland;
 //!   macOS insists on the main thread, which libkrun holds. That is phase 6's to reconcile.
 
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
 use bsx_krun::{Frame, MemoryFramebuffer, PixelFormat};
 use winit::application::ApplicationHandler;
 use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::input::{self, Held, Inputs};
-
-/// How often the framebuffer is checked for a new frame: the latency a frame can see, and the
-/// most redraws a second this will drive.
-const FRAME_POLL: Duration = Duration::from_millis(16);
 
 /// The scanout shown. libkrun numbers them from zero and one display makes one.
 const SCANOUT: u32 = 0;
@@ -47,26 +46,33 @@ const SCANOUT: u32 = 0;
 /// Window pixels of wheel travel that count as one line, for a device that reports pixels.
 const WHEEL_LINE_PIXELS: f64 = 20.0;
 
-/// Starts the display thread: a window when a display server answers, the screenshot sink either
-/// way. Returns once the thread is running, not once the window is up.
+/// Starts the display thread: a window when a display server answers, the screenshot and frame
+/// log sinks either way. Returns once the thread is running, not once the window is up.
 pub(crate) fn spawn(
     framebuffer: Arc<Mutex<MemoryFramebuffer>>,
     size: (NonZeroU32, NonZeroU32),
     title: &str,
     screenshot: Option<PathBuf>,
+    frame_log: Option<PathBuf>,
     inputs: Inputs,
 ) -> io::Result<()> {
     let title = format!("bsx: {title}");
+    let log = frame_log.map(FrameLog::create).transpose()?;
     std::thread::Builder::new()
         .name("bsx-display".to_string())
         .spawn(move || {
+            let mut sinks = Sinks {
+                screenshot,
+                log,
+                shown: None,
+            };
             let event_loop = match event_loop_off_main_thread() {
                 Ok(l) => l,
                 Err(why) => {
                     eprintln!(
                         "bsx __vmm: warning: no window ({why}); the display runs without one"
                     );
-                    headless(&framebuffer, screenshot.as_deref());
+                    headless(&framebuffer, &mut sinks);
                     return;
                 }
             };
@@ -75,16 +81,19 @@ pub(crate) fn spawn(
             // the VM the way `bsx stop` does. A window that vanished from a VM still running
             // would be a sandbox nobody can see and nobody asked to keep.
             let _stop = StopOnExit;
+            let proxy = event_loop.create_proxy();
+            lock(&framebuffer).set_wake(move || {
+                let _ = proxy.send_event(());
+            });
             let mut app = App {
                 framebuffer,
                 size,
                 title,
-                screenshot,
+                sinks,
                 inputs,
                 held: Held::default(),
                 placement: Placement::NONE,
                 window: None,
-                shown: None,
             };
             let _ = event_loop.run_app(&mut app);
         })
@@ -110,15 +119,41 @@ fn event_loop_off_main_thread() -> Result<EventLoop<()>, winit::error::EventLoop
     builder.build()
 }
 
-/// The display with no window: the screenshot sink alone, until the process ends.
-fn headless(framebuffer: &Mutex<MemoryFramebuffer>, screenshot: Option<&Path>) {
-    let mut shown = None;
+/// The framebuffer's lock, recovered if poisoned: a backend that panicked already answered
+/// libkrun with an error, and what it holds is still the latest frame.
+fn lock(framebuffer: &Mutex<MemoryFramebuffer>) -> std::sync::MutexGuard<'_, MemoryFramebuffer> {
+    framebuffer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The display with no window: the screenshot and frame log alone, woken per present, until the
+/// process ends.
+fn headless(framebuffer: &Mutex<MemoryFramebuffer>, sinks: &mut Sinks) {
+    let landed = Arc::new((Mutex::new(false), Condvar::new()));
+    let signal = Arc::clone(&landed);
+    lock(framebuffer).set_wake(move || {
+        let (flag, cv) = &*signal;
+        *flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        cv.notify_one();
+    });
+    let (flag, cv) = &*landed;
     loop {
-        std::thread::sleep(FRAME_POLL);
-        if let Some(frame) = new_frame(framebuffer, &mut shown)
-            && let Some(path) = screenshot
         {
-            let _ = write_ppm(&frame, path);
+            let mut ready = flag
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*ready {
+                ready = cv
+                    .wait(ready)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            *ready = false;
+        }
+        if let Some(frame) = new_frame(framebuffer, &mut sinks.shown) {
+            sinks.deliver(&frame);
         }
     }
 }
@@ -126,15 +161,55 @@ fn headless(framebuffer: &Mutex<MemoryFramebuffer>, screenshot: Option<&Path>) {
 /// The latest frame if its id differs from `shown`, cloned out from under the lock so libkrun
 /// is held off only for the copy.
 fn new_frame(framebuffer: &Mutex<MemoryFramebuffer>, shown: &mut Option<u32>) -> Option<Frame> {
-    let guard = framebuffer
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = lock(framebuffer);
     let frame = guard.latest_frame(SCANOUT)?;
     if *shown == Some(frame.frame_id) {
         return None;
     }
     *shown = Some(frame.frame_id);
     Some(frame.clone())
+}
+
+/// Where the frames go besides the window: the screenshot file and the frame log, and the id of
+/// the frame last delivered so the same one is never delivered twice.
+struct Sinks {
+    screenshot: Option<PathBuf>,
+    log: Option<FrameLog>,
+    shown: Option<u32>,
+}
+
+impl Sinks {
+    /// Records `frame` in every sink that is on.
+    fn deliver(&mut self, frame: &Frame) {
+        if let Some(log) = &mut self.log {
+            log.record(frame.frame_id);
+        }
+        if let Some(path) = &self.screenshot {
+            let _ = write_ppm(frame, path);
+        }
+    }
+}
+
+/// One `frame_id<TAB>nanoseconds` line per frame seen, the nanoseconds counted from the log's
+/// creation on this thread's clock. What `bench-frames` reads. Written unbuffered, one line per
+/// call, so a log of a VM that was killed is whole up to the last frame.
+struct FrameLog {
+    file: std::fs::File,
+    started: Instant,
+}
+
+impl FrameLog {
+    fn create(path: PathBuf) -> io::Result<Self> {
+        Ok(Self {
+            file: std::fs::File::create(path)?,
+            started: Instant::now(),
+        })
+    }
+
+    fn record(&mut self, frame_id: u32) {
+        let ns = self.started.elapsed().as_nanos();
+        let _ = writeln!(self.file, "{frame_id}\t{ns}");
+    }
 }
 
 /// Where the frame sits in the window, in window pixels: what the pointer is measured against.
@@ -161,15 +236,13 @@ struct App {
     framebuffer: Arc<Mutex<MemoryFramebuffer>>,
     size: (NonZeroU32, NonZeroU32),
     title: String,
-    screenshot: Option<PathBuf>,
+    sinks: Sinks,
     inputs: Inputs,
     /// What the guest thinks is down, released when the window loses focus.
     held: Held,
     /// Where the last paint put the frame.
     placement: Placement,
     window: Option<Shown>,
-    /// The id of the frame on screen, so a poll that finds the same one does nothing.
-    shown: Option<u32>,
 }
 
 /// A window and the surface that puts pixels on it.
@@ -196,19 +269,24 @@ impl App {
         let Ok(mut pixels) = shown.surface.buffer_mut() else {
             return;
         };
-        let frame = {
-            let guard = self
-                .framebuffer
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.latest_frame(SCANOUT).cloned()
-        };
+        let frame = lock(&self.framebuffer).latest_frame(SCANOUT).cloned();
         pixels.fill(0);
         if let Some(frame) = &frame {
             self.placement = fit((frame.width, frame.height), (width.get(), height.get()));
             composite(frame, self.placement, width.get(), &mut pixels);
         }
         let _ = pixels.present();
+    }
+
+    /// A frame may have landed: delivers it to the sinks and asks for a redraw. Called on each
+    /// wake, and once when the window is up in case one landed before the wake was set.
+    fn frame_arrived(&mut self) {
+        if let Some(frame) = new_frame(&self.framebuffer, &mut self.sinks.shown) {
+            self.sinks.deliver(&frame);
+            if let Some(shown) = &self.window {
+                shown.window.request_redraw();
+            }
+        }
     }
 
     /// Releases everything the guest thinks is down.
@@ -247,7 +325,11 @@ impl ApplicationHandler for App {
             return;
         };
         self.window = Some(Shown { window, surface });
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_POLL));
+        self.frame_arrived();
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        self.frame_arrived();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -297,18 +379,6 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(frame) = new_frame(&self.framebuffer, &mut self.shown) {
-            if let Some(path) = &self.screenshot {
-                let _ = write_ppm(&frame, path);
-            }
-            if let Some(shown) = &self.window {
-                shown.window.request_redraw();
-            }
-        }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_POLL));
     }
 }
 
@@ -614,5 +684,47 @@ mod tests {
             !path.with_extension("ppm.tmp").exists(),
             "the temporary was renamed away"
         );
+    }
+
+    /// The sinks deliver each new frame once: a frame log line per distinct id, and none for a
+    /// wake that found the frame already delivered.
+    #[test]
+    fn the_sinks_record_each_frame_once() {
+        let dir = bsx_test_support::ScratchDir::created("frame-log");
+        let path = dir.path().join("frames.tsv");
+        let fb = Mutex::new(MemoryFramebuffer::new());
+        let mut sinks = Sinks {
+            screenshot: None,
+            log: Some(FrameLog::create(path.clone()).expect("created")),
+            shown: None,
+        };
+        {
+            use bsx_krun::DisplayBackend;
+            let mut guard = fb.lock().expect("unpoisoned");
+            guard
+                .configure_scanout(0, 1, 1, 1, 1, PixelFormat::B8G8R8X8Unorm)
+                .expect("configured");
+            for _ in 0..2 {
+                let id = guard.alloc_frame(0).expect("a slot").frame_id;
+                guard.present_frame(0, id, None).expect("presented");
+            }
+        }
+        // Two presents, the second superseding the first: one frame is new, the next wake finds
+        // nothing newer.
+        for _ in 0..3 {
+            if let Some(frame) = new_frame(&fb, &mut sinks.shown) {
+                sinks.deliver(&frame);
+            }
+        }
+        let text = std::fs::read_to_string(&path).expect("the log");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "one line for the one frame delivered: {text:?}"
+        );
+        let (id, ns) = lines[0].split_once('\t').expect("id, tab, ns");
+        assert_eq!(id, "1", "the latest frame's id");
+        assert!(ns.parse::<u128>().is_ok(), "nanoseconds: {ns:?}");
     }
 }

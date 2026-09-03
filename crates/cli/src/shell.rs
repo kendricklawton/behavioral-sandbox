@@ -77,6 +77,10 @@ pub(crate) struct ShellArgs {
     /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
+    /// Append one `frame_id<TAB>nanoseconds` line to PATH per frame the display thread sees, for
+    /// measuring the frame path. Needs `--display`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) frame_log: Option<PathBuf>,
     /// Give the guest a virtio-snd sound card, backed by the host's audio server. Off by default:
     /// audio is a two-way hole, so the guest playing to your speakers and capturing from your
     /// microphone is opened only when asked.
@@ -129,6 +133,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         &mut cfg,
         args.display.as_deref(),
         args.screenshot.as_deref(),
+        args.frame_log.as_deref(),
     )?;
     if let Some(v) = crate::run::resolve_limit(args.vcpus, "BSX_VCPUS")? {
         cfg.vcpus = v;

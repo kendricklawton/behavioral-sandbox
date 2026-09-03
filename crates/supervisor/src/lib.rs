@@ -103,19 +103,37 @@ pub struct Display {
     pub width: NonZeroU32,
     /// Height in pixels.
     pub height: NonZeroU32,
+    /// The refresh rate the guest is told, in Hz, or `None` for libkrun's own default. The guest
+    /// paces its page flips to this, so it is the ceiling on how often a well-behaved guest
+    /// draws; it changes nothing on the host side.
+    pub refresh: Option<NonZeroU32>,
 }
 
 impl Display {
     /// A display `width` by `height` pixels.
     #[must_use]
     pub fn new(width: NonZeroU32, height: NonZeroU32) -> Self {
-        Self { width, height }
+        Self {
+            width,
+            height,
+            refresh: None,
+        }
     }
 
-    /// The `WIDTHxHEIGHT` spelling the helper parses.
+    /// The same display, with the guest told `hz` as its refresh rate.
+    #[must_use]
+    pub fn with_refresh(mut self, hz: NonZeroU32) -> Self {
+        self.refresh = Some(hz);
+        self
+    }
+
+    /// The `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ` spelling the helper parses.
     #[must_use]
     pub fn as_spec(self) -> String {
-        format!("{}x{}", self.width, self.height)
+        match self.refresh {
+            Some(hz) => format!("{}x{}@{hz}", self.width, self.height),
+            None => format!("{}x{}", self.width, self.height),
+        }
     }
 }
 
@@ -165,6 +183,10 @@ pub struct VmConfig {
     /// A file kept holding the display's latest frame as a binary PPM, rewritten on every change.
     /// A development knob: it is what lets a test read the pixels a guest drew.
     pub screenshot: Option<PathBuf>,
+    /// A file appended with one `frame_id<TAB>nanoseconds` line per frame the display thread
+    /// sees, timed from the thread's start. A development knob: what `cargo xtask bench-frames`
+    /// reads to measure how many frames a second cross from the guest.
+    pub frame_log: Option<PathBuf>,
     /// Whether the guest gets a virtio-snd sound card, backed by the host's audio server. `false`
     /// by default (design rule 3): audio is a two-way hole (the guest plays to the host's output
     /// and can capture from its input), so it is opened only by an explicit `--sound`, never
@@ -232,6 +254,7 @@ impl VmConfig {
             log: None,
             display: None,
             screenshot: None,
+            frame_log: None,
             sound: false,
         }
     }
@@ -300,6 +323,10 @@ impl VmConfig {
         }
         if let Some(path) = &self.screenshot {
             argv.push("--screenshot".into());
+            argv.push(path.clone().into());
+        }
+        if let Some(path) = &self.frame_log {
+            argv.push("--frame-log".into());
             argv.push(path.clone().into());
         }
         if self.sound {
@@ -1261,6 +1288,7 @@ mod tests {
             NonZeroU32::new(600).expect("non-zero"),
         ));
         c.screenshot = Some(PathBuf::from("/tmp/frame.ppm"));
+        c.frame_log = Some(PathBuf::from("/tmp/frames.tsv"));
         c.sound = true;
 
         let argv: Vec<String> = c
@@ -1306,6 +1334,8 @@ mod tests {
             "800x600",
             "--screenshot",
             "/tmp/frame.ppm",
+            "--frame-log",
+            "/tmp/frames.tsv",
             "--sound",
         ] {
             assert!(
@@ -1317,6 +1347,22 @@ mod tests {
 
     /// An absent option contributes no flag at all, rather than an empty one the parser would then
     /// have to interpret.
+    /// A display spells itself the way the helper parses it, with the refresh rate only when
+    /// one was asked for.
+    #[test]
+    fn a_display_spec_carries_its_refresh_rate_only_when_set() {
+        let d = Display::new(
+            NonZeroU32::new(640).expect("non-zero"),
+            NonZeroU32::new(480).expect("non-zero"),
+        );
+        assert_eq!(d.as_spec(), "640x480");
+        assert_eq!(
+            d.with_refresh(NonZeroU32::new(120).expect("non-zero"))
+                .as_spec(),
+            "640x480@120"
+        );
+    }
+
     /// The safe posture is what a caller gets for saying nothing, and it travels on the argv
     /// *explicitly*: a helper that inferred the default from a missing flag would be a second
     /// place the default is written, and the two could disagree.
@@ -1352,6 +1398,7 @@ mod tests {
             "--mount",
             "--display",
             "--screenshot",
+            "--frame-log",
             "--sound",
         ] {
             assert!(

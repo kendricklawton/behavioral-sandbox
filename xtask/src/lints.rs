@@ -110,12 +110,14 @@ mod tests {
             "expected the helper's flag set, found {written:?}"
         );
         // What the parser accepts: clap's own `long` spellings, plus the ones it derives from the
-        // field name, which the parser writes as plain `#[arg(long, ...)]`.
+        // field name, which the parser writes as plain `#[arg(long, ...)]`. clap spells a field
+        // `frame_log` as `--frame-log`, so the derived check reads the flag back the same way.
         let mut missing = Vec::new();
         for flag in &written {
             let bare = flag.trim_start_matches('-');
+            let field = bare.replace('-', "_");
             let declared_explicitly = parser.contains(&format!("long = \"{bare}\""));
-            let derived_from_field = parser.contains(&format!("\n    pub(crate) {bare}:"));
+            let derived_from_field = parser.contains(&format!("\n    pub(crate) {field}:"));
             if !declared_explicitly && !derived_from_field {
                 missing.push(flag.clone());
             }
