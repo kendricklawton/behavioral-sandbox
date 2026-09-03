@@ -68,14 +68,20 @@ impl Sinks {
         self.uploaded.load(Ordering::Relaxed)
     }
 
-    fn record(&self, frame_id: u32) {
+    /// Records an upload of `frame_id` that took `took_ns` in `write_texture`: the log line is
+    /// the frame id, the clock at the upload, and that duration.
+    fn record(&self, frame_id: u32, took_ns: u128) {
         self.uploaded.fetch_add(1, Ordering::Relaxed);
         let mut log = self
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(log) = log.as_mut() {
-            let _ = writeln!(log, "{frame_id}\t{}", crate::lease::monotonic_ns());
+            let _ = writeln!(
+                log,
+                "{frame_id}\t{}\t{took_ns}",
+                crate::lease::monotonic_ns()
+            );
         }
     }
 }
@@ -270,6 +276,7 @@ impl shader::Primitive for Primitive {
         let Some(data) = view.pixels.get(region.offset..) else {
             return;
         };
+        let started = crate::lease::monotonic_ns();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.texture,
@@ -294,7 +301,8 @@ impl shader::Primitive for Primitive {
             },
         );
         texture.holds = Some(latest.frame_id);
-        self.sinks.record(latest.frame_id);
+        self.sinks
+            .record(latest.frame_id, crate::lease::monotonic_ns() - started);
     }
 
     fn draw(&self, pipeline: &Pipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {

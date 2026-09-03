@@ -368,7 +368,9 @@ fn bench_app(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> 
         .arg("--log")
         .arg(&read_log)
         .arg("--drawn-log")
-        .arg(&drawn_log);
+        .arg(&drawn_log)
+        // The notebook stays open when a lease ends; the measurement wants the exit.
+        .arg("--exit-with-lease");
     // The app finds the sandbox under the bench's private runtime dir, so the compositor's socket,
     // which lives under the real one, is named by its absolute path.
     if let (Some(real), Some(socket)) = (std::env::var_os("XDG_RUNTIME_DIR"), wayland)
@@ -413,10 +415,17 @@ fn bench_app(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> 
     report_signed("read minus helper", &mut read_offsets, "us");
     let mut drawn_offsets = offsets_us(&drawn, &helper);
     report_signed("uploaded minus helper", &mut drawn_offsets, "us");
+    let mut took: Vec<u64> = read_third_column(&drawn_log)?
+        .into_iter()
+        .map(|ns| ns / 1000)
+        .collect();
+    report_percentiles("write_texture", &mut took, "us");
     println!(
         "  \"uploaded\" is the frame's bytes queued to the GPU from the mapped slot, at the redraw\n\
          the compositor granted; the frames the app read but never uploaded were superseded before\n\
-         a redraw came, which the panel's rate makes inevitable above it."
+         a redraw came, which the panel's rate makes inevitable above it. \"write_texture\" is the\n\
+         upload call by itself, from the mapped slot into wgpu's staging; the rest of the gap to\n\
+         the helper is the wait for the redraw and iced's own frame."
     );
     Ok(())
 }
@@ -533,18 +542,32 @@ fn report_signed(label: &str, samples: &mut [i64], unit: &str) {
     );
 }
 
-/// The `frame_id<TAB>nanoseconds` lines of a frame log, in file order.
+/// The `frame_id<TAB>nanoseconds` lines of a frame log, in file order; a third column, where a
+/// log has one, is read by [`read_third_column`].
 fn read_frame_log(path: &Path) -> Result<Vec<(u64, u64)>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read the frame log {}", path.display()))?;
     let mut rows = Vec::new();
     for line in text.lines() {
-        let Some((id, ns)) = line.split_once('\t') else {
+        let mut cols = line.split('\t');
+        let (Some(id), Some(ns)) = (cols.next(), cols.next()) else {
             bail!("frame log line without a tab: {line:?}");
         };
         rows.push((id.parse()?, ns.parse()?));
     }
     Ok(rows)
+}
+
+/// The third column of a frame log, where a line has one: the app's `--drawn-log` puts the
+/// `write_texture` duration there, in nanoseconds.
+fn read_third_column(path: &Path) -> Result<Vec<u64>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read the frame log {}", path.display()))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split('\t').nth(2))
+        .filter_map(|v| v.parse().ok())
+        .collect())
 }
 
 /// Frames seen against frames presented, the arrival rate, and the arrival intervals as
