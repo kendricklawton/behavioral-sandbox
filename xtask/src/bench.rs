@@ -19,7 +19,7 @@
 //! vCPU thread appearing. The guest's own share is inside the second number, not separated from it,
 //! and this file says so rather than implying a precision it does not have.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -222,6 +222,115 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
 /// Kills and reaps a cohort. Both results are discarded: a VM that already died is not a failure of
 /// teardown, and a bench that panicked on cleanup would leave the rest of the cohort running, which
 /// is the exact leak this project refuses.
+/// The guest drawer `bench-frames` stages into the guest, staged from the CLI's own test
+/// fixture so the bench and the end-to-end tests draw through one program.
+const FLIPPER: &str = include_str!("../../crates/cli/tests/drm_flip.py");
+
+/// `cargo xtask bench-frames --display WxH[@HZ] --frames N`: one run per path (`dirty`, unpaced;
+/// `flip`, paced by the refresh rate), each reporting the intervals between frames as the helper
+/// saw them arrive, the frames the guest presented against the frames the host got to see, and
+/// the guest's own timing of its loop.
+pub(crate) fn bench_frames(display: &str, frames: usize) -> Result<()> {
+    if frames == 0 {
+        bail!("--frames must be >= 1");
+    }
+    let ctx = BenchContext::resolve()?;
+    ctx.print_header("bench-frames");
+    println!(
+        "  display {display}, {frames} frames per path. Throughput into the host process, headless:\n\
+         \x20 no window and no panel, so nothing here is presentation. `dirty` is unpaced (what the\n\
+         \x20 flush, the readback and the backend sustain together); `flip` waits for a vblank per\n\
+         \x20 frame (what a compositor pacing to the refresh rate gets).\n"
+    );
+    let stage = ctx.runtime.join("frames");
+    std::fs::create_dir_all(&stage)?;
+    std::fs::write(stage.join("flip.py"), FLIPPER)?;
+    for path in ["dirty", "flip"] {
+        let log = stage.join(format!("{path}.tsv"));
+        let out = Command::new(&ctx.bsx)
+            .arg("run")
+            .arg("--root")
+            .arg(&ctx.guest_root)
+            .args(["--display", display])
+            .arg("--frame-log")
+            .arg(&log)
+            .arg("--mount")
+            .arg(format!("/mnt={}", stage.display()))
+            .args(["--", "python3", "/mnt/flip.py", path, &frames.to_string()])
+            .env("XDG_RUNTIME_DIR", &ctx.runtime)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("run the {path} guest"))?;
+        if !out.status.success() {
+            bail!(
+                "the {path} guest failed ({}):\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = |prefix: &str| {
+            stdout
+                .lines()
+                .find(|l| l.starts_with(prefix))
+                .unwrap_or("(the guest reported nothing)")
+                .to_string()
+        };
+        let arrivals = read_frame_log(&log)?;
+        println!("path {path}:");
+        println!("  guest:    {}", line("FLIP setup"));
+        println!("            {}", line("FLIP done"));
+        report_arrivals(&arrivals, frames);
+    }
+    println!(
+        "\n\"presented\" counts frame ids the backend handed out; \"seen\" counts the frames the\n\
+         display thread got to deliver. A gap between them is frames superseded before the thread\n\
+         ran, which the latest-frame design allows and a real window would also not have shown."
+    );
+    Ok(())
+}
+
+/// The `frame_id<TAB>nanoseconds` lines of a frame log, in file order.
+fn read_frame_log(path: &Path) -> Result<Vec<(u64, u64)>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read the frame log {}", path.display()))?;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let Some((id, ns)) = line.split_once('\t') else {
+            bail!("frame log line without a tab: {line:?}");
+        };
+        rows.push((id.parse()?, ns.parse()?));
+    }
+    Ok(rows)
+}
+
+/// Frames seen against frames presented, the arrival rate, and the arrival intervals as
+/// percentiles in microseconds.
+fn report_arrivals(arrivals: &[(u64, u64)], asked: usize) {
+    let Some((&(first_id, first_ns), &(last_id, last_ns))) = arrivals.first().zip(arrivals.last())
+    else {
+        println!("  (no frames arrived)");
+        return;
+    };
+    let seen = arrivals.len();
+    let presented = last_id.saturating_sub(first_id).saturating_add(1);
+    let span_ns = last_ns.saturating_sub(first_ns).max(1);
+    let seen_fps = (seen.saturating_sub(1)) as f64 * 1e9 / span_ns as f64;
+    let presented_fps = (presented.saturating_sub(1)) as f64 * 1e9 / span_ns as f64;
+    println!(
+        "  host:     presented {presented} (asked {asked}), seen {seen}, over {:.2} s: \
+         {presented_fps:.1} presented/s, {seen_fps:.1} seen/s",
+        span_ns as f64 / 1e9
+    );
+    let mut intervals: Vec<u64> = arrivals
+        .windows(2)
+        .map(|w| w[1].1.saturating_sub(w[0].1) / 1000)
+        .collect();
+    report_percentiles("arrival interval", &mut intervals, "us");
+}
+
 fn teardown(cohort: &mut Vec<Child>) {
     for mut child in cohort.drain(..) {
         let _ = child.kill();

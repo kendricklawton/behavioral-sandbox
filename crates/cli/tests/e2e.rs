@@ -841,6 +841,56 @@ fn sound_gives_the_guest_a_card_and_nothing_else_does() {
     );
 }
 
+/// `--frame-log` records each frame the display thread saw as it landed (roadmap 4.8): a guest
+/// that flushes five times leaves five ascending ids with non-decreasing times, because delivery
+/// is woken per present rather than polled and the flushes are half a second apart.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_frame_log_records_each_frame_the_guest_flushed() {
+    if skipped("a_frame_log_records_each_frame_the_guest_flushed") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-frame-log");
+    std::fs::write(dir.path().join("draw.py"), include_str!("drm_draw.py"))
+        .expect("stage the drawer");
+    let log = dir.path().join("frames.tsv");
+    let mount = format!("/mnt={}", dir.path().display());
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--display", "320x240@60", "--mount", &mount])
+        .arg("--frame-log")
+        .arg(&log)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["--", "python3", "/mnt/draw.py", "4"])
+        .output()
+        .expect("run bsx");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(&log).expect("the frame log was written");
+    let rows: Vec<(u64, u64)> = text
+        .lines()
+        .map(|l| {
+            let (id, ns) = l.split_once('\t').expect("id, tab, ns");
+            (id.parse().expect("id"), ns.parse().expect("ns"))
+        })
+        .collect();
+    // The mode set paints once and each of the four DIRTYFB flushes once more.
+    assert!(
+        rows.len() >= 5,
+        "five flushes half a second apart are five frames seen: {text:?}"
+    );
+    assert!(
+        rows.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 >= w[0].1),
+        "ids ascend and time does not run backwards: {text:?}"
+    );
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

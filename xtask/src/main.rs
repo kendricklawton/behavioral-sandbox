@@ -97,6 +97,20 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         count: usize,
     },
+    /// Measure the guest-to-host frame path: a guest draws frames as fast as its chosen path
+    /// allows, the helper logs each frame's arrival, and the intervals are reported as
+    /// percentiles, with the guest's own view beside them. Headless: it measures throughput
+    /// into the host process, not presentation on a panel. Needs `/dev/kvm`, the guest tree and
+    /// a **release** `bsx`.
+    BenchFrames {
+        /// The display the guest gets, `WIDTHxHEIGHT[@HZ]`; `@HZ` is what the guest paces its
+        /// page flips to. Default 640x480.
+        #[arg(long, default_value = "640x480")]
+        display: String,
+        /// Frames per run. Default 300.
+        #[arg(long, default_value_t = 300)]
+        frames: usize,
+    },
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the
     /// config parser) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
@@ -149,6 +163,7 @@ fn main() -> Result<()> {
         ),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchFootprint { count } => bench::bench_footprint(count),
+        Cmd::BenchFrames { display, frames } => bench::bench_frames(&display, frames),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
     }
