@@ -1413,6 +1413,14 @@ pub mod control {
             self.memfd.take()
         }
 
+        /// A handle another thread ends this lease with, since [`next_event`](Self::next_event)
+        /// blocks for as long as the VM has nothing to say.
+        pub fn stop_handle(&self) -> io::Result<LeaseStop> {
+            Ok(LeaseStop {
+                stream: self.stream.try_clone()?,
+            })
+        }
+
         /// Waits for the next record. `Io` with `UnexpectedEof` is the VM closing the lease,
         /// which is what a VM ending does.
         pub fn next_event(&mut self) -> Result<Event, Error> {
@@ -1439,6 +1447,20 @@ pub mod control {
                     damage: Damage::new(word(2), word(3), word(4), word(5)),
                 }
             })
+        }
+    }
+
+    /// Ends a [`DisplayLease`] from another thread: shutting the connection makes the blocked
+    /// read return, and the VM drops its side.
+    #[derive(Debug)]
+    pub struct LeaseStop {
+        stream: UnixStream,
+    }
+
+    impl LeaseStop {
+        /// Ends the lease.
+        pub fn stop(&self) {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
     }
 

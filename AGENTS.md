@@ -44,9 +44,12 @@ backed by the host audio server (4.7). A second process leases a display over th
 as a sealed memfd and a record per present (4.9), and `bsx-app` shows one in an iced window through
 a wgpu texture upload (4.10), and its keyboard and pointer reach the guest as lines down an `input`
 session on that socket (4.11). Every run leaves a record under the local data dir (posture, captured
-output, the guest's `/results`), which `bsx ls --all`, `show` and `rm` read (4.12). The application
-proper (roadmap 4.13, 4.14), GPU acceleration and macOS (phases 5 and 6) are not written, and macOS
-is unbuilt and untested.
+output, the guest's `/results`), which `bsx ls --all`, `show` and `rm` read (4.12), and `bsx-app` is
+the notebook of those runs: the list, one run's record with its display and output, a start form
+whose posture sentence is confirmed before anything boots, stop, re-run, delete, and a shell through
+`bsx exec --tty` in the operator's terminal (4.13). Frame pacing through the app on this panel is
+measured (4.14). GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt and
+untested.
 
 ## Design rules (every change holds to all six)
 
@@ -98,14 +101,14 @@ list of packages. Therefore a stale `-p` fails the gate, not the terminal of a r
 | `crates/record` | `bsx-record` | The run record: one directory per run under the local data dir with the posture as settled, the captured output (capped), and `results/`, the directory the guest sees as `/results`. Written by the CLI at start and end, read by both binaries. |
 | `crates/input` | `bsx-input` | The guest's keyboard and pointer: the two device shapes, the reports a window's events become, and the `kbd\|ptr TYPE CODE VALUE` line grammar every feeder speaks (the replay file, the `input` request). Both binaries translate through it. |
 | `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |
-| `crates/app` | `bsx-app` | The GUI application, on iced. Today the 4.10 spike: one window showing a named sandbox's display, leased over the control socket and uploaded to a wgpu texture by its damage rectangle. |
+| `crates/app` | `bsx-app` | The GUI application, on iced: the notebook of runs (live and past, from `bsx-record`), one run's record with its display (leased over the control socket, uploaded to a wgpu texture by its damage rectangle) and its captured output, a start form, stop, re-run, delete, and a shell in the operator's terminal. Starting, stopping and the shell go through the `bsx` binary beside it. |
 | `crates/test-support` | `bsx-test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook. `SUMMARY.md` is the index. The names are flat `topic-subtopic.md`. The hierarchy is in `SUMMARY.md`, not in directories. |
 
 **Two binaries will ship**, from one workspace: `bsx` (the CLI, which also carries the hidden
-helper subcommand that becomes a VM) and the GUI application, `bsx-app`, which today is the 4.10
-spike. Neither is a daemon. A VM registers a socket
+helper subcommand that becomes a VM) and the GUI application, `bsx-app`, the notebook. Neither is a
+daemon. A VM registers a socket
 under the runtime directory, and both binaries find live VMs by reading it, so a VM started by one
 is visible to the other. `scratch/ROADMAP.md` holds the reasoning.
 

@@ -35,7 +35,7 @@ in a sandbox and exits with its status, `bsx shell` opens a session on a pty ins
 `bsx up` starts a sandbox that outlives the command that started it, and `bsx ls`, `bsx exec` and
 `bsx stop` reach a sandbox this process did not start, and `--display WIDTHxHEIGHT` shows a guest's
 screen in a window whose keyboard and pointer go to the guest, and the desktop image boots to a
-terminal in a Wayland session there, with `--sound` for audio. `bsx-app` shows a sandbox's display in a window and sends the window's keyboard and pointer into it, and does nothing else yet. What is not here: the rest of the GUI application, GPU acceleration, and macOS. If you want
+terminal in a Wayland session there, with `--sound` for audio. `bsx-app` is the notebook: every run on the machine, live and past, with its posture, output and results; a live run's display in the window with your keyboard and pointer going in; a form that shows a sandbox's posture before it boots. What is not here: GPU acceleration, and macOS. If you want
 the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
@@ -99,7 +99,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/record` | `bsx-record` | The run record the notebook keeps: posture, captured output, and the guest's `/results`, one directory per run. |
 | `crates/input` | `bsx-input` | The guest's keyboard and pointer: device shapes, reports, and the line grammar the replay file and the control socket feed. |
 | `crates/cli` | `bsx` | The `bsx` CLI. No verbs today. The binary on `PATH` is `bsx`. |
-| `crates/app` | `bsx-app` | The GUI application, on iced. Today a spike: one window showing a sandbox's display. |
+| `crates/app` | `bsx-app` | The GUI application, on iced: the notebook of runs, a run's record with its display and output, a start form, stop, re-run, delete, and a shell in your terminal. |
 | `crates/test-support` | `bsx-test-support` | Shared test fixtures: a self-reclaiming scratch dir, a log sink, a deterministic generator. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the guest image build, the vendor mirror. Never shipped. |

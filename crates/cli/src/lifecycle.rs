@@ -79,6 +79,10 @@ pub(crate) struct ExecArgs {
     /// Send this process's stdin to the command, read to end of input before it starts.
     #[arg(long = "stdin", short = 'i')]
     pub(crate) stdin: bool,
+    /// Run the command on a pty in the guest with this terminal attached, as `bsx shell` does
+    /// on a fresh sandbox: keystrokes and the terminal's size go in until the command exits.
+    #[arg(long = "tty", short = 't', conflicts_with = "stdin")]
+    pub(crate) tty: bool,
     /// The command, after `--`. Resolved by the guest, against the guest's `PATH`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -357,10 +361,8 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
     };
 
     let channel_sock = socket::agent_path_for(&args.name).map_err(|e| e.to_string())?;
-    let (mut conn, _stream) =
+    let (mut conn, stream) =
         crate::agent::connect(&channel_sock, &control_sock).map_err(|e| e.to_string())?;
-    conn.send_exec(&args.command, &stdin, &env, &[] as &[&str], None)
-        .map_err(|e| format!("start the command: {e}"))?;
     // The sandbox's record, when it has one: each exec's output is appended under a line naming
     // the command, so the notebook shows what was run in it and what came back.
     let mut log = Store::open()
@@ -379,6 +381,16 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
     if let Some(log) = &mut log {
         let _ = writeln!(log, "# {} {}", bsx_record::now_ms(), args.command.join(" "));
     }
+    if args.tty {
+        let mut sink = std::io::sink();
+        let log: &mut dyn Write = match &mut log {
+            Some(log) => log,
+            None => &mut sink,
+        };
+        return crate::pty::session(conn, stream, args.command.clone(), env, log);
+    }
+    conn.send_exec(&args.command, &stdin, &env, &[] as &[&str], None)
+        .map_err(|e| format!("start the command: {e}"))?;
 
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();

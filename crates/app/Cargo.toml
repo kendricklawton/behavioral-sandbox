@@ -18,12 +18,17 @@ path = "src/main.rs"
 bsx-krun = { path = "../krun" }
 # The reports the window's keyboard and pointer become, and the lines they travel as.
 bsx-input = { path = "../input" }
+# The notebook's records, read straight from the runs directory.
+bsx-record = { path = "../record" }
 # The control socket a display is leased over.
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
 iced = { workspace = true }
 # The monotonic clock the frame logs share with the helper's `--frame-log`.
 rustix = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+bsx-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

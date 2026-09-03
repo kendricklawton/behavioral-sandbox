@@ -23,7 +23,7 @@ What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest a
 (`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
 (`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
 the VM's own process opens, with that window's keyboard and pointer going back as two virtio-input
-devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` shows a sandbox's display in a window and sends its keyboard and pointer into it, and nothing else yet. What is not: the rest of the GUI application, GPU acceleration, and macOS.
+devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` is the notebook of those runs, with a live run's display and input in the window and a start form that shows the posture before boot. What is not: GPU acceleration, and macOS.
 
 ### Design rules
 
@@ -69,6 +69,6 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-record` | `crates/record` | The run record: posture, captured output and the guest's `/results`, one directory per run under the local data dir, written by the CLI and read by both binaries. |
 | `bsx-input` | `crates/input` | The guest's keyboard and pointer: device shapes, reports, and the line grammar the replay file and the control socket's `input` session feed. |
 | `bsx` | `crates/cli` | The `bsx` binary. No verbs today: the supervisor they call is not written. Package, binary, and command all share the name. |
-| `bsx-app` | `crates/app` | The GUI application, on iced. Today a spike: one window showing a sandbox's display, leased over the control socket and uploaded to a wgpu texture. |
+| `bsx-app` | `crates/app` | The GUI application, on iced: the notebook of runs from `bsx-record`, a run's record with its display (leased over the control socket, uploaded to a wgpu texture) and output, a start form, stop, re-run, delete, and a shell in the operator's terminal through `bsx`. |
 | `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |

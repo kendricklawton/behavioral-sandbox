@@ -19,8 +19,9 @@ command in a sandbox (`bsx run`), a session on a guest pty (`bsx shell`), and a 
 outlives the command that started it (`bsx up`, reached afterwards with `ls`, `exec` and `stop`),
 and shows a guest's display in a window whose keyboard and pointer reach the guest (`--display`),
 with a desktop image that boots to a terminal in a Wayland session there, and `--sound` for audio.
-`bsx-app` shows a sandbox's display in a window and sends its keyboard and pointer into it, and nothing else yet. The rest of the GUI
-application, GPU acceleration and macOS are not written.
+`bsx-app` is the notebook: every run, live and past, with its posture, output and results, a live
+run's display with your keyboard and pointer going in, and a form that shows a sandbox's posture
+before it boots. GPU acceleration and macOS are not written.
 
 This book is short, and deliberately so: it describes the rules the project is built to and the
 crates that are actually in the tree. Pages describing the previous design were removed rather than
