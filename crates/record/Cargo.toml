@@ -1,0 +1,18 @@
+[package]
+name = "bsx-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "The run record: what the notebook keeps for one sandbox's lifetime, written and read by both binaries."
+
+[dependencies]
+
+[dev-dependencies]
+bsx-test-support = { path = "../test-support" }
+
+[lints]
+workspace = true

@@ -259,6 +259,7 @@ pub(crate) fn bench_frames(display: &str, frames: usize, app: bool) -> Result<()
             .arg(format!("/mnt={}", stage.display()))
             .args(["--", "python3", "/mnt/flip.py", path, &frames.to_string()])
             .env("XDG_RUNTIME_DIR", &ctx.runtime)
+            .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::null())
@@ -446,6 +447,7 @@ fn run_through_reader(
         .arg("--mount")
         .arg(format!("/mnt={}", stage.display()))
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .stdin(Stdio::null())
@@ -458,6 +460,7 @@ fn run_through_reader(
         let _ = Command::new(&ctx.bsx)
             .args(["stop", name])
             .env("XDG_RUNTIME_DIR", &ctx.runtime)
+            .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
             .output();
     };
     // No frame count for the reader: it ends when the lease does, which is the VM stopping below;
@@ -465,6 +468,7 @@ fn run_through_reader(
     // them.
     let reader = reader
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -481,6 +485,7 @@ fn run_through_reader(
             &frames.to_string(),
         ])
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
         .stdin(Stdio::null())
         .output()
         .context("run the flipper through exec")?;

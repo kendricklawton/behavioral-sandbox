@@ -43,8 +43,10 @@ terminal in a Wayland session under it (4.5), and `--sound` gives the guest a vi
 backed by the host audio server (4.7). A second process leases a display over the control socket
 as a sealed memfd and a record per present (4.9), and `bsx-app` shows one in an iced window through
 a wgpu texture upload (4.10), and its keyboard and pointer reach the guest as lines down an `input`
-session on that socket (4.11). The application proper (roadmap 4.12 to 4.14), GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt
-and untested.
+session on that socket (4.11). Every run leaves a record under the local data dir (posture, captured
+output, the guest's `/results`), which `bsx ls --all`, `show` and `rm` read (4.12). The application
+proper (roadmap 4.13, 4.14), GPU acceleration and macOS (phases 5 and 6) are not written, and macOS
+is unbuilt and untested.
 
 ## Design rules (every change holds to all six)
 
@@ -93,6 +95,7 @@ list of packages. Therefore a stale `-p` fails the gate, not the terminal of a r
 | `crates/krun` | `bsx-krun` | The safe wrapper over libkrun: a builder that puts the library's call-ordering rules in types, and its negative-errno returns into a typed error. The raw declarations sit under it in a **private** module, so this API is the only way to reach libkrun. **The one crate that may use `unsafe`**, because the library is C. |
 | `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. Both ends share it without change, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO: it binds a socket, accepts a connection, and serves repeated execs from one session directory. It does no init work and is not the security boundary. Static musl, baked into the guest image. Its binary keeps the bare name `guest-agent`, because the image build bakes in that path. |
+| `crates/record` | `bsx-record` | The run record: one directory per run under the local data dir with the posture as settled, the captured output (capped), and `results/`, the directory the guest sees as `/results`. Written by the CLI at start and end, read by both binaries. |
 | `crates/input` | `bsx-input` | The guest's keyboard and pointer: the two device shapes, the reports a window's events become, and the `kbd\|ptr TYPE CODE VALUE` line grammar every feeder speaks (the replay file, the `input` request). Both binaries translate through it. |
 | `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |
 | `crates/app` | `bsx-app` | The GUI application, on iced. Today the 4.10 spike: one window showing a named sandbox's display, leased over the control socket and uploaded to a wgpu texture by its damage rectangle. |

@@ -14,6 +14,9 @@
 //!   the number could name somebody else.
 //! - **`exec` needs an agent**, which means a VM started by `bsx up`. A VM booted straight into a
 //!   workload has nothing listening to ask.
+//! - **The record is kept in step here.** `exec` appends what it printed to the sandbox's
+//!   record, `stop` writes the end, and `ls --all` marks a run whose socket is dead and whose
+//!   record has no end as gone, which is the one bookkeeping a listing does.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -23,6 +26,7 @@ use std::time::{Duration, Instant};
 use clap::Args;
 
 use bsx_channel::Response;
+use bsx_record::{End, Store};
 use bsx_supervisor::control::{self, Channel, Info};
 use bsx_supervisor::{discover, socket};
 
@@ -42,6 +46,25 @@ pub(crate) struct LsArgs {
     /// asking what is running should not quietly modify the directory.
     #[arg(long)]
     pub(crate) reap: bool,
+    /// Also list the runs that have ended, from the notebook's records, newest first.
+    #[arg(long)]
+    pub(crate) all: bool,
+}
+
+/// Show one run's record: by id, or the newest by name.
+#[derive(Args, Debug)]
+pub(crate) struct ShowArgs {
+    /// The run's id, or a VM name.
+    #[arg(value_name = "ID|NAME")]
+    pub(crate) key: String,
+}
+
+/// Remove one run's record and everything it captured.
+#[derive(Args, Debug)]
+pub(crate) struct RmArgs {
+    /// The run's id, or a VM name.
+    #[arg(value_name = "ID|NAME")]
+    pub(crate) key: String,
 }
 
 /// Run a command in a sandbox that is already up.
@@ -84,6 +107,29 @@ pub(crate) fn exec(args: &ExecArgs) -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(msg) => {
             eprintln!("bsx exec: {msg}");
+            ExitCode::from(EXIT_OPERATIONAL)
+        }
+    }
+}
+
+pub(crate) fn show(args: &ShowArgs) -> ExitCode {
+    match describe(&args.key, &mut std::io::stdout()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("bsx show: {msg}");
+            ExitCode::from(EXIT_OPERATIONAL)
+        }
+    }
+}
+
+pub(crate) fn rm(args: &RmArgs) -> ExitCode {
+    match forget(&args.key) {
+        Ok(id) => {
+            println!("{id}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("bsx rm: {msg}");
             ExitCode::from(EXIT_OPERATIONAL)
         }
     }
@@ -149,7 +195,105 @@ fn list(args: &LsArgs, out: &mut impl Write) -> Result<(), String> {
         fields[1..].clone_from_slice(&cells);
         writeln!(out, "{}", row(&fields)).map_err(|e| e.to_string())?;
     }
+    if args.all {
+        list_past(out)?;
+    }
     Ok(())
+}
+
+/// The runs that have ended, newest first, after marking as gone the open ones whose VM no
+/// longer answers.
+fn list_past(out: &mut impl Write) -> Result<(), String> {
+    let store = Store::open().map_err(|e| e.to_string())?;
+    let ended = settle_gone(&store)?;
+    writeln!(out).map_err(|e| e.to_string())?;
+    writeln!(
+        out,
+        "{:<16}  {:<10}  {:<20}  {:<8}  ID",
+        "NAME", "END", "STARTED", "TOOK"
+    )
+    .map_err(|e| e.to_string())?;
+    for record in ended {
+        let took = record
+            .ended_ms
+            .map(|e| bsx_record::format_duration(e.saturating_sub(record.started_ms)))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "{:<16}  {:<10}  {:<20}  {:<8}  {}",
+            record.name,
+            record.end.map(|e| e.to_string()).unwrap_or_default(),
+            bsx_record::format_time(record.started_ms),
+            took,
+            record.id
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Marks every open record whose VM is not answering as gone, and returns the ended records,
+/// newest first.
+pub(crate) fn settle_gone(store: &Store) -> Result<Vec<bsx_record::Record>, String> {
+    let mut ended = Vec::new();
+    for mut record in store.list().map_err(|e| e.to_string())? {
+        if record.is_open() {
+            let live = socket::path_for(&record.name).is_ok_and(|p| socket::is_live(&p));
+            if live {
+                continue;
+            }
+            record.finish(End::Gone);
+            let _ = store.save(&record);
+        }
+        ended.push(record);
+    }
+    Ok(ended)
+}
+
+fn describe(key: &str, out: &mut impl Write) -> Result<(), String> {
+    let store = Store::open().map_err(|e| e.to_string())?;
+    let record = store
+        .find(key)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no run named or numbered {key:?} (`bsx ls --all` lists them)"))?;
+    let dir = store.dir_of(&record.id);
+    write!(out, "{}", record.to_text()).map_err(|e| e.to_string())?;
+    writeln!(out, "dir {}", dir.path().display()).map_err(|e| e.to_string())?;
+    for (label, path) in [
+        ("stdout", dir.stdout()),
+        ("stderr", dir.stderr()),
+        ("shell.log", dir.shell_log()),
+        ("exec.log", dir.exec_log()),
+    ] {
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let cut = if path.with_extension("truncated").exists() {
+                " (capped)"
+            } else {
+                ""
+            };
+            writeln!(out, "output {label} {} bytes{cut}", meta.len()).map_err(|e| e.to_string())?;
+        }
+    }
+    for (file, size) in dir.result_files().map_err(|e| e.to_string())? {
+        writeln!(out, "result {} {size} bytes", file.display()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn forget(key: &str) -> Result<String, String> {
+    let store = Store::open().map_err(|e| e.to_string())?;
+    let record = store
+        .find(key)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no run named or numbered {key:?} (`bsx ls --all` lists them)"))?;
+    if record.is_open() && socket::path_for(&record.name).is_ok_and(|p| socket::is_live(&p)) {
+        return Err(format!(
+            "the run {} is still running; `bsx stop {}` ends it first",
+            record.id, record.name
+        ));
+    }
+    store.remove(&record.id).map_err(|e| e.to_string())?;
+    Ok(record.id)
 }
 
 /// One line of the table: each field padded to its column's width, trailing space trimmed. The
@@ -217,16 +361,40 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
         crate::agent::connect(&channel_sock, &control_sock).map_err(|e| e.to_string())?;
     conn.send_exec(&args.command, &stdin, &env, &[] as &[&str], None)
         .map_err(|e| format!("start the command: {e}"))?;
+    // The sandbox's record, when it has one: each exec's output is appended under a line naming
+    // the command, so the notebook shows what was run in it and what came back.
+    let mut log = Store::open()
+        .ok()
+        .and_then(|store| {
+            store
+                .open_run(&args.name)
+                .ok()
+                .flatten()
+                .map(|r| (store, r))
+        })
+        .and_then(|(store, record)| {
+            let dir = store.dir_of(&record.id);
+            dir.append(&dir.exec_log()).ok()
+        });
+    if let Some(log) = &mut log {
+        let _ = writeln!(log, "# {} {}", bsx_record::now_ms(), args.command.join(" "));
+    }
 
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     loop {
         match conn.recv_response() {
             Ok(Response::Stdout(bytes)) => {
+                if let Some(log) = &mut log {
+                    let _ = log.write_all(&bytes);
+                }
                 stdout.write_all(&bytes).map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }
             Ok(Response::Stderr(bytes)) => {
+                if let Some(log) = &mut log {
+                    let _ = log.write_all(&bytes);
+                }
                 stderr.write_all(&bytes).map_err(|e| e.to_string())?;
             }
             Ok(Response::Exit { code }) => return Ok(crate::run::guest_code(code)),
@@ -317,6 +485,13 @@ fn end(name: &str) -> Result<String, String> {
     }
     if let Ok(log) = socket::log_path_for(name) {
         let _ = std::fs::remove_file(log);
+    }
+    // The record's end: this caller ended the run, so it is the one that knows how.
+    if let Ok(store) = Store::open()
+        && let Ok(Some(mut record)) = store.open_run(name)
+    {
+        record.finish(End::Stopped);
+        let _ = store.save(&record);
     }
     Ok(name.to_string())
 }

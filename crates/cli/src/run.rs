@@ -16,7 +16,8 @@ use std::process::ExitCode;
 
 use clap::Args;
 
-use bsx_supervisor::{Display, Exit, Net, RootFs, Vm, VmConfig};
+use bsx_record::{End, Posture, RESULTS_GUEST_PATH, Record, Store, Verb};
+use bsx_supervisor::{Console, Display, Exit, Net, RootFs, Vm, VmConfig};
 
 use crate::EXIT_OPERATIONAL;
 
@@ -118,6 +119,10 @@ pub(crate) struct RunArgs {
     /// microphone is opened only when asked.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Do not mount the run's results directory at `/results` in the guest. Every run gets one
+    /// by default: the record's own empty directory, where the guest's results land.
+    #[arg(long)]
+    pub(crate) no_results: bool,
     /// The command, after `--`. The first word is resolved by the guest (its `PATH`, not the
     /// host's), so `echo` runs the guest's `echo`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
@@ -137,19 +142,101 @@ pub(crate) fn run(args: &RunArgs) -> ExitCode {
 /// The verb's fallible body, one error path, one printer: the same shape as `shell`'s `session`.
 fn execute(args: &RunArgs) -> Result<u8, String> {
     let root = resolve_root(args.root.as_deref())?;
-    let cfg = to_config(args, root)?;
+    let mut cfg = to_config(args, root)?;
     let name = args
         .name
         .clone()
         .unwrap_or_else(|| format!("run-{}", std::process::id()));
+    let results = !args.no_results;
 
     if args.dry_run {
-        print_posture(&name, &cfg, &mut std::io::stdout()).map_err(|e| e.to_string())?;
+        print_posture(&name, &cfg, results, &mut std::io::stdout()).map_err(|e| e.to_string())?;
         return Ok(0);
     }
-    let vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
-    let exit = vm.wait().map_err(|e| e.to_string())?;
+    // The record first, so the results directory exists to mount; the output goes through this
+    // process on its way to the record, and the caller's stdout still gets every byte.
+    let store = Store::open().map_err(|e| e.to_string())?;
+    let mut record = Record::begin(
+        &name,
+        Verb::Run,
+        args.command.clone(),
+        posture_of(&cfg, results),
+    );
+    let run = store.create(&record).map_err(|e| e.to_string())?;
+    if results {
+        cfg.mounts
+            .push((PathBuf::from(RESULTS_GUEST_PATH), run.results()));
+    }
+    cfg.console = Console::Piped;
+    let mut vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
+    record.pid = Some(vm.pid());
+    store.save(&record).map_err(|e| e.to_string())?;
+    let out = tee(
+        vm.take_stdout(),
+        std::io::stdout(),
+        run.append(&run.stdout()).map_err(|e| e.to_string())?,
+    );
+    let err = tee(
+        vm.take_stderr(),
+        std::io::stderr(),
+        run.append(&run.stderr()).map_err(|e| e.to_string())?,
+    );
+    let waited = vm.wait();
+    let _ = out.join();
+    let _ = err.join();
+    let exit = match waited {
+        Ok(exit) => exit,
+        Err(e) => {
+            record.finish(End::Failed);
+            let _ = store.save(&record);
+            return Err(e.to_string());
+        }
+    };
+    record.finish(match exit {
+        Exit::Code(code) => End::Exit(code),
+        Exit::Signal(sig) => End::Signal(sig),
+        _ => End::Failed,
+    });
+    store.save(&record).map_err(|e| e.to_string())?;
     Ok(exit_code_of(exit))
+}
+
+/// Copies `from` to `to` and to `keep` on a thread of its own, until `from` ends. `from` being
+/// `None` is a VM whose console was not piped, which copies nothing.
+fn tee(
+    from: Option<impl std::io::Read + Send + 'static>,
+    mut to: impl std::io::Write + Send + 'static,
+    mut keep: bsx_record::Capped,
+) -> std::thread::JoinHandle<()> {
+    use std::io::Write;
+    std::thread::spawn(move || {
+        let Some(mut from) = from else { return };
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = match from.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let _ = keep.write_all(&buf[..n]);
+            if to.write_all(&buf[..n]).is_err() || to.flush().is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// The record's posture for `cfg`: the same facts [`print_posture`] prints, in the record's
+/// shape.
+pub(crate) fn posture_of(cfg: &VmConfig, results: bool) -> Posture {
+    let mut p = Posture::new(cfg.root.clone(), cfg.vcpus.get(), cfg.mem_mib.get());
+    p.rootfs = cfg.rootfs.as_flag().to_string();
+    p.mounts = cfg.mounts.clone();
+    p.shares = cfg.shares.clone();
+    p.network = cfg.net.as_flag().to_string();
+    p.display = cfg.display.map(|d| d.as_spec());
+    p.sound = cfg.sound;
+    p.results = results;
+    p
 }
 
 /// Writes what this sandbox shares, one element to a line, in the order the guest meets them.
@@ -160,6 +247,7 @@ fn execute(args: &RunArgs) -> Result<u8, String> {
 pub(crate) fn print_posture(
     name: &str,
     cfg: &VmConfig,
+    results: bool,
     out: &mut impl std::io::Write,
 ) -> std::io::Result<()> {
     writeln!(out, "name     {name}")?;
@@ -179,6 +267,12 @@ pub(crate) fn print_posture(
     }
     for (tag, host) in &cfg.shares {
         writeln!(out, "share    {tag} <- {} writable", host.display())?;
+    }
+    if results {
+        writeln!(
+            out,
+            "results  {RESULTS_GUEST_PATH} <- the run's own record directory, writable"
+        )?;
     }
     if let Some((port, path)) = &cfg.vsock {
         writeln!(out, "channel  guest vsock {port} <- {}", path.display())?;
@@ -555,7 +649,7 @@ mod tests {
         };
         let cfg = to_config(&args, PathBuf::from("/root-tree")).expect("a well-formed config");
         let mut out = Vec::new();
-        print_posture("vm-under-test", &cfg, &mut out).expect("a Vec never fails to write");
+        print_posture("vm-under-test", &cfg, false, &mut out).expect("a Vec never fails to write");
         let text = String::from_utf8(out).expect("the printer writes UTF-8");
         for line in [
             "name     vm-under-test",
@@ -618,7 +712,7 @@ mod tests {
             Some(Path::new("/tmp/frames.tsv"))
         );
         let mut out = Vec::new();
-        print_posture("vm", &cfg, &mut out).expect("a Vec never fails");
+        print_posture("vm", &cfg, true, &mut out).expect("a Vec never fails");
         let text = String::from_utf8(out).expect("UTF-8");
         assert!(text.contains("display  800x600 in a window"), "{text}");
         assert!(text.contains("screenshot /tmp/f.ppm"), "{text}");

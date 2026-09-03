@@ -68,6 +68,9 @@ pub(crate) struct UpArgs {
     /// microphone is opened only when asked.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Do not mount the sandbox's results directory at `/results` in the guest.
+    #[arg(long)]
+    pub(crate) no_results: bool,
 }
 
 /// What `start` did, so the printer cannot report the name of a VM that was never booted: a dry
@@ -159,19 +162,42 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
         cfg.mounts.push((guest.to_path_buf(), host.to_path_buf()));
     }
 
+    let results = !args.no_results;
     if args.dry_run {
-        crate::run::print_posture(&name, &cfg, &mut std::io::stdout())
+        crate::run::print_posture(&name, &cfg, results, &mut std::io::stdout())
             .map_err(|e| e.to_string())?;
         return Ok(Outcome::Described);
     }
+    let store = bsx_record::Store::open().map_err(|e| e.to_string())?;
+    let mut record = bsx_record::Record::begin(
+        &name,
+        bsx_record::Verb::Up,
+        Vec::new(),
+        crate::run::posture_of(&cfg, results),
+    );
+    let run = store.create(&record).map_err(|e| e.to_string())?;
+    if results {
+        cfg.mounts.push((
+            std::path::PathBuf::from(bsx_record::RESULTS_GUEST_PATH),
+            run.results(),
+        ));
+    }
 
     let mut vm = Vm::spawn(name.clone(), &cfg).map_err(|e| e.to_string())?;
+    record.pid = Some(vm.pid());
+    store.save(&record).map_err(|e| e.to_string())?;
     // Held only until the agent answers. Until this returns, the `Vm` still owns the helper, so a
     // guest that never comes up is torn down by the `?` below rather than left running.
     // The dial says what it saw; what the VM did wrong is in the VM's own account of itself,
     // which is why that file exists and why this names it instead of guessing.
-    let dialed = crate::agent::dial(&channel, &mut vm)
-        .map_err(|e| format!("{e}; its own report is in {}", log.display()))?;
+    let dialed = match crate::agent::dial(&channel, &mut vm) {
+        Ok(dialed) => dialed,
+        Err(e) => {
+            record.finish(bsx_record::End::Failed);
+            let _ = store.save(&record);
+            return Err(format!("{e}; its own report is in {}", log.display()));
+        }
+    };
     drop(dialed);
     vm.detach().map_err(|e| e.to_string())?;
     Ok(Outcome::Running(name))

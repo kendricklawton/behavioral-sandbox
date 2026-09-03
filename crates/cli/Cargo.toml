@@ -21,6 +21,8 @@ bsx-krun = { path = "../krun" }
 # The guest's keyboard and pointer: devices, reports, and the line grammar the replay and the
 # control socket feed.
 bsx-input = { path = "../input" }
+# The run record every verb that boots writes: the notebook's unit.
+bsx-record = { path = "../record" }
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
 # Raw mode and window size for the interactive shell, the self-signal a VM stops itself with, and

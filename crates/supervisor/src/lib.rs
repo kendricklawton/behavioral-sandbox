@@ -224,6 +224,10 @@ pub enum Console {
     /// — libkrun reads it into the guest console, so every keystroke it won would vanish from the
     /// session (watched happen) — and interleave boot noise into a raw terminal.
     Detached,
+    /// The caller's stdin, and pipes for the console and the helper's stderr that the caller
+    /// drains through [`Vm::take_stdout`] and [`Vm::take_stderr`]: how `bsx run` copies the
+    /// guest's output to its own and to the run's record. [`VmConfig::log`] is not used.
+    Piped,
 }
 
 impl VmConfig {
@@ -443,6 +447,16 @@ impl Vm {
         })
     }
 
+    /// The console pipe of a [`Console::Piped`] VM, once; `None` for any other console.
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut().and_then(|c| c.stdout.take())
+    }
+
+    /// The helper's stderr pipe of a [`Console::Piped`] VM, once; `None` for any other console.
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|c| c.stderr.take())
+    }
+
     /// The name this VM was given.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -601,6 +615,7 @@ fn helper_command_unless_helper(
     };
     let console_out = match (cfg.console, &log) {
         (Console::Inherited, _) => Stdio::inherit(),
+        (Console::Piped, _) => Stdio::piped(),
         (Console::Detached, Some(file)) => file.try_clone().map_err(Error::Log)?.into(),
         (Console::Detached, None) => Stdio::null(),
     };
@@ -608,13 +623,14 @@ fn helper_command_unless_helper(
     cmd.args(cfg.helper_argv(name))
         .env(HELPER_MARKER, "1")
         .stdin(match cfg.console {
-            Console::Inherited => Stdio::inherit(),
+            Console::Inherited | Console::Piped => Stdio::inherit(),
             Console::Detached => Stdio::null(),
         })
         .stdout(console_out)
-        .stderr(match log {
-            Some(file) => file.into(),
-            None => Stdio::inherit(),
+        .stderr(match (cfg.console, log) {
+            (Console::Piped, _) => Stdio::piped(),
+            (_, Some(file)) => file.into(),
+            (_, None) => Stdio::inherit(),
         });
     Ok(cmd)
 }

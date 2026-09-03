@@ -17,7 +17,7 @@
 //!   process's stdin into the guest console*, stealing the session's keystrokes (watched happen),
 //!   and its output would interleave boot noise into a raw terminal.
 use std::io::{IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -86,6 +86,9 @@ pub(crate) struct ShellArgs {
     /// microphone is opened only when asked.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Do not mount the session's results directory at `/results` in the guest.
+    #[arg(long)]
+    pub(crate) no_results: bool,
     /// The command to run on the pty, after `--`. Defaults to `/bin/sh`.
     #[arg(last = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
@@ -159,17 +162,68 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         .name
         .clone()
         .unwrap_or_else(|| format!("shell-{}", std::process::id()));
+    let results = !args.no_results;
 
     if args.dry_run {
-        crate::run::print_posture(&name, &cfg, &mut std::io::stdout())
+        crate::run::print_posture(&name, &cfg, results, &mut std::io::stdout())
             .map_err(|e| e.to_string())?;
         return Ok(0);
     }
-    let mut vm = Vm::spawn(name, &cfg).map_err(|e| e.to_string())?;
+    let mut command: Vec<String> = args.command.clone();
+    if command.is_empty() {
+        command = vec!["/bin/sh".to_string()];
+    }
+    let store = bsx_record::Store::open().map_err(|e| e.to_string())?;
+    let mut record = bsx_record::Record::begin(
+        &name,
+        bsx_record::Verb::Shell,
+        command.clone(),
+        crate::run::posture_of(&cfg, results),
+    );
+    let run = store.create(&record).map_err(|e| e.to_string())?;
+    if results {
+        cfg.mounts
+            .push((PathBuf::from(bsx_record::RESULTS_GUEST_PATH), run.results()));
+    }
+    let mut log = run.append(&run.shell_log()).map_err(|e| e.to_string())?;
+    let outcome = attach(
+        args,
+        &cfg,
+        &channel_sock,
+        name,
+        command,
+        &mut log,
+        &mut record,
+        &store,
+    );
+    record.finish(match &outcome {
+        Ok(code) => bsx_record::End::Exit(i32::from(*code)),
+        Err(_) => bsx_record::End::Failed,
+    });
+    store.save(&record).map_err(|e| e.to_string())?;
+    outcome
+}
+
+/// Boots the VM and runs the session on it, the terminal's bytes copied to `log` on the way to
+/// the terminal.
+#[allow(clippy::too_many_arguments)]
+fn attach(
+    args: &ShellArgs,
+    cfg: &VmConfig,
+    channel_sock: &Path,
+    name: String,
+    command: Vec<String>,
+    log: &mut bsx_record::Capped,
+    record: &mut bsx_record::Record,
+    store: &bsx_record::Store,
+) -> Result<u8, String> {
+    let mut vm = Vm::spawn(name, cfg).map_err(|e| e.to_string())?;
+    record.pid = Some(vm.pid());
+    store.save(record).map_err(|e| e.to_string())?;
     // This VM's console is discarded (a raw terminal is about to own it), so there is no report
     // to point at: the likeliest cause of a session VM ending early is an image with no agent in
     // it, and naming that beats naming nothing.
-    let (mut reader, stream) = crate::agent::dial(&channel_sock, &mut vm).map_err(|e| {
+    let (mut reader, stream) = crate::agent::dial(channel_sock, &mut vm).map_err(|e| {
         format!("{e}; is the guest image one with the agent baked in? (`cargo xtask build-rootfs`)")
     })?;
 
@@ -181,10 +235,6 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
 
     let sender = Arc::new(Mutex::new(ClientConnection::resume(stream)));
 
-    let mut command: Vec<String> = args.command.clone();
-    if command.is_empty() {
-        command = vec!["/bin/sh".to_string()];
-    }
     let mut env: Vec<(String, String)> = args
         .env
         .iter()
@@ -250,11 +300,13 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         });
     }
 
-    // The terminal's bytes down, on this thread, until the command exits.
+    // The terminal's bytes down, on this thread, until the command exits. What the terminal
+    // shows is what the record keeps: typed text only where the guest echoed it.
     let mut stdout = std::io::stdout();
     loop {
         match reader.recv_response() {
             Ok(Response::Stdout(bytes)) => {
+                let _ = log.write_all(&bytes);
                 stdout.write_all(&bytes).map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }

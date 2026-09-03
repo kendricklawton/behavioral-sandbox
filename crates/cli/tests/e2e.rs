@@ -46,7 +46,15 @@ fn guest_root() -> PathBuf {
 
 /// The `bsx` under test: the binary cargo built for this test run, never a `PATH` lookup.
 fn bsx() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bsx"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
+    // The records these tests write go under the temp dir, not the operator's notebook.
+    cmd.env("BSX_RUNS_DIR", runs_dir());
+    cmd
+}
+
+/// A runs directory for this test process alone.
+fn runs_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("bsx-e2e-runs-{}", std::process::id()))
 }
 
 /// The roadmap's own example: the guest's stdout is this process's stdout, unmixed with anything
@@ -1039,7 +1047,16 @@ fn a_second_process_maps_the_frames_the_guest_draws() {
 #[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
 fn a_non_ascii_argument_is_refused_not_aborted_on() {
     let out = bsx()
-        .args(["run", "--root", "/tmp", "--", "echo", "\u{e9}"])
+        // `/tmp` is no image, so the results mount point it lacks would be refused first.
+        .args([
+            "run",
+            "--root",
+            "/tmp",
+            "--no-results",
+            "--",
+            "echo",
+            "\u{e9}",
+        ])
         .output()
         .expect("run bsx");
     assert_eq!(
@@ -1179,5 +1196,202 @@ fn a_key_and_click_over_the_control_socket_reach_a_guest_process() {
     assert!(
         position("1 272 1") < position("1 272 0"),
         "the release the session's end sent comes after the press: {events:?}"
+    );
+}
+
+/// A `run` leaves a record (roadmap 4.12): the posture as settled, the command's stdout and
+/// stderr as the caller also got them, the exit as the run's end, and what the guest wrote to
+/// `/results` in the record's own directory; `bsx show` reads it back and `bsx rm` removes it.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_run_leaves_its_record_output_and_results() {
+    if skipped("a_run_leaves_its_record_output_and_results") {
+        return;
+    }
+    let runs = runs_dir().join("run-record");
+    let out = bsx()
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["run", "--root"])
+        .arg(guest_root())
+        .args(["--name", "recorded", "--"])
+        .args([
+            "sh",
+            "-c",
+            "echo out; echo err >&2; echo data > /results/file.txt; exit 3",
+        ])
+        .output()
+        .expect("run bsx");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "the guest's code passes through"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "out\n",
+        "stdout still reaches the caller"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("err"),
+        "stderr too"
+    );
+
+    let store = bsx_record::Store::at(runs.clone()).expect("the store");
+    let record = store
+        .find("recorded")
+        .expect("read")
+        .expect("a record for the run");
+    assert_eq!(record.verb, bsx_record::Verb::Run);
+    assert_eq!(record.end, Some(bsx_record::End::Exit(3)));
+    assert!(record.posture.results, "results on by default");
+    assert_eq!(record.posture.network, "none");
+    assert!(record.ended_ms >= Some(record.started_ms));
+    let dir = store.dir_of(&record.id);
+    assert_eq!(
+        std::fs::read_to_string(dir.stdout()).expect("stdout kept"),
+        "out\n"
+    );
+    assert!(
+        std::fs::read_to_string(dir.stderr())
+            .expect("stderr kept")
+            .contains("err")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.results().join("file.txt")).expect("the guest wrote it"),
+        "data\n"
+    );
+    let shown = bsx()
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["show", &record.id])
+        .output()
+        .expect("run bsx show");
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        text.contains("end exit 3") && text.contains("result file.txt 5 bytes"),
+        "{text}"
+    );
+    let removed = bsx()
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["rm", "recorded"])
+        .output()
+        .expect("run bsx rm");
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(
+        store.find("recorded").expect("read").is_none(),
+        "gone from the notebook"
+    );
+}
+
+/// An `up` sandbox's record is open while it runs, each `exec` appends what it printed under
+/// its command, `ls --all` lists it, and `stop` writes the end.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn an_up_sandbox_records_its_execs_and_its_stop() {
+    if skipped("an_up_sandbox_records_its_execs_and_its_stop") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-up-record");
+    let rt = dir.path().join("rt");
+    std::fs::create_dir(&rt).expect("a runtime dir");
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).expect("private");
+    let runs = dir.path().join("runs");
+    let up = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("BSX_RUNS_DIR", &runs)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["up", "--root"])
+        .arg(guest_root())
+        .args(["--name", "kept"])
+        .output()
+        .expect("run bsx up");
+    assert!(
+        up.status.success(),
+        "up: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = bsx()
+                .env("XDG_RUNTIME_DIR", &self.0)
+                .args(["stop", "kept"])
+                .output();
+        }
+    }
+    let _stop = Stop(rt.clone());
+    let store = bsx_record::Store::at(runs.clone()).expect("the store");
+    let open = store
+        .open_run("kept")
+        .expect("read")
+        .expect("an open record");
+    assert!(open.pid.is_some(), "the VM's pid is recorded");
+
+    let ran = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("BSX_RUNS_DIR", &runs)
+        .args([
+            "exec",
+            "kept",
+            "--",
+            "sh",
+            "-c",
+            "echo hello-from-exec; echo to-err >&2",
+        ])
+        .output()
+        .expect("run bsx exec");
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let log = std::fs::read_to_string(store.dir_of(&open.id).exec_log()).expect("exec.log");
+    assert!(
+        log.contains("echo hello-from-exec")
+            && log.contains("hello-from-exec\n")
+            && log.contains("to-err"),
+        "{log}"
+    );
+
+    let listed = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["ls", "--all"])
+        .output()
+        .expect("run bsx ls");
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(text.lines().any(|l| l.starts_with("kept ")), "live: {text}");
+    assert!(
+        store.open_run("kept").expect("read").is_some(),
+        "listing does not end a run whose VM answers"
+    );
+
+    let stopped = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["stop", "kept"])
+        .output()
+        .expect("run bsx stop");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let ended = store.find("kept").expect("read").expect("still there");
+    assert_eq!(ended.end, Some(bsx_record::End::Stopped));
+    let listed = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env("BSX_RUNS_DIR", &runs)
+        .args(["ls", "--all"])
+        .output()
+        .expect("run bsx ls");
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        text.contains("stopped") && text.contains(&ended.id),
+        "past: {text}"
     );
 }

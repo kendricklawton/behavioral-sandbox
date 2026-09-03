@@ -218,6 +218,7 @@ dependencies = [
  "bsx-channel",
  "bsx-input",
  "bsx-krun",
+ "bsx-record",
  "bsx-supervisor",
  "bsx-test-support",
  "clap",
@@ -270,6 +271,13 @@ name = "bsx-krun"
 version = "0.0.4"
 dependencies = [
  "rustix 1.1.4",
+]
+
+[[package]]
+name = "bsx-record"
+version = "0.0.4"
+dependencies = [
+ "bsx-test-support",
 ]
 
 [[package]]

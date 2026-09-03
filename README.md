@@ -96,6 +96,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/krun` | `bsx-krun` | The safe wrapper over libkrun, with the raw declarations private beneath it. The one crate that may use `unsafe`, because the library is C. |
 | `crates/channel` | `bsx-channel` | The host↔guest wire protocol: nearly dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by both ends. |
 | `crates/guest-agent` | `bsx-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
+| `crates/record` | `bsx-record` | The run record the notebook keeps: posture, captured output, and the guest's `/results`, one directory per run. |
 | `crates/input` | `bsx-input` | The guest's keyboard and pointer: device shapes, reports, and the line grammar the replay file and the control socket feed. |
 | `crates/cli` | `bsx` | The `bsx` CLI. No verbs today. The binary on `PATH` is `bsx`. |
 | `crates/app` | `bsx-app` | The GUI application, on iced. Today a spike: one window showing a sandbox's display. |

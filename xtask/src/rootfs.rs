@@ -236,6 +236,10 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
         set_mode_0755(&dest)?;
     }
 
+    // The mount point every run's results directory lands on (`bsx_record::RESULTS_GUEST_PATH`):
+    // the root is read-only, so a directory the mount preamble needs has to be in the image.
+    std::fs::create_dir_all(in_staging(&staging, "/results"))?;
+
     // Last gate before the tree is published: everything the guest depends on is present, at the
     // mode it needs.
     verify_guest_contract(image, &staging)?;

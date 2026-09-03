@@ -55,6 +55,10 @@ enum Cmd {
     Exec(lifecycle::ExecArgs),
     /// Stop a running sandbox.
     Stop(lifecycle::StopArgs),
+    /// Show one run's record: what it could touch, what it printed, what it wrote.
+    Show(lifecycle::ShowArgs),
+    /// Remove one run's record and everything it captured.
+    Rm(lifecycle::RmArgs),
     /// Become a virtual machine. Not a verb: the supervisor re-executes this binary with it.
     ///
     /// Hidden rather than removed from the parser, so a boot that fails can be reproduced by hand
@@ -76,6 +80,8 @@ fn main() -> ExitCode {
         Cmd::Ls(args) => lifecycle::ls(&args),
         Cmd::Exec(args) => lifecycle::exec(&args),
         Cmd::Stop(args) => lifecycle::stop(&args),
+        Cmd::Show(args) => lifecycle::show(&args),
+        Cmd::Rm(args) => lifecycle::rm(&args),
         Cmd::Vmm(args) => vmm::run(&args),
         Cmd::Frames(args) => frames::run(&args),
     }
