@@ -1,8 +1,7 @@
 //! Obtaining a pinned upstream input: download or restore from the vendor mirror, sha256-verify,
 //! and cache under `artifacts/`. The sha256 is the contract; the URL is replaceable.
 //!
-//! The boot kernel and rootfs rows are gone with the Firecracker engine that booted them. What is
-//! left is the machinery, which `rootfs.rs` uses for the Alpine base and the static `apk`.
+//! The machinery `rootfs.rs` uses for the Alpine base and the static `apk`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

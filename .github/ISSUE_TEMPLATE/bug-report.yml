@@ -1,12 +1,12 @@
 name: Bug report
-description: Something the engine does wrong: a boot, exec, snapshot, probe, or audit-record misbehavior.
+description: Something bsx does wrong: a boot, a run, an exec, a display, or a run's record misbehaving.
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: >-
         Thanks for the report. One check first: if this is a **suspected vulnerability** (an
-        isolation escape, a way to tamper with the audit log, a host-path panic from guest input),
+        isolation escape, a way to tamper with a run's record, a host-path panic from guest input),
         please use the private
         [security-advisory form](https://github.com/kendricklawton/behavioral-sandbox/security/advisories/new)
         instead of a public issue.

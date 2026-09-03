@@ -3,10 +3,7 @@
 //! A workflow names repo paths as bare shell text, and the prose-drift lint reads `.rs` and `.md`
 //! only, so a rename lands green here and fails days later on a scheduled job.
 //!
-//! It runs under `cargo xtask ci` like any other test. The twins this module also held (the two
-//! `Uid:` parses, the backoff pair, the cgroup-limit mirror) each had one of their two sites inside
-//! the deleted Firecracker engine, so they went with it rather than becoming a lint on a single
-//! site.
+//! It runs under `cargo xtask ci` like any other test.
 
 #[cfg(test)]
 mod tests {
@@ -19,9 +16,9 @@ mod tests {
     /// a backticked span, so without this a rename lands green and the weekly job fails days later on a
     /// path that no longer exists.
     ///
-    /// Scoped to the `crates/` and `xtask/` prefixes, which are ours. A workflow also fetches a
-    /// path out of upstream Firecracker's repo by URL, and `dist/` is build output; neither is a
-    /// file this tree can be asked to hold.
+    /// Scoped to the `crates/` and `xtask/` prefixes, which are ours. A workflow also fetches
+    /// a script by URL, and `dist/` is build output; neither is a file this tree can be asked to
+    /// hold.
     #[test]
     fn workflow_repo_paths_exist() {
         let repo = workspace_root();
@@ -34,7 +31,7 @@ mod tests {
                     if !(token.starts_with("crates/") || token.starts_with("xtask/")) {
                         continue;
                     }
-                    // `crates/engine/**` is a path *filter*, not a file: check the dir it roots.
+                    // `crates/foo/**` is a path *filter*, not a file: check the dir it roots.
                     // Trailing sentence punctuation is not part of the path either.
                     let target = token
                         .trim_end_matches("/**")

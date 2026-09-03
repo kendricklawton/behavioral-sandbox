@@ -1,9 +1,5 @@
 //! The libkrun benchmarks: what a sandbox costs to start, and what it costs to keep.
 //!
-//! **Rebuilt from nothing after the Firecracker engine was deleted.** None of the old numbers carry
-//! over: a different VMM, a different guest tree, and a measurement host that no longer exists.
-//! What survives is the reporting discipline, because that was the part worth keeping.
-//!
 //! - **Nearest-rank percentiles, never averages.** A `p99` whose rank lands on the last sample is
 //!   `max` relabelled, so it prints `—` instead. A short run cannot dress its slowest sample up as
 //!   a tail.

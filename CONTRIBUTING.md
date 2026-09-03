@@ -27,12 +27,11 @@ otherwise have the right to submit it under the project's license. Contributions
 and the repo's standard for a test is that it was watched failing before it passed: break the
 behavior under test, see the assertion fire, then revert.
 
-**Nothing in the tree boots a VM right now.** The Firecracker engine was deleted in the move to
-libkrun and the supervisor replacing it is not written, so `cargo xtask ci` is the whole test story
-today and it needs no privilege. `cargo xtask setup` reports what your host can do. When the tests
-that boot a guest come back, they will be `#[ignore]`d and each will name its own prerequisite,
-because a test whose prerequisite is missing skips itself and cargo counts a skipped test as a
-pass.
+**`cargo xtask ci` is the gate and needs no privilege.** The tests that boot a guest are
+`#[ignore]`d and each names its own prerequisite (`/dev/kvm` and a guest tree from
+`cargo xtask build-rootfs`), because a test whose prerequisite is missing skips itself and cargo
+counts a skipped test as a pass; run them with `cargo test -p bsx --test e2e -- --ignored`.
+`cargo xtask setup` reports what your host can do.
 
 **Expect review to take a while.** One maintainer, no service commitment, and a security-sensitive
 core that gets read slowly on purpose.

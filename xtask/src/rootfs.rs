@@ -465,9 +465,8 @@ fn reexec_under_fakeroot_if_needed(
     }
     let exe = std::env::current_exe().context("locate the xtask binary to re-exec")?;
     // Re-exec **only the rootfs build**, reconstructed from this call's own arguments, never the
-    // caller's argv. Replaying argv re-runs whatever invoked us: under `dist` the child ran the
-    // entire packaging (eBPF object, musl binary, stage, tar), the parent then ran steps 3 to 5 a
-    // second time on top of it, and the two tarballs differed. Only this build needs uid 0.
+    // caller's argv: replaying argv would re-run whatever invoked us (under `dist`, the entire
+    // packaging, twice). Only this build needs uid 0.
     let mut args: Vec<&str> = vec!["build-rootfs"];
     if verify {
         args.push("--verify");

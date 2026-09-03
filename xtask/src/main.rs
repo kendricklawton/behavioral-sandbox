@@ -40,9 +40,9 @@ enum Cmd {
     Ci,
     /// Check the host can do KVM; report what's missing.
     Setup,
-    /// Snapshot every sha-pinned upstream input (guest kernel + rootfs, Alpine base, the `.apk`
-    /// closure) into a local mirror, so a fresh host builds offline, no Firecracker S3 bucket, no
-    /// Alpine CDN. Writes a sha manifest; re-verify it offline with `--verify`.
+    /// Snapshot every sha-pinned upstream input (the Alpine base, the static `apk`, the `.apk`
+    /// closure) into a local mirror, so a fresh host builds offline without the Alpine CDN.
+    /// Writes a sha manifest; re-verify it offline with `--verify`.
     Vendor {
         /// The mirror directory to populate or verify (default `vendor/` under the workspace root).
         #[arg(long, value_name = "DIR")]
@@ -1049,7 +1049,7 @@ mod tests {
     fn excluded_dirs_reads_the_list_and_ignores_the_members() {
         let manifest = r#"
 [workspace]
-members = ["crates/engine", "xtask"]
+members = ["crates/example", "xtask"]
 exclude = ["fuzz"]
 "#;
         assert_eq!(excluded_dirs(manifest), vec!["fuzz"]);
@@ -1159,9 +1159,8 @@ exclude = ["fuzz"]
 
     /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.
     /// Two reasons: `metadata`'s JSON repeats `"name"` for every *target* as well as every package,
-    /// which is what made the first cut of this test report `exec` and `tracer` as missing packages;
-    /// and `fuzz` is excluded from the workspace, so `metadata` never sees it while the
-    /// layout tables rightly list it.
+    /// so a binary target would read as a package; and `fuzz` is excluded from the workspace, so
+    /// `metadata` never sees it while the layout tables rightly list it.
     fn workspace_packages(root: &Path) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))

@@ -1,5 +1,5 @@
 /target
-# eBPF objects build to their own target dir under the git-ignored root target
+# Nested target dirs: the fuzz harness is its own workspace and builds into `fuzz/target`.
 **/target/
 # A throwaway build dir for a root test run: `sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged"
 # cargo test ...` sends root-owned artifacts here so they never poison `./target`.
@@ -11,7 +11,7 @@
 core.*
 *.log
 .claude
-# Built/downloaded VM images (guest kernel + rootfs): fetched by `cargo xtask fetch-artifacts`,
+# Built guest images and the downloaded inputs they are built from (`cargo xtask build-rootfs`),
 # never committed.
 /artifacts/
 # The local vendor mirror of all sha-pinned upstream inputs (`cargo xtask vendor`): a self-hoster

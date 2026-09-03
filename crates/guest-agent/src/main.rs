@@ -145,7 +145,7 @@ fn serve_incoming<S, E>(
 /// *is* the session.
 ///
 /// The pid in the name is for the host-side `unix:` dev transport, where several agent processes may
-/// share one `/tmp`. A snapshot clone keeps its pid, so the path is stable across restore.
+/// share one `/tmp`.
 fn session_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bsx-session-{}", std::process::id()))
 }

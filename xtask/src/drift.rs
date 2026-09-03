@@ -196,7 +196,7 @@ fn cargo_package_refs(text: &str) -> Vec<(usize, String)> {
             if pkg.starts_with(['<', '{', '$', '"']) {
                 continue;
             }
-            // Trailing shell/prose punctuation (`-p bsx-engine,` `-p bsx-engine`.) is not part of the name.
+            // Trailing shell/prose punctuation (`-p bsx-example,` `-p bsx-example`.) is not part of the name.
             let pkg =
                 pkg.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
             if pkg.is_empty() || pkg.starts_with('-') {
@@ -533,13 +533,13 @@ mod tests {
     #[test]
     fn path_candidates_match_anchored_paths_not_prose_slashes() {
         let tracked: BTreeSet<String> =
-            ["crates/engine/src/lib.rs", "crates/guest-agent/src/lib.rs"]
+            ["crates/example/src/lib.rs", "crates/guest-agent/src/lib.rs"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect();
         let anchors = path_anchors(&tracked);
         for good in [
-            "crates/engine/src/lib.rs",
+            "crates/example/src/lib.rs",
             "docs/benchmarks.md",
             "crates/channel",
             "crates/guest-agent/src/lib.rs",
@@ -564,20 +564,20 @@ mod tests {
 
     #[test]
     fn path_exists_matches_exact_dir_and_suffix() {
-        let tracked: BTreeSet<String> = ["crates/engine/src/lib.rs", "crates/engine/Cargo.toml"]
+        let tracked: BTreeSet<String> = ["crates/example/src/lib.rs", "crates/example/Cargo.toml"]
             .into_iter()
             .map(str::to_owned)
             .collect();
-        assert!(path_exists(&tracked, "crates/engine/src/lib.rs"));
-        assert!(path_exists(&tracked, "crates/engine"));
+        assert!(path_exists(&tracked, "crates/example/src/lib.rs"));
+        assert!(path_exists(&tracked, "crates/example"));
         assert!(
-            path_exists(&tracked, "engine/src/lib.rs"),
+            path_exists(&tracked, "example/src/lib.rs"),
             "trailing segments name a path"
         );
-        assert!(path_exists(&tracked, "crates/engine/"));
-        assert!(!path_exists(&tracked, "crates/engine/src/gone.rs"));
+        assert!(path_exists(&tracked, "crates/example/"));
+        assert!(!path_exists(&tracked, "crates/example/src/gone.rs"));
         assert!(
-            !path_exists(&tracked, "gine/src/lib.rs"),
+            !path_exists(&tracked, "ample/src/lib.rs"),
             "a suffix of a segment is not a segment"
         );
     }

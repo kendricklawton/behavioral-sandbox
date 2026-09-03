@@ -6,8 +6,7 @@
 //! in a real (dev-)dependency crate rather than be copy-pasted. Never shipped (`publish = false`)
 //! and pure-std, so it stays a leaf every suite can borrow without coupling.
 //!
-//! The small-filesystem fixtures that used to live here were the Firecracker suite's, and went
-//! with it. One host-capability probe is back ([`kvm_unusable`]), because the leak tests and the
+//! One host-capability probe lives here too ([`kvm_unusable`]), because the leak tests and the
 //! benches both refuse a host that cannot boot a VM and should refuse it with one message.
 
 #![forbid(unsafe_code)]

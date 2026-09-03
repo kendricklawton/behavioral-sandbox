@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn manifest_round_trips() {
         let entries = vec![
-            ("aaaa".to_string(), "vmlinux".to_string()),
+            ("aaaa".to_string(), "alpine-minirootfs.tar.gz".to_string()),
             (
                 "bbbb".to_string(),
                 "apk-cache/python3-3.12.1-r0.apk".to_string(),
