@@ -570,8 +570,14 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     // The display's framebuffer does not exist yet when the socket is bound, and the control
     // thread has to answer a display lease from it once it does: the slot is filled below.
     let display_share: DisplayShare = Arc::new(OnceLock::new());
+    let input_share: InputShare = Arc::new(OnceLock::new());
     if let Some(name) = args.name.as_deref() {
-        bind_control_socket(name, control_info(args), Arc::clone(&display_share))?;
+        bind_control_socket(
+            name,
+            control_info(args),
+            Arc::clone(&display_share),
+            Arc::clone(&input_share),
+        )?;
     }
 
     let mut machine = bsx_krun::Context::new()?
@@ -616,10 +622,11 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         let (with_backend, framebuffer) =
             with_display.display_backend(bsx_krun::MemoryFramebuffer::shared())?;
         let _ = display_share.set(Arc::clone(&framebuffer));
-        let (with_keyboard, keyboard) = with_backend.input_device(crate::input::keyboard())?;
-        let (with_pointer, pointer) = with_keyboard.input_device(crate::input::pointer())?;
+        let (with_keyboard, keyboard) = with_backend.input_device(bsx_input::keyboard())?;
+        let (with_pointer, pointer) = with_keyboard.input_device(bsx_input::pointer())?;
         machine = with_pointer;
         let inputs = crate::input::Inputs { keyboard, pointer };
+        let _ = input_share.set(inputs.clone());
         if let Some(path) = std::env::var_os(crate::input::REPLAY_ENV) {
             crate::input::replay(PathBuf::from(path), inputs.clone())
                 .map_err(HelperError::Input)?;
@@ -705,11 +712,14 @@ fn control_info(args: &VmmArgs) -> bsx_supervisor::control::Info {
 /// long as it can answer.
 /// The framebuffer the control thread leases displays from, filled once the display exists.
 type DisplayShare = Arc<OnceLock<Arc<Mutex<bsx_krun::MemoryFramebuffer>>>>;
+/// The device senders an `input` session feeds, filled beside the framebuffer.
+type InputShare = Arc<OnceLock<crate::input::Inputs>>;
 
 fn bind_control_socket(
     name: &str,
     info: bsx_supervisor::control::Info,
     display: DisplayShare,
+    inputs: InputShare,
 ) -> Result<(), HelperError> {
     let path = bsx_supervisor::socket::path_for(name).map_err(HelperError::Socket)?;
     // A leftover from a previous helper with this name would make `bind` fail with EADDRINUSE. Only
@@ -724,7 +734,7 @@ fn bind_control_socket(
 
     std::thread::Builder::new()
         .name(format!("bsx-ctl-{name}"))
-        .spawn(move || serve_control(&listener, &info, &display))
+        .spawn(move || serve_control(&listener, &info, &display, &inputs))
         .map_err(HelperError::Socket)?;
     Ok(())
 }
@@ -741,6 +751,7 @@ fn serve_control(
     listener: &std::os::unix::net::UnixListener,
     info: &bsx_supervisor::control::Info,
     display: &DisplayShare,
+    inputs: &InputShare,
 ) {
     use bsx_supervisor::control::{Request, read_request, write_answer};
 
@@ -758,6 +769,10 @@ fn serve_control(
             lease_display(stream, display.get());
             continue;
         }
+        if request == Some(Request::Input) {
+            serve_input(stream, inputs.get());
+            continue;
+        }
         if write_answer(&mut stream, request, info).is_err() {
             continue;
         }
@@ -769,6 +784,23 @@ fn serve_control(
             stop_this_vm();
         }
     }
+}
+
+/// Answers an input session: `ok`, then the connection goes to a thread that feeds its lines
+/// to the devices until the client hangs up. No read deadline from here on, because a key may
+/// be any time away.
+fn serve_input(mut stream: std::os::unix::net::UnixStream, inputs: Option<&crate::input::Inputs>) {
+    use std::io::Write;
+
+    use bsx_supervisor::control::write_refusal;
+    let Some(inputs) = inputs else {
+        let _ = write_refusal(&mut stream, "this VM has no display");
+        return;
+    };
+    if writeln!(stream, "ok").is_err() || stream.set_read_timeout(None).is_err() {
+        return;
+    }
+    let _ = crate::input::serve(stream, inputs.clone());
 }
 
 /// Answers a display lease: the memfd and layout now, then one record per present on the same

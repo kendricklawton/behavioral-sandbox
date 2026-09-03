@@ -216,6 +216,7 @@ name = "bsx"
 version = "0.0.4"
 dependencies = [
  "bsx-channel",
+ "bsx-input",
  "bsx-krun",
  "bsx-supervisor",
  "bsx-test-support",
@@ -229,6 +230,7 @@ dependencies = [
 name = "bsx-app"
 version = "0.0.4"
 dependencies = [
+ "bsx-input",
  "bsx-krun",
  "bsx-supervisor",
  "clap",
@@ -254,6 +256,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vsock",
+]
+
+[[package]]
+name = "bsx-input"
+version = "0.0.4"
+dependencies = [
+ "bsx-krun",
 ]
 
 [[package]]

@@ -37,13 +37,12 @@ use winit::event::{MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::input::{self, Held, Inputs};
+use bsx_input::{Area, Held};
+
+use crate::input::{self, Inputs};
 
 /// The scanout shown. libkrun numbers them from zero and one display makes one.
 const SCANOUT: u32 = 0;
-
-/// Window pixels of wheel travel that count as one line, for a device that reports pixels.
-const WHEEL_LINE_PIXELS: f64 = 20.0;
 
 /// Starts the display thread: a window when a display server answers, the screenshot and frame
 /// log sinks either way. Returns once the thread is running, not once the window is up.
@@ -241,6 +240,16 @@ impl Placement {
     };
 }
 
+/// The placement as the pointer measures against it.
+fn area(p: Placement) -> Area {
+    Area::new(
+        f64::from(p.x),
+        f64::from(p.y),
+        f64::from(p.width),
+        f64::from(p.height),
+    )
+}
+
 /// The window's state, driven by winit's callbacks.
 struct App {
     framebuffer: Arc<Mutex<MemoryFramebuffer>>,
@@ -362,21 +371,21 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state.is_pressed();
                 if let Some(code) = event.physical_key.to_scancode()
-                    && let Some(report) = input::key(code, pressed, event.repeat)
+                    && let Some(report) = bsx_input::key(code, pressed, event.repeat)
                 {
                     self.held.key(report[0].code, pressed);
                     let _ = self.inputs.keyboard.send(&report);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let report = input::position(position.x, position.y, self.placement);
+                let report = bsx_input::position(position.x, position.y, area(self.placement));
                 let _ = self.inputs.pointer.send(&report);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(code) = input::button_code(button) {
                     let pressed = state.is_pressed();
                     self.held.button(code, pressed);
-                    let _ = self.inputs.pointer.send(&input::button(code, pressed));
+                    let _ = self.inputs.pointer.send(&bsx_input::button(code, pressed));
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -384,11 +393,11 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(x, y) => (x, y),
                     // The window's pixel count as a line; clamped so the cast is exact.
                     MouseScrollDelta::PixelDelta(p) => (
-                        (p.x / WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
-                        (p.y / WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        (p.x / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        (p.y / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
                     ),
                 };
-                let report = input::wheel(dx, dy);
+                let report = bsx_input::wheel(dx, dy);
                 if !report.is_empty() {
                     let _ = self.inputs.pointer.send(&report);
                 }

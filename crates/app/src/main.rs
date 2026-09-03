@@ -18,14 +18,14 @@ mod lease;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use iced::widget::{center, shader, text};
 use iced::{Element, Fill, Size, Subscription, Task, window};
 
 use bsx_krun::SharedFrames;
-use bsx_supervisor::control::Damage;
+use bsx_supervisor::control::{Damage, InputSession};
 
 /// Exit code for an operational failure, the CLI's convention.
 const EXIT_OPERATIONAL: u8 = 2;
@@ -49,18 +49,18 @@ struct Cli {
     /// Append one `frame_id<TAB>nanoseconds` line here per frame uploaded to the GPU.
     #[arg(long, value_name = "PATH")]
     drawn_log: Option<PathBuf>,
+    /// Append each input line sent to the guest here, as it went down the session.
+    #[arg(long, value_name = "PATH")]
+    input_log: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     frame::report_adapter();
-    let sinks = match frame::Sinks::open(cli.drawn_log.as_deref()) {
+    let sinks = match frame::Sinks::open(cli.drawn_log.as_deref(), cli.input_log.as_deref()) {
         Ok(sinks) => Arc::new(sinks),
         Err(e) => {
-            eprintln!(
-                "bsx-app: {}: {e}",
-                cli.drawn_log.unwrap_or_default().display()
-            );
+            eprintln!("bsx-app: opening a log: {e}");
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
@@ -94,6 +94,8 @@ enum Message {
         slot: u32,
         damage: Damage,
     },
+    /// The input session is open: the window's keyboard and pointer reach the guest.
+    Input(InputSession),
     /// The lease ended, with why; the sandbox stopping is the ordinary case.
     Ended(String),
 }
@@ -105,6 +107,8 @@ struct App {
     frames: Option<Arc<SharedFrames>>,
     /// The presents read, newest last, each with what changed.
     history: Arc<Vec<frame::Present>>,
+    /// Where the window's keyboard and pointer go, once the session is open.
+    input: Arc<Mutex<Option<InputSession>>>,
     read: u64,
 }
 
@@ -116,6 +120,7 @@ impl App {
             sinks,
             frames: None,
             history: Arc::new(Vec::new()),
+            input: Arc::new(Mutex::new(None)),
             read: 0,
         }
     }
@@ -149,6 +154,14 @@ impl App {
                 });
                 Task::none()
             }
+            Message::Input(session) => {
+                *self
+                    .input
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+                eprintln!("bsx-app: the keyboard and pointer reach the guest");
+                Task::none()
+            }
             Message::Ended(why) => {
                 eprintln!(
                     "bsx-app: {why}; read {} presents, uploaded {} frames",
@@ -166,6 +179,7 @@ impl App {
                 frames: Arc::clone(frames),
                 history: Arc::clone(&self.history),
                 sinks: Arc::clone(&self.sinks),
+                input: Arc::clone(&self.input),
             })
             .width(Fill)
             .height(Fill)

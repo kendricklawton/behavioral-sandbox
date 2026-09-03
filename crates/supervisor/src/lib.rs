@@ -762,6 +762,22 @@ pub mod socket {
         Ok(runtime_dir()?.join(format!("{name}.sock")))
     }
 
+    /// The control socket path for `name` under the runtime directory a process with
+    /// `XDG_RUNTIME_DIR=base` has, for a caller that already holds that directory and does not
+    /// want this process's own. Nothing is created or checked.
+    pub fn path_in(base: &Path, name: &str) -> io::Result<PathBuf> {
+        if !valid_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{name:?} is not a usable VM name: {}, since the name becomes a filename",
+                    name_rule()
+                ),
+            ));
+        }
+        Ok(base.join(DIR_NAME).join(format!("{name}.sock")))
+    }
+
     /// The agent-channel socket path for `name`, beside its control socket.
     ///
     /// A VM's exec channel has to be somewhere a process that did not start the VM can find it,
@@ -863,8 +879,8 @@ pub mod control {
 
     /// The grammar's version, reported in every [`Request::Info`] answer so a client meeting an
     /// older or newer VM can say so instead of misreading its fields. 2 added [`Request::Display`],
-    /// 3 put the damage rectangle in each present record.
-    pub const PROTOCOL_VERSION: u8 = 3;
+    /// 3 put the damage rectangle in each present record, 4 added [`Request::Input`].
+    pub const PROTOCOL_VERSION: u8 = 4;
 
     /// The slot number a present record carries when the scanout was reconfigured instead: the
     /// client's mapping is of an allocation that is no longer the scanout's.
@@ -892,6 +908,10 @@ pub mod control {
         /// their layout, and the connection then streams one record per present until the caller
         /// closes it. Refused while no scanout is configured, and by a VM with no display.
         Display,
+        /// Feed the keyboard and pointer: after `ok`, the connection carries `kbd|ptr TYPE CODE
+        /// VALUE` lines, one event each, until the caller closes it, and whatever those lines left
+        /// down is released then. Refused by a VM with no display, which has no devices.
+        Input,
     }
 
     impl Request {
@@ -902,6 +922,7 @@ pub mod control {
                 Self::Info => "info",
                 Self::Stop => "stop",
                 Self::Display => "display",
+                Self::Input => "input",
             }
         }
 
@@ -912,6 +933,7 @@ pub mod control {
                 "info" => Some(Self::Info),
                 "stop" => Some(Self::Stop),
                 "display" => Some(Self::Display),
+                "input" => Some(Self::Input),
                 _ => None,
             }
         }
@@ -1230,13 +1252,18 @@ pub mod control {
             Some(Request::Stop) => writeln!(out, "ok")?,
             // The display answer carries an fd, which a plain writer cannot send: the server
             // answers it with [`write_display_answer`] or [`write_refusal`], never here.
-            Some(Request::Display) => writeln!(out, "err this VM has no display")?,
+            // Both need the devices a display brings: the server answers them itself when it has
+            // them, and this is the answer when it has not.
+            Some(Request::Display | Request::Input) => {
+                writeln!(out, "err this VM has no display")?;
+            }
             None => writeln!(
                 out,
-                "err unrecognized request; this VM speaks {}, {} and {}",
+                "err unrecognized request; this VM speaks {}, {}, {} and {}",
                 Request::Info.as_word(),
                 Request::Stop.as_word(),
-                Request::Display.as_word()
+                Request::Display.as_word(),
+                Request::Input.as_word()
             )?,
         }
         out.flush()
@@ -1495,6 +1522,46 @@ pub mod control {
     /// for. Returning means the VM took the request, not that the process is already gone.
     pub fn stop(socket: &Path) -> Result<(), Error> {
         exchange(socket, Request::Stop).map(drop)
+    }
+
+    /// An open input session: the connection the lines go down. Dropping it ends the session,
+    /// and the VM then releases whatever the lines left down.
+    #[derive(Debug)]
+    pub struct InputSession {
+        stream: UnixStream,
+    }
+
+    impl InputSession {
+        /// Sends one `kbd|ptr TYPE CODE VALUE` line. The grammar is `bsx-input`'s; this carries
+        /// the text.
+        pub fn send(&mut self, line: &str) -> io::Result<()> {
+            writeln!(self.stream, "{line}")
+        }
+    }
+
+    /// Opens an input session on the VM listening on `socket`: connects, asks, and reads the
+    /// `ok`. The refusal is a VM with no display.
+    pub fn input(socket: &Path) -> Result<InputSession, Error> {
+        let stream = UnixStream::connect(socket)?;
+        input_on(stream)
+    }
+
+    /// The client half of an input session on an already connected `stream`.
+    pub(crate) fn input_on(mut stream: UnixStream) -> Result<InputSession, Error> {
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        writeln!(stream, "{}", Request::Input.as_word())?;
+        stream.flush()?;
+        // One status line and nothing after it from the VM, so an unbuffered read loses nothing.
+        let mut status = String::new();
+        BufReader::new((&stream).take(MAX_REPLY)).read_line(&mut status)?;
+        match status.trim_end() {
+            "ok" => Ok(InputSession { stream }),
+            other => Err(match other.strip_prefix("err ") {
+                Some(why) => Error::Refused(why.to_string()),
+                None => Error::Protocol(format!("{other:?} is neither ok nor err")),
+            }),
+        }
     }
 
     /// One request, one answer: connect, ask, read to EOF, and split the status line off the body.
@@ -2229,6 +2296,7 @@ mod control_tests {
     fn a_request_is_read_off_the_first_line() {
         let read = |bytes: &str| super::control::read_request(bytes.as_bytes()).expect("no io");
         assert_eq!(read("info\n"), Some(Request::Info));
+        assert_eq!(read("input\n"), Some(Request::Input));
         assert_eq!(read("stop\nleftover\n"), Some(Request::Stop));
         assert_eq!(read("nonsense\n"), None);
         assert_eq!(read(""), None, "a caller that says nothing asks nothing");
@@ -2288,6 +2356,46 @@ mod control_tests {
         assert_eq!(
             lease.next_event().expect("the end"),
             control::Event::Reconfigured
+        );
+    }
+
+    /// An input session is the request, the `ok`, and then the caller's lines until it hangs
+    /// up; a VM that refuses is read as the refusal.
+    #[test]
+    fn an_input_session_is_ok_and_then_the_callers_lines() {
+        use std::io::{BufReader, Read, Write};
+        let (server, client) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let served = std::thread::spawn(move || {
+            let mut request = String::new();
+            let mut reader = BufReader::new(&server);
+            reader.read_line(&mut request).expect("the request");
+            assert_eq!(request.trim_end(), "input");
+            writeln!(&server, "ok").expect("answered");
+            let mut lines = String::new();
+            reader.read_to_string(&mut lines).expect("the lines to EOF");
+            lines
+        });
+        let mut session = control::input_on(client).expect("an open session");
+        session.send("kbd 1 30 1").expect("a line");
+        session.send("kbd 0 0 0").expect("a line");
+        drop(session);
+        assert_eq!(
+            served.join().expect("the server"),
+            "kbd 1 30 1\nkbd 0 0 0\n"
+        );
+
+        let (server, client) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        std::thread::spawn(move || {
+            let mut request = String::new();
+            BufReader::new(&server)
+                .read_line(&mut request)
+                .expect("the request");
+            control::write_refusal(&mut &server, "this VM has no display").expect("refused");
+        });
+        let outcome = control::input_on(client);
+        assert!(
+            matches!(&outcome, Err(control::Error::Refused(why)) if why == "this VM has no display"),
+            "not the refusal: {outcome:?}"
         );
     }
 

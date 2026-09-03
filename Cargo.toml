@@ -9,6 +9,7 @@ members = [
     "crates/krun",
     "crates/supervisor",
     "crates/guest-agent",
+    "crates/input",
     "crates/cli",
     "crates/app",
     "crates/test-support",

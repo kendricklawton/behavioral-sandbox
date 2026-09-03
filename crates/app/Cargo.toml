@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 # The mapping of a leased display's memfd (`SharedFrames`) and the pixel formats it names.
 bsx-krun = { path = "../krun" }
+# The reports the window's keyboard and pointer become, and the lines they travel as.
+bsx-input = { path = "../input" }
 # The control socket a display is leased over.
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }

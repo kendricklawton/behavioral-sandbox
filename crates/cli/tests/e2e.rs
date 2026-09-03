@@ -1063,3 +1063,121 @@ fn run_refuses_a_missing_root_before_booting() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("build-rootfs"), "names the fix: {err}");
 }
+
+/// A key and a click sent down an `input` session on the control socket arrive in the guest as
+/// the evdev events a process there reads (roadmap 4.11), and a session that ends with a button
+/// down is followed by its release, so a client that dies mid-drag leaves nothing held.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_key_and_click_over_the_control_socket_reach_a_guest_process() {
+    use std::io::{BufRead, BufReader};
+    if skipped("a_key_and_click_over_the_control_socket_reach_a_guest_process") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-wire-input");
+    let rt = dir.path().join("rt");
+    std::fs::create_dir(&rt).expect("a runtime dir");
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).expect("private");
+    let mount_dir = dir.path().join("m");
+    std::fs::create_dir(&mount_dir).expect("a mount dir");
+    std::fs::write(mount_dir.join("read.py"), include_str!("input_read.py")).expect("stage");
+    let mount = format!("/mnt={}", mount_dir.display());
+    let up = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["up", "--root"])
+        .arg(guest_root())
+        .args(["--name", "wired", "--display", "320x240", "--mount", &mount])
+        .output()
+        .expect("run bsx up");
+    assert!(
+        up.status.success(),
+        "up: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = bsx()
+                .env("XDG_RUNTIME_DIR", &self.0)
+                .args(["stop", "wired"])
+                .output();
+        }
+    }
+    let _stop = Stop(rt.clone());
+
+    let mut reader = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["exec", "wired", "--", "python3", "/mnt/read.py", "20"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the reader through exec");
+    let mut stdout = BufReader::new(reader.stdout.take().expect("piped"));
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read the guest") == 0 {
+            break;
+        }
+        let ready = line.starts_with("INPUT ready");
+        lines.push(line);
+        if ready {
+            break;
+        }
+    }
+    assert!(
+        lines.last().is_some_and(|l| l.starts_with("INPUT ready")),
+        "the guest never got to its devices: {lines:?}"
+    );
+    // Only now is the guest listening. The session is the app's path in: the same lines the
+    // replay file carries, down the control socket, and the button left down at the end is
+    // what the helper must release when the session goes.
+    let socket = bsx_supervisor::socket::path_in(&rt, "wired").expect("a socket path");
+    let mut session = bsx_supervisor::control::input(&socket).expect("an input session");
+    for line in [
+        "kbd 1 30 1",
+        "kbd 0 0 0",
+        "kbd 1 30 0",
+        "kbd 0 0 0",
+        "ptr 3 0 16384",
+        "ptr 3 1 8192",
+        "ptr 0 0 0",
+        "ptr 1 272 1",
+        "ptr 0 0 0",
+    ] {
+        session.send(line).expect("send a line");
+    }
+    drop(session);
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut rest).expect("read the rest");
+    let status = reader.wait().expect("wait for exec");
+    let out = lines.concat() + &rest;
+    assert!(status.success(), "the reader: {out}");
+    let events: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("INPUT ") && l.split_whitespace().count() == 5)
+        .map(|l| l.split_once(' ').map_or("", |(_, rest)| rest))
+        .map(|l| l.split_once(' ').map_or("", |(_, rest)| rest))
+        .collect();
+    for expected in [
+        "1 30 1",
+        "1 30 0",
+        "3 0 16384",
+        "3 1 8192",
+        "1 272 1",
+        "1 272 0",
+    ] {
+        assert!(
+            events.contains(&expected),
+            "the guest read `{expected}`; it read {events:?}"
+        );
+    }
+    let position = |needle: &str| events.iter().position(|e| *e == needle).expect("present");
+    assert!(
+        position("1 272 1") < position("1 272 0"),
+        "the release the session's end sent comes after the press: {events:?}"
+    );
+}

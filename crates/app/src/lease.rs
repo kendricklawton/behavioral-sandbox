@@ -2,7 +2,8 @@
 //!
 //! The same client as `bsx __frames`, feeding a channel the window's subscription drains. A
 //! present is forwarded as its record says, slot and damage, and the frame is never copied here;
-//! the upload in [`crate::frame`] reads the mapped slot itself.
+//! the upload in [`crate::frame`] reads the mapped slot itself. Once the display is mapped the
+//! thread opens the input session too, and hands it to the window, whose events go down it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,14 @@ fn run(
         .is_err()
     {
         return Ok("the window closed".to_string());
+    }
+    match control::input(&socket) {
+        Ok(session) => {
+            if sender.unbounded_send(Message::Input(session)).is_err() {
+                return Ok("the window closed".to_string());
+            }
+        }
+        Err(e) => eprintln!("bsx-app: no input session: {e}"),
     }
     loop {
         match lease.next_event() {

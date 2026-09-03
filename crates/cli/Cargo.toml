@@ -18,6 +18,9 @@ path = "src/main.rs"
 # The agent wire protocol, for the interactive shell's session over vsock.
 bsx-channel = { path = "../channel" }
 bsx-krun = { path = "../krun" }
+# The guest's keyboard and pointer: devices, reports, and the line grammar the replay and the
+# control socket feed.
+bsx-input = { path = "../input" }
 bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
 # Raw mode and window size for the interactive shell, the self-signal a VM stops itself with, and

@@ -7,18 +7,23 @@
 //! - **A slot is read after the guest may have moved on.** The helper frees a slot two presents
 //!   after it was the latest, so a very late upload tears; it never faults, because the mapping's
 //!   size is sealed.
+//! - **The widget's events are the guest's input.** A key, a pointer move against where the
+//!   frame sits, a button or a wheel becomes `bsx_input`'s report and travels as its lines down
+//!   the input session; losing the window's focus releases everything held.
 
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use iced::keyboard::key::{NativeCode, Physical};
 use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
-use iced::{Rectangle, mouse};
+use iced::{Event, Rectangle, keyboard, mouse, window};
 
+use bsx_input::{Area, Button, Held, InputEvent, Target, format_line};
 use bsx_krun::{PixelFormat, SharedFrames, SharedLayout};
-use bsx_supervisor::control::Damage;
+use bsx_supervisor::control::{Damage, InputSession};
 
 /// One present as the lease reported it.
 #[derive(Debug, Clone, Copy)]
@@ -28,19 +33,35 @@ pub(crate) struct Present {
     pub(crate) damage: Damage,
 }
 
-/// Where an upload is recorded: a count, and a log line per upload when asked for.
+/// Where an upload is recorded (a count, and a log line per upload when asked for), and where
+/// each input line goes beside the session when asked for.
 #[derive(Debug)]
 pub(crate) struct Sinks {
     uploaded: AtomicU64,
     log: Mutex<Option<std::fs::File>>,
+    input: Mutex<Option<std::fs::File>>,
 }
 
 impl Sinks {
-    pub(crate) fn open(log: Option<&std::path::Path>) -> std::io::Result<Self> {
+    pub(crate) fn open(
+        log: Option<&std::path::Path>,
+        input: Option<&std::path::Path>,
+    ) -> std::io::Result<Self> {
         Ok(Self {
             uploaded: AtomicU64::new(0),
             log: Mutex::new(log.map(std::fs::File::create).transpose()?),
+            input: Mutex::new(input.map(std::fs::File::create).transpose()?),
         })
+    }
+
+    fn sent(&self, line: &str) {
+        let mut log = self
+            .input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(log) = log.as_mut() {
+            let _ = writeln!(log, "{line}");
+        }
     }
 
     pub(crate) fn uploaded(&self) -> u64 {
@@ -65,19 +86,137 @@ pub(crate) struct Program {
     pub(crate) frames: Arc<SharedFrames>,
     pub(crate) history: Arc<Vec<Present>>,
     pub(crate) sinks: Arc<Sinks>,
+    pub(crate) input: Arc<Mutex<Option<InputSession>>>,
 }
 
 impl<Message> shader::Program<Message> for Program {
-    type State = ();
+    /// What the guest thinks is down, released when the window loses focus.
+    type State = Held;
     type Primitive = Primitive;
 
-    fn draw(&self, _state: &(), _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
+    fn update(
+        &self,
+        held: &mut Held,
+        event: &Event,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<shader::Action<Message>> {
+        let mut session = self
+            .input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = session.as_mut()?;
+        let mut send = |target: Target, events: &[InputEvent]| {
+            for event in events {
+                let line = format_line(target, event);
+                self.sinks.sent(&line);
+                let _ = session.send(&line);
+            }
+        };
+        match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                physical_key,
+                repeat,
+                ..
+            }) => {
+                if let Some(report) =
+                    scancode(physical_key).and_then(|code| bsx_input::key(code, true, *repeat))
+                {
+                    held.key(report[0].code, true);
+                    send(Target::Keyboard, &report);
+                }
+            }
+            Event::Keyboard(keyboard::Event::KeyReleased { physical_key, .. }) => {
+                if let Some(report) =
+                    scancode(physical_key).and_then(|code| bsx_input::key(code, false, false))
+                {
+                    held.key(report[0].code, false);
+                    send(Target::Keyboard, &report);
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                let layout = self.frames.layout();
+                let place = fit(bounds, layout.width, layout.height);
+                let area = Area::new(
+                    f64::from(place.x),
+                    f64::from(place.y),
+                    f64::from(place.width),
+                    f64::from(place.height),
+                );
+                send(
+                    Target::Pointer,
+                    &bsx_input::position(f64::from(position.x), f64::from(position.y), area),
+                );
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                if let Some(code) = button_of(*button) {
+                    held.button(code, true);
+                    send(Target::Pointer, &bsx_input::button(code, true));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                if let Some(code) = button_of(*button) {
+                    held.button(code, false);
+                    send(Target::Pointer, &bsx_input::button(code, false));
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let (dx, dy) = match *delta {
+                    mouse::ScrollDelta::Lines { x, y } => (x, y),
+                    // The window's pixel count as a line; clamped so the cast is exact.
+                    mouse::ScrollDelta::Pixels { x, y } => (
+                        (f64::from(x) / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        (f64::from(y) / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                    ),
+                };
+                let report = bsx_input::wheel(dx, dy);
+                if !report.is_empty() {
+                    send(Target::Pointer, &report);
+                }
+            }
+            Event::Window(window::Event::Unfocused) => {
+                let (keys, buttons) = held.release_all();
+                if !keys.is_empty() {
+                    send(Target::Keyboard, &keys);
+                }
+                if !buttons.is_empty() {
+                    send(Target::Pointer, &buttons);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn draw(&self, _state: &Held, _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
         Primitive {
             frames: Arc::clone(&self.frames),
             history: Arc::clone(&self.history),
             sinks: Arc::clone(&self.sinks),
         }
     }
+}
+
+/// The evdev code of the physical key iced reports: by the key's UI Events name, or the xkb
+/// number of one it could not name, which winit reports as the scancode itself.
+fn scancode(key: &Physical) -> Option<u32> {
+    match key {
+        Physical::Code(code) => bsx_input::key_code(&format!("{code:?}")).map(u32::from),
+        Physical::Unidentified(NativeCode::Xkb(raw)) => Some(*raw),
+        Physical::Unidentified(_) => None,
+    }
+}
+
+/// The evdev code of a mouse button, or `None` for one the pointer does not emit.
+fn button_of(button: mouse::Button) -> Option<u16> {
+    Some(bsx_input::button_code(match button {
+        mouse::Button::Left => Button::Left,
+        mouse::Button::Right => Button::Right,
+        mouse::Button::Middle => Button::Middle,
+        mouse::Button::Back => Button::Back,
+        mouse::Button::Forward => Button::Forward,
+        mouse::Button::Other(_) => return None,
+    }))
 }
 
 /// What one redraw draws: the latest present in `history`, uploaded from `frames`.
@@ -585,6 +724,30 @@ mod tests {
                 height: 240.0
             }
         );
+    }
+
+    /// iced's physical keys become evdev codes by name, an xkb number it could not name passes
+    /// through, and its buttons become the pointer's codes.
+    #[test]
+    fn iced_keys_and_buttons_become_evdev_codes() {
+        use iced::keyboard::key::Code;
+        assert_eq!(scancode(&Physical::Code(Code::KeyA)), Some(30));
+        assert_eq!(scancode(&Physical::Code(Code::Enter)), Some(28));
+        assert_eq!(scancode(&Physical::Code(Code::Hyper)), None);
+        assert_eq!(
+            scancode(&Physical::Unidentified(NativeCode::Xkb(240))),
+            Some(240)
+        );
+        assert_eq!(
+            scancode(&Physical::Unidentified(NativeCode::Unidentified)),
+            None
+        );
+        assert_eq!(button_of(mouse::Button::Left), Some(bsx_input::BTN_LEFT));
+        assert_eq!(
+            button_of(mouse::Button::Forward),
+            Some(bsx_input::BTN_EXTRA)
+        );
+        assert_eq!(button_of(mouse::Button::Other(9)), None);
     }
 
     /// The texture's colour encoding follows the target's, so a sample and the write cancel.
