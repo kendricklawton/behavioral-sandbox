@@ -575,7 +575,10 @@ impl App {
                     "bsx-app: mapped {}x{} {:?}, stride {}, {} slots",
                     layout.width, layout.height, layout.format, layout.stride, layout.slots
                 );
+                // A new mapping is a new scanout: the history's frame ids and slots were the
+                // old one's.
                 self.frames = Some(frames);
+                self.history = Arc::new(Vec::new());
                 Task::none()
             }
             Message::Presented {

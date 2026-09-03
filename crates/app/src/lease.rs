@@ -8,6 +8,9 @@
 //! - **Leaving the run ends the lease.** The subscription's stream carries a stop handle, and
 //!   dropping it shuts the lease's connection, so the thread's blocked read returns and the
 //!   thread, the mapping and the socket all go with the run that was left.
+//! - **A reconfigure is a new lease.** A guest that sets a new mode ends the lease with a
+//!   reconfigure record; the thread leases again and hands the window a new mapping, whose
+//!   layout the frame widget follows.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,7 +93,8 @@ pub(crate) fn stream((name, log): &(String, Option<PathBuf>)) -> Feed {
     Feed { receiver, stop }
 }
 
-/// Leases, maps, and forwards until the lease ends. `Ok` carries the ordinary end.
+/// Leases, maps, and forwards until the lease ends, leasing again after each reconfigure.
+/// `Ok` carries the ordinary end.
 fn run(
     name: &str,
     log: Option<&Path>,
@@ -98,18 +102,51 @@ fn run(
     stop: &Stop,
 ) -> Result<String, String> {
     let socket = bsx_supervisor::socket::path_for(name).map_err(|e| e.to_string())?;
+    let mut log = log
+        .map(|path| std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display())))
+        .transpose()?;
+    let mut leased_before = false;
+    loop {
+        match run_one_lease(&socket, &mut log, sender, stop, leased_before)? {
+            Some(why) => return Ok(why),
+            None => {
+                leased_before = true;
+                eprintln!("bsx-app: the display was reconfigured; leasing again");
+            }
+        }
+    }
+}
+
+/// One lease: `Some` with why it ended for good, `None` for a reconfigure to lease after.
+fn run_one_lease(
+    socket: &Path,
+    log: &mut Option<std::fs::File>,
+    sender: &mpsc::UnboundedSender<Message>,
+    stop: &Stop,
+    leased_before: bool,
+) -> Result<Option<String>, String> {
     let deadline = Instant::now() + CONFIGURE_WAIT;
     let mut lease = loop {
         if stop.cancelled() {
-            return Ok("the run was left".to_string());
+            return Ok(Some("the run was left".to_string()));
         }
-        match control::display(&socket) {
+        match control::display(socket) {
             Ok(lease) => break lease,
             Err(control::Error::Refused(why)) if why.contains("ask again") => {
                 if Instant::now() > deadline {
                     return Err(format!("{why} (gave up after {CONFIGURE_WAIT:?})"));
                 }
                 std::thread::sleep(Duration::from_millis(50));
+            }
+            // A socket gone after a lease was held is the VM ending.
+            Err(control::Error::Io(e))
+                if leased_before
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
+                return Ok(Some("the lease ended".to_string()));
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -132,20 +169,17 @@ fn run(
         scanout.generation,
     );
     let mapped = bsx_krun::SharedFrames::map(memfd, layout).map_err(|e| e.to_string())?;
-    let mut log = log
-        .map(|path| std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display())))
-        .transpose()?;
     if sender
         .unbounded_send(Message::Mapped(Arc::new(mapped)))
         .is_err()
     {
-        return Ok("the window closed".to_string());
+        return Ok(Some("the window closed".to_string()));
     }
-    match control::input(&socket) {
+    match control::input(socket) {
         Ok(session) => {
             let session = Arc::new(Mutex::new(Some(session)));
             if sender.unbounded_send(Message::Input(session)).is_err() {
-                return Ok("the window closed".to_string());
+                return Ok(Some("the window closed".to_string()));
             }
         }
         Err(e) => eprintln!("bsx-app: no input session: {e}"),
@@ -157,7 +191,7 @@ fn run(
                 slot,
                 damage,
             }) => {
-                if let Some(log) = &mut log {
+                if let Some(log) = log.as_mut() {
                     let _ = writeln!(log, "{frame_id}\t{}", monotonic_ns());
                 }
                 let sent = sender.unbounded_send(Message::Presented {
@@ -166,14 +200,14 @@ fn run(
                     damage,
                 });
                 if sent.is_err() {
-                    return Ok("the window closed".to_string());
+                    return Ok(Some("the window closed".to_string()));
                 }
             }
-            Ok(Event::Reconfigured) => return Err("the display was reconfigured".to_string()),
+            Ok(Event::Reconfigured) => return Ok(None),
             Ok(_) => {}
-            Err(_) if stop.cancelled() => return Ok("the run was left".to_string()),
+            Err(_) if stop.cancelled() => return Ok(Some("the run was left".to_string())),
             Err(control::Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok("the lease ended".to_string());
+                return Ok(Some("the lease ended".to_string()));
             }
             Err(e) => return Err(e.to_string()),
         }

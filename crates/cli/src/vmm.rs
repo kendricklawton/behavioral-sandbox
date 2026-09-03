@@ -869,6 +869,12 @@ fn lease_display(
             let _ = write_present(&mut &stream, 0, RECONFIGURED_SLOT, whole);
             false
         }
+        bsx_krun::Event::Disabled {
+            scanout_id: SCANOUT,
+        } => {
+            let _ = write_present(&mut &stream, 0, RECONFIGURED_SLOT, whole);
+            false
+        }
         _ => true,
     });
 }

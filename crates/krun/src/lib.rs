@@ -865,12 +865,19 @@ pub enum Event {
         /// The part that changed since the frame before it, or `None` for all of it.
         damage: Option<Rect>,
     },
-    /// `scanout_id` was reconfigured to a new size, so its memory is a new allocation.
+    /// `scanout_id` was reconfigured to a new shape, so its memory is a new allocation, or the
+    /// same one laid out differently.
     Reconfigured {
         /// The scanout.
         scanout_id: u32,
         /// The allocation now current.
         generation: u32,
+    },
+    /// `scanout_id` was disabled: its memory is no longer the scanout's, and a configure may
+    /// follow with a new allocation. A guest setting a new mode does exactly this pair.
+    Disabled {
+        /// The scanout.
+        scanout_id: u32,
     },
 }
 
@@ -929,6 +936,8 @@ pub struct MemoryFramebuffer {
     /// Whether scanouts allocate in memfds a second process can map.
     shared: bool,
     watchers: Vec<Watcher>,
+    /// The generation the next new or reshaped scanout allocation takes.
+    next_generation: u32,
 }
 
 impl fmt::Debug for MemoryFramebuffer {
@@ -1129,23 +1138,31 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
                 Ok(Storage::Heap(vec![0; total]))
             }
         };
+        // A generation is unique for the framebuffer's life, not per scanout: a scanout disabled
+        // and configured again is a new allocation, and a reader holding the old one must see a
+        // number it has not seen.
         let mut reconfigured = None;
         match self.scanouts.get_mut(&scanout_id) {
-            Some(scanout) if scanout.slot_bytes == slot_bytes => {
-                scanout.config = config;
+            Some(scanout) if scanout.config == config => {
                 scanout.states = [SlotState::Free; SLOTS];
                 scanout.latest = None;
             }
             Some(scanout) => {
-                scanout.storage = make_storage()?;
+                // The same bytes in a different shape is still a new layout to a reader.
+                if scanout.slot_bytes != slot_bytes {
+                    scanout.storage = make_storage()?;
+                }
                 scanout.config = config;
                 scanout.slot_bytes = slot_bytes;
                 scanout.states = [SlotState::Free; SLOTS];
                 scanout.latest = None;
-                scanout.generation = scanout.generation.wrapping_add(1);
+                scanout.generation = self.next_generation;
+                self.next_generation = self.next_generation.wrapping_add(1);
                 reconfigured = Some(scanout.generation);
             }
             None => {
+                let generation = self.next_generation;
+                self.next_generation = self.next_generation.wrapping_add(1);
                 self.scanouts.insert(
                     scanout_id,
                     Scanout {
@@ -1155,7 +1172,7 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
                         states: [SlotState::Free; SLOTS],
                         latest: None,
                         next_id: 0,
-                        generation: 0,
+                        generation,
                     },
                 );
             }
@@ -1173,7 +1190,9 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
         self.scanouts
             .remove(&scanout_id)
             .map(drop)
-            .ok_or(DisplayError::InvalidScanoutId)
+            .ok_or(DisplayError::InvalidScanoutId)?;
+        self.notify(&Event::Disabled { scanout_id });
+        Ok(())
     }
 
     fn alloc_frame(&mut self, scanout_id: u32) -> Result<FrameAllocation<'_>, DisplayError> {
@@ -2641,6 +2660,45 @@ mod tests {
                 .expect_err("heap is not shareable")
                 .kind(),
             std::io::ErrorKind::Unsupported
+        );
+    }
+
+    /// A scanout disabled and configured again, which is what a guest's mode set does, tells the
+    /// watchers, and the allocation that comes back carries a generation no earlier one had; the
+    /// same bytes in a new shape is a reconfigure too.
+    #[test]
+    fn a_disable_and_a_new_shape_are_both_told_with_fresh_generations() {
+        let mut fb = MemoryFramebuffer::shared();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        fb.watch(move |e| {
+            log.lock().expect("unpoisoned").push(*e);
+            true
+        });
+        fb.configure_scanout(0, 4, 2, 4, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured");
+        let first = fb.share(0).expect("ok").expect("configured").1.generation;
+        fb.disable_scanout(0).expect("disabled");
+        fb.configure_scanout(0, 4, 2, 4, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured again");
+        let second = fb.share(0).expect("ok").expect("configured").1.generation;
+        assert_ne!(first, second, "a new allocation has a new generation");
+        // Same bytes, a different shape: 2x4 in place of 4x2.
+        fb.configure_scanout(0, 2, 4, 2, 4, PixelFormat::B8G8R8X8Unorm)
+            .expect("reshaped");
+        let third = fb.share(0).expect("ok").expect("configured").1.generation;
+        assert_ne!(second, third, "a new shape is a new generation");
+        let events = seen.lock().expect("unpoisoned").clone();
+        assert_eq!(
+            events,
+            [
+                Event::Disabled { scanout_id: 0 },
+                Event::Reconfigured {
+                    scanout_id: 0,
+                    generation: third
+                }
+            ],
+            "the disable is told; the re-create is a new generation the next lease reads; the reshape is told"
         );
     }
 

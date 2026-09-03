@@ -1395,3 +1395,114 @@ fn an_up_sandbox_records_its_execs_and_its_stop() {
         "past: {text}"
     );
 }
+
+/// A guest that sets a new mode (roadmap 4.4) is followed on the host: the lease it had is ended
+/// with a reconfigure record, the next lease is at the new size, and the frame read through it is
+/// what the guest drew there. The guest's driver keeps every mode the display's EDID lists; only
+/// the preferred one is pinned to the `--display` size.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_guest_that_sets_a_new_mode_is_followed_by_the_next_lease() {
+    if skipped("a_guest_that_sets_a_new_mode_is_followed_by_the_next_lease") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-mode");
+    let rt = dir.path().join("rt");
+    std::fs::create_dir(&rt).expect("a runtime dir");
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).expect("private");
+    let mount_dir = dir.path().join("m");
+    std::fs::create_dir(&mount_dir).expect("a mount dir");
+    std::fs::write(mount_dir.join("mode.py"), include_str!("drm_mode.py")).expect("stage");
+    let shot = dir.path().join("shot.ppm");
+    let mount = format!("/mnt={}", mount_dir.display());
+    let up = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["up", "--root"])
+        .arg(guest_root())
+        .args(["--name", "moded", "--display", "640x480", "--mount", &mount])
+        .output()
+        .expect("run bsx up");
+    assert!(
+        up.status.success(),
+        "up: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = bsx()
+                .env("XDG_RUNTIME_DIR", &self.0)
+                .args(["stop", "moded"])
+                .output();
+        }
+    }
+    let _stop = Stop(rt.clone());
+    // The reader holds a lease across the switch and re-leases after it; the screenshot is the
+    // last frame of the last lease.
+    let reader = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["__frames", "moded"])
+        .arg("--screenshot")
+        .arg(&shot)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the reader");
+    // Mode 0 is the preferred 640x480; mode 8 is the EDID's 800x500, the smallest other one.
+    let switched = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args([
+            "exec",
+            "moded",
+            "--",
+            "python3",
+            "/mnt/mode.py",
+            "0",
+            "2",
+            "8",
+            "3",
+        ])
+        .output()
+        .expect("run the mode setter");
+    let out = String::from_utf8_lossy(&switched.stdout);
+    assert!(
+        out.contains("SETCRTC ok 640x480") && out.contains("SETCRTC ok 800x500"),
+        "the guest set both modes: {out}\n{}",
+        String::from_utf8_lossy(&switched.stderr)
+    );
+    let stopped = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["stop", "moded"])
+        .output()
+        .expect("run bsx stop");
+    assert!(stopped.status.success());
+    let read = reader.wait_with_output().expect("wait for the reader");
+    let err = String::from_utf8_lossy(&read.stderr);
+    assert!(read.status.success(), "the reader: {err}");
+    assert!(
+        err.contains("leasing again"),
+        "the first lease ended on the switch: {err}"
+    );
+    let ppm = std::fs::read(&shot).expect("the screenshot");
+    let mut parts = ppm.splitn(4, |&b| b == b'\n');
+    assert_eq!(parts.next(), Some(&b"P6"[..]));
+    assert_eq!(
+        parts.next(),
+        Some(&b"800 500"[..]),
+        "the last lease is at the new size"
+    );
+    let _ = parts.next();
+    let pixels = parts.next().expect("pixels");
+    assert_eq!(
+        &pixels[..3],
+        &[255, 0, 0],
+        "the guest's red block at the top-left, as drawn"
+    );
+    assert_eq!(
+        &pixels[400 * 3..400 * 3 + 3],
+        &[0x40, 0x40, 0x40],
+        "the grey elsewhere"
+    );
+}

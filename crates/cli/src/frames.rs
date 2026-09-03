@@ -9,6 +9,9 @@
 //!   id and their difference is the boundary's cost.
 //! - **A screenshot is the proof.** `--screenshot` writes the last frame read through the mapping
 //!   as a PPM, so a test can check that the pixels a guest drew are the pixels that crossed.
+//! - **A reconfigure is a new lease.** A guest that sets a new mode disables and reconfigures its
+//!   scanout; the record that says so ends the lease, and the reader asks again, so the frames
+//!   after it come at the new size.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -48,15 +51,49 @@ pub(crate) fn run(args: &FramesArgs) -> ExitCode {
 
 fn read(args: &FramesArgs) -> Result<(), String> {
     let socket = bsx_supervisor::socket::path_for(&args.name).map_err(|e| e.to_string())?;
+    let mut log = args
+        .log
+        .clone()
+        .map(crate::window::FrameLog::create)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let mut read = 0u64;
+    loop {
+        match read_one_lease(&socket, args, &mut log, &mut read)? {
+            Some(()) => return Ok(()),
+            None => eprintln!("bsx __frames: the display was reconfigured; leasing again"),
+        }
+    }
+}
+
+/// Leases the display until the lease ends: `Some` when the reader is done (the count reached,
+/// or the VM gone), `None` when the scanout was reconfigured and a new lease is wanted.
+fn read_one_lease(
+    socket: &std::path::Path,
+    args: &FramesArgs,
+    log: &mut Option<crate::window::FrameLog>,
+    read: &mut u64,
+) -> Result<Option<()>, String> {
     let deadline = Instant::now() + CONFIGURE_WAIT;
     let mut lease = loop {
-        match control::display(&socket) {
+        match control::display(socket) {
             Ok(lease) => break lease,
             Err(control::Error::Refused(why)) if why.contains("ask again") => {
                 if Instant::now() > deadline {
                     return Err(format!("{why} (gave up after {CONFIGURE_WAIT:?})"));
                 }
                 std::thread::sleep(Duration::from_millis(50));
+            }
+            // A socket that is gone or refuses after a lease was held is the VM ending, which
+            // is how a reader that asks again after a reconfigure learns the run is over.
+            Err(control::Error::Io(e))
+                if *read > 0
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
+                return Ok(Some(()));
             }
             Err(e) => return Err(e.to_string()),
         }
@@ -75,34 +112,33 @@ fn read(args: &FramesArgs) -> Result<(), String> {
         scanout.generation,
     );
     let mapped = bsx_krun::SharedFrames::map(memfd, layout).map_err(|e| e.to_string())?;
-    let mut log = args
-        .log
-        .clone()
-        .map(crate::window::FrameLog::create)
-        .transpose()
-        .map_err(|e| e.to_string())?;
     let mut last = None;
-    let mut read = 0u64;
-    while args.count.is_none_or(|n| read < n) {
+    let mut outcome = Some(());
+    while args.count.is_none_or(|n| *read < n) {
         match lease.next_event() {
             Ok(Event::Presented { frame_id, slot, .. }) => {
-                if let Some(log) = &mut log {
+                if let Some(log) = log.as_mut() {
                     log.record(frame_id);
                 }
                 last = Some((frame_id, slot));
-                read += 1;
+                *read += 1;
             }
-            Ok(Event::Reconfigured) => return Err("the display was reconfigured".to_string()),
+            Ok(Event::Reconfigured) => {
+                outcome = None;
+                break;
+            }
             Ok(_) => {}
             Err(control::Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e.to_string()),
         }
     }
+    // Written for every lease that saw a frame, so the file holds the last frame of the last
+    // lease: after a reconfigure, the new size.
     if let (Some(path), Some((frame_id, slot))) = (&args.screenshot, last) {
         let view = mapped
             .frame(frame_id, slot)
             .ok_or_else(|| format!("slot {slot} is outside the layout"))?;
         crate::window::write_ppm(&view.to_frame(), path).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(outcome)
 }
