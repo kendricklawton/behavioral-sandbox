@@ -289,7 +289,130 @@ pub(crate) fn bench_frames(display: &str, frames: usize) -> Result<()> {
          display thread got to deliver. A gap between them is frames superseded before the thread\n\
          ran, which the latest-frame design allows and a real window would also not have shown."
     );
+    bench_boundary(&ctx, display, frames, &stage)?;
     Ok(())
+}
+
+/// The process boundary (4.9): a second process leases the display over the control socket, maps
+/// the memfd, and logs each present record as it reads it; the helper's own frame log names the
+/// same frames on the same clock, and the difference per frame is what the boundary cost.
+fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> Result<()> {
+    let name = "bench-frames-boundary";
+    let helper_log = stage.join("boundary-helper.tsv");
+    let client_log = stage.join("boundary-client.tsv");
+    let up = Command::new(&ctx.bsx)
+        .arg("up")
+        .arg("--root")
+        .arg(&ctx.guest_root)
+        .args(["--name", name, "--display", display])
+        .arg("--frame-log")
+        .arg(&helper_log)
+        .arg("--mount")
+        .arg(format!("/mnt={}", stage.display()))
+        .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .stdin(Stdio::null())
+        .output()
+        .context("run bsx up for the boundary")?;
+    if !up.status.success() {
+        bail!("bsx up failed: {}", String::from_utf8_lossy(&up.stderr));
+    }
+    let stop = || {
+        let _ = Command::new(&ctx.bsx)
+            .args(["stop", name])
+            .env("XDG_RUNTIME_DIR", &ctx.runtime)
+            .output();
+    };
+    // No `--count`: the reader ends when the lease does, which is the VM stopping below; a
+    // count could be missed, since a lease taken after the scanout's first frames never sees them.
+    let reader = Command::new(&ctx.bsx)
+        .args(["__frames", name])
+        .arg("--log")
+        .arg(&client_log)
+        .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run the frame reader")?;
+    let drew = Command::new(&ctx.bsx)
+        .args([
+            "exec",
+            name,
+            "--",
+            "python3",
+            "/mnt/flip.py",
+            "flip",
+            &frames.to_string(),
+        ])
+        .env("XDG_RUNTIME_DIR", &ctx.runtime)
+        .stdin(Stdio::null())
+        .output()
+        .context("run the flipper through exec")?;
+    stop();
+    let read = reader.wait_with_output().context("wait for the reader")?;
+    if !drew.status.success() {
+        bail!(
+            "the flipper failed: {}",
+            String::from_utf8_lossy(&drew.stderr)
+        );
+    }
+    if !read.status.success() {
+        bail!(
+            "the reader failed: {}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+    }
+    let helper = read_frame_log(&helper_log)?;
+    let client = read_frame_log(&client_log)?;
+    println!("path flip, through the boundary (a second process mapping the memfd):");
+    println!(
+        "  helper saw {} frames, the client read {}",
+        helper.len(),
+        client.len()
+    );
+    let mut offsets: Vec<i64> = client
+        .iter()
+        .filter_map(|(id, at)| {
+            let (_, seen) = helper.iter().find(|(h, _)| h == id)?;
+            Some((i128::from(*at) - i128::from(*seen)) as i64 / 1000)
+        })
+        .collect();
+    report_signed("client minus helper", &mut offsets, "us");
+    println!(
+        "  the same frame ids on the same clock: when the second process had each frame relative\n\
+         to the helper's own display thread. Negative is earlier: the record is written from\n\
+         libkrun's thread under the lock, before the helper's thread has woken. This is the\n\
+         boundary's whole cost; the frames themselves were never copied."
+    );
+    Ok(())
+}
+
+/// [`report_percentiles`] for values that may be negative.
+fn report_signed(label: &str, samples: &mut [i64], unit: &str) {
+    samples.sort_unstable();
+    let n = samples.len();
+    if n == 0 {
+        println!("  {label:<26} (no samples; {unit})");
+        return;
+    }
+    let pct = |p: usize| -> String {
+        let rank = (p * n).div_ceil(100).clamp(1, n);
+        if rank >= n {
+            format!("{:>7}", "—")
+        } else {
+            format!("{:>7}", samples[rank - 1])
+        }
+    };
+    println!(
+        "  {label:<26} min {:>7}  p50 {}  p90 {}  p99 {}  max {:>7}  ({unit}, n={n})",
+        samples[0],
+        pct(50),
+        pct(90),
+        pct(99),
+        samples[n - 1]
+    );
 }
 
 /// The `frame_id<TAB>nanoseconds` lines of a frame log, in file order.
