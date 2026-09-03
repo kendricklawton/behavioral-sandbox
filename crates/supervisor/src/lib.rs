@@ -854,6 +854,7 @@ pub mod socket {
 pub mod control {
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::num::{NonZeroU8, NonZeroU32};
+    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::time::Duration;
@@ -861,8 +862,12 @@ pub mod control {
     use super::{Net, RootFs};
 
     /// The grammar's version, reported in every [`Request::Info`] answer so a client meeting an
-    /// older or newer VM can say so instead of misreading its fields.
-    pub const PROTOCOL_VERSION: u8 = 1;
+    /// older or newer VM can say so instead of misreading its fields. 2 added [`Request::Display`].
+    pub const PROTOCOL_VERSION: u8 = 2;
+
+    /// The slot number a present record carries when the scanout was reconfigured instead: the
+    /// client's mapping is of an allocation that is no longer the scanout's.
+    pub const RECONFIGURED_SLOT: u32 = u32::MAX;
 
     /// How long a caller waits on a VM's control socket. A VM answers from a thread that does
     /// nothing else, so anything slower than this is a VM that has stopped answering, and `ls`
@@ -882,6 +887,10 @@ pub mod control {
         /// Stop the VM. It answers first and dies after, so a caller learns the request was
         /// accepted rather than inferring it from a closed connection.
         Stop,
+        /// Lease the display: the answer carries the memfd holding the scanout's frame slots and
+        /// their layout, and the connection then streams one record per present until the caller
+        /// closes it. Refused while no scanout is configured, and by a VM with no display.
+        Display,
     }
 
     impl Request {
@@ -891,6 +900,7 @@ pub mod control {
             match self {
                 Self::Info => "info",
                 Self::Stop => "stop",
+                Self::Display => "display",
             }
         }
 
@@ -900,6 +910,7 @@ pub mod control {
             match word {
                 "info" => Some(Self::Info),
                 "stop" => Some(Self::Stop),
+                "display" => Some(Self::Display),
                 _ => None,
             }
         }
@@ -1048,6 +1059,110 @@ pub mod control {
         }
     }
 
+    /// How a leased display's memory is laid out: `slots` regions of `slot_bytes` back to back,
+    /// each one `width` by `height` frame in the virtio-gpu `format` at `stride` bytes a row.
+    /// The numbers, not the interpretation: a client that maps the memfd decides what to do with
+    /// a format it does not know.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct Scanout {
+        /// Frame width in pixels.
+        pub width: u32,
+        /// Frame height in pixels.
+        pub height: u32,
+        /// The `KRUN_DISPLAY_FORMAT_*` number.
+        pub format: u32,
+        /// Bytes per row.
+        pub stride: u32,
+        /// Regions in the memfd.
+        pub slots: u32,
+        /// Bytes per region.
+        pub slot_bytes: u64,
+        /// Which allocation this is; a reconfigure to a new size makes a new one.
+        pub generation: u32,
+    }
+
+    impl Scanout {
+        /// A layout with these numbers.
+        #[must_use]
+        pub fn new(
+            width: u32,
+            height: u32,
+            format: u32,
+            stride: u32,
+            slots: u32,
+            slot_bytes: u64,
+            generation: u32,
+        ) -> Self {
+            Self {
+                width,
+                height,
+                format,
+                stride,
+                slots,
+                slot_bytes,
+                generation,
+            }
+        }
+
+        pub(crate) fn body(&self) -> String {
+            format!(
+                "proto {PROTOCOL_VERSION}\nwidth {}\nheight {}\nformat {}\nstride {}\nslots {}\n\
+                 slot_bytes {}\ngeneration {}\n",
+                self.width,
+                self.height,
+                self.format,
+                self.stride,
+                self.slots,
+                self.slot_bytes,
+                self.generation
+            )
+        }
+
+        pub(crate) fn parse_body(text: &str) -> Result<Self, Error> {
+            let fields = fields_of(text)?;
+            let number = |key: &str| -> Result<u64, Error> {
+                fields
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| *v)
+                    .ok_or_else(|| Error::Protocol(format!("the answer carries no {key}")))?
+                    .parse()
+                    .map_err(|_| Error::Protocol(format!("{key} is not a number")))
+            };
+            let small = |key: &str| -> Result<u32, Error> {
+                u32::try_from(number(key)?)
+                    .map_err(|_| Error::Protocol(format!("{key} does not fit")))
+            };
+            if small("proto")? != u32::from(PROTOCOL_VERSION) {
+                return Err(Error::Protocol(format!(
+                    "the VM speaks control protocol {}, this build speaks {PROTOCOL_VERSION}",
+                    number("proto")?
+                )));
+            }
+            Ok(Self::new(
+                small("width")?,
+                small("height")?,
+                small("format")?,
+                small("stride")?,
+                small("slots")?,
+                number("slot_bytes")?,
+                small("generation")?,
+            ))
+        }
+    }
+
+    /// The `key value` lines of an answer body.
+    fn fields_of(text: &str) -> Result<Vec<(&str, &str)>, Error> {
+        text.lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                line.split_once(' ')
+                    .ok_or_else(|| Error::Protocol(format!("{line:?} is not `key value`")))
+            })
+            .collect()
+    }
+
     /// A control exchange that did not produce an answer.
     #[derive(Debug)]
     #[non_exhaustive]
@@ -1112,14 +1227,199 @@ pub mod control {
                 info.write_body(out)?;
             }
             Some(Request::Stop) => writeln!(out, "ok")?,
+            // The display answer carries an fd, which a plain writer cannot send: the server
+            // answers it with [`write_display_answer`] or [`write_refusal`], never here.
+            Some(Request::Display) => writeln!(out, "err this VM has no display")?,
             None => writeln!(
                 out,
-                "err unrecognized request; this VM speaks {} and {}",
+                "err unrecognized request; this VM speaks {}, {} and {}",
                 Request::Info.as_word(),
-                Request::Stop.as_word()
+                Request::Stop.as_word(),
+                Request::Display.as_word()
             )?,
         }
         out.flush()
+    }
+
+    /// Writes an `err` answer saying `why`.
+    pub fn write_refusal(out: &mut impl Write, why: &str) -> io::Result<()> {
+        writeln!(out, "err {why}")?;
+        out.flush()
+    }
+
+    /// Answers [`Request::Display`]: the `ok` line, the layout, a blank line, and the memfd as
+    /// the message's ancillary data, in one `sendmsg` so the fd arrives with the first byte. The
+    /// caller then streams present records on the same connection with [`write_present`].
+    pub fn write_display_answer(
+        stream: &UnixStream,
+        memfd: BorrowedFd<'_>,
+        scanout: &Scanout,
+    ) -> io::Result<()> {
+        let text = format!("ok\n{}\n", scanout.body());
+        let mut space = [std::mem::MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = rustix::net::SendAncillaryBuffer::new(&mut space);
+        let fds = [memfd];
+        control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds));
+        let sent = rustix::net::sendmsg(
+            stream.as_fd(),
+            &[io::IoSlice::new(text.as_bytes())],
+            &mut control,
+            rustix::net::SendFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+        if sent != text.len() {
+            return Err(io::Error::other("the display answer was sent in part"));
+        }
+        Ok(())
+    }
+
+    /// Writes one present record: `frame_id` then `slot`, each four bytes little-endian.
+    pub fn write_present(out: &mut impl Write, frame_id: u32, slot: u32) -> io::Result<()> {
+        let mut record = [0u8; 8];
+        record[..4].copy_from_slice(&frame_id.to_le_bytes());
+        record[4..].copy_from_slice(&slot.to_le_bytes());
+        out.write_all(&record)
+    }
+
+    /// What a leased display reports next.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum Event {
+        /// Frame `frame_id` is in slot `slot` of the mapped memory.
+        Presented {
+            /// The id it was presented under.
+            frame_id: u32,
+            /// The region it occupies.
+            slot: u32,
+        },
+        /// The scanout was reconfigured to a new size: the mapping is stale, and the VM will send
+        /// nothing more on this lease. Ask again for a new one.
+        Reconfigured,
+    }
+
+    /// A leased display: the memfd and its layout, and the connection the present records come
+    /// down. Dropping it ends the lease.
+    #[derive(Debug)]
+    pub struct DisplayLease {
+        memfd: Option<OwnedFd>,
+        scanout: Scanout,
+        stream: UnixStream,
+        /// Record bytes that arrived with the answer.
+        pending: Vec<u8>,
+    }
+
+    impl DisplayLease {
+        /// How the memfd is laid out.
+        #[must_use]
+        pub fn scanout(&self) -> Scanout {
+            self.scanout
+        }
+
+        /// The memfd, once: it is the caller's to map.
+        pub fn take_memfd(&mut self) -> Option<OwnedFd> {
+            self.memfd.take()
+        }
+
+        /// Waits for the next record. `Io` with `UnexpectedEof` is the VM closing the lease,
+        /// which is what a VM ending does.
+        pub fn next_event(&mut self) -> Result<Event, Error> {
+            let mut record = [0u8; 8];
+            let have = self.pending.len().min(8);
+            record[..have].copy_from_slice(&self.pending[..have]);
+            self.pending.drain(..have);
+            self.stream.read_exact(&mut record[have..])?;
+            let frame_id = u32::from_le_bytes([record[0], record[1], record[2], record[3]]);
+            let slot = u32::from_le_bytes([record[4], record[5], record[6], record[7]]);
+            Ok(if slot == RECONFIGURED_SLOT {
+                Event::Reconfigured
+            } else {
+                Event::Presented { frame_id, slot }
+            })
+        }
+    }
+
+    /// Leases the display of the VM listening on `socket`: connects, asks, and reads the answer
+    /// with its fd. The lease's reads have no timeout, because a present may be any time away.
+    pub fn display(socket: &Path) -> Result<DisplayLease, Error> {
+        let stream = UnixStream::connect(socket)?;
+        lease_on(stream)
+    }
+
+    /// The client half of a display lease on an already connected `stream`.
+    pub(crate) fn lease_on(mut stream: UnixStream) -> Result<DisplayLease, Error> {
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        writeln!(stream, "{}", Request::Display.as_word())?;
+        stream.flush()?;
+
+        // The answer text ends at a blank line; whatever follows it is the first records.
+        let mut buf = vec![0u8; 4096];
+        let mut space = [std::mem::MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = rustix::net::RecvAncillaryBuffer::new(&mut space);
+        let got = rustix::net::recvmsg(
+            stream.as_fd(),
+            &mut [io::IoSliceMut::new(&mut buf)],
+            &mut control,
+            rustix::net::RecvFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+        let mut memfd = None;
+        for message in control.drain() {
+            if let rustix::net::RecvAncillaryMessage::ScmRights(fds) = message {
+                for fd in fds {
+                    memfd = Some(fd);
+                }
+            }
+        }
+        // An `ok` answer ends at a blank line; a refusal is its one line. Read until whichever
+        // this is has fully arrived.
+        let mut text = buf[..got.bytes].to_vec();
+        let complete = |text: &[u8]| {
+            text.windows(2).any(|w| w == b"\n\n")
+                || (text.starts_with(b"err") && text.contains(&b'\n'))
+        };
+        while !complete(&text) {
+            if text.len() >= MAX_REPLY as usize {
+                return Err(Error::Protocol(
+                    "the display answer never ended".to_string(),
+                ));
+            }
+            let mut more = [0u8; 256];
+            let n = stream.read(&mut more)?;
+            if n == 0 {
+                return Err(Error::Io(io::Error::from(io::ErrorKind::UnexpectedEof)));
+            }
+            text.extend_from_slice(&more[..n]);
+        }
+        let end = text
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .map_or(text.len(), |at| at + 2);
+        let pending = text.split_off(end);
+        let answer = String::from_utf8_lossy(&text).into_owned();
+        let (status, body) = answer.split_once('\n').unwrap_or((answer.trim_end(), ""));
+        match status {
+            "ok" => {}
+            other => {
+                return Err(match other.strip_prefix("err ") {
+                    Some(why) => Error::Refused(why.to_string()),
+                    None => Error::Protocol(format!("{other:?} is neither ok nor err")),
+                });
+            }
+        }
+        let scanout = Scanout::parse_body(body)?;
+        let Some(memfd) = memfd else {
+            return Err(Error::Protocol(
+                "the display answer carried no memfd".to_string(),
+            ));
+        };
+        stream.set_read_timeout(None)?;
+        Ok(DisplayLease {
+            memfd: Some(memfd),
+            scanout,
+            stream,
+            pending,
+        })
     }
 
     /// Asks the VM listening on `socket` for its shape.
@@ -1773,8 +2073,11 @@ mod socket_tests {
 mod control_tests {
     #![allow(clippy::panic)]
 
+    use std::io::BufRead;
     use std::num::{NonZeroU8, NonZeroU32};
+    use std::os::fd::AsFd;
 
+    use super::control;
     use super::control::{Channel, Info, PROTOCOL_VERSION, Request, write_answer};
     use super::{Net, RootFs};
 
@@ -1868,6 +2171,95 @@ mod control_tests {
         assert_eq!(read("stop\nleftover\n"), Some(Request::Stop));
         assert_eq!(read("nonsense\n"), None);
         assert_eq!(read(""), None, "a caller that says nothing asks nothing");
+    }
+    /// The display answer carries the layout and the memfd in one message, the first records may
+    /// arrive in the same read, and every record after it names its frame and slot; a
+    /// reconfigure record ends the lease's stream of presents.
+    #[test]
+    fn a_display_answer_carries_the_layout_the_fd_and_then_records() {
+        use std::os::fd::AsRawFd;
+        let (server, client) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let dir = bsx_test_support::ScratchDir::created("display-lease");
+        let file = std::fs::File::create(dir.path().join("frames")).expect("a file to hand over");
+        let scanout = control::Scanout::new(320, 240, 2, 1280, 4, 307_200, 3);
+        let answered = std::thread::spawn(move || {
+            let mut request = String::new();
+            std::io::BufReader::new(&server)
+                .read_line(&mut request)
+                .expect("the request");
+            assert_eq!(request.trim_end(), "display");
+            control::write_display_answer(&server, file.as_fd(), &scanout).expect("answered");
+            control::write_present(&mut &server, 41, 2).expect("a record");
+            control::write_present(&mut &server, 42, 3).expect("a record");
+            control::write_present(&mut &server, 0, control::RECONFIGURED_SLOT).expect("the end");
+            file.as_raw_fd()
+        });
+        let mut lease = control::lease_on(client).expect("leased");
+        assert_eq!(lease.scanout(), scanout, "the layout as sent");
+        let memfd = lease.take_memfd().expect("the fd came with the answer");
+        let original = answered.join().expect("the server thread");
+        assert_ne!(
+            memfd.as_raw_fd(),
+            original,
+            "a passed fd is a new descriptor"
+        );
+        assert!(lease.take_memfd().is_none(), "taken once");
+        assert_eq!(
+            lease.next_event().expect("first"),
+            control::Event::Presented {
+                frame_id: 41,
+                slot: 2
+            }
+        );
+        assert_eq!(
+            lease.next_event().expect("second"),
+            control::Event::Presented {
+                frame_id: 42,
+                slot: 3
+            }
+        );
+        assert_eq!(
+            lease.next_event().expect("the end"),
+            control::Event::Reconfigured
+        );
+    }
+
+    /// A refusal is one line with no terminator, and the client reads it as the refusal rather
+    /// than waiting for a blank line that never comes.
+    #[test]
+    fn a_refused_display_lease_is_read_as_the_refusal() {
+        let (mut server, client) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let refused = std::thread::spawn(move || {
+            let mut request = String::new();
+            std::io::BufReader::new(&server)
+                .read_line(&mut request)
+                .expect("the request");
+            control::write_refusal(&mut server, "no scanout is configured yet; ask again")
+                .expect("refused");
+        });
+        let err = control::lease_on(client).expect_err("refused");
+        refused.join().expect("the server thread");
+        assert!(
+            matches!(&err, control::Error::Refused(why) if why.contains("ask again")),
+            "{err}"
+        );
+    }
+
+    /// The layout body round-trips, and a body from another protocol version is refused.
+    #[test]
+    fn a_scanout_layout_round_trips_and_checks_the_protocol() {
+        let scanout = control::Scanout::new(1920, 1080, 2, 7680, 4, 8_294_400, 0);
+        let body = scanout.body();
+        assert_eq!(
+            control::Scanout::parse_body(&body).expect("parsed"),
+            scanout
+        );
+        let old = body.replacen(
+            &format!("proto {}", control::PROTOCOL_VERSION),
+            "proto 1",
+            1,
+        );
+        assert!(control::Scanout::parse_body(&old).is_err());
     }
 }
 

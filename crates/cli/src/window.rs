@@ -30,7 +30,6 @@ use std::io::{self, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use bsx_krun::{Frame, MemoryFramebuffer, PixelFormat};
 use winit::application::ApplicationHandler;
@@ -152,22 +151,30 @@ fn headless(framebuffer: &Mutex<MemoryFramebuffer>, sinks: &mut Sinks) {
             }
             *ready = false;
         }
-        if let Some(frame) = new_frame(framebuffer, &mut sinks.shown) {
+        if let Some(frame) = new_frame(framebuffer, &mut sinks.shown, sinks.log.as_mut()) {
             sinks.deliver(&frame);
         }
     }
 }
 
 /// The latest frame if its id differs from `shown`, cloned out from under the lock so libkrun
-/// is held off only for the copy.
-fn new_frame(framebuffer: &Mutex<MemoryFramebuffer>, shown: &mut Option<u32>) -> Option<Frame> {
+/// is held off only for the copy. The frame log is written before the copy, so it records when
+/// the frame was seen, not when it had been copied.
+fn new_frame(
+    framebuffer: &Mutex<MemoryFramebuffer>,
+    shown: &mut Option<u32>,
+    log: Option<&mut FrameLog>,
+) -> Option<Frame> {
     let guard = lock(framebuffer);
     let frame = guard.latest_frame(SCANOUT)?;
     if *shown == Some(frame.frame_id) {
         return None;
     }
     *shown = Some(frame.frame_id);
-    Some(frame.clone())
+    if let Some(log) = log {
+        log.record(frame.frame_id);
+    }
+    Some(frame.to_frame())
 }
 
 /// Where the frames go besides the window: the screenshot file and the frame log, and the id of
@@ -179,37 +186,40 @@ struct Sinks {
 }
 
 impl Sinks {
-    /// Records `frame` in every sink that is on.
+    /// Records `frame` in every sink that is on. The log was written when the frame was seen, in
+    /// [`new_frame`]; this is the rest.
     fn deliver(&mut self, frame: &Frame) {
-        if let Some(log) = &mut self.log {
-            log.record(frame.frame_id);
-        }
         if let Some(path) = &self.screenshot {
             let _ = write_ppm(frame, path);
         }
     }
 }
 
-/// One `frame_id<TAB>nanoseconds` line per frame seen, the nanoseconds counted from the log's
-/// creation on this thread's clock. What `bench-frames` reads. Written unbuffered, one line per
-/// call, so a log of a VM that was killed is whole up to the last frame.
-struct FrameLog {
+/// One `frame_id<TAB>nanoseconds` line per frame seen, the nanoseconds being the host's
+/// `CLOCK_MONOTONIC`, so a log from another process on this host lines up with it. What
+/// `bench-frames` reads. Written unbuffered, one line per call, so a log of a VM that was killed
+/// is whole up to the last frame.
+pub(crate) struct FrameLog {
     file: std::fs::File,
-    started: Instant,
 }
 
 impl FrameLog {
-    fn create(path: PathBuf) -> io::Result<Self> {
+    pub(crate) fn create(path: PathBuf) -> io::Result<Self> {
         Ok(Self {
             file: std::fs::File::create(path)?,
-            started: Instant::now(),
         })
     }
 
-    fn record(&mut self, frame_id: u32) {
-        let ns = self.started.elapsed().as_nanos();
-        let _ = writeln!(self.file, "{frame_id}\t{ns}");
+    pub(crate) fn record(&mut self, frame_id: u32) {
+        let _ = writeln!(self.file, "{frame_id}\t{}", monotonic_ns());
     }
+}
+
+/// The host's monotonic clock in nanoseconds: the one timestamp two processes on this host can
+/// compare.
+pub(crate) fn monotonic_ns() -> u128 {
+    let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    u128::try_from(t.tv_sec).unwrap_or(0) * 1_000_000_000 + u128::try_from(t.tv_nsec).unwrap_or(0)
 }
 
 /// Where the frame sits in the window, in window pixels: what the pointer is measured against.
@@ -269,7 +279,9 @@ impl App {
         let Ok(mut pixels) = shown.surface.buffer_mut() else {
             return;
         };
-        let frame = lock(&self.framebuffer).latest_frame(SCANOUT).cloned();
+        let frame = lock(&self.framebuffer)
+            .latest_frame(SCANOUT)
+            .map(|v| v.to_frame());
         pixels.fill(0);
         if let Some(frame) = &frame {
             self.placement = fit((frame.width, frame.height), (width.get(), height.get()));
@@ -281,7 +293,11 @@ impl App {
     /// A frame may have landed: delivers it to the sinks and asks for a redraw. Called on each
     /// wake, and once when the window is up in case one landed before the wake was set.
     fn frame_arrived(&mut self) {
-        if let Some(frame) = new_frame(&self.framebuffer, &mut self.sinks.shown) {
+        if let Some(frame) = new_frame(
+            &self.framebuffer,
+            &mut self.sinks.shown,
+            self.sinks.log.as_mut(),
+        ) {
             self.sinks.deliver(&frame);
             if let Some(shown) = &self.window {
                 shown.window.request_redraw();
@@ -490,7 +506,7 @@ mod tests {
         let id = alloc.frame_id;
         alloc.buffer.copy_from_slice(pixels);
         fb.present_frame(0, id, None).expect("back");
-        fb.latest_frame(0).expect("presented").clone()
+        fb.latest_frame(0).expect("presented").to_frame()
     }
 
     /// The frame as it sits, one to one.
@@ -712,7 +728,7 @@ mod tests {
         // Two presents, the second superseding the first: one frame is new, the next wake finds
         // nothing newer.
         for _ in 0..3 {
-            if let Some(frame) = new_frame(&fb, &mut sinks.shown) {
+            if let Some(frame) = new_frame(&fb, &mut sinks.shown, sinks.log.as_mut()) {
                 sinks.deliver(&frame);
             }
         }

@@ -15,8 +15,9 @@ links = "krun"
 build = "build.rs"
 
 [dependencies]
-# The eventfd an input queue is polled through, and the reads and writes that arm and clear it.
-rustix = { workspace = true, features = ["event"] }
+# The eventfd an input queue is polled through and the reads and writes that arm and clear it
+# (`event`); the sealed memfd a shared scanout lives in (`fs`); and the mapping of it (`mm`).
+rustix = { workspace = true, features = ["event", "fs", "mm"] }
 
 [lints]
 workspace = true

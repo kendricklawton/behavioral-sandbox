@@ -649,54 +649,308 @@ const DISPLAY_GPU_FLAGS: u32 =
 /// while the last is presented; a third is slack for one that runs ahead of that.
 const RING: usize = 3;
 
+/// Buffers a scanout owns: `RING` to hand out and one holding the latest frame.
+const SLOTS: usize = RING + 1;
+
 /// The largest frame id handed out: ids cross the vtable as the non-negative half of an `i32`.
 const MAX_FRAME_ID: u32 = i32::MAX as u32;
 
-/// A buffer libkrun may be writing into, and the id it was handed out under.
-#[derive(Debug, Default)]
-struct Slot {
-    /// `Some` while handed out and not yet presented.
-    frame_id: Option<u32>,
-    pixels: Vec<u8>,
+/// A scanout's buffers: one allocation of `SLOTS` equal regions, on the heap or in a memfd.
+enum Storage {
+    Heap(Vec<u8>),
+    Shared(SharedRegion),
+}
+
+impl Storage {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Heap(v) => v.as_mut_slice(),
+            Self::Shared(r) => r.as_mut_slice(),
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Heap(v) => v.as_slice(),
+            Self::Shared(r) => r.as_slice(),
+        }
+    }
+}
+
+impl fmt::Debug for Storage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Heap(v) => write!(f, "Heap({} bytes)", v.len()),
+            Self::Shared(r) => write!(f, "Shared({} bytes, fd {:?})", r.len, r.fd),
+        }
+    }
+}
+
+/// A memfd of one fixed size, sealed against growing or shrinking, mapped shared. The sealing is
+/// what lets a second process map it without either side being able to shrink it under the
+/// other's mapping, which would turn a read into a `SIGBUS`.
+struct SharedRegion {
+    fd: OwnedFd,
+    base: std::ptr::NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: a shared mapping has no thread affinity; the region is only ever reached through
+// `&self`/`&mut self`, which is what serialises access from this process.
+unsafe impl Send for SharedRegion {}
+
+impl SharedRegion {
+    /// A new memfd of `len` bytes, zero-filled, sealed, and mapped read-write.
+    fn create(len: usize) -> std::io::Result<Self> {
+        use rustix::fs::{MemfdFlags, SealFlags};
+        let fd = rustix::fs::memfd_create(
+            "bsx-frames",
+            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+        )?;
+        rustix::fs::ftruncate(&fd, len as u64)?;
+        rustix::fs::fcntl_add_seals(&fd, SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL)?;
+        let base = Self::map(
+            &fd,
+            len,
+            rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+        )?;
+        Ok(Self { fd, base, len })
+    }
+
+    /// Maps `len` bytes of `fd` shared with `prot`.
+    fn map(
+        fd: &OwnedFd,
+        len: usize,
+        prot: rustix::mm::ProtFlags,
+    ) -> std::io::Result<std::ptr::NonNull<u8>> {
+        // SAFETY: a fresh anonymous mapping of the memfd, whose size is sealed to `len`, at an
+        // address the kernel chooses; nothing else aliases it.
+        let ptr = unsafe {
+            rustix::mm::mmap(
+                std::ptr::null_mut(),
+                len,
+                prot,
+                rustix::mm::MapFlags::SHARED,
+                fd,
+                0,
+            )?
+        };
+        std::ptr::NonNull::new(ptr.cast::<u8>())
+            .ok_or_else(|| std::io::Error::other("mmap returned a null mapping"))
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: `base` is a live mapping of `len` bytes held for as long as `self` is, and
+        // `&mut self` is the only way to reach it in this process.
+        unsafe { std::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: as `as_mut_slice`, for reading.
+        unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for SharedRegion {
+    fn drop(&mut self) {
+        // SAFETY: `base`/`len` are the mapping `create`/`map` made, unmapped exactly once here.
+        let _ = unsafe { rustix::mm::munmap(self.base.as_ptr().cast(), self.len) };
+    }
+}
+
+/// What a slot is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotState {
+    /// Nobody's: the next `alloc_frame` may hand it out.
+    Free,
+    /// Handed out under this id, and libkrun may be writing into it.
+    HandedOut(u32),
+    /// Holds the frame last presented.
+    Latest,
+}
+
+/// The frame last presented on a scanout: which slot, under which id, with what damage.
+#[derive(Debug, Clone, Copy)]
+struct Latest {
+    slot: usize,
+    frame_id: u32,
+    damage: Option<Rect>,
 }
 
 /// One scanout: its shape, the buffers libkrun draws into, and the frame it last presented.
 #[derive(Debug)]
 struct Scanout {
     config: ScanoutConfig,
-    ring: [Slot; RING],
-    latest: Option<Frame>,
+    /// Bytes per slot: the frame size, which also puts slot `i` at `i * slot_bytes`.
+    slot_bytes: usize,
+    storage: Storage,
+    states: [SlotState; SLOTS],
+    latest: Option<Latest>,
     next_id: u32,
+    /// Bumped each time `storage` is replaced, so a process holding the old one can tell.
+    generation: u32,
 }
 
-/// A display backend that keeps each scanout's latest frame in host RAM, for a compositor in this
-/// process to read under the lock.
+impl Scanout {
+    fn region(&self, slot: usize) -> Option<&[u8]> {
+        let at = slot.checked_mul(self.slot_bytes)?;
+        self.storage
+            .as_slice()
+            .get(at..at.checked_add(self.slot_bytes)?)
+    }
+}
+
+/// What a frame's memory looks like to a process that maps the scanout's memfd: `slots` regions
+/// of `slot_bytes` each, back to back, each holding one `width` by `height` frame of `format`
+/// at `stride` bytes a row. Handed over the control socket beside the fd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SharedLayout {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// The pixel layout.
+    pub format: PixelFormat,
+    /// Bytes per row.
+    pub stride: u32,
+    /// Regions in the memfd.
+    pub slots: u32,
+    /// Bytes per region.
+    pub slot_bytes: u64,
+    /// Which allocation this is; a reconfigure that changes the size makes a new one.
+    pub generation: u32,
+}
+
+impl SharedLayout {
+    /// A layout with these numbers, as a client reads them off the control socket.
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        stride: u32,
+        slots: u32,
+        slot_bytes: u64,
+        generation: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            stride,
+            slots,
+            slot_bytes,
+            generation,
+        }
+    }
+}
+
+/// What a watcher is told: a present names the slot the frame is in, and a reconfigure says the
+/// slots a watcher may hold are no longer this scanout's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Event {
+    /// Frame `frame_id` is in slot `slot` of `scanout_id`.
+    Presented {
+        /// The scanout.
+        scanout_id: u32,
+        /// The id it was presented under.
+        frame_id: u32,
+        /// The region it occupies.
+        slot: u32,
+    },
+    /// `scanout_id` was reconfigured to a new size, so its memory is a new allocation.
+    Reconfigured {
+        /// The scanout.
+        scanout_id: u32,
+        /// The allocation now current.
+        generation: u32,
+    },
+}
+
+/// A frame as it sits in the backend: a borrow of the slot holding it, valid for the lock.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct FrameView<'a> {
+    /// The id it was presented under.
+    pub frame_id: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// The pixel layout.
+    pub format: PixelFormat,
+    /// The part that changed, or `None` for all of it.
+    pub damage: Option<Rect>,
+    /// The slot it occupies.
+    pub slot: u32,
+    /// The pixels, `width * 4` bytes a row.
+    pub pixels: &'a [u8],
+}
+
+impl FrameView<'_> {
+    /// A copy of the frame that outlives the lock.
+    #[must_use]
+    pub fn to_frame(&self) -> Frame {
+        Frame {
+            frame_id: self.frame_id,
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            pixels: self.pixels.to_vec(),
+            damage: self.damage,
+        }
+    }
+}
+
+/// What [`MemoryFramebuffer::watch`] registers: told each event, kept while it answers `true`.
+type Watcher = Box<dyn Fn(&Event) -> bool + Send>;
+
+/// A display backend that keeps each scanout's latest frame in host RAM, for a compositor in
+/// this process to read under the lock, or in a memfd a second process maps.
 ///
-/// **No history, and no allocation once warm.** A scanout owns `RING` buffers to hand out and
-/// one presented frame; presenting swaps the filled buffer with the previous frame's, so at steady
-/// state the bytes move owners and nothing is allocated or zeroed. A history of frames would be
-/// that many copies of the screen for a reader that wants the newest one.
+/// **No history, and no allocation once warm.** A scanout owns `SLOTS` regions of one allocation:
+/// `RING` to hand out and one holding the latest frame. Presenting marks the filled slot latest
+/// and frees the previous one, so at steady state nothing is copied, allocated or zeroed. A
+/// history of frames would be that many copies of the screen for a reader that wants the newest.
+///
+/// **A watcher learns of a present under the lock.** Each present calls every watcher from
+/// libkrun's gpu thread with the slot the frame landed in; a watcher that returns `false` is
+/// dropped, which is how a client whose socket has gone leaves without a list to be cleaned.
 #[derive(Default)]
 pub struct MemoryFramebuffer {
     scanouts: HashMap<u32, Scanout>,
-    /// Called on each present, from libkrun's thread, under the backend's lock.
-    wake: Option<Box<dyn Fn() + Send>>,
+    /// Whether scanouts allocate in memfds a second process can map.
+    shared: bool,
+    watchers: Vec<Watcher>,
 }
 
 impl fmt::Debug for MemoryFramebuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryFramebuffer")
             .field("scanouts", &self.scanouts)
-            .field("wake", &self.wake.as_ref().map(|_| "set"))
+            .field("shared", &self.shared)
+            .field("watchers", &self.watchers.len())
             .finish()
     }
 }
 
 impl MemoryFramebuffer {
-    /// An empty framebuffer: no scanouts until libkrun configures one.
+    /// An empty framebuffer whose scanouts live on this process's heap.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty framebuffer whose scanouts live in sealed memfds, so [`share`](Self::share) can
+    /// hand one to another process.
+    #[must_use]
+    pub fn shared() -> Self {
+        Self {
+            shared: true,
+            ..Self::default()
+        }
     }
 
     /// How `scanout_id` is configured, if it is.
@@ -705,25 +959,138 @@ impl MemoryFramebuffer {
         self.scanouts.get(&scanout_id).map(|s| s.config)
     }
 
-    /// The frame most recently presented on `scanout_id`, if one has been.
+    /// The frame most recently presented on `scanout_id`, if one has been, borrowed from the
+    /// slot it sits in.
     #[must_use]
-    pub fn latest_frame(&self, scanout_id: u32) -> Option<&Frame> {
-        self.scanouts.get(&scanout_id)?.latest.as_ref()
+    pub fn latest_frame(&self, scanout_id: u32) -> Option<FrameView<'_>> {
+        let scanout = self.scanouts.get(&scanout_id)?;
+        let latest = scanout.latest?;
+        Some(FrameView {
+            frame_id: latest.frame_id,
+            width: scanout.config.width,
+            height: scanout.config.height,
+            format: scanout.config.format,
+            damage: latest.damage,
+            slot: latest.slot as u32,
+            pixels: scanout.region(latest.slot)?,
+        })
     }
 
-    /// Calls `wake` each time a frame is presented, from libkrun's gpu thread while the backend's
-    /// lock is held, so it must return at once and must not take that lock. It is how a
-    /// compositor learns of a frame the moment it lands instead of polling for it.
+    /// A duplicate of the memfd holding `scanout_id`'s slots and the layout to read it by, for a
+    /// second process. `Ok(None)` while the scanout is not configured; refused as `Unsupported`
+    /// on a framebuffer made by [`new`](Self::new), whose memory is not shareable.
+    pub fn share(&self, scanout_id: u32) -> std::io::Result<Option<(OwnedFd, SharedLayout)>> {
+        let Some(scanout) = self.scanouts.get(&scanout_id) else {
+            return Ok(None);
+        };
+        let Storage::Shared(region) = &scanout.storage else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this framebuffer's slots are on the heap, not in a memfd",
+            ));
+        };
+        let bpp = scanout
+            .config
+            .format
+            .bytes_per_pixel()
+            .map_or(4, NonZeroUsize::get);
+        Ok(Some((
+            region.fd.try_clone()?,
+            SharedLayout {
+                width: scanout.config.width,
+                height: scanout.config.height,
+                format: scanout.config.format,
+                stride: scanout.config.width.saturating_mul(bpp as u32),
+                slots: SLOTS as u32,
+                slot_bytes: scanout.slot_bytes as u64,
+                generation: scanout.generation,
+            },
+        )))
+    }
+
+    /// Calls `watch` on every present and reconfigure, from libkrun's gpu thread while the
+    /// backend's lock is held, so it must return at once and must not take that lock. Returning
+    /// `false` drops the watcher.
+    pub fn watch(&mut self, watch: impl Fn(&Event) -> bool + Send + 'static) {
+        self.watchers.push(Box::new(watch));
+    }
+
+    /// Calls `wake` each time a frame is presented, under the same rules as [`watch`](Self::watch).
+    /// It is how a compositor learns of a frame the moment it lands instead of polling for it.
     pub fn set_wake(&mut self, wake: impl Fn() + Send + 'static) {
-        self.wake = Some(Box::new(wake));
+        self.watch(move |event| {
+            if matches!(event, Event::Presented { .. }) {
+                wake();
+            }
+            true
+        });
+    }
+
+    fn notify(&mut self, event: &Event) {
+        self.watchers.retain(|w| w(event));
     }
 }
 
-// SAFETY: the memory handed out is a slot's `pixels`, a heap `Vec` whose allocation changes only
-// in `alloc_frame` for a slot that is not handed out, in `present_frame` for the slot being taken
-// back (a swap moves the allocation between owners and leaves its address alone), and in
-// `configure_scanout` and `disable_scanout`, after which the header says libkrun has abandoned
-// every frame of that scanout. Nothing else touches a handed-out slot.
+/// A scanout's slots as a second process sees them: the memfd from
+/// [`MemoryFramebuffer::share`] mapped read-only, addressed by the layout that came with it.
+///
+/// **A slot is read while the helper may be reusing it.** The helper frees a slot two presents
+/// after it was the latest, and hands it out again after that; a reader that takes longer than
+/// that to consume a frame sees the next-but-one frame's pixels in it. A torn read is the cost
+/// of no copy; a fault is not possible, because the region's size is sealed.
+pub struct SharedFrames {
+    region: SharedRegion,
+    layout: SharedLayout,
+}
+
+impl SharedFrames {
+    /// Maps `fd`, a memfd from [`MemoryFramebuffer::share`], by `layout`.
+    pub fn map(fd: OwnedFd, layout: SharedLayout) -> std::io::Result<Self> {
+        let len = usize::try_from(layout.slot_bytes.saturating_mul(u64::from(layout.slots)))
+            .map_err(|_| std::io::Error::other("the layout does not fit in memory"))?;
+        let base = SharedRegion::map(&fd, len, rustix::mm::ProtFlags::READ)?;
+        Ok(Self {
+            region: SharedRegion { fd, base, len },
+            layout,
+        })
+    }
+
+    /// The layout the mapping was made by.
+    #[must_use]
+    pub fn layout(&self) -> SharedLayout {
+        self.layout
+    }
+
+    /// The frame in `slot`, presented as `frame_id`, or `None` for a slot the layout has not got.
+    #[must_use]
+    pub fn frame(&self, frame_id: u32, slot: u32) -> Option<FrameView<'_>> {
+        let bytes = usize::try_from(self.layout.slot_bytes).ok()?;
+        let at = usize::try_from(slot).ok()?.checked_mul(bytes)?;
+        let pixels = self.region.as_slice().get(at..at.checked_add(bytes)?)?;
+        Some(FrameView {
+            frame_id,
+            width: self.layout.width,
+            height: self.layout.height,
+            format: self.layout.format,
+            damage: None,
+            slot,
+            pixels,
+        })
+    }
+}
+
+impl fmt::Debug for SharedFrames {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedFrames")
+            .field("layout", &self.layout)
+            .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: the memory handed out is a region of a scanout's `storage`, whose allocation changes
+// only in `configure_scanout` (to a new size, after which the header says libkrun has abandoned
+// every frame of that scanout) and `disable_scanout`. A slot is handed out only while `Free` and
+// no other slot's region overlaps it, so nothing else touches a handed-out slot.
 unsafe impl DisplayBackend for MemoryFramebuffer {
     fn configure_scanout(
         &mut self,
@@ -743,16 +1110,56 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
         };
         // Refused before anything is recorded, so a shape that cannot be sized leaves the old
         // one in place rather than a scanout every `alloc_frame` then fails on.
-        config.frame_size()?;
-        let scanout = self.scanouts.entry(scanout_id).or_insert_with(|| Scanout {
-            config,
-            ring: Default::default(),
-            latest: None,
-            next_id: 0,
-        });
-        scanout.config = config;
-        for slot in &mut scanout.ring {
-            slot.frame_id = None;
+        let slot_bytes = config.frame_size()?;
+        let total = slot_bytes
+            .checked_mul(SLOTS)
+            .ok_or(DisplayError::InvalidParam)?;
+        let shared = self.shared;
+        let make_storage = || -> Result<Storage, DisplayError> {
+            if shared {
+                SharedRegion::create(total)
+                    .map(Storage::Shared)
+                    .map_err(|_| DisplayError::Internal)
+            } else {
+                Ok(Storage::Heap(vec![0; total]))
+            }
+        };
+        let mut reconfigured = None;
+        match self.scanouts.get_mut(&scanout_id) {
+            Some(scanout) if scanout.slot_bytes == slot_bytes => {
+                scanout.config = config;
+                scanout.states = [SlotState::Free; SLOTS];
+                scanout.latest = None;
+            }
+            Some(scanout) => {
+                scanout.storage = make_storage()?;
+                scanout.config = config;
+                scanout.slot_bytes = slot_bytes;
+                scanout.states = [SlotState::Free; SLOTS];
+                scanout.latest = None;
+                scanout.generation = scanout.generation.wrapping_add(1);
+                reconfigured = Some(scanout.generation);
+            }
+            None => {
+                self.scanouts.insert(
+                    scanout_id,
+                    Scanout {
+                        config,
+                        slot_bytes,
+                        storage: make_storage()?,
+                        states: [SlotState::Free; SLOTS],
+                        latest: None,
+                        next_id: 0,
+                        generation: 0,
+                    },
+                );
+            }
+        }
+        if let Some(generation) = reconfigured {
+            self.notify(&Event::Reconfigured {
+                scanout_id,
+                generation,
+            });
         }
         Ok(())
     }
@@ -769,11 +1176,10 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
             .scanouts
             .get_mut(&scanout_id)
             .ok_or(DisplayError::InvalidScanoutId)?;
-        let size = scanout.config.frame_size()?;
         let slot = scanout
-            .ring
-            .iter_mut()
-            .find(|s| s.frame_id.is_none())
+            .states
+            .iter()
+            .position(|s| *s == SlotState::Free)
             .ok_or(DisplayError::OutOfBuffers)?;
         let frame_id = scanout.next_id;
         scanout.next_id = if frame_id == MAX_FRAME_ID {
@@ -781,9 +1187,14 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
         } else {
             frame_id + 1
         };
-        slot.frame_id = Some(frame_id);
-        slot.pixels.resize(size, 0);
-        Ok(FrameAllocation::new(frame_id, &mut slot.pixels))
+        scanout.states[slot] = SlotState::HandedOut(frame_id);
+        let bytes = scanout.slot_bytes;
+        let region = scanout
+            .storage
+            .as_mut_slice()
+            .get_mut(slot * bytes..(slot + 1) * bytes)
+            .ok_or(DisplayError::Internal)?;
+        Ok(FrameAllocation::new(frame_id, region))
     }
 
     fn present_frame(
@@ -797,29 +1208,26 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
             .get_mut(&scanout_id)
             .ok_or(DisplayError::InvalidScanoutId)?;
         let slot = scanout
-            .ring
-            .iter_mut()
-            .find(|s| s.frame_id == Some(frame_id))
+            .states
+            .iter()
+            .position(|s| *s == SlotState::HandedOut(frame_id))
             .ok_or(DisplayError::InvalidParam)?;
-        slot.frame_id = None;
-        // The filled buffer becomes the frame, and the previous frame's buffer becomes the free
-        // slot: no bytes copied, nothing allocated.
-        let pixels = std::mem::take(&mut slot.pixels);
+        // The filled slot becomes the frame, and the previous frame's slot becomes free: no bytes
+        // copied, nothing allocated.
         if let Some(previous) = scanout.latest.take() {
-            slot.pixels = previous.pixels;
+            scanout.states[previous.slot] = SlotState::Free;
         }
-        let config = scanout.config;
-        scanout.latest = Some(Frame {
+        scanout.states[slot] = SlotState::Latest;
+        scanout.latest = Some(Latest {
+            slot,
             frame_id,
-            width: config.width,
-            height: config.height,
-            format: config.format,
-            pixels,
             damage,
         });
-        if let Some(wake) = &self.wake {
-            wake();
-        }
+        self.notify(&Event::Presented {
+            scanout_id,
+            frame_id,
+            slot: slot as u32,
+        });
         Ok(())
     }
 }
@@ -2034,10 +2442,12 @@ mod tests {
         assert_eq!(
             latest.pixels.as_ptr(),
             first_addr,
-            "the frame is the buffer, not a copy"
+            "the frame is the slot, not a copy"
         );
+        assert_eq!(latest.to_frame().pixels[..4], [1, 2, 3, 4]);
 
-        // Run the ring dry: RING allocations may be outstanding, and the next is refused.
+        // Run the ring dry: RING allocations may be outstanding beside the latest, and the next
+        // is refused.
         let mut handed = Vec::new();
         for _ in 0..RING {
             handed.push(fb.alloc_frame(0).expect("a free slot").frame_id);
@@ -2049,9 +2459,9 @@ mod tests {
         }
         assert_eq!(fb.latest_frame(0).map(|f| f.frame_id), Some(3));
 
-        // Warm: the buffer frame 0 was written into has been recycled and comes round again.
+        // Warm: the slot frame 0 was written into has been freed and comes round again.
         let mut seen = Vec::new();
-        for _ in 0..RING + 1 {
+        for _ in 0..SLOTS {
             let f = fb.alloc_frame(0).expect("a free slot");
             seen.push(f.buffer.as_ptr());
             let id = f.frame_id;
@@ -2059,7 +2469,7 @@ mod tests {
         }
         assert!(
             seen.contains(&first_addr),
-            "the first buffer never came back round"
+            "the first slot never came back round"
         );
 
         fb.configure_scanout(0, 8, 8, 8, 8, PixelFormat::B8G8R8A8Unorm)
@@ -2152,6 +2562,107 @@ mod tests {
             self.calls.push(format!("present {id} {frame} {damage:?}"));
             self.answer
         }
+    }
+
+    /// A shared scanout lives in a memfd sealed to its size, and a second mapping of that fd
+    /// reads the frame the backend presented, by the slot the event named, with no copy between.
+    #[test]
+    fn a_shared_scanout_is_a_sealed_memfd_a_second_mapping_reads() {
+        use rustix::fs::SealFlags;
+        let mut fb = MemoryFramebuffer::shared();
+        assert!(fb.share(0).expect("no scanout is not an error").is_none());
+        fb.configure_scanout(0, 2, 2, 2, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        fb.watch(move |e| {
+            log.lock().expect("unpoisoned").push(*e);
+            true
+        });
+        let alloc = fb.alloc_frame(0).expect("a slot");
+        let id = alloc.frame_id;
+        alloc.buffer[..4].copy_from_slice(&[7, 8, 9, 10]);
+        fb.present_frame(0, id, None).expect("presented");
+
+        let (fd, layout) = fb.share(0).expect("shareable").expect("configured");
+        assert_eq!(
+            (layout.width, layout.height, layout.slots),
+            (2, 2, SLOTS as u32)
+        );
+        assert_eq!(layout.slot_bytes, 16);
+        assert_eq!(layout.stride, 8);
+        let seals = rustix::fs::fcntl_get_seals(&fd).expect("seals readable");
+        assert!(seals.contains(SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL));
+
+        let events = seen.lock().expect("unpoisoned").clone();
+        assert!(
+            matches!(events[..], [Event::Presented { .. }]),
+            "one present event: {events:?}"
+        );
+        let Some(Event::Presented { frame_id, slot, .. }) = events.first().copied() else {
+            return;
+        };
+        let mapped = SharedFrames::map(fd, layout).expect("mapped");
+        let view = mapped.frame(frame_id, slot).expect("in the layout");
+        assert_eq!(&view.pixels[..4], &[7, 8, 9, 10]);
+        assert!(
+            mapped.frame(0, layout.slots).is_none(),
+            "a slot past the layout"
+        );
+
+        assert!(
+            MemoryFramebuffer::new().share(0).is_ok(),
+            "no scanout on a heap framebuffer is still None"
+        );
+        let mut heap = MemoryFramebuffer::new();
+        heap.configure_scanout(0, 1, 1, 1, 1, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured");
+        assert_eq!(
+            heap.share(0)
+                .map(drop)
+                .expect_err("heap is not shareable")
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
+    /// A reconfigure to the same size keeps the allocation and tells nobody; one to a new size
+    /// makes a new allocation, bumps the generation, and tells every watcher, and a watcher that
+    /// answers `false` is dropped there and then.
+    #[test]
+    fn a_resize_tells_watchers_and_a_watcher_may_leave() {
+        let mut fb = MemoryFramebuffer::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        fb.watch(move |e| {
+            log.lock().expect("unpoisoned").push(*e);
+            !matches!(e, Event::Reconfigured { .. })
+        });
+        fb.configure_scanout(0, 2, 2, 2, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("configured");
+        fb.configure_scanout(0, 2, 2, 2, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("the same shape again");
+        assert!(
+            seen.lock().expect("unpoisoned").is_empty(),
+            "same size: silent"
+        );
+        fb.configure_scanout(0, 4, 4, 4, 4, PixelFormat::B8G8R8X8Unorm)
+            .expect("a new size");
+        assert_eq!(
+            seen.lock().expect("unpoisoned").as_slice(),
+            &[Event::Reconfigured {
+                scanout_id: 0,
+                generation: 1
+            }]
+        );
+        assert_eq!(fb.watchers.len(), 0, "the watcher left on the reconfigure");
+        let id = fb.alloc_frame(0).expect("a slot").frame_id;
+        fb.present_frame(0, id, None).expect("presented");
+        assert_eq!(
+            seen.lock().expect("unpoisoned").len(),
+            1,
+            "nobody left to tell"
+        );
     }
 
     /// The wake runs once per present and for nothing else, so a compositor woken by it has a

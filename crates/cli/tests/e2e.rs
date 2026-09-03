@@ -891,6 +891,148 @@ fn a_frame_log_records_each_frame_the_guest_flushed() {
     );
 }
 
+/// A second process sees the frames a guest draws without a copy (roadmap 4.9): it leases the
+/// display over the control socket, maps the memfd the answer carries, is told each present's
+/// slot, and reads the drawn pattern out of that slot. Its frame log names the same frame ids as
+/// the helper's own, on the same clock.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_second_process_maps_the_frames_the_guest_draws() {
+    if skipped("a_second_process_maps_the_frames_the_guest_draws") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-boundary");
+    let rt = dir.path().join("rt");
+    std::fs::create_dir(&rt).expect("a runtime dir");
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).expect("private");
+    let mount_dir = dir.path().join("m");
+    std::fs::create_dir(&mount_dir).expect("a mount dir");
+    std::fs::write(mount_dir.join("draw.py"), include_str!("drm_draw.py")).expect("stage");
+    let helper_log = dir.path().join("helper.tsv");
+    let client_log = dir.path().join("client.tsv");
+    let shot = dir.path().join("shot.ppm");
+    let mount = format!("/mnt={}", mount_dir.display());
+
+    let up = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["up", "--root"])
+        .arg(guest_root())
+        .args([
+            "--name",
+            "boundary",
+            "--display",
+            "320x240",
+            "--mount",
+            &mount,
+        ])
+        .arg("--frame-log")
+        .arg(&helper_log)
+        .output()
+        .expect("run bsx up");
+    assert!(
+        up.status.success(),
+        "up: {}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    // Stopped however this ends, so a failed assertion leaves no guest behind.
+    struct Stop(PathBuf);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = bsx()
+                .env("XDG_RUNTIME_DIR", &self.0)
+                .args(["stop", "boundary"])
+                .output();
+        }
+    }
+    let _stop = Stop(rt.clone());
+
+    // The reader first, so it holds the lease while the guest draws. It waits for the scanout,
+    // which the guest's mode set creates, and reads until the lease ends, which is the stop
+    // below: a lease taken after the scanout's first frames never sees them, so no count is safe.
+    let reader = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["__frames", "boundary"])
+        .arg("--log")
+        .arg(&client_log)
+        .arg("--screenshot")
+        .arg(&shot)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run the reader");
+    let drew = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["exec", "boundary", "--", "python3", "/mnt/draw.py", "4"])
+        .output()
+        .expect("run bsx exec");
+    assert!(
+        String::from_utf8_lossy(&drew.stdout).contains("DRAW setcrtc ok"),
+        "the guest drew: {}",
+        String::from_utf8_lossy(&drew.stderr)
+    );
+    let stopped = bsx()
+        .env("XDG_RUNTIME_DIR", &rt)
+        .args(["stop", "boundary"])
+        .output()
+        .expect("run bsx stop");
+    assert!(
+        stopped.status.success(),
+        "stop: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let status = reader.wait_with_output().expect("wait for the reader");
+    assert!(
+        status.status.success(),
+        "the reader ends when the lease does: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    // The pixels crossed: the pattern draw.py paints, read out of the mapped slot.
+    let ppm = std::fs::read(&shot).expect("the reader's screenshot");
+    let mut parts = ppm.splitn(4, |&b| b == b'\n');
+    assert_eq!(parts.next(), Some(&b"P6"[..]));
+    assert_eq!(parts.next(), Some(&b"320 240"[..]));
+    parts.next();
+    let px = parts.next().expect("pixels");
+    let at = |x: usize, y: usize| &px[(y * 320 + x) * 3..(y * 320 + x) * 3 + 3];
+    assert_eq!(at(2, 2), [255, 0, 0], "top-left is red");
+    assert_eq!(at(317, 237), [255, 255, 255], "bottom-right is white");
+    assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
+
+    // The two logs name the same frames on the same clock, within the wake's latency of each
+    // other in either direction: the record is written under the lock before the helper's own
+    // thread has woken, so the client is often the earlier one.
+    let rows = |path: &Path| -> Vec<(u64, u128)> {
+        std::fs::read_to_string(path)
+            .expect("a log")
+            .lines()
+            .map(|l| {
+                let (id, ns) = l.split_once('\t').expect("id, tab, ns");
+                (id.parse().expect("id"), ns.parse().expect("ns"))
+            })
+            .collect()
+    };
+    let helper = rows(&helper_log);
+    let client = rows(&client_log);
+    assert!(
+        client.len() >= 3,
+        "the flushes after the lease, at least three of four: {client:?}"
+    );
+    for (id, seen_by_client) in &client {
+        let (_, seen_by_helper) = helper
+            .iter()
+            .find(|(h, _)| h == id)
+            .unwrap_or_else(|| panic!("frame {id} is in the helper's log too: {helper:?}"));
+        let apart = seen_by_client.abs_diff(*seen_by_helper);
+        assert!(
+            apart < 20_000_000,
+            "frame {id}: the two processes saw it {apart} ns apart, more than a wake should cost"
+        );
+    }
+}
+
 /// The crash class found while building 3.3: a byte outside printable ASCII in the workload's
 /// argv aborted the whole VMM inside libkrun (SIGABRT, exit 134). It must be a typed refusal.
 #[test]

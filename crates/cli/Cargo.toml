@@ -22,7 +22,7 @@ bsx-supervisor = { path = "../supervisor" }
 clap = { workspace = true }
 # Raw mode and window size for the interactive shell, the self-signal a VM stops itself with, and
 # the readiness wait on a non-blocking stdin. Safe wrappers only.
-rustix = { workspace = true, features = ["event", "pipe", "process", "termios"] }
+rustix = { workspace = true, features = ["event", "pipe", "process", "termios", "time"] }
 # The `--display` window, on a thread of the helper that is the VM (`src/window.rs`).
 winit = { workspace = true }
 softbuffer = { workspace = true }

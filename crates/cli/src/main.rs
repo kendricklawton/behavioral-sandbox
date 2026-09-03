@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod frames;
 mod input;
 mod lifecycle;
 mod run;
@@ -60,6 +61,11 @@ enum Cmd {
     /// with the exact arguments the supervisor used.
     #[command(name = vmm::HELPER_SUBCOMMAND, hide = true)]
     Vmm(vmm::VmmArgs),
+    /// Read a running sandbox's display through the control socket. A development verb: what
+    /// `cargo xtask bench-frames` runs to time the process boundary, and the end-to-end test's
+    /// proof that a second process sees the frames.
+    #[command(name = "__frames", hide = true)]
+    Frames(frames::FramesArgs),
 }
 
 fn main() -> ExitCode {
@@ -71,5 +77,6 @@ fn main() -> ExitCode {
         Cmd::Exec(args) => lifecycle::exec(&args),
         Cmd::Stop(args) => lifecycle::stop(&args),
         Cmd::Vmm(args) => vmm::run(&args),
+        Cmd::Frames(args) => frames::run(&args),
     }
 }

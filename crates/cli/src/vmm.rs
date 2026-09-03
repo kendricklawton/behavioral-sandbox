@@ -27,14 +27,20 @@
 
 use std::ffi::OsStr;
 use std::num::{NonZeroU8, NonZeroU32};
+use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use clap::Args;
 
 #[cfg(test)]
 use crate::{Cli, Cmd};
+
+/// The scanout a display's lease and window show: libkrun numbers them from zero and one
+/// display makes one.
+const SCANOUT: u32 = 0;
 
 /// The subcommand name, declared once here so the supervisor that spawns it and the parser that
 /// reads it cannot drift into a binary invoked with a subcommand it does not have.
@@ -561,8 +567,11 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     // process when the guest ends, which does not unwind, so there is nothing a `Drop` here could
     // clean up: the socket file outliving this process is the normal case, and the supervisor's
     // stale check is what handles it.
+    // The display's framebuffer does not exist yet when the socket is bound, and the control
+    // thread has to answer a display lease from it once it does: the slot is filled below.
+    let display_share: DisplayShare = Arc::new(OnceLock::new());
     if let Some(name) = args.name.as_deref() {
-        bind_control_socket(name, control_info(args))?;
+        bind_control_socket(name, control_info(args), Arc::clone(&display_share))?;
     }
 
     let mut machine = bsx_krun::Context::new()?
@@ -602,8 +611,11 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         if let Some(hz) = refresh {
             with_display = with_display.display_set_refresh_rate(display_id, hz.get())?;
         }
+        // Shared, not heap: the slots live in a memfd so a `display` lease over the control
+        // socket can hand them to another process without a copy (4.9).
         let (with_backend, framebuffer) =
-            with_display.display_backend(bsx_krun::MemoryFramebuffer::new())?;
+            with_display.display_backend(bsx_krun::MemoryFramebuffer::shared())?;
+        let _ = display_share.set(Arc::clone(&framebuffer));
         let (with_keyboard, keyboard) = with_backend.input_device(crate::input::keyboard())?;
         let (with_pointer, pointer) = with_keyboard.input_device(crate::input::pointer())?;
         machine = with_pointer;
@@ -691,7 +703,14 @@ fn control_info(args: &VmmArgs) -> bsx_supervisor::control::Info {
 /// [`Request::Stop`](bsx_supervisor::control::Request::Stop) by ending this process, which is what
 /// ending a VM is. Its liveness is also what discovery reads, so a VM is listed for exactly as
 /// long as it can answer.
-fn bind_control_socket(name: &str, info: bsx_supervisor::control::Info) -> Result<(), HelperError> {
+/// The framebuffer the control thread leases displays from, filled once the display exists.
+type DisplayShare = Arc<OnceLock<Arc<Mutex<bsx_krun::MemoryFramebuffer>>>>;
+
+fn bind_control_socket(
+    name: &str,
+    info: bsx_supervisor::control::Info,
+    display: DisplayShare,
+) -> Result<(), HelperError> {
     let path = bsx_supervisor::socket::path_for(name).map_err(HelperError::Socket)?;
     // A leftover from a previous helper with this name would make `bind` fail with EADDRINUSE. Only
     // cleared when nothing is listening, so a name genuinely in use still refuses.
@@ -705,7 +724,7 @@ fn bind_control_socket(name: &str, info: bsx_supervisor::control::Info) -> Resul
 
     std::thread::Builder::new()
         .name(format!("bsx-ctl-{name}"))
-        .spawn(move || serve_control(&listener, &info))
+        .spawn(move || serve_control(&listener, &info, &display))
         .map_err(HelperError::Socket)?;
     Ok(())
 }
@@ -721,6 +740,7 @@ const CONTROL_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 fn serve_control(
     listener: &std::os::unix::net::UnixListener,
     info: &bsx_supervisor::control::Info,
+    display: &DisplayShare,
 ) {
     use bsx_supervisor::control::{Request, read_request, write_answer};
 
@@ -734,6 +754,10 @@ fn serve_control(
         let Ok(request) = read_request(&mut stream) else {
             continue;
         };
+        if request == Some(Request::Display) {
+            lease_display(stream, display.get());
+            continue;
+        }
         if write_answer(&mut stream, request, info).is_err() {
             continue;
         }
@@ -745,6 +769,71 @@ fn serve_control(
             stop_this_vm();
         }
     }
+}
+
+/// Answers a display lease: the memfd and layout now, then one record per present on the same
+/// connection until the client goes or the scanout is resized. The record is written from
+/// libkrun's gpu thread under the backend's lock, non-blocking, and a client that cannot take it
+/// (gone, or so far behind that the socket is full) is dropped there rather than waited for.
+fn lease_display(
+    stream: std::os::unix::net::UnixStream,
+    framebuffer: Option<&Arc<Mutex<bsx_krun::MemoryFramebuffer>>>,
+) {
+    use bsx_supervisor::control::{
+        RECONFIGURED_SLOT, Scanout, write_display_answer, write_present, write_refusal,
+    };
+    let mut stream = stream;
+    let Some(framebuffer) = framebuffer else {
+        let _ = write_refusal(&mut stream, "this VM has no display");
+        return;
+    };
+    let mut guard = framebuffer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let shared = match guard.share(SCANOUT) {
+        Ok(Some(shared)) => shared,
+        Ok(None) => {
+            let _ = write_refusal(&mut stream, "no scanout is configured yet; ask again");
+            return;
+        }
+        Err(e) => {
+            let _ = write_refusal(&mut stream, &format!("the display cannot be shared: {e}"));
+            return;
+        }
+    };
+    let (memfd, layout) = shared;
+    let scanout = Scanout::new(
+        layout.width,
+        layout.height,
+        layout.format.to_raw(),
+        layout.stride,
+        layout.slots,
+        layout.slot_bytes,
+        layout.generation,
+    );
+    // Answered under the lock, so no present can slip between the layout and the first record.
+    if write_display_answer(&stream, memfd.as_fd(), &scanout).is_err() {
+        return;
+    }
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    let generation = layout.generation;
+    guard.watch(move |event| match *event {
+        bsx_krun::Event::Presented {
+            scanout_id: SCANOUT,
+            frame_id,
+            slot,
+        } => write_present(&mut &stream, frame_id, slot).is_ok(),
+        bsx_krun::Event::Reconfigured {
+            scanout_id: SCANOUT,
+            generation: now,
+        } if now != generation => {
+            let _ = write_present(&mut &stream, 0, RECONFIGURED_SLOT);
+            false
+        }
+        _ => true,
+    });
 }
 
 /// Ends this process, which is what ending a VM is: `krun_start_enter` never returns, so there is
