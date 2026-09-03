@@ -18,8 +18,9 @@ deleted rather than carried alongside a replacement that did not exist yet. The 
 command in a sandbox (`bsx run`), a session on a guest pty (`bsx shell`), and a sandbox that
 outlives the command that started it (`bsx up`, reached afterwards with `ls`, `exec` and `stop`),
 and shows a guest's display in a window whose keyboard and pointer reach the guest (`--display`),
-with a desktop image that boots to a terminal in a Wayland session there, and `--sound` for audio. The GUI application, GPU acceleration and
-macOS are not written.
+with a desktop image that boots to a terminal in a Wayland session there, and `--sound` for audio.
+`bsx-app` shows a sandbox's display in a window and nothing else yet. The rest of the GUI
+application, GPU acceleration and macOS are not written.
 
 This book is short, and deliberately so: it describes the rules the project is built to and the
 crates that are actually in the tree. Pages describing the previous design were removed rather than

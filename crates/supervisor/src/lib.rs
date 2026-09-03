@@ -862,8 +862,9 @@ pub mod control {
     use super::{Net, RootFs};
 
     /// The grammar's version, reported in every [`Request::Info`] answer so a client meeting an
-    /// older or newer VM can say so instead of misreading its fields. 2 added [`Request::Display`].
-    pub const PROTOCOL_VERSION: u8 = 2;
+    /// older or newer VM can say so instead of misreading its fields. 2 added [`Request::Display`],
+    /// 3 put the damage rectangle in each present record.
+    pub const PROTOCOL_VERSION: u8 = 3;
 
     /// The slot number a present record carries when the scanout was reconfigured instead: the
     /// client's mapping is of an allocation that is no longer the scanout's.
@@ -1273,11 +1274,58 @@ pub mod control {
         Ok(())
     }
 
-    /// Writes one present record: `frame_id` then `slot`, each four bytes little-endian.
-    pub fn write_present(out: &mut impl Write, frame_id: u32, slot: u32) -> io::Result<()> {
-        let mut record = [0u8; 8];
-        record[..4].copy_from_slice(&frame_id.to_le_bytes());
-        record[4..].copy_from_slice(&slot.to_le_bytes());
+    /// The part of a frame that changed since the one before it, in pixels.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct Damage {
+        /// Left edge.
+        pub x: u32,
+        /// Top edge.
+        pub y: u32,
+        /// Width.
+        pub width: u32,
+        /// Height.
+        pub height: u32,
+    }
+
+    impl Damage {
+        /// A rectangle at `(x, y)` of `width` by `height`.
+        #[must_use]
+        pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+            Self {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
+    }
+
+    /// Bytes in one present record: six `u32`s.
+    const RECORD_LEN: usize = 24;
+
+    /// Writes one present record: `frame_id`, `slot`, then the damage's `x`, `y`, `width` and
+    /// `height`, each four bytes little-endian.
+    pub fn write_present(
+        out: &mut impl Write,
+        frame_id: u32,
+        slot: u32,
+        damage: Damage,
+    ) -> io::Result<()> {
+        let mut record = [0u8; RECORD_LEN];
+        for (at, word) in [
+            frame_id,
+            slot,
+            damage.x,
+            damage.y,
+            damage.width,
+            damage.height,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            record[at * 4..at * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
         out.write_all(&record)
     }
 
@@ -1291,6 +1339,8 @@ pub mod control {
             frame_id: u32,
             /// The region it occupies.
             slot: u32,
+            /// The part that changed since the frame before it.
+            damage: Damage,
         },
         /// The scanout was reconfigured to a new size: the mapping is stale, and the VM will send
         /// nothing more on this lease. Ask again for a new one.
@@ -1323,17 +1373,28 @@ pub mod control {
         /// Waits for the next record. `Io` with `UnexpectedEof` is the VM closing the lease,
         /// which is what a VM ending does.
         pub fn next_event(&mut self) -> Result<Event, Error> {
-            let mut record = [0u8; 8];
-            let have = self.pending.len().min(8);
+            let mut record = [0u8; RECORD_LEN];
+            let have = self.pending.len().min(RECORD_LEN);
             record[..have].copy_from_slice(&self.pending[..have]);
             self.pending.drain(..have);
             self.stream.read_exact(&mut record[have..])?;
-            let frame_id = u32::from_le_bytes([record[0], record[1], record[2], record[3]]);
-            let slot = u32::from_le_bytes([record[4], record[5], record[6], record[7]]);
+            let word = |at: usize| {
+                u32::from_le_bytes([
+                    record[at * 4],
+                    record[at * 4 + 1],
+                    record[at * 4 + 2],
+                    record[at * 4 + 3],
+                ])
+            };
+            let (frame_id, slot) = (word(0), word(1));
             Ok(if slot == RECONFIGURED_SLOT {
                 Event::Reconfigured
             } else {
-                Event::Presented { frame_id, slot }
+                Event::Presented {
+                    frame_id,
+                    slot,
+                    damage: Damage::new(word(2), word(3), word(4), word(5)),
+                }
             })
         }
     }
@@ -2189,18 +2250,22 @@ mod control_tests {
                 .expect("the request");
             assert_eq!(request.trim_end(), "display");
             control::write_display_answer(&server, file.as_fd(), &scanout).expect("answered");
-            control::write_present(&mut &server, 41, 2).expect("a record");
-            control::write_present(&mut &server, 42, 3).expect("a record");
-            control::write_present(&mut &server, 0, control::RECONFIGURED_SLOT).expect("the end");
-            file.as_raw_fd()
+            let whole = control::Damage::new(0, 0, 320, 240);
+            control::write_present(&mut &server, 41, 2, whole).expect("a record");
+            control::write_present(&mut &server, 42, 3, control::Damage::new(16, 8, 4, 2))
+                .expect("a record");
+            control::write_present(&mut &server, 0, control::RECONFIGURED_SLOT, whole)
+                .expect("the end");
+            file
         });
         let mut lease = control::lease_on(client).expect("leased");
         assert_eq!(lease.scanout(), scanout, "the layout as sent");
         let memfd = lease.take_memfd().expect("the fd came with the answer");
+        // The original stays open across the comparison: a closed number can be handed out again.
         let original = answered.join().expect("the server thread");
         assert_ne!(
             memfd.as_raw_fd(),
-            original,
+            original.as_raw_fd(),
             "a passed fd is a new descriptor"
         );
         assert!(lease.take_memfd().is_none(), "taken once");
@@ -2208,14 +2273,16 @@ mod control_tests {
             lease.next_event().expect("first"),
             control::Event::Presented {
                 frame_id: 41,
-                slot: 2
+                slot: 2,
+                damage: control::Damage::new(0, 0, 320, 240),
             }
         );
         assert_eq!(
             lease.next_event().expect("second"),
             control::Event::Presented {
                 frame_id: 42,
-                slot: 3
+                slot: 3,
+                damage: control::Damage::new(16, 8, 4, 2),
             }
         );
         assert_eq!(

@@ -226,11 +226,12 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
 /// fixture so the bench and the end-to-end tests draw through one program.
 const FLIPPER: &str = include_str!("../../crates/cli/tests/drm_flip.py");
 
-/// `cargo xtask bench-frames --display WxH[@HZ] --frames N`: one run per path (`dirty`, unpaced;
-/// `flip`, paced by the refresh rate), each reporting the intervals between frames as the helper
-/// saw them arrive, the frames the guest presented against the frames the host got to see, and
-/// the guest's own timing of its loop.
-pub(crate) fn bench_frames(display: &str, frames: usize) -> Result<()> {
+/// `cargo xtask bench-frames --display WxH[@HZ] --frames N [--app]`: one run per path (`dirty`,
+/// unpaced; `flip`, paced by the refresh rate), each reporting the intervals between frames as the
+/// helper saw them arrive, the frames the guest presented against the frames the host got to see,
+/// and the guest's own timing of its loop. Then the process boundary, and with `--app` the frames
+/// through `bsx-app`'s window.
+pub(crate) fn bench_frames(display: &str, frames: usize, app: bool) -> Result<()> {
     if frames == 0 {
         bail!("--frames must be >= 1");
     }
@@ -290,6 +291,9 @@ pub(crate) fn bench_frames(display: &str, frames: usize) -> Result<()> {
          ran, which the latest-frame design allows and a real window would also not have shown."
     );
     bench_boundary(&ctx, display, frames, &stage)?;
+    if app {
+        bench_app(&ctx, display, frames, &stage)?;
+    }
     Ok(())
 }
 
@@ -297,16 +301,148 @@ pub(crate) fn bench_frames(display: &str, frames: usize) -> Result<()> {
 /// the memfd, and logs each present record as it reads it; the helper's own frame log names the
 /// same frames on the same clock, and the difference per frame is what the boundary cost.
 fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> Result<()> {
-    let name = "bench-frames-boundary";
     let helper_log = stage.join("boundary-helper.tsv");
     let client_log = stage.join("boundary-client.tsv");
+    let mut reader = Command::new(&ctx.bsx);
+    reader
+        .args(["__frames", "bench-frames-boundary"])
+        .arg("--log")
+        .arg(&client_log);
+    let read = run_through_reader(
+        ctx,
+        "bench-frames-boundary",
+        display,
+        frames,
+        stage,
+        &helper_log,
+        reader,
+    )?;
+    if !read.status.success() {
+        bail!(
+            "the reader failed: {}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+    }
+    let helper = read_frame_log(&helper_log)?;
+    let client = read_frame_log(&client_log)?;
+    println!("path flip, through the boundary (a second process mapping the memfd):");
+    println!(
+        "  helper saw {} frames, the client read {}",
+        helper.len(),
+        client.len()
+    );
+    let mut offsets = offsets_us(&client, &helper);
+    report_signed("client minus helper", &mut offsets, "us");
+    println!(
+        "  the same frame ids on the same clock: when the second process had each frame relative\n\
+         to the helper's own display thread. Negative is earlier: the record is written from\n\
+         libkrun's thread under the lock, before the helper's thread has woken. This is the\n\
+         boundary's whole cost; the frames themselves were never copied."
+    );
+    Ok(())
+}
+
+/// The application (4.10): `bsx-app` leases the display into a window, logging each present as
+/// it reads it and each frame it uploads to the GPU. What reaches the screen is bounded by the
+/// panel, so "uploaded" against "presented" is the number, and the upload's lag behind the helper
+/// is the cost of the window.
+fn bench_app(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> Result<()> {
+    let app = ctx.bsx.with_file_name("bsx-app");
+    if !app.is_file() {
+        bail!(
+            "no release app at {} — run `cargo build --release -p bsx-app`",
+            app.display()
+        );
+    }
+    let (wayland, x11) = (
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("DISPLAY"),
+    );
+    if wayland.is_none() && x11.is_none() {
+        println!("path flip, through bsx-app: SKIPPED (no WAYLAND_DISPLAY or DISPLAY: no window)");
+        return Ok(());
+    }
+    let helper_log = stage.join("app-helper.tsv");
+    let read_log = stage.join("app-read.tsv");
+    let drawn_log = stage.join("app-drawn.tsv");
+    let mut reader = Command::new(&app);
+    reader
+        .arg("bench-frames-app")
+        .arg("--log")
+        .arg(&read_log)
+        .arg("--drawn-log")
+        .arg(&drawn_log);
+    // The app finds the sandbox under the bench's private runtime dir, so the compositor's socket,
+    // which lives under the real one, is named by its absolute path.
+    if let (Some(real), Some(socket)) = (std::env::var_os("XDG_RUNTIME_DIR"), wayland)
+        && !Path::new(&socket).is_absolute()
+    {
+        reader.env("WAYLAND_DISPLAY", Path::new(&real).join(socket));
+    }
+    let ran = run_through_reader(
+        ctx,
+        "bench-frames-app",
+        display,
+        frames,
+        stage,
+        &helper_log,
+        reader,
+    )?;
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    if !ran.status.success() {
+        bail!("bsx-app failed: {stderr}");
+    }
+    let helper = read_frame_log(&helper_log)?;
+    let read = read_frame_log(&read_log)?;
+    let drawn = read_frame_log(&drawn_log)?;
+    println!("path flip, through bsx-app (iced, wgpu):");
+    for line in stderr.lines().filter(|l| l.starts_with("bsx-app:")) {
+        println!("  {}", line.trim_start_matches("bsx-app:").trim());
+    }
+    println!(
+        "  helper saw {} frames, the app read {} and uploaded {}",
+        helper.len(),
+        read.len(),
+        drawn.len()
+    );
+    if let Some((&(_, first), &(_, last))) = drawn.first().zip(drawn.last()) {
+        let span = last.saturating_sub(first).max(1) as f64 / 1e9;
+        println!(
+            "  uploads: {:.1}/s over {span:.2} s (the panel's refresh rate is the ceiling)",
+            drawn.len().saturating_sub(1) as f64 / span
+        );
+    }
+    let mut read_offsets = offsets_us(&read, &helper);
+    report_signed("read minus helper", &mut read_offsets, "us");
+    let mut drawn_offsets = offsets_us(&drawn, &helper);
+    report_signed("uploaded minus helper", &mut drawn_offsets, "us");
+    println!(
+        "  \"uploaded\" is the frame's bytes queued to the GPU from the mapped slot, at the redraw\n\
+         the compositor granted; the frames the app read but never uploaded were superseded before\n\
+         a redraw came, which the panel's rate makes inevitable above it."
+    );
+    Ok(())
+}
+
+/// `bsx up` with a frame log at `helper_log`, `reader` (which takes the sandbox `name`) on it,
+/// the flipper through `bsx exec`, then `bsx stop`; the reader's output once it has exited, which
+/// it does when the lease ends.
+fn run_through_reader(
+    ctx: &BenchContext,
+    name: &str,
+    display: &str,
+    frames: usize,
+    stage: &Path,
+    helper_log: &Path,
+    mut reader: Command,
+) -> Result<std::process::Output> {
     let up = Command::new(&ctx.bsx)
         .arg("up")
         .arg("--root")
         .arg(&ctx.guest_root)
         .args(["--name", name, "--display", display])
         .arg("--frame-log")
-        .arg(&helper_log)
+        .arg(helper_log)
         .arg("--mount")
         .arg(format!("/mnt={}", stage.display()))
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
@@ -314,7 +450,7 @@ fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path
         .env_remove("WAYLAND_DISPLAY")
         .stdin(Stdio::null())
         .output()
-        .context("run bsx up for the boundary")?;
+        .with_context(|| format!("run bsx up for {name}"))?;
     if !up.status.success() {
         bail!("bsx up failed: {}", String::from_utf8_lossy(&up.stderr));
     }
@@ -324,18 +460,16 @@ fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path
             .env("XDG_RUNTIME_DIR", &ctx.runtime)
             .output();
     };
-    // No `--count`: the reader ends when the lease does, which is the VM stopping below; a
-    // count could be missed, since a lease taken after the scanout's first frames never sees them.
-    let reader = Command::new(&ctx.bsx)
-        .args(["__frames", name])
-        .arg("--log")
-        .arg(&client_log)
+    // No frame count for the reader: it ends when the lease does, which is the VM stopping below;
+    // a count could be missed, since a lease taken after the scanout's first frames never sees
+    // them.
+    let reader = reader
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .context("run the frame reader")?;
+        .with_context(|| format!("run the reader for {name}"))?;
     let drew = Command::new(&ctx.bsx)
         .args([
             "exec",
@@ -358,35 +492,18 @@ fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path
             String::from_utf8_lossy(&drew.stderr)
         );
     }
-    if !read.status.success() {
-        bail!(
-            "the reader failed: {}",
-            String::from_utf8_lossy(&read.stderr)
-        );
-    }
-    let helper = read_frame_log(&helper_log)?;
-    let client = read_frame_log(&client_log)?;
-    println!("path flip, through the boundary (a second process mapping the memfd):");
-    println!(
-        "  helper saw {} frames, the client read {}",
-        helper.len(),
-        client.len()
-    );
-    let mut offsets: Vec<i64> = client
+    Ok(read)
+}
+
+/// For each frame in `later` that `earlier` also names, `later` minus `earlier` in microseconds.
+fn offsets_us(later: &[(u64, u64)], earlier: &[(u64, u64)]) -> Vec<i64> {
+    later
         .iter()
         .filter_map(|(id, at)| {
-            let (_, seen) = helper.iter().find(|(h, _)| h == id)?;
+            let (_, seen) = earlier.iter().find(|(h, _)| h == id)?;
             Some((i128::from(*at) - i128::from(*seen)) as i64 / 1000)
         })
-        .collect();
-    report_signed("client minus helper", &mut offsets, "us");
-    println!(
-        "  the same frame ids on the same clock: when the second process had each frame relative\n\
-         to the helper's own display thread. Negative is earlier: the record is written from\n\
-         libkrun's thread under the lock, before the helper's thread has woken. This is the\n\
-         boundary's whole cost; the frames themselves were never copied."
-    );
-    Ok(())
+        .collect()
 }
 
 /// [`report_percentiles`] for values that may be negative.

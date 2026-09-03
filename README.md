@@ -35,7 +35,7 @@ in a sandbox and exits with its status, `bsx shell` opens a session on a pty ins
 `bsx up` starts a sandbox that outlives the command that started it, and `bsx ls`, `bsx exec` and
 `bsx stop` reach a sandbox this process did not start, and `--display WIDTHxHEIGHT` shows a guest's
 screen in a window whose keyboard and pointer go to the guest, and the desktop image boots to a
-terminal in a Wayland session there, with `--sound` for audio. What is not here: the GUI application, GPU acceleration, and macOS. If you want
+terminal in a Wayland session there, with `--sound` for audio. `bsx-app` shows a sandbox's display in a window and does nothing else yet. What is not here: the rest of the GUI application, GPU acceleration, and macOS. If you want
 the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
@@ -97,6 +97,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/channel` | `bsx-channel` | The host↔guest wire protocol: nearly dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by both ends. |
 | `crates/guest-agent` | `bsx-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/cli` | `bsx` | The `bsx` CLI. No verbs today. The binary on `PATH` is `bsx`. |
+| `crates/app` | `bsx-app` | The GUI application, on iced. Today a spike: one window showing a sandbox's display. |
 | `crates/test-support` | `bsx-test-support` | Shared test fixtures: a self-reclaiming scratch dir, a log sink, a deterministic generator. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the guest image build, the vendor mirror. Never shipped. |

@@ -698,6 +698,9 @@ struct SharedRegion {
 // SAFETY: a shared mapping has no thread affinity; the region is only ever reached through
 // `&self`/`&mut self`, which is what serialises access from this process.
 unsafe impl Send for SharedRegion {}
+// SAFETY: `&self` only reads the mapping, and two readers of the same bytes on two threads see
+// what one reader sees: the bytes another process may be writing, which `SharedFrames` states.
+unsafe impl Sync for SharedRegion {}
 
 impl SharedRegion {
     /// A new memfd of `len` bytes, zero-filled, sealed, and mapped read-write.
@@ -859,6 +862,8 @@ pub enum Event {
         frame_id: u32,
         /// The region it occupies.
         slot: u32,
+        /// The part that changed since the frame before it, or `None` for all of it.
+        damage: Option<Rect>,
     },
     /// `scanout_id` was reconfigured to a new size, so its memory is a new allocation.
     Reconfigured {
@@ -1227,6 +1232,7 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
             scanout_id,
             frame_id,
             slot: slot as u32,
+            damage,
         });
         Ok(())
     }
@@ -2582,7 +2588,8 @@ mod tests {
         let alloc = fb.alloc_frame(0).expect("a slot");
         let id = alloc.frame_id;
         alloc.buffer[..4].copy_from_slice(&[7, 8, 9, 10]);
-        fb.present_frame(0, id, None).expect("presented");
+        fb.present_frame(0, id, Some(Rect::new(0, 0, 1, 1)))
+            .expect("presented");
 
         let (fd, layout) = fb.share(0).expect("shareable").expect("configured");
         assert_eq!(
@@ -2599,9 +2606,20 @@ mod tests {
             matches!(events[..], [Event::Presented { .. }]),
             "one present event: {events:?}"
         );
-        let Some(Event::Presented { frame_id, slot, .. }) = events.first().copied() else {
+        let Some(Event::Presented {
+            frame_id,
+            slot,
+            damage,
+            ..
+        }) = events.first().copied()
+        else {
             return;
         };
+        assert_eq!(
+            damage,
+            Some(Rect::new(0, 0, 1, 1)),
+            "the damage rides the event"
+        );
         let mapped = SharedFrames::map(fd, layout).expect("mapped");
         let view = mapped.frame(frame_id, slot).expect("in the layout");
         assert_eq!(&view.pixels[..4], &[7, 8, 9, 10]);

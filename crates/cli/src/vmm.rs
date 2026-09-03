@@ -780,7 +780,7 @@ fn lease_display(
     framebuffer: Option<&Arc<Mutex<bsx_krun::MemoryFramebuffer>>>,
 ) {
     use bsx_supervisor::control::{
-        RECONFIGURED_SLOT, Scanout, write_display_answer, write_present, write_refusal,
+        Damage, RECONFIGURED_SLOT, Scanout, write_display_answer, write_present, write_refusal,
     };
     let mut stream = stream;
     let Some(framebuffer) = framebuffer else {
@@ -819,17 +819,22 @@ fn lease_display(
         return;
     }
     let generation = layout.generation;
+    let whole = Damage::new(0, 0, layout.width, layout.height);
     guard.watch(move |event| match *event {
         bsx_krun::Event::Presented {
             scanout_id: SCANOUT,
             frame_id,
             slot,
-        } => write_present(&mut &stream, frame_id, slot).is_ok(),
+            damage,
+        } => {
+            let damage = damage.map_or(whole, |r| Damage::new(r.x, r.y, r.width, r.height));
+            write_present(&mut &stream, frame_id, slot, damage).is_ok()
+        }
         bsx_krun::Event::Reconfigured {
             scanout_id: SCANOUT,
             generation: now,
         } if now != generation => {
-            let _ = write_present(&mut &stream, 0, RECONFIGURED_SLOT);
+            let _ = write_present(&mut &stream, 0, RECONFIGURED_SLOT, whole);
             false
         }
         _ => true,

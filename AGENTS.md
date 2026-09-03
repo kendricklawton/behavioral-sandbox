@@ -40,9 +40,11 @@ outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this pro
 `--display` gives a guest a virtio-gpu display shown in a window, and the window's keyboard and
 pointer reach the guest as two virtio-input devices (4.2, 4.3), the desktop image boots to a
 terminal in a Wayland session under it (4.5), and `--sound` gives the guest a virtio-snd card
-backed by the host audio server (4.7). The GUI application (iced; roadmap 4.9 to 4.13) is not
-started, GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt and
-untested.
+backed by the host audio server (4.7). A second process leases a display over the control socket
+as a sealed memfd and a record per present (4.9), and `bsx-app` shows one in an iced window through
+a wgpu texture upload (4.10, a spike: no input, no start or stop). The application proper (roadmap
+4.11 to 4.14), GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt
+and untested.
 
 ## Design rules (every change holds to all six)
 
@@ -92,13 +94,14 @@ list of packages. Therefore a stale `-p` fails the gate, not the terminal of a r
 | `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. Both ends share it without change, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO: it binds a socket, accepts a connection, and serves repeated execs from one session directory. It does no init work and is not the security boundary. Static musl, baked into the guest image. Its binary keeps the bare name `guest-agent`, because the image build bakes in that path. |
 | `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |
+| `crates/app` | `bsx-app` | The GUI application, on iced. Today the 4.10 spike: one window showing a named sandbox's display, leased over the control socket and uploaded to a wgpu texture by its damage rectangle. |
 | `crates/test-support` | `bsx-test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook. `SUMMARY.md` is the index. The names are flat `topic-subtopic.md`. The hierarchy is in `SUMMARY.md`, not in directories. |
 
 **Two binaries will ship**, from one workspace: `bsx` (the CLI, which also carries the hidden
-helper subcommand that becomes a VM) and the GUI application. Today only `bsx` exists, and it has no
-verbs. Neither is a daemon. A VM registers a socket
+helper subcommand that becomes a VM) and the GUI application, `bsx-app`, which today is the 4.10
+spike. Neither is a daemon. A VM registers a socket
 under the runtime directory, and both binaries find live VMs by reading it, so a VM started by one
 is visible to the other. `scratch/ROADMAP.md` holds the reasoning.
 

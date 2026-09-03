@@ -85,7 +85,7 @@ fn read(args: &FramesArgs) -> Result<(), String> {
     let mut read = 0u64;
     while args.count.is_none_or(|n| read < n) {
         match lease.next_event() {
-            Ok(Event::Presented { frame_id, slot }) => {
+            Ok(Event::Presented { frame_id, slot, .. }) => {
                 if let Some(log) = &mut log {
                     log.record(frame_id);
                 }

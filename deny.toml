@@ -10,8 +10,16 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
 # Fail on any known RustSec advisory in the tree. `yanked` crates are also rejected.
 version = 2
 yanked = "deny"
-# No advisory exceptions: the tree is clean, so `cargo deny check advisories` fails on any new one.
-# Add an `ignore = ["RUSTSEC-…"]` here only with a reason if an unavoidable transitive advisory lands.
+# Each exception names the crate, who pulls it in, and why the tree carries it anyway; a new
+# advisory outside this list fails the gate.
+ignore = [
+    # `paste`, a proc macro under `metal`, the macOS half of wgpu. Unmaintained, not vulnerable, and
+    # a macro that runs at compile time on this tree's own source.
+    { id = "RUSTSEC-2024-0436", reason = "paste: compile-time macro under metal (wgpu on macOS)" },
+    # `ttf-parser`, the font parser under `cosmic-text`, which draws iced's text. Unmaintained; the
+    # fonts it parses are the host's own, not a guest's.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: host font parsing under cosmic-text (iced)" },
+]
 
 [licenses]
 version = 2
@@ -30,6 +38,9 @@ allow = [
     "ISC",
     # `arrayref`, under `tiny-skia`, which draws the Wayland window decorations.
     "BSD-2-Clause",
+    # `hexf-parse`, the hex-float parser under `naga`, wgpu's shader compiler. A public-domain
+    # dedication, with a permissive fallback licence where that is not recognised.
+    "CC0-1.0",
 ]
 confidence-threshold = 0.9
 

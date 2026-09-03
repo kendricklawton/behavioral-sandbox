@@ -1,0 +1,27 @@
+[package]
+name = "bsx-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "The bsx GUI application (`bsx-app`): the iced spike."
+
+[[bin]]
+name = "bsx-app"
+path = "src/main.rs"
+
+[dependencies]
+# The mapping of a leased display's memfd (`SharedFrames`) and the pixel formats it names.
+bsx-krun = { path = "../krun" }
+# The control socket a display is leased over.
+bsx-supervisor = { path = "../supervisor" }
+clap = { workspace = true }
+iced = { workspace = true }
+# The monotonic clock the frame logs share with the helper's `--frame-log`.
+rustix = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

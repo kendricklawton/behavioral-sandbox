@@ -10,6 +10,7 @@ members = [
     "crates/supervisor",
     "crates/guest-agent",
     "crates/cli",
+    "crates/app",
     "crates/test-support",
     "xtask",
 ]
@@ -51,6 +52,10 @@ tracing = "0.1"
 # `wayland-csd-adwaita-notitle` draws window decorations without pulling in a font stack.
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle", "rwh_06"] }
 softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+# The GUI application's toolkit (roadmap 4.10). `wgpu` is the one renderer it has: a frame goes on
+# screen as a texture upload, which is the point of the spike. No `tiny-skia` fallback, no theme
+# detection (it would spawn a settings daemon client), and both display servers open at run time.
+iced = { version = "0.14", default-features = false, features = ["wgpu", "x11", "wayland", "thread-pool"] }
 # `json`: the `--log-json` machine-readable encoding of the same structured events.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

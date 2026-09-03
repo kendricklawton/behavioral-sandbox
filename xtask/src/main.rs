@@ -110,6 +110,9 @@ enum Cmd {
         /// Frames per run. Default 300.
         #[arg(long, default_value_t = 300)]
         frames: usize,
+        /// Also run the frames through `bsx-app`, which opens a window on this desktop.
+        #[arg(long)]
+        app: bool,
     },
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the
     /// config parser) with `cargo fuzz` (libFuzzer), the deep,
@@ -163,7 +166,11 @@ fn main() -> Result<()> {
         ),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchFootprint { count } => bench::bench_footprint(count),
-        Cmd::BenchFrames { display, frames } => bench::bench_frames(&display, frames),
+        Cmd::BenchFrames {
+            display,
+            frames,
+            app,
+        } => bench::bench_frames(&display, frames, app),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
     }

@@ -23,7 +23,7 @@ What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest a
 (`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
 (`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
 the VM's own process opens, with that window's keyboard and pointer going back as two virtio-input
-devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. What is not: the GUI application, GPU acceleration, and macOS.
+devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` shows a sandbox's display in a window and nothing else yet. What is not: the rest of the GUI application, GPU acceleration, and macOS.
 
 ### Design rules
 
@@ -67,5 +67,6 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-channel` | `crates/channel` | The host/guest wire protocol. Nearly dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by both ends. |
 | `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the guest image. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `bsx` | `crates/cli` | The `bsx` binary. No verbs today: the supervisor they call is not written. Package, binary, and command all share the name. |
+| `bsx-app` | `crates/app` | The GUI application, on iced. Today a spike: one window showing a sandbox's display, leased over the control socket and uploaded to a wgpu texture. |
 | `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
