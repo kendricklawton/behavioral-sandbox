@@ -40,8 +40,9 @@ outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this pro
 `--display` gives a guest a virtio-gpu display shown in a window, and the window's keyboard and
 pointer reach the guest as two virtio-input devices (4.2, 4.3), the desktop image boots to a
 terminal in a Wayland session under it (4.5), and `--sound` gives the guest a virtio-snd card
-backed by the host audio server (4.7). GPU acceleration and macOS (phases 5 and 6) are not
-written, and macOS is unbuilt and untested.
+backed by the host audio server (4.7). The GUI application (iced; roadmap 4.9 to 4.13) is not
+started, GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt and
+untested.
 
 ## Design rules (every change holds to all six)
 
