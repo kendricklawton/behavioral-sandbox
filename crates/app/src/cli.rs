@@ -152,50 +152,172 @@ pub(crate) fn stop(bsx: &Path, name: &str) -> Result<String, String> {
 
 /// Opens the operator's terminal on a shell in the run named `name`: `bsx exec --tty`.
 pub(crate) fn open_shell(bsx: &Path, name: &str) -> Result<String, String> {
-    let (terminal, how) = terminal().ok_or_else(|| {
-        "no terminal found: set $TERMINAL, or install foot, alacritty, kitty, wezterm, \
-         gnome-terminal, konsole or xterm"
-            .to_string()
-    })?;
-    let mut cmd = Command::new(&terminal);
-    cmd.args(how);
-    cmd.arg(bsx)
-        .args(["exec", "--tty", name, "--", "/bin/sh"])
+    let terminal = terminal().ok_or_else(no_terminal)?;
+    let shown = terminal.shown();
+    let mut cmd = terminal.command(bsx, name)?;
+    let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = cmd
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("run {}: {e}", terminal.display()))?;
+        .map_err(|e| format!("run {shown}: {e}"))?;
     reap(child);
-    Ok(format!("a shell in {name}, in {}", terminal.display()))
+    Ok(format!("a shell in {name}, in {shown}"))
 }
 
-/// The terminal to open and the arguments that make it run a command: `$TERMINAL` first, then
-/// the first of a known few on `PATH`.
-fn terminal() -> Option<(PathBuf, &'static [&'static str])> {
-    if let Some(term) = std::env::var_os("TERMINAL") {
-        return Some((PathBuf::from(term), &["-e"]));
+/// What to suggest when nothing was found, in the names this platform's users would recognise.
+fn no_terminal() -> String {
+    let known = KNOWN_TERMINALS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("no terminal found: set $TERMINAL, or install one of {known}")
+}
+
+/// How to get a terminal to run one command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Terminal {
+    /// A terminal that takes the command as arguments, after `before`.
+    Direct {
+        program: PathBuf,
+        before: &'static [&'static str],
+    },
+    /// macOS's stock Terminal, which opens a *file* rather than taking a command, so the command
+    /// is written to a script and that is what is opened.
+    TerminalApp,
+}
+
+impl Terminal {
+    /// How this terminal names itself in a message.
+    fn shown(&self) -> String {
+        match self {
+            Self::Direct { program, .. } => program.display().to_string(),
+            Self::TerminalApp => "Terminal.app".to_string(),
+        }
     }
-    const KNOWN: [(&str, &[&str]); 7] = [
-        ("foot", &["-e"]),
-        ("alacritty", &["-e"]),
-        ("kitty", &["-e"]),
-        ("wezterm", &["start", "--"]),
-        ("gnome-terminal", &["--"]),
-        ("konsole", &["-e"]),
-        ("xterm", &["-e"]),
-    ];
-    let path = std::env::var_os("PATH")?;
-    for (name, how) in KNOWN {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some((candidate, how));
+
+    /// The command that opens a shell on `name`.
+    fn command(&self, bsx: &Path, name: &str) -> Result<Command, String> {
+        match self {
+            Self::Direct { program, before } => {
+                let mut cmd = Command::new(program);
+                cmd.args(*before);
+                cmd.arg(bsx).args(["exec", "--tty", name, "--", "/bin/sh"]);
+                Ok(cmd)
+            }
+            // `open -a Terminal <file>` is the only route that needs no AppleScript, and
+            // AppleScript would mean quoting a command into a second language. The script removes
+            // itself first thing, so a launch that never happens leaves the OS to clean one file
+            // out of its own temporary directory rather than leaving one behind on every click.
+            Self::TerminalApp => {
+                let script = std::env::temp_dir().join(format!("bsx-shell-{name}.command"));
+                let body = format!(
+                    "#!/bin/sh\nrm -f -- \"$0\"\nexec {} exec --tty {} -- /bin/sh\n",
+                    shell_quote(&bsx.display().to_string()),
+                    shell_quote(name)
+                );
+                std::fs::write(&script, body).map_err(|e| format!("write {script:?}: {e}"))?;
+                set_executable(&script)?;
+                let mut cmd = Command::new("open");
+                cmd.args(["-a", "Terminal"]).arg(&script);
+                Ok(cmd)
             }
         }
     }
+}
+
+/// A single-quoted shell word, so a path with a space in it survives the script.
+fn shell_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', r"'\''"))
+}
+
+/// Marks `path` executable, which `open -a Terminal` needs of a `.command` file.
+fn set_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("make {path:?} executable: {e}"))
+}
+
+/// Terminals this knows how to hand a command to, and the arguments that make each do it.
+///
+/// Ordered by how likely a person is to want the one they installed over the one that came with
+/// the machine, which is why `Terminal.app` is not in here: it is the fallback below, and it is
+/// also the only one that cannot take a command as arguments.
+const KNOWN_TERMINALS: [(&str, &[&str]); 8] = [
+    ("ghostty", &["-e"]),
+    ("wezterm", &["start", "--"]),
+    ("alacritty", &["-e"]),
+    ("kitty", &["-e"]),
+    ("foot", &["-e"]),
+    ("gnome-terminal", &["--"]),
+    ("konsole", &["-e"]),
+    ("xterm", &["-e"]),
+];
+
+/// The terminal to open: `$TERMINAL` first, then a known one on `PATH`, then a known one inside a
+/// macOS application bundle, then macOS's stock Terminal.
+///
+/// The bundle step is why a Mac is not simply "none of these are on `PATH`": a terminal installed
+/// by dragging it to `/Applications` puts no binary there, and every one of these ships its
+/// executable at the same place inside its own bundle.
+fn terminal() -> Option<Terminal> {
+    if let Some(term) = std::env::var_os("TERMINAL") {
+        return Some(Terminal::Direct {
+            program: PathBuf::from(term),
+            before: &["-e"],
+        });
+    }
+    let on_path = std::env::var_os("PATH").and_then(|path| {
+        KNOWN_TERMINALS.iter().find_map(|(name, before)| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(name))
+                .find(|candidate| candidate.is_file())
+                .map(|program| Terminal::Direct { program, before })
+        })
+    });
+    if let Some(found) = on_path {
+        return Some(found);
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(found) = in_app_bundle() {
+            return Some(found);
+        }
+        // Every Mac has this one, so the button is never dead here.
+        return Some(Terminal::TerminalApp);
+    }
     None
+}
+
+/// A known terminal's executable inside an application bundle, which is where macOS keeps one.
+fn in_app_bundle() -> Option<Terminal> {
+    let roots = [
+        PathBuf::from("/Applications"),
+        std::env::var_os("HOME").map_or_else(
+            || PathBuf::from("/Applications"),
+            |home| PathBuf::from(home).join("Applications"),
+        ),
+    ];
+    KNOWN_TERMINALS.iter().find_map(|(name, before)| {
+        roots.iter().find_map(|root| {
+            let bundle = root.join(format!("{}.app", bundle_name(name)));
+            let program = bundle.join("Contents/MacOS").join(name);
+            program
+                .is_file()
+                .then_some(Terminal::Direct { program, before })
+        })
+    })
+}
+
+/// The bundle a terminal ships as, which is its name capitalised except where it is not.
+fn bundle_name(binary: &str) -> &str {
+    match binary {
+        "ghostty" => "Ghostty",
+        "wezterm" => "WezTerm",
+        "alacritty" => "Alacritty",
+        "kitty" => "kitty",
+        other => other,
+    }
 }
 
 /// Waits for `child` on a thread of its own, so a detached `bsx` is reaped when it ends.
@@ -210,6 +332,97 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    /// A direct terminal is handed the command as arguments, after whatever that terminal needs
+    /// first, and the shell is the last word: `wezterm start -- bsx exec --tty NAME -- /bin/sh`.
+    #[test]
+    fn a_direct_terminal_is_handed_the_command() {
+        let term = Terminal::Direct {
+            program: PathBuf::from("/opt/homebrew/bin/wezterm"),
+            before: &["start", "--"],
+        };
+        let cmd = term
+            .command(Path::new("/usr/local/bin/bsx"), "vm1")
+            .expect("built");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "start",
+                "--",
+                "/usr/local/bin/bsx",
+                "exec",
+                "--tty",
+                "vm1",
+                "--",
+                "/bin/sh"
+            ]
+        );
+        assert!(term.shown().ends_with("wezterm"), "{}", term.shown());
+    }
+
+    /// Terminal.app takes a *file*, not a command, so what it is opened on is a script that runs
+    /// the shell. Written, executable, and removing itself before it execs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_app_is_opened_on_a_script_that_runs_the_shell() {
+        let cmd = Terminal::TerminalApp
+            .command(Path::new("/usr/local/bin/bsx"), "vm-two")
+            .expect("built");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(cmd.get_program(), "open");
+        assert_eq!(args[..2], ["-a".to_string(), "Terminal".to_string()]);
+
+        let script = PathBuf::from(&args[2]);
+        let body = std::fs::read_to_string(&script).expect("the script was written");
+        assert!(body.contains("exec --tty 'vm-two'"), "{body}");
+        assert!(body.contains("rm -f -- \"$0\""), "removes itself: {body}");
+        let mode = std::fs::metadata(&script)
+            .expect("staged")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o100, "must be executable: {mode:o}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    /// A path with a space survives into the script, because a shell would otherwise read it as
+    /// two words and run the wrong program.
+    #[test]
+    fn a_quoted_word_survives_a_space_and_a_quote() {
+        assert_eq!(
+            shell_quote("/Volumes/My Disk/bsx"),
+            "'/Volumes/My Disk/bsx'"
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// The refusal names terminals this platform's user could plausibly install, and every name it
+    /// offers is one the launcher actually knows how to drive.
+    #[test]
+    fn the_refusal_only_suggests_terminals_it_can_drive() {
+        let why = no_terminal();
+        assert!(why.contains("$TERMINAL"), "{why}");
+        for (name, _) in KNOWN_TERMINALS {
+            assert!(
+                why.contains(name),
+                "{name} is driveable but unmentioned: {why}"
+            );
+        }
+    }
+
+    /// macOS always has an answer, so the shell button is never dead there: with no known terminal
+    /// on `PATH` and none in a bundle, the stock Terminal is what is left.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_always_has_a_terminal_to_fall_back_to() {
+        assert!(terminal().is_some(), "a Mac always has Terminal.app");
+    }
 
     /// The form's posture becomes the CLI's flags, one to one, and a field the CLI would refuse
     /// is refused here with its name.
