@@ -29,6 +29,21 @@ use clap::{Parser, Subcommand};
 /// conventional "2", the same convention (and name) as the guest agent's.
 const EXIT_OPERATIONAL: u8 = 2;
 
+/// Refuses a `--name` the filesystem could not carry, quoting the one rule `bsx-supervisor`
+/// enforces.
+///
+/// Checked where the flag was typed: the name becomes both a socket file and the tail of the run
+/// id, so a refusal further in would name one of those instead of `--name`.
+fn check_name(name: &str) -> Result<(), String> {
+    if bsx_supervisor::socket::valid_name(name) {
+        return Ok(());
+    }
+    Err(format!(
+        "{name:?} is not a usable --name: {}, since the name becomes a filename",
+        bsx_supervisor::socket::name_rule()
+    ))
+}
+
 #[derive(Parser)]
 #[command(
     name = "bsx",

@@ -745,7 +745,11 @@ pub mod socket {
     }
 
     /// The rule a usable name satisfies, spelled by the function every refusal quotes.
-    pub(crate) fn name_rule() -> String {
+    ///
+    /// Public so a caller refusing a name at the flag the operator typed states the same rule
+    /// this module enforces, rather than keeping a second copy of the alphabet and the length.
+    #[must_use]
+    pub fn name_rule() -> String {
         format!("1..={MAX_NAME} characters of [A-Za-z0-9_-]")
     }
 

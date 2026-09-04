@@ -153,6 +153,7 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
         .name
         .clone()
         .unwrap_or_else(|| format!("shell-{}", std::process::id()));
+    crate::check_name(&name)?;
     let results = !args.no_results;
 
     if args.dry_run {
