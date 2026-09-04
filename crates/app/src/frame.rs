@@ -90,6 +90,7 @@ impl Sinks {
 /// The widget's program: what the view hands the shader widget each time it is built.
 #[derive(Debug)]
 pub(crate) struct Program {
+    pub(crate) run: Arc<str>,
     pub(crate) frames: Arc<SharedFrames>,
     pub(crate) history: Arc<VecDeque<Present>>,
     pub(crate) sinks: Arc<Sinks>,
@@ -199,6 +200,7 @@ impl<Message> shader::Program<Message> for Program {
 
     fn draw(&self, _state: &Held, _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
         Primitive {
+            run: Arc::clone(&self.run),
             frames: Arc::clone(&self.frames),
             history: Arc::clone(&self.history),
             sinks: Arc::clone(&self.sinks),
@@ -229,8 +231,13 @@ fn button_of(button: mouse::Button) -> Option<u16> {
 }
 
 /// What one redraw draws: the latest present in `history`, uploaded from `frames`.
+///
+/// **`run` is which sandbox's frame this is.** iced keys a shader pipeline by the primitive's
+/// type, not by the widget, so every frame on screen shares one [`Pipeline`]; the texture and the
+/// placement live in it under this name, or the grid's thumbnails would overwrite each other.
 #[derive(Debug)]
 pub(crate) struct Primitive {
+    run: Arc<str>,
     frames: Arc<SharedFrames>,
     history: Arc<VecDeque<Present>>,
     sinks: Arc<Sinks>,
@@ -252,7 +259,7 @@ impl shader::Primitive for Primitive {
             return;
         };
         let scale = viewport.scale_factor();
-        pipeline.place = fit(
+        let place = fit(
             Rectangle {
                 x: bounds.x * scale,
                 y: bounds.y * scale,
@@ -262,9 +269,12 @@ impl shader::Primitive for Primitive {
             layout.width,
             layout.height,
         );
-        let Some(texture) = pipeline.texture_for(device, &layout) else {
+        let Some(texture) = pipeline.texture_for(&self.run, device, &layout) else {
             return;
         };
+        // Where it goes is recorded even when the frame it holds is already the latest: the
+        // window can be resized without the guest presenting anything new.
+        texture.place = place;
         if texture.holds == Some(latest.frame_id) {
             return;
         }
@@ -309,10 +319,10 @@ impl shader::Primitive for Primitive {
     }
 
     fn draw(&self, pipeline: &Pipeline, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        let Some(texture) = &pipeline.texture else {
+        let Some(texture) = pipeline.textures.get(&self.run) else {
             return true;
         };
-        let place = pipeline.place;
+        let place = texture.place;
         pass.set_viewport(place.x, place.y, place.width, place.height, 0.0, 1.0);
         pass.set_pipeline(&pipeline.render);
         pass.set_bind_group(0, &texture.bind_group, &[]);
@@ -329,7 +339,7 @@ fn changed_since(history: &VecDeque<Present>, since: Option<u32>) -> Option<Dama
 }
 
 /// The smallest rectangle holding both.
-fn union(a: Damage, b: Damage) -> Damage {
+pub(crate) fn union(a: Damage, b: Damage) -> Damage {
     let left = a.x.min(b.x);
     let top = a.y.min(b.y);
     let right = a.x.saturating_add(a.width).max(b.x.saturating_add(b.width));
@@ -415,25 +425,36 @@ fn texture_format(format: PixelFormat, srgb: bool) -> Option<wgpu::TextureFormat
     }
 }
 
-/// The texture holding the frame, and which frame it holds.
+/// The texture holding one run's frame, which frame it holds, and where it goes.
 #[derive(Debug)]
 struct Texture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     layout: SharedLayout,
     holds: Option<u32>,
+    /// Where the frame goes in the target, in physical pixels. Per run, because iced runs every
+    /// `prepare` before any `draw`: a single field would hold the last one prepared.
+    place: Rectangle,
+    /// When this run's frame was last prepared, for the eviction below.
+    used: u64,
 }
 
-/// What every [`Primitive`] shares: the render pipeline for the target format, and the texture.
+/// The most runs whose textures are kept at once. A grid shows what is running, and a long
+/// session would otherwise leave a texture behind for every sandbox ever watched. Above
+/// `crate::MAX_THUMBNAILS`, so the grid's leases plus the open run always have one each.
+pub(crate) const MAX_TEXTURES: usize = 16;
+
+/// What every [`Primitive`] shares: the render pipeline for the target format, and one texture
+/// per run on screen.
 #[derive(Debug)]
 pub(crate) struct Pipeline {
     render: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     target: wgpu::TextureFormat,
-    texture: Option<Texture>,
-    /// Where the frame goes in the target, in physical pixels.
-    place: Rectangle,
+    textures: std::collections::HashMap<Arc<str>, Texture>,
+    /// Bumped per prepare, so the least recently prepared run is the one evicted.
+    tick: u64,
     refused: Option<PixelFormat>,
 }
 
@@ -442,13 +463,15 @@ impl Pipeline {
     /// for a format this build cannot upload (said once).
     fn texture_for(
         &mut self,
+        run: &Arc<str>,
         device: &wgpu::Device,
         layout: &SharedLayout,
     ) -> Option<&mut Texture> {
-        if self.texture.as_ref().is_some_and(|t| t.layout != *layout) {
-            self.texture = None;
+        self.tick += 1;
+        if self.textures.get(run).is_some_and(|t| t.layout != *layout) {
+            self.textures.remove(run);
         }
-        if self.texture.is_none() {
+        if !self.textures.contains_key(run) {
             let Some(format) = texture_format(layout.format, self.target.is_srgb()) else {
                 if self.refused != Some(layout.format) {
                     eprintln!(
@@ -488,14 +511,34 @@ impl Pipeline {
                     },
                 ],
             });
-            self.texture = Some(Texture {
-                texture,
-                bind_group,
-                layout: *layout,
-                holds: None,
-            });
+            // Evict before inserting, so the map never holds more than the cap.
+            while self.textures.len() >= MAX_TEXTURES {
+                let Some(oldest) = self
+                    .textures
+                    .iter()
+                    .min_by_key(|(_, t)| t.used)
+                    .map(|(k, _)| Arc::clone(k))
+                else {
+                    break;
+                };
+                self.textures.remove(&oldest);
+            }
+            self.textures.insert(
+                Arc::clone(run),
+                Texture {
+                    texture,
+                    bind_group,
+                    layout: *layout,
+                    holds: None,
+                    place: Rectangle::default(),
+                    used: self.tick,
+                },
+            );
         }
-        self.texture.as_mut()
+        let tick = self.tick;
+        let texture = self.textures.get_mut(run)?;
+        texture.used = tick;
+        Some(texture)
     }
 }
 
@@ -594,8 +637,8 @@ impl shader::Pipeline for Pipeline {
             bind_layout,
             sampler,
             target: format,
-            texture: None,
-            place: Rectangle::default(),
+            textures: std::collections::HashMap::new(),
+            tick: 0,
             refused: None,
         }
     }

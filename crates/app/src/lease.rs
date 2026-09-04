@@ -75,20 +75,35 @@ impl Drop for Feed {
     }
 }
 
-/// Starts the lease thread for `name` and returns the messages it sends, as the subscription's
-/// stream. `log`, when set, gets one line per present read.
-pub(crate) fn stream((name, log): &(String, Option<PathBuf>)) -> Feed {
+/// What one lease is for: whose display, where its presents are logged, and how often a present
+/// is worth waking the window for.
+///
+/// **This is the subscription's identity**, so a change to any field is a new lease and the old
+/// one is dropped. That is what moves a run between the grid's rate and the open run's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Watch {
+    pub(crate) name: String,
+    pub(crate) log: Option<PathBuf>,
+    /// The shortest gap between two forwarded presents. Zero forwards every one, which is what
+    /// the run on screen wants; the grid asks for a slower rate, because a thumbnail redrawn at
+    /// the guest's pace costs a whole window rebuild per frame per sandbox.
+    pub(crate) every: Duration,
+}
+
+/// Starts the lease thread for `watch` and returns the messages it sends, as the subscription's
+/// stream. Every message carries the run's name, so a window holding several tells them apart.
+pub(crate) fn stream(watch: &Watch) -> Feed {
     let (sender, receiver) = mpsc::unbounded();
-    let name = name.clone();
-    let log = log.clone();
+    let watch = watch.clone();
     let stop = Arc::new(Stop::default());
     let thread_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
-        let ended = match run(&name, log.as_deref(), &sender, &thread_stop) {
+        let name = watch.name.clone();
+        let ended = match run(&watch, &sender, &thread_stop) {
             Ok(why) => why,
             Err(why) => why,
         };
-        let _ = sender.unbounded_send(Message::Ended(ended));
+        let _ = sender.unbounded_send(Message::Ended(name, ended));
     });
     Feed { receiver, stop }
 }
@@ -96,18 +111,19 @@ pub(crate) fn stream((name, log): &(String, Option<PathBuf>)) -> Feed {
 /// Leases, maps, and forwards until the lease ends, leasing again after each reconfigure.
 /// `Ok` carries the ordinary end.
 fn run(
-    name: &str,
-    log: Option<&Path>,
+    watch: &Watch,
     sender: &mpsc::UnboundedSender<Message>,
     stop: &Stop,
 ) -> Result<String, String> {
-    let socket = bsx_supervisor::socket::path_for(name).map_err(|e| e.to_string())?;
-    let mut log = log
+    let socket = bsx_supervisor::socket::path_for(&watch.name).map_err(|e| e.to_string())?;
+    let mut log = watch
+        .log
+        .as_deref()
         .map(|path| std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display())))
         .transpose()?;
     let mut leased_before = false;
     loop {
-        match run_one_lease(&socket, &mut log, sender, stop, leased_before)? {
+        match run_one_lease(watch, &socket, &mut log, sender, stop, leased_before)? {
             Some(why) => return Ok(why),
             None => {
                 leased_before = true;
@@ -119,6 +135,7 @@ fn run(
 
 /// One lease: `Some` with why it ended for good, `None` for a reconfigure to lease after.
 fn run_one_lease(
+    watch: &Watch,
     socket: &Path,
     log: &mut Option<std::fs::File>,
     sender: &mpsc::UnboundedSender<Message>,
@@ -170,7 +187,7 @@ fn run_one_lease(
     );
     let mapped = bsx_krun::SharedFrames::map(memfd, layout).map_err(|e| e.to_string())?;
     if sender
-        .unbounded_send(Message::Mapped(Arc::new(mapped)))
+        .unbounded_send(Message::Mapped(watch.name.clone(), Arc::new(mapped)))
         .is_err()
     {
         return Ok(Some("the window closed".to_string()));
@@ -178,7 +195,10 @@ fn run_one_lease(
     match control::input(socket) {
         Ok(session) => {
             let lines = spawn_input_writer(session);
-            if sender.unbounded_send(Message::Input(lines)).is_err() {
+            if sender
+                .unbounded_send(Message::Input(watch.name.clone(), lines))
+                .is_err()
+            {
                 return Ok(Some("the window closed".to_string()));
             }
         }
@@ -190,6 +210,10 @@ fn run_one_lease(
             )));
         }
     }
+    // What the window has already been told about, so a rate-limited watch can forward the
+    // newest present rather than the oldest of the batch it skipped.
+    let mut last_sent: Option<Instant> = None;
+    let mut pending: Option<(u32, u32, control::Damage)> = None;
     loop {
         match lease.next_event() {
             Ok(Event::Presented {
@@ -197,10 +221,28 @@ fn run_one_lease(
                 slot,
                 damage,
             }) => {
+                // The log is every present the lease read, never the subset forwarded: it is the
+                // measurement of the guest-to-host path, not of what this window chose to draw.
                 if let Some(log) = log.as_mut() {
                     let _ = writeln!(log, "{frame_id}\t{}", monotonic_ns());
                 }
+                // A skipped present's damage is not lost, it is folded into the next one that
+                // goes: the window builds its upload from the damage it was told about, so a
+                // dropped rectangle would leave that part of the thumbnail stale.
+                pending = Some(match pending.take() {
+                    Some((_, _, held)) => (frame_id, slot, crate::frame::union(held, damage)),
+                    None => (frame_id, slot, damage),
+                });
+                let due = last_sent.is_none_or(|at| at.elapsed() >= watch.every);
+                if !due {
+                    continue;
+                }
+                let Some((frame_id, slot, damage)) = pending.take() else {
+                    continue;
+                };
+                last_sent = Some(Instant::now());
                 let sent = sender.unbounded_send(Message::Presented {
+                    name: watch.name.clone(),
                     frame_id,
                     slot,
                     damage,
@@ -267,13 +309,18 @@ mod tests {
     fn dropping_the_feed_ends_its_thread() {
         use iced::futures::StreamExt;
         let before = threads();
-        let feed = stream(&("no-such-vm-for-this-test".to_string(), None));
+        let feed = stream(&Watch {
+            name: "no-such-vm-for-this-test".to_string(),
+            log: None,
+            every: Duration::ZERO,
+        });
         // The thread reports the failed lease and ends by itself for a name with no socket; what
         // this pins is that the report goes to the feed and the count comes back down.
         let ended =
             iced::futures::executor::block_on(async { feed.take(1).collect::<Vec<_>>().await });
         assert!(
-            matches!(ended.as_slice(), [Message::Ended(why)] if why.contains("control socket")),
+            matches!(ended.as_slice(), [Message::Ended(name, why)]
+                if name == "no-such-vm-for-this-test" && why.contains("control socket")),
             "{ended:?}"
         );
         // Other tests' threads come and go beside this one, so the count is a ceiling, not a
@@ -294,7 +341,12 @@ mod tests {
         stop.cancel();
         assert!(stop.cancelled());
         let (sender, _receiver) = mpsc::unbounded();
-        let outcome = run("no-such-vm-either", None, &sender, &stop);
+        let watch = Watch {
+            name: "no-such-vm-either".to_string(),
+            log: None,
+            every: Duration::ZERO,
+        };
+        let outcome = run(&watch, &sender, &stop);
         assert!(
             matches!(&outcome, Ok(why) if why == "the run was left"),
             "{outcome:?}"

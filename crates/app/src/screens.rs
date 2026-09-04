@@ -94,11 +94,30 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
     ]
     .spacing(8);
     let second = row![space().width(Length::Fixed(18.0)), text(state).size(13),].spacing(8);
-    let body = column![first, second].spacing(2).padding([6, 8]);
+    let text_side = column![first, second].spacing(2).padding([6, 8]);
+    // A running sandbox with a display shows it, so the list says what each one is doing rather
+    // than only what it was asked to do.
+    let body: Element<'_, Message> = match crate::frame_program(app, &record.name) {
+        Some(program) if live => row![
+            container(shader(program).width(Fill).height(Fill))
+                .width(Length::Fixed(THUMBNAIL.0))
+                .height(Length::Fixed(THUMBNAIL.1))
+                .style(container::dark),
+            text_side.width(Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center)
+        .into(),
+        _ => text_side.width(Fill).into(),
+    };
     mouse_area(container(body).width(Fill).style(container::rounded_box))
         .on_press(Message::Open(record.id.clone()))
         .into()
 }
+
+/// How big a live sandbox's frame is in the list, in logical pixels. Wide enough to tell two
+/// desktops apart at a glance, small enough that a screen of them is still a list.
+const THUMBNAIL: (f32, f32) = (160.0, 120.0);
 
 /// The posture in a glance: network, mounts, display, sound.
 fn posture_tags(record: &Record) -> String {
@@ -168,7 +187,7 @@ pub(crate) fn run<'a>(app: &'a App, id: &str) -> Element<'a, Message> {
 
     let mut right = column![].spacing(10);
     if live && record.posture.display.is_some() {
-        let display: Element<'_, Message> = match crate::frame_program(app) {
+        let display: Element<'_, Message> = match crate::frame_program(app, &record.name) {
             Some(program) => shader(program).width(Fill).height(Fill).into(),
             None => container(text("leasing the display…").size(14))
                 .center(Fill)

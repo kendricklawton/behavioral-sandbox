@@ -20,7 +20,7 @@ mod lease;
 mod screens;
 mod timer;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -41,6 +41,20 @@ const HISTORY: usize = 64;
 
 /// Bytes of an output file the pane shows, from its end.
 const OUTPUT_TAIL: u64 = 256 * 1024;
+
+/// The shortest gap between two presents a thumbnail in the list is redrawn for. A thumbnail is
+/// a glance, not a screen, and every present it takes is a whole window rebuild.
+const THUMBNAIL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The most live displays the list leases at once, newest first. Each lease is a thread, a
+/// socket and a mapping of that guest's scanout, so the grid is bounded rather than growing with
+/// however many sandboxes are running. Held under `frame::MAX_TEXTURES`, which caps the textures
+/// those leases upload into, so the two cannot disagree and thrash.
+const MAX_THUMBNAILS: usize = 12;
+
+/// The grid's leases plus the open run must each have a texture to upload into, or the cache
+/// thrashes. The compiler holds the two constants in step, so neither can be raised alone.
+const _: () = assert!(MAX_THUMBNAILS < frame::MAX_TEXTURES);
 
 #[derive(Parser)]
 #[command(
@@ -285,20 +299,24 @@ pub(crate) enum Message {
     Rerun(String),
     Delete(String),
     Show(Stream),
-    /// The lease landed and its memfd is mapped.
-    Mapped(Arc<SharedFrames>),
-    /// A frame was presented into `slot`.
+    /// A run's lease landed and its memfd is mapped.
+    Mapped(String, Arc<SharedFrames>),
+    /// A run presented a frame into `slot`.
     Presented {
+        name: String,
         frame_id: u32,
         slot: u32,
         damage: Damage,
     },
-    /// The input session is open: these are the lines the window's keyboard and pointer become.
-    Input(iced::futures::channel::mpsc::UnboundedSender<String>),
+    /// A run's input session is open: these are the lines its keyboard and pointer become.
+    Input(
+        String,
+        iced::futures::channel::mpsc::UnboundedSender<String>,
+    ),
     /// Something the operator should see in the window rather than on a stderr they may not have.
     Note(String),
-    /// The lease ended, with why; the sandbox stopping is the ordinary case.
-    Ended(String),
+    /// A run's lease ended, with why; the sandbox stopping is the ordinary case.
+    Ended(String, String),
 }
 
 pub(crate) struct App {
@@ -318,12 +336,19 @@ pub(crate) struct App {
     results: Vec<(PathBuf, u64)>,
     log: Option<PathBuf>,
     sinks: Arc<frame::Sinks>,
-    /// The display path of the run being viewed, when it is live and has one.
-    frames: Option<Arc<SharedFrames>>,
+    /// The display of every run this window is leasing, by name: the one on screen, and every
+    /// live run with a display when the list is showing its grid.
+    displays: BTreeMap<String, Display>,
+    exit_with_lease: bool,
+}
+
+/// One leased display: what was mapped for it, the presents it has reported, and where its input
+/// goes.
+struct Display {
+    frames: Arc<SharedFrames>,
     history: Arc<std::collections::VecDeque<frame::Present>>,
     input: Option<iced::futures::channel::mpsc::UnboundedSender<String>>,
     read: u64,
-    exit_with_lease: bool,
 }
 
 impl App {
@@ -345,10 +370,7 @@ impl App {
             results: Vec::new(),
             log,
             sinks,
-            frames: None,
-            history: Arc::new(std::collections::VecDeque::with_capacity(HISTORY)),
-            input: None,
-            read: 0,
+            displays: BTreeMap::new(),
             exit_with_lease,
         };
         app.refresh();
@@ -406,6 +428,7 @@ impl App {
             let id = id.clone();
             self.reload_output(&id);
         }
+        self.forget_unwatched();
     }
 
     /// Rereads the tail of the shown stream of run `id`, and the results the guest has written.
@@ -440,29 +463,76 @@ impl App {
     /// Opens run `id`: the record, its output, and its display if it is live and has one.
     fn open(&mut self, id: String) {
         self.leave();
-        self.screen = Screen::Run(id.clone());
+        self.set_screen(Screen::Run(id.clone()));
         self.output.stream = None;
         self.reload_output(&id);
     }
 
-    /// Leaves whatever run is shown: the display lease ends with its subscription, and what was
-    /// mapped for it is dropped here.
+    /// Leaves whatever run is shown. The leases the next screen does not want end with their
+    /// subscriptions, and [`Self::forget_unwatched`] drops what was mapped for them.
     fn leave(&mut self) {
         self.results = Vec::new();
-        self.frames = None;
-        self.history = Arc::new(std::collections::VecDeque::with_capacity(HISTORY));
-        // Dropping the sender ends the writer thread, which closes the session with it.
-        self.input = None;
-        self.read = 0;
     }
 
-    /// The live run whose display the window is leasing, if the shown run is one.
-    fn leased(&self) -> Option<&Record> {
-        let Screen::Run(id) = &self.screen else {
-            return None;
+    /// Every live run with a display, newest first: what the list's grid shows a frame for.
+    fn showing_displays(&self) -> Vec<&Record> {
+        self.runs
+            .iter()
+            .filter(|r| self.is_live(r) && r.posture.display.is_some())
+            .collect()
+    }
+
+    /// The runs this window wants a lease on, and how often each wants a present.
+    ///
+    /// The run on screen is watched at the guest's own pace, because it is the one being used.
+    /// Every other live display is a thumbnail on the list, and asks for [`THUMBNAIL_EVERY`], so
+    /// a screen of sandboxes costs a bounded number of window rebuilds rather than the sum of
+    /// their frame rates.
+    fn watches(&self) -> Vec<lease::Watch> {
+        let open = match &self.screen {
+            Screen::Run(id) => self.record(id).map(|r| r.name.clone()),
+            _ => None,
         };
-        let record = self.record(id)?;
-        (self.is_live(record) && record.posture.display.is_some()).then_some(record)
+        let mut watches = Vec::new();
+        if let Some(name) = &open {
+            if self
+                .record_by_name(name)
+                .is_some_and(|r| self.is_live(r) && r.posture.display.is_some())
+            {
+                watches.push(lease::Watch {
+                    name: name.clone(),
+                    log: self.log.clone(),
+                    every: std::time::Duration::ZERO,
+                });
+            }
+            return watches;
+        }
+        for record in self.showing_displays().into_iter().take(MAX_THUMBNAILS) {
+            watches.push(lease::Watch {
+                name: record.name.clone(),
+                log: None,
+                every: THUMBNAIL_EVERY,
+            });
+        }
+        watches
+    }
+
+    /// Moves to `screen` and settles what is leased for it.
+    fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+        self.forget_unwatched();
+    }
+
+    /// Drops what was mapped for a run this window no longer leases, so a display left behind
+    /// does not keep its memfd, its input session or its history alive.
+    fn forget_unwatched(&mut self) {
+        let wanted: BTreeSet<String> = self.watches().into_iter().map(|w| w.name).collect();
+        self.displays.retain(|name, _| wanted.contains(name));
+    }
+
+    /// The record with `name`, from the last tick.
+    fn record_by_name(&self, name: &str) -> Option<&Record> {
+        self.runs.iter().find(|r| r.name == name)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -478,14 +548,14 @@ impl App {
             }
             Message::Back => {
                 self.leave();
-                self.screen = Screen::List;
+                self.set_screen(Screen::List);
                 self.status = None;
                 Task::none()
             }
             Message::NewRun => {
                 self.leave();
                 self.form = Form::blank();
-                self.screen = Screen::New;
+                self.set_screen(Screen::New);
                 self.status = None;
                 Task::none()
             }
@@ -527,7 +597,7 @@ impl App {
                         let id = record.id.clone();
                         self.open(id);
                     }
-                    None => self.screen = Screen::List,
+                    None => self.set_screen(Screen::List),
                 }
                 Task::none()
             }
@@ -552,7 +622,7 @@ impl App {
                 if let Some(record) = self.record(&id) {
                     self.form = Form::from_record(record);
                     self.leave();
-                    self.screen = Screen::New;
+                    self.set_screen(Screen::New);
                 }
                 Task::none()
             }
@@ -566,7 +636,7 @@ impl App {
                     Ok(()) => Some(format!("removed {id}")),
                     Err(e) => Some(format!("removing {id}: {e}")),
                 };
-                self.screen = Screen::List;
+                self.set_screen(Screen::List);
                 self.refresh();
                 Task::none()
             }
@@ -578,28 +648,43 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Mapped(frames) => {
+            Message::Mapped(name, frames) => {
                 let layout = frames.layout();
                 eprintln!(
-                    "bsx-app: mapped {}x{} {:?}, stride {}, {} slots",
+                    "bsx-app: mapped {name} {}x{} {:?}, stride {}, {} slots",
                     layout.width, layout.height, layout.format, layout.stride, layout.slots
                 );
-                // A new mapping is a new scanout: the history's frame ids and slots were the
-                // old one's.
-                self.frames = Some(frames);
-                self.history = Arc::new(std::collections::VecDeque::with_capacity(HISTORY));
+                // A new mapping is a new scanout, so the history starts again: its frame ids and
+                // slots belonged to the old one. An input session already open for this run is
+                // kept, since a reconfigure does not close it.
+                let input = self.displays.remove(&name).and_then(|d| d.input);
+                self.displays.insert(
+                    name,
+                    Display {
+                        frames,
+                        history: Arc::new(std::collections::VecDeque::with_capacity(HISTORY)),
+                        input,
+                        read: 0,
+                    },
+                );
                 Task::none()
             }
             Message::Presented {
+                name,
                 frame_id,
                 slot,
                 damage,
             } => {
-                self.read += 1;
+                // A present for a run this window has stopped leasing is dropped: its lease and
+                // its mapping are already gone.
+                let Some(display) = self.displays.get_mut(&name) else {
+                    return Task::none();
+                };
+                display.read += 1;
                 // The widget holds an `Arc` of this while it draws, so `make_mut` copies the
                 // history on the presents that land mid-draw. Bounded at `HISTORY` either way,
                 // and `VecDeque` keeps the drop of the oldest off the front.
-                let history = Arc::make_mut(&mut self.history);
+                let history = Arc::make_mut(&mut display.history);
                 if history.len() >= HISTORY {
                     history.pop_front();
                 }
@@ -610,22 +695,24 @@ impl App {
                 });
                 Task::none()
             }
-            Message::Input(lines) => {
-                self.input = Some(lines);
-                eprintln!("bsx-app: the keyboard and pointer reach the guest");
+            Message::Input(name, lines) => {
+                if let Some(display) = self.displays.get_mut(&name) {
+                    display.input = Some(lines);
+                    eprintln!("bsx-app: the keyboard and pointer reach {name}");
+                }
                 Task::none()
             }
             Message::Note(what) => {
                 self.status = Some(what);
                 Task::none()
             }
-            Message::Ended(why) => {
+            Message::Ended(name, why) => {
+                let read = self.displays.get(&name).map_or(0, |d| d.read);
                 eprintln!(
-                    "bsx-app: {why}; read {} presents, uploaded {} frames",
-                    self.read,
+                    "bsx-app: {name}: {why}; read {read} presents, uploaded {} frames",
                     self.sinks.uploaded()
                 );
-                self.leave();
+                self.displays.remove(&name);
                 if self.exit_with_lease {
                     return iced::exit();
                 }
@@ -645,12 +732,14 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![timer::every_second()];
-        if let Some(record) = self.leased() {
-            subs.push(Subscription::run_with(
-                (record.name.clone(), self.log.clone()),
-                lease::stream,
-            ));
-        }
+        // One lease per watched run. A `Watch` is the subscription's identity, so a run that
+        // leaves the set has its subscription dropped, which cancels its lease and ends its
+        // thread; one that changes rate is a new lease at the new rate.
+        subs.extend(
+            self.watches()
+                .into_iter()
+                .map(|watch| Subscription::run_with(watch, lease::stream)),
+        );
         Subscription::batch(subs)
     }
 }
@@ -671,14 +760,16 @@ fn tail_of(path: &std::path::Path, max: u64) -> (String, u64) {
     (String::from_utf8_lossy(&bytes).into_owned(), size)
 }
 
-/// Where the shown run's frames, history, sinks and input go: the shader widget's program.
-pub(crate) fn frame_program(app: &App) -> Option<frame::Program> {
-    let frames = app.frames.as_ref()?;
+/// Where a run's frames, history, sinks and input go: the shader widget's program, or `None`
+/// when this window holds no display for it yet.
+pub(crate) fn frame_program(app: &App, name: &str) -> Option<frame::Program> {
+    let display = app.displays.get(name)?;
     Some(frame::Program {
-        frames: Arc::clone(frames),
-        history: Arc::clone(&app.history),
+        run: Arc::from(name),
+        frames: Arc::clone(&display.frames),
+        history: Arc::clone(&display.history),
         sinks: Arc::clone(&app.sinks),
-        input: app.input.clone(),
+        input: display.input.clone(),
     })
 }
 
@@ -697,6 +788,102 @@ mod tests {
         assert_eq!(tail_of(&path, 100), ("0123456789".to_string(), 10));
         assert_eq!(tail_of(&dir.join("none"), 4), (String::new(), 0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run with a display, live or not, for the watch-set tests.
+    fn displayed(name: &str, with_display: bool) -> Record {
+        let mut p = bsx_record::Posture::new(PathBuf::from("/img"), 1, 512);
+        p.display = with_display.then(|| "640x480".to_string());
+        Record::begin(name, bsx_record::Verb::Run, vec!["true".into()], p)
+    }
+
+    fn app_with(runs: Vec<Record>, live: &[&str]) -> App {
+        let dir = bsx_test_support::ScratchDir::created("app-watches");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let sinks = Arc::new(frame::Sinks::open(None, None).expect("sinks"));
+        let mut app = App::new(store, None, None, sinks, false);
+        app.runs = runs;
+        app.live = live.iter().map(|n| (*n).to_string()).collect();
+        // The scratch dir is dropped at the end of the test; nothing here touches it again.
+        std::mem::forget(dir);
+        app
+    }
+
+    /// The list leases every live display, each at the thumbnail rate; opening one run leases
+    /// that one alone, at the guest's own pace. A run without a display is never leased, and
+    /// neither is one that has ended.
+    #[test]
+    fn the_list_watches_every_live_display_and_a_run_screen_watches_one() {
+        let runs = vec![
+            displayed("alpha", true),
+            displayed("beta", true),
+            displayed("nodisplay", false),
+            displayed("ended", true),
+        ];
+        let open_id = runs[0].id.clone();
+        let mut app = app_with(runs, &["alpha", "beta", "nodisplay"]);
+
+        let mut watched: Vec<(String, std::time::Duration)> = app
+            .watches()
+            .into_iter()
+            .map(|w| (w.name, w.every))
+            .collect();
+        watched.sort();
+        assert_eq!(
+            watched,
+            [
+                ("alpha".to_string(), THUMBNAIL_EVERY),
+                ("beta".to_string(), THUMBNAIL_EVERY),
+            ],
+            "the list watches both live displays, and only those, at the thumbnail rate"
+        );
+
+        app.screen = Screen::Run(open_id);
+        let watched: Vec<(String, std::time::Duration)> = app
+            .watches()
+            .into_iter()
+            .map(|w| (w.name, w.every))
+            .collect();
+        assert_eq!(
+            watched,
+            [("alpha".to_string(), std::time::Duration::ZERO)],
+            "an open run is the only lease, and it takes every present"
+        );
+    }
+
+    /// A display this window has stopped watching is dropped, so its mapping, its history and
+    /// its input session go with the lease rather than outliving it.
+    #[test]
+    fn a_display_no_longer_watched_is_forgotten() {
+        let runs = vec![displayed("alpha", true), displayed("beta", true)];
+        let mut app = app_with(runs, &["alpha", "beta"]);
+        // A real mapping, so what is dropped is the memfd and the region, not a stand-in.
+        let frames = {
+            use bsx_krun::DisplayBackend as _;
+            let mut fb = bsx_krun::MemoryFramebuffer::shared();
+            fb.configure_scanout(0, 64, 32, 64, 32, bsx_krun::PixelFormat::B8G8R8X8Unorm)
+                .expect("a scanout");
+            let (fd, layout) = fb.share(0).expect("shareable").expect("a scanout");
+            Arc::new(bsx_krun::SharedFrames::map(fd, layout).expect("mapped"))
+        };
+        for name in ["alpha", "beta"] {
+            app.displays.insert(
+                name.to_string(),
+                Display {
+                    frames: Arc::clone(&frames),
+                    history: Arc::new(std::collections::VecDeque::new()),
+                    input: None,
+                    read: 0,
+                },
+            );
+        }
+        app.live.remove("beta");
+        app.forget_unwatched();
+        assert_eq!(
+            app.displays.keys().collect::<Vec<_>>(),
+            ["alpha"],
+            "the run that stopped answering is no longer held"
+        );
     }
 
     /// A re-run's form is the record's command and posture again.
