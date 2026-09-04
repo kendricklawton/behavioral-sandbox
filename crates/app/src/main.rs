@@ -310,11 +310,15 @@ pub(crate) struct App {
     /// The last thing worth telling the operator: an error, or what just happened.
     status: Option<String>,
     output: Output,
+    /// The shown run's result files, as of the last tick. Held here rather than read in `view`,
+    /// which iced rebuilds once per message: with a guest presenting frames that is a directory
+    /// walk per frame.
+    results: Vec<(PathBuf, u64)>,
     log: Option<PathBuf>,
     sinks: Arc<frame::Sinks>,
     /// The display path of the run being viewed, when it is live and has one.
     frames: Option<Arc<SharedFrames>>,
-    history: Arc<Vec<frame::Present>>,
+    history: Arc<std::collections::VecDeque<frame::Present>>,
     input: Arc<Mutex<Option<InputSession>>>,
     read: u64,
     exit_with_lease: bool,
@@ -336,10 +340,11 @@ impl App {
             form: Form::blank(),
             status: None,
             output: Output::default(),
+            results: Vec::new(),
             log,
             sinks,
             frames: None,
-            history: Arc::new(Vec::new()),
+            history: Arc::new(std::collections::VecDeque::with_capacity(HISTORY)),
             input: Arc::new(Mutex::new(None)),
             read: 0,
             exit_with_lease,
@@ -401,10 +406,11 @@ impl App {
         }
     }
 
-    /// Rereads the tail of the shown stream of run `id`.
+    /// Rereads the tail of the shown stream of run `id`, and the results the guest has written.
     fn reload_output(&mut self, id: &str) {
         let Some(record) = self.record(id) else {
             self.output = Output::default();
+            self.results = Vec::new();
             return;
         };
         let streams = Stream::of(record.verb);
@@ -413,6 +419,7 @@ impl App {
             _ => streams.first().copied(),
         };
         let dir = self.store.dir_of(id);
+        self.results = dir.result_files().unwrap_or_default();
         self.output = match stream {
             Some(stream) => {
                 let path = stream.path(&dir);
@@ -439,8 +446,9 @@ impl App {
     /// Leaves whatever run is shown: the display lease ends with its subscription, and what was
     /// mapped for it is dropped here.
     fn leave(&mut self) {
+        self.results = Vec::new();
         self.frames = None;
-        self.history = Arc::new(Vec::new());
+        self.history = Arc::new(std::collections::VecDeque::with_capacity(HISTORY));
         *self
             .input
             .lock()
@@ -578,7 +586,7 @@ impl App {
                 // A new mapping is a new scanout: the history's frame ids and slots were the
                 // old one's.
                 self.frames = Some(frames);
-                self.history = Arc::new(Vec::new());
+                self.history = Arc::new(std::collections::VecDeque::with_capacity(HISTORY));
                 Task::none()
             }
             Message::Presented {
@@ -587,11 +595,14 @@ impl App {
                 damage,
             } => {
                 self.read += 1;
+                // The widget holds an `Arc` of this while it draws, so `make_mut` copies the
+                // history on the presents that land mid-draw. Bounded at `HISTORY` either way,
+                // and `VecDeque` keeps the drop of the oldest off the front.
                 let history = Arc::make_mut(&mut self.history);
                 if history.len() >= HISTORY {
-                    history.remove(0);
+                    history.pop_front();
                 }
-                history.push(frame::Present {
+                history.push_back(frame::Present {
                     frame_id,
                     slot,
                     damage,

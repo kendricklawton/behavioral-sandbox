@@ -273,14 +273,13 @@ fn run_lines(record: &Record, live: bool) -> Vec<String> {
 }
 
 fn results_lines(app: &App, record: &Record) -> Vec<String> {
-    let dir = app.store.dir_of(&record.id);
-    let files = dir.result_files().unwrap_or_default();
-    if files.is_empty() {
+    if app.results.is_empty() {
+        let dir = app.store.dir_of(&record.id);
         return vec![format!("(nothing in {})", dir.results().display())];
     }
-    files
-        .into_iter()
-        .map(|(file, size)| format!("{:<28} {}", file.display(), bytes(size)))
+    app.results
+        .iter()
+        .map(|(file, size)| format!("{:<28} {}", file.display(), bytes(*size)))
         .collect()
 }
 

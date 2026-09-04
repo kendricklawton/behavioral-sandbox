@@ -11,6 +11,7 @@
 //!   frame sits, a button or a wheel becomes `bsx_input`'s report and travels as its lines down
 //!   the input session; losing the window's focus releases everything held.
 
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -90,7 +91,7 @@ impl Sinks {
 #[derive(Debug)]
 pub(crate) struct Program {
     pub(crate) frames: Arc<SharedFrames>,
-    pub(crate) history: Arc<Vec<Present>>,
+    pub(crate) history: Arc<VecDeque<Present>>,
     pub(crate) sinks: Arc<Sinks>,
     pub(crate) input: Arc<Mutex<Option<InputSession>>>,
 }
@@ -229,7 +230,7 @@ fn button_of(button: mouse::Button) -> Option<u16> {
 #[derive(Debug)]
 pub(crate) struct Primitive {
     frames: Arc<SharedFrames>,
-    history: Arc<Vec<Present>>,
+    history: Arc<VecDeque<Present>>,
     sinks: Arc<Sinks>,
 }
 
@@ -245,7 +246,7 @@ impl shader::Primitive for Primitive {
         viewport: &Viewport,
     ) {
         let layout = self.frames.layout();
-        let Some(latest) = self.history.last().copied() else {
+        let Some(latest) = self.history.back().copied() else {
             return;
         };
         let scale = viewport.scale_factor();
@@ -320,9 +321,9 @@ impl shader::Primitive for Primitive {
 
 /// The union of the damage of every present after the one with id `since`, or `None` when
 /// `since` is not in the history (the texture holds a frame too old to build on).
-fn changed_since(history: &[Present], since: Option<u32>) -> Option<Damage> {
+fn changed_since(history: &VecDeque<Present>, since: Option<u32>) -> Option<Damage> {
     let at = history.iter().position(|p| Some(p.frame_id) == since)?;
-    history[at + 1..].iter().map(|p| p.damage).reduce(union)
+    history.iter().skip(at + 1).map(|p| p.damage).reduce(union)
 }
 
 /// The smallest rectangle holding both.
@@ -645,12 +646,12 @@ mod tests {
     /// holds, and only those; a texture holding a frame the history has forgotten gets all of it.
     #[test]
     fn the_upload_covers_what_changed_since_the_frame_the_texture_holds() {
-        let history = vec![
+        let history: VecDeque<Present> = VecDeque::from(vec![
             present(10, Damage::new(0, 0, 640, 480)),
             present(11, Damage::new(10, 10, 5, 5)),
             present(12, Damage::new(100, 200, 20, 10)),
             present(13, Damage::new(0, 0, 16, 16)),
-        ];
+        ]);
         assert_eq!(
             changed_since(&history, Some(11)),
             Some(Damage::new(0, 0, 120, 210)),
