@@ -210,9 +210,8 @@ fn attach(
     let mut vm = Vm::spawn(name, cfg).map_err(|e| e.to_string())?;
     record.pid = Some(vm.pid());
     store.save(record).map_err(|e| e.to_string())?;
-    // This VM's console is discarded (a raw terminal is about to own it), so there is no report
-    // to point at: the likeliest cause of a session VM ending early is an image with no agent in
-    // it, and naming that beats naming nothing.
+    // The console is discarded, a raw terminal being about to own it, so there is no report to
+    // point at: an image with no agent is the likeliest cause.
     let (reader, stream) = crate::agent::dial(channel_sock, &mut vm).map_err(|e| {
         format!("{e}; is the guest image one with the agent baked in? (`cargo xtask build-rootfs`)")
     })?;

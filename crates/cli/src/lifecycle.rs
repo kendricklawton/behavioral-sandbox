@@ -152,10 +152,9 @@ pub(crate) fn stop(args: &StopArgs) -> ExitCode {
     }
 }
 
-/// The columns, in order, with the width each is padded to. One definition, so the header and
-/// every row are laid out from the same widths and cannot drift into a table whose header names
-/// the wrong column. A name longer than its width pushes the row out rather than being
-/// truncated, since a truncated name is not one `bsx exec` would take back.
+/// The columns, in order, with the width each is padded to: one definition, so a header cannot
+/// name a different column than the rows below it. A long name pushes the row out rather than
+/// truncating, since a truncated name is not one `bsx exec` takes back.
 const COLUMNS: [(&str, usize); CELLS + 1] = [
     ("NAME", 16),
     ("PID", 8),
@@ -415,9 +414,8 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
             }
             Ok(Response::Error(msg)) => return Err(format!("the agent refused: {msg}")),
             Ok(_) => {}
-            // A channel that ends mid-command is most often the VM ending under it, which the
-            // control socket can be *asked* rather than guessed at: "failed to fill whole buffer"
-            // is true and tells the caller nothing about what happened to their sandbox.
+            // A channel ending mid-command is usually the VM going, which the socket can be
+            // asked rather than guessed at.
             Err(e) if !socket::is_live(&control_sock) => {
                 return Err(format!(
                     "the VM {:?} ended while the command was running ({e})",
@@ -431,9 +429,8 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
 
 /// This process's stdin, read to end of input, for a caller that asked with `--stdin`.
 ///
-/// **Only when asked**, since the request carries stdin as one payload and an idle pipe has no
-/// end. **`EAGAIN` is not an error** on an inherited non-blocking description: waited for, not
-/// reported.
+/// **Only when asked**, the request carrying stdin as one payload. **`EAGAIN` is not an error**
+/// on an inherited non-blocking description: waited for, not reported.
 fn read_stdin() -> Result<Vec<u8>, String> {
     let mut reader = std::io::stdin()
         .lock()

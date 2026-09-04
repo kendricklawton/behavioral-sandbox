@@ -102,10 +102,8 @@ fn spawn_guest(name: &str, runtime: &Path) -> std::process::Child {
 }
 
 /// Whether `pid` has a **vCPU thread**, the difference between a helper that started and a VM
-/// that is running.
-///
-/// The socket is not the signal: a helper binds it long before libkrun is up. Matches libkrun's
-/// `fc_vcpu 0` thread name, since a thread count drifts with a release.
+/// that is running: the socket is bound long before libkrun is up. Matches the `fc_vcpu 0` name,
+/// since a thread count drifts with a release.
 fn vm_is_running(pid: u32) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
         return false;

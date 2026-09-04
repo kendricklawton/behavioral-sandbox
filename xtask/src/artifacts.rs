@@ -36,10 +36,8 @@ fn artifact_name(a: &Artifact) -> String {
     )
 }
 
-/// Restore one artifact from the local vendor mirror `<vendor>/<name>`, a sha-verified copy, no
-/// network, so an offline host builds from the vendored inputs. A missing vendored file is a clear
-/// error naming `cargo xtask vendor`, never a silent fallback to the network (which would defeat the
-/// point of pinning the host offline).
+/// Restores one artifact from the local vendor mirror, sha-verified and offline. A missing file
+/// is an error naming `cargo xtask vendor`, never a silent fallback to the network.
 fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {
     let name = artifact_name(a);
     if a.dest.is_file() && sha256_of(&a.dest)? == a.sha256 {
@@ -69,10 +67,9 @@ fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Download one artifact into place if it isn't already present with the right hash. Downloads to a
-/// `.part` and renames only after the hash verifies, so an interrupted download can never leave a
-/// plausible-looking file at the final path. This is the raw upstream fetch; `cargo xtask vendor`
-/// calls it directly (bypassing the vendor mirror) to populate that mirror in the first place.
+/// Downloads one artifact into place unless it is already there with the right hash, through a
+/// `.part` renamed only after the hash verifies. The raw upstream fetch, which `vendor` calls
+/// directly to populate the mirror.
 pub(crate) fn download_one(a: &Artifact) -> Result<()> {
     let name = a
         .dest

@@ -1029,10 +1029,8 @@ impl MemoryFramebuffer {
 }
 
 /// A scanout's slots as a second process sees them: [`MemoryFramebuffer::share`]'s memfd mapped
-/// read-only, addressed by the layout that came with it.
-///
-/// **A slot is read while the helper may be reusing it**, two presents after it was latest, so a
-/// slow reader tears. It cannot fault: the region's size is sealed.
+/// read-only. **A slot is read while the helper may be reusing it**, two presents after it was
+/// latest, so a slow reader tears. It cannot fault: the region's size is sealed.
 pub struct SharedFrames {
     region: SharedRegion,
     layout: SharedLayout,
@@ -1082,9 +1080,8 @@ impl fmt::Debug for SharedFrames {
     }
 }
 
-// SAFETY: a slot is a region of a scanout's `storage`, whose allocation changes only in
-// `configure_scanout` and `disable_scanout`, both of which abandon every frame first. A slot is
-// handed out only while `Free`, and no two slots overlap.
+// SAFETY: a slot is a region of a scanout's `storage`, whose allocation changes only where every
+// frame is abandoned first. A slot is handed out only while `Free`, and no two overlap.
 unsafe impl DisplayBackend for MemoryFramebuffer {
     fn configure_scanout(
         &mut self,
@@ -1237,10 +1234,8 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
 }
 
 /// What [`Machine::display_backend`] hands libkrun and keeps alive: the count behind
-/// `create_userdata`, and the table itself.
-///
-/// The count is taken back if the machine is dropped without starting. The table is retained by
-/// the crate's rule for anything libkrun is given a pointer to.
+/// `create_userdata`, taken back if the machine drops without starting, and the table, retained
+/// by the crate's rule for anything libkrun is given a pointer to.
 struct DisplayHandle {
     userdata: *const c_void,
     /// Returns the count for the concrete `B` the pointer was made from; the handle itself is
@@ -1807,11 +1802,9 @@ impl Context {
         Ok(self)
     }
 
-    /// Serves `path` as the guest's root over virtiofs under `access`, and moves on to the stage
-    /// where the rest of the machine is configured.
-    ///
-    /// `krun_add_virtiofs3`, not `krun_set_root`, because only it takes the read-only flag, which
-    /// the device enforces as `EROFS`.
+    /// Serves `path` as the guest's root over virtiofs under `access`, moving on to the stage
+    /// where the rest is configured. `krun_add_virtiofs3`, not `krun_set_root`, because only it
+    /// takes the read-only flag, which the device enforces as `EROFS`.
     pub fn root(mut self, path: &Path, access: FsAccess) -> Result<Machine, Error> {
         let c_tag = c_bytes("the root tag", OsStr::new(sys::KRUN_FS_ROOT_TAG))?;
         let c_dir = c_path("the root path", path)?;
@@ -1867,10 +1860,8 @@ impl Machine {
     }
 
     /// Replaces libkrun's implicit vsock device with an explicit one carrying exactly
-    /// `tsi_features`. `0` is no transparent socket proxying, which is the no-network posture;
-    /// the implicit device enables TSI by heuristic, so this is how a caller says no.
-    ///
-    /// Must come before [`vsock_port`](Self::vsock_port), which attaches to this device.
+    /// `tsi_features`; `0` is the no-network posture, the implicit device enabling TSI by
+    /// heuristic. Must come before [`vsock_port`](Self::vsock_port), which attaches to it.
     pub fn vsock(self, tsi_features: u32) -> Result<Self, Error> {
         check("krun_disable_implicit_vsock", unsafe {
             sys::krun_disable_implicit_vsock(self.ctx.id)
@@ -1996,10 +1987,8 @@ impl Machine {
     }
 
     /// Adds a virtio-snd device backed by the host audio server. One boolean, so the guest gets
-    /// **playback and capture**, the microphone included: libkrun's API cannot split the two.
-    ///
-    /// Gate on [`has_feature`]`(`[`KRUN_FEATURE_SND`]`)`: a build without snd exports the symbol
-    /// and adds no device.
+    /// **playback and capture**, libkrun's API not splitting the two. Gate on
+    /// [`has_feature`]`(`[`KRUN_FEATURE_SND`]`)`: a build without snd adds no device.
     pub fn sound_device(self) -> Result<Self, Error> {
         check("krun_set_snd_device", unsafe {
             sys::krun_set_snd_device(self.ctx.id, true)
@@ -2107,9 +2096,8 @@ impl Machine {
 
     /// Starts the microVM, **and does not return.**
     ///
-    /// libkrun takes over the process and exits with the guest's status, so the only return is a
-    /// failure, hence [`Error`] and not a `Result`. There is no "after", which is what makes a VM
-    /// a helper process rather than a thread.
+    /// libkrun exits the process with the guest's status, so the only return is a failure, hence
+    /// [`Error`] and not a `Result`. No "after" is what makes a VM a process, not a thread.
     pub fn enter(self) -> Error {
         match check("krun_start_enter", unsafe {
             sys::krun_start_enter(self.ctx.id)
@@ -2163,10 +2151,9 @@ pub fn nested_virt_supported() -> Result<bool, Error> {
 mod tests {
     use super::*;
 
-    /// `check` is the whole of the error mapping, and its sign convention is the part that is easy
-    /// to get backwards: libkrun returns a *negated* errno, so `-2` is `ENOENT` and not errno 2's
-    /// negation being passed through to `io::Error` as-is. Only meaningful where a real library
-    /// produced the value: the stub build reports every failure as [`Error::NotLinked`] instead.
+    /// The sign convention is the part easy to get backwards: libkrun returns a *negated* errno,
+    /// so `-2` is `ENOENT`. Only meaningful against a real library; the stub build reports
+    /// [`Error::NotLinked`].
     #[cfg(krun_linked)]
     #[test]
     fn a_negative_return_is_read_as_a_negated_errno() {
@@ -2224,10 +2211,7 @@ mod tests {
         );
     }
 
-    /// The C arrays libkrun reads are NULL-terminated, not length-carrying, so the terminator is
-    /// load-bearing: without it libkrun walks off the end of the array.
-    /// The device flag is an enum so a call site reads as a posture, and the default is the safe
-    /// one: a caller that says nothing gets a root it cannot write.
+    /// The default is the safe one: a caller that says nothing gets a root it cannot write.
     #[test]
     fn the_root_access_default_is_read_only() {
         assert_eq!(FsAccess::default(), FsAccess::ReadOnly);
@@ -2235,6 +2219,8 @@ mod tests {
         assert!(!FsAccess::ReadWrite.is_read_only());
     }
 
+    /// The C arrays libkrun reads are NULL-terminated, not length-carrying, so without the
+    /// terminator libkrun walks off the end.
     #[test]
     fn a_pointer_array_carries_its_null_terminator() {
         let items = vec![
@@ -2265,10 +2251,8 @@ mod tests {
     }
 
     /// The handles are `!Send` by construction, so a context cannot be built on one thread and
-    /// entered on another.
-    ///
-    /// A negative bound needs the inherent-method-beats-trait trick, checked against a known-`Send`
-    /// and a known-`!Send` type, or a probe answering `false` for everything would pass.
+    /// entered on another. The probe is checked against a known-`Send` and a known-`!Send` type,
+    /// or one answering `false` for everything would pass.
     #[test]
     fn a_context_cannot_cross_threads() {
         assert!(

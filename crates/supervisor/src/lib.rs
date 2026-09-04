@@ -155,10 +155,9 @@ pub struct VmConfig {
     pub env: Vec<OsString>,
     /// Extra virtiofs shares, as `(tag, host path)`.
     pub shares: Vec<(String, PathBuf)>,
-    /// Host directories made read-write inside the guest, as `(guest path, host path)`. Edits
-    /// land on the host: this is the project-directory case, where the sandbox works on real
-    /// files. The helper wraps the workload in a mount preamble, so a VM with mounts needs
-    /// `/bin/sh` and `mount` in its image.
+    /// Host directories made read-write inside the guest, as `(guest path, host path)`: the
+    /// project-directory case, where edits land on real files. The helper wraps the workload in a
+    /// mount preamble, so the image needs `/bin/sh` and `mount`.
     pub mounts: Vec<(PathBuf, PathBuf)>,
     /// A vsock mapping as `(guest port, host unix socket path)`: the guest listens on the port,
     /// and a host process reaches it by connecting to the socket. One is enough for the agent
@@ -182,10 +181,8 @@ pub struct VmConfig {
     /// sees, timed from the thread's start. A development knob: what `cargo xtask bench-frames`
     /// reads to measure how many frames a second cross from the guest.
     pub frame_log: Option<PathBuf>,
-    /// Whether the guest gets a virtio-snd sound card, backed by the host's audio server. `false`
-    /// by default (design rule 3): audio is a two-way hole (the guest plays to the host's output
-    /// and can capture from its input), so it is opened only by an explicit `--sound`, never
-    /// ambient.
+    /// Whether the guest gets a virtio-snd card, backed by the host's audio server. `false` by
+    /// default (rule 3): a two-way hole is opened by an explicit `--sound`, never ambient.
     pub sound: bool,
     /// A file to take everything this VM says, instead of the caller's stderr.
     ///
@@ -410,10 +407,8 @@ pub struct Vm {
 
 impl Vm {
     /// Spawns a helper process for `cfg`, re-executing this binary through [`helper_path`]. The
-    /// name becomes its control socket, so [`discover`] can list it; one
-    /// [`socket::valid_name`] refuses is refused here.
-    ///
-    /// The helper inherits stdio, so a VM's output is the caller's.
+    /// name becomes its control socket, so [`discover`] can list it. The helper inherits stdio,
+    /// so a VM's output is the caller's.
     pub fn spawn(name: impl Into<String>, cfg: &VmConfig) -> Result<Self, Error> {
         let name = name.into();
         let child = helper_command(&name, cfg)?.spawn().map_err(Error::Spawn)?;
@@ -595,9 +590,8 @@ fn exit_of(status: &std::process::ExitStatus) -> Exit {
 
 /// Where a VM's control socket lives, and how a caller tells a live one from a leftover.
 ///
-/// There is no daemon: the sockets **are** the registry. One outliving its helper is expected,
-/// since `krun_start_enter` exits without unwinding, so [`socket::is_live`] connects rather than
-/// checking presence.
+/// There is no daemon: the sockets **are** the registry. One outliving its helper is expected, so
+/// [`socket::is_live`] connects rather than checking presence.
 pub mod socket {
     use std::io;
     use std::os::unix::fs::PermissionsExt;
@@ -1007,10 +1001,9 @@ pub mod control {
         }
     }
 
-    /// How a leased display's memory is laid out: `slots` regions of `slot_bytes` back to back,
-    /// each one `width` by `height` frame in the virtio-gpu `format` at `stride` bytes a row.
-    /// The numbers, not the interpretation: a client that maps the memfd decides what to do with
-    /// a format it does not know.
+    /// How a leased display's memory is laid out: `slots` regions of `slot_bytes`, each a `width`
+    /// by `height` frame in the virtio-gpu `format` at `stride` bytes a row. The numbers only; a
+    /// client decides what to do with a format it does not know.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[non_exhaustive]
     pub struct Scanout {
@@ -1556,10 +1549,9 @@ pub mod discover {
         live_in(&socket::runtime_dir()?)
     }
 
-    /// [`live`] against an explicit directory, for a caller whose helpers were pointed somewhere
-    /// other than the runtime directory: a test or bench that gives its VMs a private
-    /// `XDG_RUNTIME_DIR` scans `<that>/bsx` with this, where the real directory would mix in
-    /// whatever else the machine is running.
+    /// [`live`] against an explicit directory, for a caller whose helpers were pointed elsewhere:
+    /// a test giving its VMs a private `XDG_RUNTIME_DIR` scans `<that>/bsx`, where the real one
+    /// would mix in whatever else is running.
     pub fn live_in(dir: &Path) -> io::Result<Vec<Found>> {
         let mut found: Vec<Found> = entries_in(dir)?
             .into_iter()
@@ -1697,10 +1689,8 @@ mod tests {
         }
     }
 
-    /// An absent option contributes no flag at all, rather than an empty one the parser would then
-    /// have to interpret.
-    /// A display spells itself the way the helper parses it, with the refresh rate only when
-    /// one was asked for.
+    /// A display spells itself the way the helper parses it, with the refresh rate only when one
+    /// was asked for.
     #[test]
     fn a_display_spec_carries_its_refresh_rate_only_when_set() {
         let d = Display::new(
@@ -1734,6 +1724,8 @@ mod tests {
         assert_eq!(argv.get(at + 1).map(String::as_str), Some("read-only"));
     }
 
+    /// An absent option contributes no flag at all, rather than an empty one the parser would
+    /// then have to interpret.
     #[test]
     fn an_unset_option_contributes_no_flag() {
         let argv = cfg().helper_argv("plain");
@@ -1769,10 +1761,8 @@ mod tests {
         assert!(path.exists(), "names a real file: {path:?}");
     }
 
-    /// The claim that matters about spawning: the program is **this executable**, resolved through
-    /// `current_exe`, not the string "bsx" handed to a `PATH` search. Checked on the `Command`
-    /// rather than on a spawned child, which would race the child's exit before `/proc` could be
-    /// read and turn a real assertion into a flaky one.
+    /// The program is **this executable**, through `current_exe`, not "bsx" on a `PATH` search.
+    /// Checked on the `Command`, since a spawned child would race its own exit.
     #[test]
     fn the_spawn_command_runs_this_executable_not_a_path_lookup() {
         let cmd = helper_command("vm", &cfg()).expect("build the helper command");
@@ -1909,10 +1899,8 @@ mod tests {
         );
     }
 
-    /// A VM that ended on its own is still reported honestly by `stop`, rather than the race being
-    /// hidden: the child is reaped here, so `stop` has a real status to hand back and does not
-    /// invent one. This is the common case for a short workload, where the guest finishes between
-    /// the caller deciding to stop it and the signal landing.
+    /// A VM that ended on its own is still reported honestly by `stop`, which has a real status
+    /// to hand back rather than an invented one. The common case for a short workload.
     #[test]
     fn stopping_a_vm_that_already_finished_reports_its_real_exit() {
         let vm = Vm {

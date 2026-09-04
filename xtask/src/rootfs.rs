@@ -13,10 +13,8 @@ use crate::artifacts::{Artifact, fetch_one, sha256_of};
 use crate::guest_bins::build_guest_agent;
 use crate::{artifacts_dir, run_tool, vendor_dir, workspace_root};
 
-/// The apk cache subdirectory (under a build's `artifacts/` or a vendor mirror): the `.apk` closure +
-/// its `APKINDEX`, populated online once and installed from offline thereafter. Defined here with the
-/// rest of the apk machinery; `vendor` imports it (so the module edge points one way, `vendor` →
-/// `rootfs`, not a cycle).
+/// The apk cache subdirectory: the `.apk` closure and its `APKINDEX`, populated online once and
+/// installed from offline after. Defined here so the module edge runs `vendor` → `rootfs`.
 pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 
 /// Soft ceiling on the base rootfs's footprint, which `build-rootfs` fails past. Adding a runtime
@@ -138,8 +136,7 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
 /// The pinned static `apk` that installs [`GUEST_PACKAGES`] into the staging dir **rootless**.
 ///
 /// **Mirrored, because the upstream URL expires**, and unable to float, being the installer whose
-/// sha256 stands between a fresh clone and an unverified binary. The sha256 is upstream's, so the
-/// mirrored copy stays checkable against Alpine.
+/// sha256 stands between a fresh clone and an unverified binary.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
@@ -298,11 +295,9 @@ fn walk_tree(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// The guest-image contract, checked against the staged tree before it is published: a
-/// half-applied rename fails here rather than booting into something absent.
-///
-/// Ownership is checked separately, being a property of the build environment rather than the
-/// tree, which the reproducibility check cannot see.
+/// The guest-image contract, checked against the staged tree before it is published, so a
+/// half-applied rename fails here rather than booting into something absent. Ownership is checked
+/// separately, being a property of the build environment.
 fn verify_staged_ownership(staging: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -382,10 +377,8 @@ struct RootfsBuild {
 }
 
 /// Re-execs this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it
-/// ran the build in a child.
-///
-/// The tree must be owned by uid/gid **0**, which unprivileged `tar` cannot set. One `fakeroot`
-/// wraps the whole assembly, the faked ownership living in one process.
+/// ran the build in a child: the tree must be owned by uid/gid **0**, which unprivileged `tar`
+/// cannot set. One `fakeroot` wraps the whole assembly, the ownership living in one process.
 fn reexec_under_fakeroot_if_needed(
     image: &ImageSpec,
     verify: bool,
@@ -503,10 +496,8 @@ fn packages_lock_path(image: &ImageSpec) -> PathBuf {
     workspace_root().join("xtask").join(image.lock)
 }
 
-/// The resolved package closure from a staging tree's apk database: every installed package (the
-/// pinned base + the `apk add` dependency closure) as sorted `name-version-rN`. The db content is
-/// deterministic for a given set of package revisions, so this is a stable fingerprint of the
-/// rootfs's software, it changes only when a package revision does.
+/// The resolved package closure from a staging tree's apk database, as sorted `name-version-rN`.
+/// The db is deterministic per revision set, so this fingerprint moves only when a package does.
 fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
     let db = staging.join("lib/apk/db/installed");
     let text =
@@ -669,10 +660,9 @@ fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf,
     Ok((tooldir, apk))
 }
 
-/// The `--root`, `--arch` and `--repository` arguments every `apk.static` call for `image` starts
-/// with. The host's arch, not a literal: Alpine's arch names match Rust's for the arches we pin
-/// (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned, so this stays correct
-/// by itself when a second arch lands, not silently installing x86_64 into an aarch64 image.
+/// The `--root`, `--arch` and `--repository` arguments every `apk.static` call starts with. The
+/// host's arch, not a literal, Alpine's names matching Rust's for the arches pinned here, so a
+/// second arch cannot silently install x86_64 into an aarch64 image.
 fn apk_base_args(image: &ImageSpec, staging: &Path) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--root"),
@@ -689,10 +679,9 @@ fn apk_base_args(image: &ImageSpec, staging: &Path) -> Vec<OsString> {
     args
 }
 
-/// Run `apk.static add` for the image's packages into `staging`, sourced per [`ApkSource`]. The
-/// package set, arch, and repos are identical across sources, only the fetch/cache flags differ, so
-/// the resolved closure (and thus [`resolved_packages`]) is the same whether built online or from the
-/// vendored cache, keeping the lockfile contract intact.
+/// Runs `apk.static add` for the image's packages into `staging`, sourced per [`ApkSource`]. Only
+/// the fetch flags differ between sources, so [`resolved_packages`] is the same online or
+/// vendored, which is what keeps the lockfile contract.
 fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource, image: &ImageSpec) -> Result<()> {
     let mut args = apk_base_args(image, staging);
     args.push(OsString::from("--no-scripts"));
@@ -732,10 +721,8 @@ fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path, image: &ImageSpe
     run_tool(&apk_str, &arg_refs)
 }
 
-/// Make `path` absolute (against the current dir, `xtask` runs from the workspace root). apk
-/// resolves a *relative* `--cache-dir` against its `--root`, which would put the cache inside the
-/// staging tree instead of where the packages actually live, so every cache path handed to apk goes
-/// through here first.
+/// Makes `path` absolute: apk resolves a relative `--cache-dir` against its `--root`, which would
+/// put the cache inside the staging tree.
 fn absolute(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -748,10 +735,8 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 }
 
 /// Populates a vendored apk cache with the resolved closure and its `APKINDEX`, by one online
-/// `apk add` into a throwaway root, so a later build installs `--no-network`.
-///
-/// The throwaway root exists only for the base's `/etc/apk/keys`. The tarballs are the already
-/// sha-verified vendored ones.
+/// `apk add` into a throwaway root that exists only for the base's `/etc/apk/keys`, so a later
+/// build installs `--no-network`.
 pub(crate) fn populate_apk_cache(
     cache_dir: &Path,
     base_tar: &Path,
@@ -825,10 +810,9 @@ mod tests {
 
     use super::{GUEST, GUEST_AGENT_PATH, in_staging, lock_drift, verify_guest_contract};
 
-    /// The drift report is the whole of what a gate log says about an Alpine bump, so it names the
-    /// packages that moved rather than only that something did: a version bump reads as one `-`/`+`
-    /// pair, and a package entering or leaving the closure reads as a lone `+` or `-`. A report
-    /// naming nothing leaves a reader diffing the lockfile by hand to find which.
+    /// The drift report names the packages that moved, not only that something did: a bump reads
+    /// as a `-`/`+` pair and an entry or exit as a lone one. Naming nothing leaves a reader
+    /// diffing the lockfile by hand.
     #[test]
     fn the_drift_report_names_what_moved() {
         let recorded = [

@@ -278,9 +278,7 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
     let _vm = up(&rt, "instdin");
 
     let piped = |nonblocking: bool| -> String {
-        // `CLOEXEC`, or the child inherits copies of **both** ends and its stdin never
-        // reaches EOF, because it is holding the write end open itself (watched: it hung
-        // this test).
+        // `CLOEXEC`, or the child holds the write end open and its stdin never reaches EOF.
         let (read, write) =
             rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
         if nonblocking {

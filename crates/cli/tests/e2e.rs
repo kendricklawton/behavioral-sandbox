@@ -107,9 +107,7 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     if skipped("shell_runs_the_command_on_a_guest_pty_and_returns_its_exit") {
         return;
     }
-    // The image tree's /tmp before and after: a session's scratch lives on a guest tmpfs, so a
-    // run must add nothing here. Session dirs used to land in the shared image through the rw
-    // root virtiofs and survive the VM.
+    // A session's scratch lives on a guest tmpfs, so a run must add nothing to the image /tmp.
     let image_tmp = || -> Vec<String> {
         std::fs::read_dir(guest_root().join("tmp"))
             .map(|d| {
@@ -152,9 +150,8 @@ fn the_default_guest_cannot_reach_the_host_network() {
     }
     let server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a host-only server");
     let port = server.local_addr().expect("addr").port();
-    // The guest probes with `wget`, which fails on a connect carrying no response, so the server
-    // must answer. The request is read **before** the reply is written: closing with unread data
-    // sends an RST that discards the reply.
+    // `wget` fails on a connect carrying no response, so the server answers. The request is read
+    // before the reply is written, or an RST discards it.
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for mut s in server.incoming().take(4).flatten() {
@@ -190,10 +187,8 @@ fn the_default_guest_cannot_reach_the_host_network() {
     );
 }
 
-/// The 3.5 contract: the limits in the config are the machine the guest actually gets. Asked
-/// for 2 vCPUs and 256 MiB, the guest's own `nproc` says 2 and its `MemTotal` sits within a
-/// kernel-overhead band of the ask (measured 271 MiB for a 256 MiB config), not at the 512 MiB
-/// default and not at the host's size.
+/// The 3.5 contract: the configured limits are the machine the guest gets. Its own `nproc` and
+/// `MemTotal` answer the ask within a kernel-overhead band, not the default and not the host.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn the_configured_limits_are_what_the_guest_sees() {
@@ -273,10 +268,8 @@ fn a_machine_larger_than_the_host_is_refused_before_boot() {
     assert!(err.contains("more RAM than this host"), "{err}");
 }
 
-/// The 3.3 contract, under 3.7's read-only root: a host directory is read-write at the guest
-/// path, and edits land on the host, while the image tree the mount point lives in is untouched.
-/// `/mnt` because the image has it: the preamble's `mkdir -p` cannot make one through a
-/// read-only root, which is what `a_mount_point_the_image_lacks_is_refused_before_boot` covers.
+/// The 3.3 contract under a read-only root: a host directory is read-write at the guest path and
+/// edits land on the host, with the image tree untouched. `/mnt` because the image has it.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
@@ -464,10 +457,9 @@ fn a_mount_point_the_image_lacks_is_refused_before_boot() {
     assert!(err.contains("--rootfs writable"), "names the opt-in: {err}");
 }
 
-/// Design rule 3's other half: what is shared is visible *before* the VM starts. `--dry-run`
-/// prints the posture and boots nothing, which is asserted through the control socket every
-/// boot leaves behind: no socket, no VM. The second half runs the same command for real, so a
-/// change that stopped the socket from appearing could not leave this passing vacuously.
+/// Design rule 3's other half: the posture is visible *before* the VM starts. `--dry-run` boots
+/// nothing, asserted through the control socket every boot leaves. The same command runs for
+/// real after, so a socket that stopped appearing could not leave this vacuous.
 #[test]
 #[ignore = "the dry run boots nothing; the paired real run needs /dev/kvm and the guest tree"]
 fn a_dry_run_prints_the_posture_and_boots_nothing() {
@@ -516,10 +508,9 @@ fn a_dry_run_prints_the_posture_and_boots_nothing() {
     );
 }
 
-/// A `--share` cannot take a tag `--mount` uses. The guest mounts by tag, so a duplicate left it
-/// mounting whichever device the kernel matched first: `--share bsx-mnt-0=X --mount /mnt=Y` put
-/// `X` at `/mnt` and `Y` nowhere, with `--dry-run` printing the mount that did not happen
-/// (measured 2026-09-01). Refused before boot, because nothing downstream can tell.
+/// A `--share` cannot take a tag `--mount` uses: the guest mounts by tag, so a duplicate leaves
+/// the kernel matching whichever device it saw first. Refused before boot, since nothing
+/// downstream can tell.
 #[test]
 #[ignore = "spawns the built bsx (no VM boots: the refusal is the test)"]
 fn a_share_tag_that_would_shadow_a_mount_is_refused_before_boot() {
@@ -637,10 +628,9 @@ fn a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for() {
     says("PROBE libvulkan (absent)");
 }
 
-/// A key on the keyboard device and a click on the pointer device arrive in the guest as the
-/// evdev events a process there reads, under the names the devices were given (roadmap 0.10).
-/// The events go in through the replay hook, since a runner has no window to type into; the
-/// guest side is the same either way.
+/// A key and a click arrive in the guest as the evdev events a process there reads, under the
+/// names the devices were given (roadmap 0.10). Through the replay hook, a runner having no
+/// window to type into.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_synthetic_key_and_click_reach_a_guest_process() {
@@ -796,10 +786,9 @@ fn typed(text: &str) -> String {
         .collect()
 }
 
-/// The desktop image boots to a Wayland session (cage) whose terminal (foot) runs a shell the
-/// window's keyboard reaches (roadmap 4.5): a command typed through the replay hook writes a
-/// sentinel to a mounted directory, and the `exit` that follows ends the terminal, the compositor
-/// and the run. The root is read-only; the sentinel lands on the writable mount.
+/// The desktop image boots to a Wayland session whose terminal runs a shell the window's keyboard
+/// reaches (roadmap 4.5): a typed command writes a sentinel to the writable mount, and the `exit`
+/// after it ends the terminal, the compositor and the run.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the desktop tree"]
 fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
@@ -823,9 +812,8 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
             .expect("run mkfifo")
             .success()
     );
-    // The terminal runs a shell that reads one line and runs it: the session is the compositor,
-    // and what a real user would type at foot's prompt is fed the same way. Reading one line keeps
-    // the shell simple and ends it deterministically.
+    // A shell reading one line and running it: what a user would type at foot's prompt, fed the
+    // same way, and deterministic.
     let mount = format!("/mnt={}", dir.path().display());
     let mut child = bsx()
         .arg("run")
@@ -911,10 +899,9 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
     );
 }
 
-/// `--sound` gives the guest a virtio-snd card and nothing else does (roadmap 4.7): the guest
-/// reads its card list, and the card is present exactly when the flag is. The card is a two-way
-/// device (`playback 1 : capture 1`), which is why the flag is opt-in. Headless: `/proc/asound`
-/// needs no tools and no host audio, so a runner with no sound server still decides it.
+/// `--sound` gives the guest a virtio-snd card and nothing else does (roadmap 4.7), the card
+/// being present exactly when the flag is. Two-way (`playback 1 : capture 1`), which is why it is
+/// opt-in. Read from `/proc/asound`, so a runner with no sound server still decides it.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn sound_gives_the_guest_a_card_and_nothing_else_does() {
@@ -1000,9 +987,8 @@ fn a_frame_log_records_each_frame_the_guest_flushed() {
 }
 
 /// A second process sees the frames a guest draws without a copy (roadmap 4.9): it leases the
-/// display over the control socket, maps the memfd the answer carries, is told each present's
-/// slot, and reads the drawn pattern out of that slot. Its frame log names the same frame ids as
-/// the helper's own, on the same clock.
+/// display, maps the memfd the answer carries, and reads the pattern out of the slot it is told.
+/// Its frame log names the helper's own frame ids, on the same clock.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_second_process_maps_the_frames_the_guest_draws() {
@@ -1056,9 +1042,8 @@ fn a_second_process_maps_the_frames_the_guest_draws() {
     }
     let _stop = Stop(rt.clone());
 
-    // The reader first, so it holds the lease while the guest draws. It waits for the scanout,
-    // which the guest's mode set creates, and reads until the lease ends, which is the stop
-    // below: a lease taken after the scanout's first frames never sees them, so no count is safe.
+    // The reader first, so it holds the lease while the guest draws, and reads until the stop
+    // below: a late lease misses the first frames, so no count is safe.
     let reader = bsx()
         .env("XDG_RUNTIME_DIR", &rt)
         .args(["__frames", "boundary"])
@@ -1109,9 +1094,8 @@ fn a_second_process_maps_the_frames_the_guest_draws() {
     assert_eq!(at(317, 237), [255, 255, 255], "bottom-right is white");
     assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
 
-    // The two logs name the same frames on the same clock, within the wake's latency of each
-    // other in either direction: the record is written under the lock before the helper's own
-    // thread has woken, so the client is often the earlier one.
+    // The same frames on the same clock, within the wake's latency either way: the record is
+    // written under the lock before the helper's own thread wakes.
     let rows = |path: &Path| -> Vec<(u64, u128)> {
         std::fs::read_to_string(path)
             .expect("a log")
@@ -1249,9 +1233,8 @@ fn a_key_and_click_over_the_control_socket_reach_a_guest_process() {
         lines.last().is_some_and(|l| l.starts_with("INPUT ready")),
         "the guest never got to its devices: {lines:?}"
     );
-    // Only now is the guest listening. The session is the app's path in: the same lines the
-    // replay file carries, down the control socket, and the button left down at the end is
-    // what the helper must release when the session goes.
+    // Only now is the guest listening. The button left down is what the helper must release
+    // when the session goes.
     let socket = bsx_supervisor::socket::path_in(&rt, "wired").expect("a socket path");
     let mut session = bsx_supervisor::control::input(&socket).expect("an input session");
     for line in [
@@ -1496,10 +1479,9 @@ fn an_up_sandbox_records_its_execs_and_its_stop() {
     );
 }
 
-/// A guest that sets a new mode (roadmap 4.4) is followed on the host: the lease it had is ended
-/// with a reconfigure record, the next lease is at the new size, and the frame read through it is
-/// what the guest drew there. The guest's driver keeps every mode the display's EDID lists; only
-/// the preferred one is pinned to the `--display` size.
+/// A guest that sets a new mode (roadmap 4.4) is followed on the host: the old lease ends with a
+/// reconfigure record and the next is at the new size. The driver keeps every mode the EDID
+/// lists; only the preferred one is pinned to `--display`.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_guest_that_sets_a_new_mode_is_followed_by_the_next_lease() {

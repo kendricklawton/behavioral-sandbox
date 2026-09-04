@@ -39,8 +39,6 @@ const IDLE_GUEST: &str = "sleep 3600";
 ///
 /// - **to vCPU**: spawn to a running `fc_vcpu` thread. Polled, so it is a floor.
 /// - **to exit**: spawn to the process ending, for a `/bin/true` workload.
-///
-/// Their difference is not reported: subtracting two differently-noisy series would overstate it.
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
@@ -107,8 +105,6 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
 ///
 /// - **Pss per VMM**, which splits shared pages, so summing it is the true resident cost.
 /// - **The whole-host `MemAvailable` drop**, which catches what a VMM's `smaps` cannot see.
-///
-/// Rss sits beside Pss because the gap between them is the sharing.
 pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
     if count == 0 {
         bail!("--count must be >= 1");
@@ -327,10 +323,9 @@ fn bench_boundary(ctx: &BenchContext, display: &str, frames: usize, stage: &Path
     Ok(())
 }
 
-/// The application (4.10): `bsx-app` leases the display into a window, logging each present as
-/// it reads it and each frame it uploads to the GPU. What reaches the screen is bounded by the
-/// panel, so "uploaded" against "presented" is the number, and the upload's lag behind the helper
-/// is the cost of the window.
+/// The application (4.10): `bsx-app` leases the display into a window, logging each present read
+/// and each frame uploaded. The panel bounds what reaches the screen, so uploaded against
+/// presented is the number.
 fn bench_app(ctx: &BenchContext, display: &str, frames: usize, stage: &Path) -> Result<()> {
     let app = ctx.bsx.with_file_name("bsx-app");
     if !app.is_file() {

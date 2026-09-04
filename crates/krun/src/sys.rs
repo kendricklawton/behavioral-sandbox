@@ -438,8 +438,7 @@ pub struct krun_input_event_provider {
 }
 
 // Transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`/`gid_t` are `u32` on
-// both targets, which keeps this crate free of libc; `the_uid_type_is_the_width_the_header_uses`
-// pins it.
+// both targets, pinned by `the_uid_type_is_the_width_the_header_uses`.
 #[cfg(krun_linked)]
 unsafe extern "C" {
     // --- context lifecycle -------------------------------------------------------------------
@@ -536,8 +535,8 @@ unsafe extern "C" {
     pub fn krun_add_vsock(ctx_id: u32, tsi_features: u32) -> i32;
 
     // --- network -----------------------------------------------------------------------------
-    /// Points the network backend at a gvproxy socket path. Takes a **mutable** `char *` in the
-    /// header, transcribed as such rather than quietly narrowed.
+    /// Points the network backend at a gvproxy socket path. A **mutable** `char *` in the header,
+    /// transcribed as such.
     pub fn krun_set_gvproxy_path(ctx_id: u32, c_path: *mut c_char) -> i32;
     /// Hands the network backend an already-connected passt descriptor.
     pub fn krun_set_passt_fd(ctx_id: u32, fd: c_int) -> i32;
@@ -587,7 +586,7 @@ unsafe extern "C" {
 
     // --- input -------------------------------------------------------------------------------
     /// Adds a virtio-input device whose identity and events come from two callback tables.
-    /// Declared `int` in the header, where its neighbours are `int32_t`.
+    /// Declared `int`, where its neighbours are `int32_t`.
     pub fn krun_add_input_device(
         ctx_id: u32,
         config_backend: *const c_void,
@@ -597,8 +596,8 @@ unsafe extern "C" {
     ) -> i32;
 
     // --- lifecycle and probes ----------------------------------------------------------------
-    /// Returns an eventfd that stops the VM when written to. The stop path, since the thread that
-    /// called `krun_start_enter` never comes back to be asked.
+    /// Returns an eventfd that stops the VM when written to, the thread that called
+    /// `krun_start_enter` never coming back to be asked.
     pub fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32;
     /// **Never returns.** Takes over the calling process, boots the guest, and exits with the
     /// guest's status. This one fact is why every VM is a helper process.
@@ -800,9 +799,8 @@ mod tests {
 
     /// The argument list of `fn` in the header text, or `None` if it declares no such function.
     ///
-    /// Anchored on the return type, not the bare name: the header names functions inside comments,
-    /// whose empty parens read as a zero-argument declaration. Joined to the matching close paren,
-    /// because declarations wrap.
+    /// Anchored on the return type, since the header names functions inside comments, and joined
+    /// to the matching close paren, since declarations wrap.
     fn header_arity(header: &str, name: &str) -> Option<usize> {
         let at = header
             .find(&format!("int32_t {name}("))

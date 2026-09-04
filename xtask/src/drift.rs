@@ -54,9 +54,8 @@ pub fn check(root: &Path) -> Result<()> {
             continue;
         };
 
-        // A `-p <name>` a reader is told to run must name a real package: the directory and the
-        // package differ here (`crates/cli` builds `bsx`). Over every tracked text file, since
-        // scoping it to `.rs`/`.md` let others survive.
+        // A `-p <name>` must name a real package, the directory and the package differing here.
+        // Over every tracked text file, since scoping it to `.rs`/`.md` let others survive.
         for (line_no, pkg) in cargo_package_refs(&text) {
             pkg_refs += 1;
             if !packages.contains(&pkg) {

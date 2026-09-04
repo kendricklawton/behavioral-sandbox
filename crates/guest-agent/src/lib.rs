@@ -161,10 +161,10 @@ impl SplitStream for vsock::VsockStream {
 }
 
 /// Serves one exec request over `stream` in a **fresh working directory** removed afterwards.
-/// A spawn failure both sends [`Response::Error`] and returns [`AgentError::Spawn`].
 ///
 /// # Errors
-/// [`AgentError`] on any channel, spawn, or wait failure. A non-zero exit is not one.
+/// [`AgentError`] on any channel, spawn or wait failure; a non-zero exit is not one. A spawn
+/// failure also sends [`Response::Error`].
 pub fn serve<S>(stream: S) -> Result<i32, AgentError>
 where
     S: SplitStream + 'static,
@@ -496,11 +496,9 @@ static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// per process rather than one per exec.
 static CGROUP_LOSS_REPORTED: AtomicBool = AtomicBool::new(false);
 
-/// A per-exec cgroup whose only job is to **kill the whole process tree**: v2 membership is
-/// inherited and `setsid` cannot escape it, which a direct-child kill misses.
-///
-/// Best-effort: `None` without cgroup v2. No controllers are enabled, so the root cgroup holding
-/// processes does not bite and no host-side delegation is needed.
+/// A per-exec cgroup whose only job is to **kill the whole process tree**, which `setsid` cannot
+/// escape and a direct-child kill misses. Best-effort: `None` without cgroup v2, and no
+/// controllers are enabled, so no host-side delegation is needed.
 struct ExecCgroup {
     path: PathBuf,
 }
@@ -777,9 +775,8 @@ fn serve_pty<S: SplitStream + 'static>(
         }
     };
 
-    // `setsid -c` makes the slave the controlling terminal, which routes `^C` to the child.
-    // The `Command` is scoped to this closure: a slave fd still open in the parent is a master
-    // that never reads EOF.
+    // `setsid -c` makes the slave the controlling terminal, routing `^C` to the child. Scoped to
+    // this closure: a slave fd open in the parent is a master that never reads EOF.
     let stdio = |f: &std::fs::File| f.try_clone().map(Stdio::from);
     let child = (|| {
         let mut cmd = Command::new("setsid");

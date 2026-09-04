@@ -73,9 +73,8 @@ fn run(spec: &str) -> Result<(), String> {
 /// Serves connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on the
 /// console *after* the bind, so the host never dials before we're accepting.
 fn run_vsock(port: u32) -> Result<(), String> {
-    // Serving vsock is what proves this process is inside a guest, so guest-only setup belongs
-    // here: without the tmpfs, session dirs under `/tmp` reach the shared image tree through the
-    // rw root and outlive the VM. Best-effort; `build-rootfs --verify` reports the drift.
+    // Serving vsock is what proves this process is inside a guest. Without the tmpfs, session
+    // dirs reach the shared image tree through the rw root and outlive the VM.
     if let Err(e) = rustix::mount::mount(
         "tmpfs",
         "/tmp",

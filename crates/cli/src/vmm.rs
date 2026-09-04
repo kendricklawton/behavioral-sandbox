@@ -99,10 +99,9 @@ pub(crate) struct VmmArgs {
     /// guest editing what the next guest starts from.
     #[arg(long, value_name = "POSTURE", default_value = "read-only")]
     pub(crate) rootfs: RootFsPosture,
-    /// A display for the guest as `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`, shown in a window this
-    /// process opens, whose keyboard and pointer go to the guest as two input devices. `@HZ` is
-    /// the refresh rate the guest is told. Without a display server the display still runs and
-    /// the window is skipped, with a warning.
+    /// A display as `WIDTHxHEIGHT[@HZ]`, shown in a window this process opens, whose keyboard and
+    /// pointer reach the guest as two input devices. Without a display server the display still
+    /// runs and the window is skipped.
     #[arg(long, value_name = "WIDTHxHEIGHT[@HZ]")]
     pub(crate) display: Option<String>,
     /// Keep this file holding the display's latest frame as a binary PPM. Needs `--display`.
@@ -120,10 +119,8 @@ pub(crate) struct VmmArgs {
 }
 
 /// What the guest may do to its root filesystem, [`ReadOnly`](RootFsPosture::ReadOnly) by default
-/// because one image tree boots every sandbox.
-///
-/// Enforced by the virtiofs device, so the guest can neither undo nor see it: `/proc/mounts`
-/// still reports the root `rw`.
+/// because one image tree boots every sandbox. Enforced by the virtiofs device, so the guest can
+/// neither undo nor see it: `/proc/mounts` still reports the root `rw`.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum RootFsPosture {
     /// Guest writes to the root fail with `EROFS`. Writable state comes from a `--mount`.
@@ -252,11 +249,9 @@ fn mount_tag(i: usize) -> String {
     format!("{RESERVED_TAG_PREFIX}mnt-{i}")
 }
 
-/// The `sh -c` script that mounts every `--mount` tag and then becomes the workload. A failed
-/// step exits 2 rather than running with a directory missing.
-///
-/// **The grammar is the transport's**: one argv entry whose codec corrupts a space inside a
-/// double-quoted span, so one line, no double quote, every word through [`sh_quote`].
+/// The `sh -c` script that mounts every `--mount` tag and becomes the workload, exiting 2 on a
+/// failed step. **The grammar is the transport's**: one argv entry whose codec corrupts a space
+/// inside a double-quoted span, so one line, no double quote, every word through [`sh_quote`].
 fn mount_preamble(mounts: &[(&Path, &Path)], exec: &Path, args: &[String]) -> String {
     let mut script = String::new();
     for (i, (guest, _)) in mounts.iter().enumerate() {
@@ -470,9 +465,7 @@ impl From<bsx_krun::Error> for HelperError {
 /// Returns `Infallible` in the `Ok` position: there is no success value because a successful start
 /// never comes back here. The type says so, so nobody writes code after it.
 fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperError> {
-    // Every argument is checked before the control socket is bound, so a refused invocation does
-    // not leave a socket file behind for a VM that never existed. A *libkrun* failure after the
-    // bind still leaves one, which is the leftover the supervisor's stale check exists for.
+    // Checked before the socket is bound, so a refusal leaves no file for a VM that never was.
     require_dir("the root", &args.root)?;
     let mut shares = Vec::with_capacity(args.shares.len());
     for spec in &args.shares {
@@ -567,9 +560,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         machine = machine.vsock_port(port, path, true)?;
         restrict_when_bound(path);
     }
-    // The display: the device, the scanout's size, where its frames land, and the keyboard and
-    // pointer that come with it. The window that shows the frames and feeds the devices runs on
-    // its own thread from here on, because the one this is on is about to become the guest.
+    // The window runs on its own thread from here, this one being about to become the guest.
     if let Some((width, height, refresh)) = display {
         machine = machine.gpu_device()?;
         let (mut with_display, display_id) = machine.add_display(width.get(), height.get())?;
@@ -626,9 +617,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         let argv: Vec<&OsStr> = args.args.iter().map(OsStr::new).collect();
         machine.exec(&args.exec, &argv, &env)?
     } else {
-        // The workload becomes `sh -c '<mounts>; exec <command, quoted>'`: the mounts land
-        // before anything of the caller's runs, and the `exec` hands the process over with the
-        // exit code and PATH resolution the unwrapped form had.
+        // `sh -c '<mounts>; exec <command>'`: the `exec` keeps the unwrapped exit code and
+        // PATH resolution.
         let script = mount_preamble(&mounts, &args.exec, &args.args);
         // Covers the guest mount paths, which are spliced into the script.
         require_cmdline_safe("the mount preamble", OsStr::new(&script))?;
@@ -679,9 +669,8 @@ fn bind_control_socket(
     // cleared when nothing is listening, so a name genuinely in use still refuses.
     bsx_supervisor::socket::clear_if_stale(&path).map_err(HelperError::Socket)?;
     let listener = std::os::unix::net::UnixListener::bind(&path).map_err(HelperError::Socket)?;
-    // `bind` applies the umask, which commonly leaves the socket world-connectable. The runtime
-    // directory is already `0700`, so this is the second lock rather than the only one: a directory
-    // whose mode is loosened later should not silently expose every VM's control channel.
+    // `bind` applies the umask, commonly leaving the socket world-connectable. The `0700`
+    // runtime directory is the first lock; this is the second.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .map_err(HelperError::Socket)?;
 
@@ -730,9 +719,8 @@ fn serve_control(
             continue;
         }
         if request == Some(Request::Stop) {
-            // Closed **after** the request was read, so the answer is delivered: closing a socket
-            // with unread data in its receive queue sends an RST, which would discard the `ok`
-            // the caller is waiting for.
+            // Closed after the request is read: unread data in the queue sends an RST, which
+            // would discard the `ok`.
             drop(stream);
             stop_this_vm();
         }
@@ -756,10 +744,9 @@ fn serve_input(mut stream: std::os::unix::net::UnixStream, inputs: Option<&crate
     let _ = crate::input::serve(stream, inputs.clone());
 }
 
-/// Answers a display lease: the memfd and layout now, then one record per present on the same
-/// connection until the client goes or the scanout is resized. The record is written from
-/// libkrun's gpu thread under the backend's lock, non-blocking, and a client that cannot take it
-/// (gone, or so far behind that the socket is full) is dropped there rather than waited for.
+/// Answers a display lease: the memfd and layout now, then a record per present until the client
+/// goes or the scanout is resized. Written from libkrun's gpu thread under the lock, non-blocking,
+/// so a client that cannot take it is dropped rather than waited for.
 fn lease_display(
     stream: std::os::unix::net::UnixStream,
     framebuffer: Option<&Arc<Mutex<bsx_krun::MemoryFramebuffer>>>,
@@ -834,9 +821,8 @@ fn lease_display(
 
 /// Ends this process, which is what ending a VM is: `krun_start_enter` never returns.
 ///
-/// SIGKILL to itself, not `exit`: it is the same power cut `Vm::stop` gives, and `exit` would run
-/// libkrun's atexit handlers off the VMM's thread. By pid, which is safe only because the process
-/// asking cannot have been reaped and replaced.
+/// SIGKILL to itself, not `exit`, which would run libkrun's atexit handlers off the VMM's thread.
+/// By pid, safe only because the process asking cannot have been reaped.
 pub(crate) fn stop_this_vm() {
     let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
 }
@@ -849,9 +835,8 @@ const BIND_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Tightens the agent channel socket to `0600` once libkrun has bound it.
 ///
-/// **The channel runs commands in the sandbox.** libkrun binds it under the caller's umask with
-/// no call to set a mode, so this waits for the file from a thread. The `0700` runtime directory
-/// is what holds the window; this is the second lock.
+/// **The channel runs commands in the sandbox**, and libkrun binds it under the caller's umask
+/// with no call to set a mode. The `0700` runtime directory holds the window between.
 fn restrict_when_bound(path: &Path) {
     let path = path.to_path_buf();
     // Best-effort by construction: a VM whose socket could not be tightened still runs, and a
@@ -870,10 +855,8 @@ fn restrict_when_bound(path: &Path) {
         });
 }
 
-/// libkrun was **measured** (2026-09-01, 1.19.4, an 8-CPU host) silently clamping the vCPU count
-/// above this: 16 boots as 16, 17 and 24 boot as 16, and the config never learns. Above it the
-/// helper warns rather than refuses, because the bound may be different libkrun code or other
-/// hardware, and a warning stays true either way.
+/// libkrun silently clamps the vCPU count above this, and the config never learns. A warning
+/// rather than a refusal, since the bound may differ with other libkrun code or hardware.
 const MEASURED_VCPU_CLAMP: u8 = 16;
 
 /// Host `MemTotal` in MiB, where the host exposes it. A host without a readable `/proc/meminfo`
@@ -1044,9 +1027,7 @@ mod tests {
             (Path::new("/project"), Path::new("/srv/a")),
             (Path::new("/it's here"), Path::new("/srv/b")),
         ];
-        // The command's own words go through `sh_quote` like the paths, so a word with spaces
-        // or quotes is data. (A word mixing `"` with a space never reaches here: the codec
-        // guard refuses it for every workload, wrapped or not.)
+        // The command's words go through `sh_quote` too, so one with spaces or quotes is data.
         let script = mount_preamble(
             &mounts,
             Path::new("sh"),
@@ -1086,10 +1067,8 @@ mod tests {
         assert!(split_mount("/project").is_none(), "no separator");
     }
 
-    /// A machine larger than the host is refused with both numbers, because the alternative is
-    /// a guest that believes in RAM nothing can back and a failure that arrives as the host
-    /// OOMing later. Driven with a fabricated host size, since the check itself reads the real
-    /// one.
+    /// A machine larger than the host is refused with both numbers, the alternative being a
+    /// guest believing in RAM nothing can back. Driven with a fabricated host size.
     #[test]
     fn a_mem_ask_beyond_the_host_is_refused_with_both_numbers() {
         if let Some(host) = host_mem_mib() {

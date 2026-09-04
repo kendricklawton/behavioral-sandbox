@@ -52,10 +52,9 @@ enum Cmd {
         #[arg(long)]
         verify: bool,
     },
-    /// Check the pinned API surface against a baseline git rev with `cargo-semver-checks`, naming
-    /// each crate explicitly (the default set silently drops every `publish = false` package, which
-    /// is all of them). Refuses rather than reporting a pass it did not earn. Needs
-    /// `cargo-semver-checks`; not part of `ci` (it builds rustdoc for two trees).
+    /// Check the pinned API surface against a baseline git rev, naming each crate explicitly
+    /// since the default set silently drops every `publish = false` package. Needs
+    /// `cargo-semver-checks`; not part of `ci`, building rustdoc for two trees.
     SemverCheck {
         /// The git rev to compare against (default: the latest `v*` tag).
         #[arg(long, value_name = "REV")]
@@ -127,10 +126,9 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         seconds: u64,
     },
-    /// Fuzz **every** target briefly (seeded), the per-PR smoke: a change that breaks a decoder is
-    /// caught before it lands, not only on the nightly deep run. Fail-fast on the first crash, whose
-    /// input lands under `fuzz/artifacts/`. Same install needs as `fuzz`; never part of `ci`. Wired
-    /// to the `fuzz-smoke` CI job on pull requests.
+    /// Fuzz **every** target briefly, the per-PR smoke, so a broken decoder is caught before it
+    /// lands. Fail-fast, the crashing input landing under `fuzz/artifacts/`. Same install needs as
+    /// `fuzz`; never part of `ci`.
     FuzzSmoke {
         /// Wall-clock seconds per target.
         #[arg(long, default_value_t = 60)]
@@ -177,10 +175,9 @@ fn main() -> Result<()> {
     }
 }
 
-/// Accept only a real target, and let clap print the list in `--help` rather than a doc comment
-/// restating it. The three fuzz subcommands share this so [`FUZZ_TARGETS`] is the only place a
-/// target is named in this file, and an unknown one is an error at the edge instead of a
-/// cargo-fuzz failure several steps in.
+/// Accepts only a real target, letting clap print the list in `--help`. Shared by the three fuzz
+/// subcommands, so [`FUZZ_TARGETS`] is the only place a target is named and an unknown one fails
+/// at the edge.
 fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(FUZZ_TARGETS)
 }
@@ -263,10 +260,8 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
 }
 
 /// Warns about a `fuzz/corpus/<name>` directory no [`FUZZ_TARGETS`] entry names: a renamed target
-/// leaves its corpus under the old name and starts from empty, so coverage goes quiet.
-///
-/// A warning, not a gate assertion: `fuzz/corpus/` is gitignored working data, absent on a fresh
-/// clone.
+/// starts from empty, so coverage goes quiet. A warning, not a gate assertion, `fuzz/corpus/`
+/// being gitignored working data.
 fn warn_orphan_corpora(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root.join("fuzz/corpus")) else {
         return; // nothing fuzzed here yet
@@ -419,10 +414,8 @@ fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
 }
 
 /// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces, which a
-/// root-workspace clippy does not walk.
-///
-/// The cwd is **inside** each workspace, so rustup honours its own `rust-toolchain.toml`; a
-/// missing toolchain skips, since the gate runs everywhere.
+/// root-workspace clippy does not walk. The cwd is **inside** each, so rustup honours its own
+/// `rust-toolchain.toml`; a missing toolchain skips.
 fn lint_detached_workspaces(root: &Path) -> Result<()> {
     let denies = workspace_clippy_denies(root)?;
     for manifest in detached_manifests(root)? {
@@ -549,10 +542,8 @@ fn toolchain_msrv_agree(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The first `key = "value"` assignment's value (quotes stripped), scanning trimmed, non-comment
-/// lines. A tiny hand parser: xtask has no TOML dependency, and each key we read is the sole such
-/// string assignment in its file (`channel` in `[toolchain]`, `rust-version` in
-/// `[workspace.package]`).
+/// The first `key = "value"` assignment's value, quotes stripped. A hand parser, xtask carrying
+/// no TOML dependency, and each key read is the only such assignment in its file.
 fn toml_string_value(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let line = line.trim();
@@ -838,11 +829,9 @@ fn cargo(args: &[&str]) -> Result<()> {
     cargo_env(args, &[])
 }
 
-/// Runs cargo with this host's identity remapped out of what it builds, for release binaries only.
-///
-/// `panic!` locations are baked in regardless of debug info, so two hosts emit different bytes.
-/// `CARGO_ENCODED_RUSTFLAGS` *replaces* configured `rustflags`, which is why this stays off the
-/// gate.
+/// Runs cargo with this host's identity remapped out of what it builds, for release binaries only:
+/// `panic!` locations are baked in regardless of debug info. `CARGO_ENCODED_RUSTFLAGS` *replaces*
+/// configured `rustflags`, which is why this stays off the gate.
 fn cargo_reproducible(args: &[&str]) -> Result<()> {
     let flags = remap_flags(
         &cargo_home(),
@@ -1066,10 +1055,8 @@ exclude = ["fuzz"]
         );
     }
 
-    /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.
-    /// Two reasons: `metadata`'s JSON repeats `"name"` for every *target* as well as every package,
-    /// so a binary target would read as a package; and `fuzz` is excluded from the workspace, so
-    /// `metadata` never sees it while the layout tables rightly list it.
+    /// Package name to directory name, from the manifests rather than `cargo metadata`, whose
+    /// JSON repeats `"name"` per target and never sees the excluded `fuzz` workspace.
     fn workspace_packages(root: &Path) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))

@@ -192,10 +192,8 @@ impl Sinks {
     }
 }
 
-/// One `frame_id<TAB>nanoseconds` line per frame seen, the nanoseconds being the host's
-/// `CLOCK_MONOTONIC`, so a log from another process on this host lines up with it. What
-/// `bench-frames` reads. Written unbuffered, one line per call, so a log of a VM that was killed
-/// is whole up to the last frame.
+/// One `frame_id<TAB>nanoseconds` line per frame seen, on the host's `CLOCK_MONOTONIC` so two
+/// processes line up. Unbuffered, so a killed VM's log is whole up to its last frame.
 pub(crate) struct FrameLog {
     file: std::fs::File,
 }

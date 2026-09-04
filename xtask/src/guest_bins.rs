@@ -115,10 +115,9 @@ pub(crate) fn verify_static(bin: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `readelf <flag> <bin>` and return its stdout. `Ok(None)` means `readelf` (binutils) isn't
-/// installed, the only outcome the caller may treat as a soft skip. A `readelf` that *is* present
-/// but exits non-zero is an `Err`, never a silent `None`: otherwise a tool failure would quietly
-/// disarm the static-link check and let a dynamically-linked guest agent pass as "verified static".
+/// Runs `readelf <flag> <bin>` and returns its stdout. `Ok(None)` is binutils absent, the only
+/// soft skip; a `readelf` present but failing is an `Err`, or a tool failure would disarm the
+/// static-link check silently.
 fn readelf(bin: &Path, flag: &str) -> Result<Option<String>> {
     let out = match Command::new("readelf").arg(flag).arg(bin).output() {
         Ok(o) => o,

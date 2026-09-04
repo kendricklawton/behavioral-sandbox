@@ -54,9 +54,7 @@ impl std::fmt::Display for Error {
             Self::VmEnded(how) => {
                 write!(f, "the VM ended ({how}) before the agent answered")
             }
-            // Deliberately claims nothing about why. The earlier wording said the VM was still
-            // running, which the `connect` path never checked, and named a missing agent as the
-            // cause, which was printed verbatim over a refused `--mem` (watched).
+            // Claims nothing about why: the `connect` path checks neither.
             Self::Silent { socket, last } => write!(
                 f,
                 "the agent on {} did not answer within {DIAL_GRACE:?} (last attempt: {last})",
@@ -132,10 +130,7 @@ mod tests {
 
     use super::Error;
 
-    /// A dial reports what it observed and nothing else. Both messages once said more than they
-    /// had checked: the silent one claimed the VM was still running, which the `connect` path
-    /// never looked at, and the ended one named a missing agent as the cause, which was printed
-    /// verbatim over a refused `--mem` (watched). What went wrong is the VM's to say.
+    /// A dial reports what it observed and nothing else: what went wrong is the VM's to say.
     #[test]
     fn a_dial_failure_claims_only_what_it_checked() {
         let silent = Error::Silent {
