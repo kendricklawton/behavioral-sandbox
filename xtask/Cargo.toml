@@ -18,6 +18,9 @@ bsx-channel = { path = "../crates/channel" }
 # The scratch-dir guard for the tests, and the `/dev/kvm` probe the benches refuse a host
 # with, so they and the supervisor's leak tests explain an unusable device the same way.
 bsx-test-support = { path = "../crates/test-support" }
+# For `KRUNFW_DIR` in the preflight: the same constant the helper is spawned with, so what `setup`
+# reports and what a boot uses cannot disagree.
+bsx-krun = { path = "../crates/krun" }
 
 [lints]
 workspace = true

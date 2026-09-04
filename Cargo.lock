@@ -3688,6 +3688,7 @@ version = "0.0.4"
 dependencies = [
  "anyhow",
  "bsx-channel",
+ "bsx-krun",
  "bsx-test-support",
  "clap",
  "rustix 1.1.4",

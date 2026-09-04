@@ -39,7 +39,9 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
-    /// Check the host can do KVM; report what's missing.
+    /// Check whether a hypervisor answers here and the dev toolchain is present; report what is
+    /// missing. Asks this host's own question, so it names KVM on Linux and Hypervisor.framework
+    /// on macOS rather than a device one of them has not got.
     Setup,
     /// Sign the built `bsx` for Hypervisor.framework so it can start a VM (macOS). A later cargo
     /// build or test replaces the binary and the signature with it, so this runs after a build
@@ -87,6 +89,12 @@ enum Cmd {
         /// after Alpine's branch repo bumps a package out from under the floating install.
         #[arg(long)]
         update_lock: bool,
+        /// The guest image's architecture (`x86_64` or `aarch64`), defaulting to this host's.
+        /// `apk` installs by unpacking and the install runs `--no-scripts`, so a Linux builder of
+        /// either arch can produce an image for the other; `apk.static` itself still has to run
+        /// here, so the builder's own arch must be one with a pinned tool.
+        #[arg(long, value_name = "ARCH")]
+        arch: Option<String>,
     },
     /// Measure cold-boot latency as nearest-rank percentiles: spawn → a running vCPU, and
     /// spawn → the exit of a guest running `/bin/true`. Needs `/dev/kvm`, the guest tree and a
@@ -162,15 +170,23 @@ fn main() -> Result<()> {
             desktop,
             verify,
             update_lock,
-        } => rootfs::build_rootfs(
-            if desktop {
-                &rootfs::DESKTOP
-            } else {
-                &rootfs::GUEST
-            },
-            verify,
-            update_lock,
-        ),
+            arch,
+        } => {
+            let arch = match arch.as_deref() {
+                Some(name) => rootfs::GuestArch::parse(name)?,
+                None => rootfs::GuestArch::host()?,
+            };
+            rootfs::build_rootfs(
+                if desktop {
+                    &rootfs::DESKTOP
+                } else {
+                    &rootfs::GUEST
+                },
+                verify,
+                update_lock,
+                arch,
+            )
+        }
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchFootprint { count, settle_secs } => {
             bench::bench_footprint(count, std::time::Duration::from_secs(settle_secs))
@@ -595,19 +611,66 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Whether a hypervisor answers here, and the question that was put to it.
+///
+/// **The one place a platform branch is allowed to live** (`AGENTS.md`: host variance in the
+/// preflight, never in the boot path), and even here what is asked is a capability: Linux opens the
+/// device, macOS asks the kernel whether it supports virtualization at all. Neither reads a distro,
+/// a release file, or a version.
+fn hypervisor_answers() -> (bool, &'static str) {
+    #[cfg(target_os = "linux")]
+    {
+        (
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/kvm")
+                .is_ok(),
+            "/dev/kvm readable and writable (hardware virtualization)",
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `kern.hv_support` is the kernel's own answer to "can this machine virtualise", which is
+        // the same question `/dev/kvm` answers by opening. Reaching Hypervisor.framework directly
+        // would need this binary to carry the entitlement, and `xtask` is never signed.
+        let answers = Command::new("sysctl")
+            .args(["-n", "kern.hv_support"])
+            .output()
+            .is_ok_and(|out| out.status.success() && out.stdout.starts_with(b"1"));
+        (
+            answers,
+            "Hypervisor.framework answers (kern.hv_support: hardware virtualization)",
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        (false, "a hypervisor this project knows how to reach")
+    }
+}
+
 /// Print a checklist of the host prerequisites; read-only, never fails the build.
 fn setup() -> Result<()> {
     println!("bsx: host capability check\n");
 
-    // Asked of the host, not a distro list: the device either opens read-write or it does not.
-    check(
-        "/dev/kvm readable and writable (hardware virtualization)",
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/kvm")
-            .is_ok(),
-    );
+    let (answers, asked) = hypervisor_answers();
+    check(asked, answers);
+
+    // Everything a macOS host needs beyond the hypervisor, because a green preflight there and a
+    // sandbox that cannot boot is the failure this section exists to prevent.
+    if cfg!(target_os = "macos") {
+        check(
+            "codesign (the hypervisor entitlement: `cargo xtask sign`)",
+            dev_tool_path("codesign").is_some(),
+        );
+        check(
+            &match bsx_krun::KRUNFW_DIR {
+                Some(dir) => format!("libkrunfw found, at {dir} (libkrun's kernel payload)"),
+                None => "libkrunfw (libkrun's kernel payload; set BSX_KRUNFW_LIB_DIR)".to_string(),
+            },
+            bsx_krun::KRUNFW_DIR.is_some(),
+        );
+    }
 
     // Verified, not announced: a row printing the pin while any version satisfied it is hollow.
     println!("\ndev toolchain (for building, not running):");
@@ -615,12 +678,13 @@ fn setup() -> Result<()> {
         &format!("pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"),
         nightly_ready(),
     );
+    let guest_arch = rootfs::GuestArch::host()?;
     check(
         &format!(
             "guest musl target ({}): the static guest agent build (`cargo xtask build-rootfs`)",
-            guest_bins::GUEST_TARGET
+            guest_arch.musl_target()
         ),
-        guest_bins::guest_target_installed(),
+        guest_bins::guest_target_installed(guest_arch),
     );
     // Not optional for an unprivileged rootfs build: without it the staged tree is owned by the
     // builder's uid rather than 0, and the image hash then depends on who ran the build.
@@ -633,7 +697,7 @@ fn setup() -> Result<()> {
         dev_tool_path("readelf").is_some(),
     );
 
-    println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
+    println!("\nMissing items are covered in AGENTS.md -> Building from source.");
     Ok(())
 }
 
@@ -1112,6 +1176,28 @@ exclude = ["fuzz"]
             }
         }
         map
+    }
+
+    /// The preflight asks a question *this* host can answer. What this replaced printed
+    /// `/dev/kvm` on a machine that has no such device, which reads as a missing prerequisite
+    /// rather than as a check that does not apply here.
+    #[test]
+    fn the_preflight_asks_a_question_this_host_can_answer() {
+        let (_, asked) = super::hypervisor_answers();
+        assert!(!asked.is_empty(), "a row with no question is not a check");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                !asked.contains("/dev/kvm"),
+                "{asked:?} names a device this host has not got"
+            );
+            assert!(
+                asked.contains("kern.hv_support"),
+                "{asked:?} must name what was actually asked"
+            );
+        }
+        #[cfg(target_os = "linux")]
+        assert!(asked.contains("/dev/kvm"), "{asked:?}");
     }
 
     /// Every workspace crate forbids `unsafe` except the raw libkrun bindings, which two doc pages

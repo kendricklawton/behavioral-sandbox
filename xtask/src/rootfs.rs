@@ -78,8 +78,9 @@ pub(crate) struct ImageSpec {
     required: &'static [&'static str],
     /// The footprint ceiling.
     budget_mib: u64,
-    /// The committed lockfile's name under `xtask/`.
-    lock: &'static str,
+    /// The committed lockfile's stem under `xtask/`. The arch is appended, because the resolved
+    /// closure differs between arches and one list cannot describe both.
+    lock_stem: &'static str,
 }
 
 /// The headless image every verb boots by default.
@@ -91,7 +92,7 @@ pub(crate) const GUEST: ImageSpec = ImageSpec {
     programs: &[],
     required: &[],
     budget_mib: ROOTFS_BUDGET_MIB,
-    lock: "rootfs-packages.lock",
+    lock_stem: "rootfs-packages",
 };
 
 /// The desktop image: `bsx run --display WxH --root artifacts/rootfs-desktop -- bsx-session`
@@ -110,30 +111,92 @@ pub(crate) const DESKTOP: ImageSpec = ImageSpec {
         "/bin/udevadm",
     ],
     budget_mib: DESKTOP_BUDGET_MIB,
-    lock: "rootfs-desktop-packages.lock",
+    lock_stem: "rootfs-desktop-packages",
 };
 
 /// Every image, for the `vendor` snapshot that has to carry both closures.
 pub(crate) const IMAGES: &[&ImageSpec] = &[&GUEST, &DESKTOP];
 
+/// The architecture of the **guest image**, which is not always the builder's.
+///
+/// `apk` installs by fetching and unpacking, and [`run_apk_add`] passes `--no-scripts`, so an
+/// x86_64 Linux host builds an aarch64 image. Keeping the two apart is what makes that possible:
+///
+/// - **Follows the guest**: the minirootfs, the musl triple the agent is built for, `apk --arch`,
+///   and the package lockfile, whose closure differs between arches.
+/// - **Follows the builder**: `apk.static`, which has to *execute* on the machine doing the build.
+///
+/// The names match Alpine's and Rust's, which agree for both arches, so one string serves all
+/// three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuestArch {
+    X86_64,
+    Aarch64,
+}
+
+impl GuestArch {
+    /// The builder's own architecture, the default target when none is asked for.
+    pub(crate) fn host() -> Result<Self> {
+        Self::parse(std::env::consts::ARCH)
+    }
+
+    /// Parses an arch by the name Alpine and Rust both use.
+    pub(crate) fn parse(name: &str) -> Result<Self> {
+        match name {
+            "x86_64" => Ok(Self::X86_64),
+            "aarch64" => Ok(Self::Aarch64),
+            other => bail!("no guest image is pinned for arch {other} (x86_64 or aarch64)"),
+        }
+    }
+
+    /// The name Alpine's repositories and Rust's target triples both use.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
+    }
+
+    /// The Rust target the in-guest agent is built for: static musl, so it runs in any guest.
+    pub(crate) fn musl_target(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64-unknown-linux-musl",
+            Self::Aarch64 => "aarch64-unknown-linux-musl",
+        }
+    }
+}
+
 /// The pinned Alpine minirootfs, a real musl+busybox userland (so init and a shell just work, and
-/// `apk` adds the [`GUEST_PACKAGES`] runtimes).
-pub(crate) fn alpine_artifact() -> Result<Artifact> {
-    let dir = artifacts_dir();
-    match std::env::consts::ARCH {
-        "x86_64" => Ok(Artifact {
-            url: format!(
-                "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/releases/x86_64/\
-                 alpine-minirootfs-3.24.1-x86_64.tar.gz"
-            ),
-            sha256: "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
-            dest: dir.join("alpine-minirootfs.tar.gz"),
-        }),
-        other => bail!("no pinned Alpine minirootfs for arch {other} yet (x86_64 only)"),
+/// `apk` adds the [`GUEST_PACKAGES`] runtimes). Follows the **guest**.
+///
+/// Infallible, unlike the tool below: every [`GuestArch`] has one, which is what the enum is for.
+pub(crate) fn alpine_artifact(arch: GuestArch) -> Artifact {
+    let (version, sha256) = match arch {
+        GuestArch::X86_64 => (
+            "3.24.1",
+            "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+        ),
+        // Fetched and hashed 2026-09-04, 4023732 bytes.
+        GuestArch::Aarch64 => (
+            "3.24.1",
+            "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+        ),
+    };
+    let name = arch.name();
+    Artifact {
+        url: format!(
+            "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/releases/{name}/\
+             alpine-minirootfs-{version}-{name}.tar.gz"
+        ),
+        sha256,
+        dest: artifacts_dir().join(format!("alpine-minirootfs-{name}.tar.gz")),
     }
 }
 
 /// The pinned static `apk` that installs [`GUEST_PACKAGES`] into the staging dir **rootless**.
+///
+/// Follows the **builder**, not the guest: this one is executed here. So a cross-arch image needs
+/// no second copy of it, and a host arch with no pinned tool cannot build any image at all.
 ///
 /// **Mirrored, because the upstream URL expires**, and unable to float, being the installer whose
 /// sha256 stands between a fresh clone and an unverified binary.
@@ -147,16 +210,19 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
             sha256: "ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1",
             dest: dir.join("apk-tools-static.apk"),
         }),
-        other => bail!("no pinned apk-tools-static for arch {other} yet (x86_64 only)"),
+        other => bail!(
+            "no pinned apk-tools-static for a {other} builder, and it is the builder's arch that \
+             decides: `apk.static` runs here. Mirror one for {other} to build on this host."
+        ),
     }
 }
 
 /// One full rootfs assembly into `out_dir`, producing a **directory tree** for libkrun's virtiofs
 /// root: no image, no loopback, no root. Returns the tree's hash and the resolved closure.
-fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
-    let agent = build_guest_agent()?;
+fn assemble_rootfs(image: &ImageSpec, out_dir: &Path, arch: GuestArch) -> Result<RootfsBuild> {
+    let agent = build_guest_agent(arch)?;
 
-    let base = alpine_artifact()?;
+    let base = alpine_artifact(arch);
     fetch_one(&base)?;
 
     let dir = artifacts_dir();
@@ -181,7 +247,7 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
 
     // Rootless, verified against the keys the minirootfs ships. `--no-scripts`, since those need
     // a chroot; the packages are file payloads and the in-VM exec test proves they run.
-    install_guest_packages(image, &staging)?;
+    install_guest_packages(image, &staging, arch)?;
 
     // Bake the static agent in at the path the init line respawns.
     let agent_dest = in_staging(&staging, GUEST_AGENT_PATH);
@@ -383,6 +449,7 @@ fn reexec_under_fakeroot_if_needed(
     image: &ImageSpec,
     verify: bool,
     update_lock: bool,
+    arch: GuestArch,
 ) -> Result<bool> {
     if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
         return Ok(false);
@@ -406,6 +473,10 @@ fn reexec_under_fakeroot_if_needed(
         args.push("--update-lock");
     }
     args.extend(image.flags.iter().copied());
+    // Carried explicitly: the child defaults to the *host's* arch, which is the wrong image
+    // whenever this build is a cross one.
+    args.push("--arch");
+    args.push(arch.name());
     println!("  (re-exec under fakeroot: the guest rootfs must be uid 0)");
     let mut cmd_args: Vec<&std::ffi::OsStr> = vec![exe.as_os_str()];
     cmd_args.extend(args.iter().map(std::ffi::OsStr::new));
@@ -416,12 +487,17 @@ fn reexec_under_fakeroot_if_needed(
 /// `cargo xtask build-rootfs [--verify] [--update-lock]`: assembles the deterministic guest tree
 /// and prints its hash. `--update-lock` re-records the package lockfile, `--verify` builds twice
 /// and requires an identical hash. Every mode reports closure drift and none fails on it.
-pub(crate) fn build_rootfs(image: &ImageSpec, verify: bool, update_lock: bool) -> Result<()> {
-    if reexec_under_fakeroot_if_needed(image, verify, update_lock)? {
+pub(crate) fn build_rootfs(
+    image: &ImageSpec,
+    verify: bool,
+    update_lock: bool,
+    arch: GuestArch,
+) -> Result<()> {
+    if reexec_under_fakeroot_if_needed(image, verify, update_lock, arch)? {
         return Ok(());
     }
     let out = artifacts_dir().join(image.name);
-    let build = assemble_rootfs(image, &out)?;
+    let build = assemble_rootfs(image, &out, arch)?;
     println!(
         "\n✓ {} built (agent baked in): {}",
         image.name,
@@ -442,20 +518,20 @@ pub(crate) fn build_rootfs(image: &ImageSpec, verify: bool, update_lock: bool) -
     }
 
     if update_lock {
-        write_packages_lock(image, &build.packages)?;
+        write_packages_lock(image, &build.packages, arch)?;
         println!(
             "  ✓ recorded {} packages in {}",
             build.packages.len(),
-            packages_lock_path(image).display()
+            packages_lock_path(image, arch).display()
         );
     } else {
-        report_packages_lock_drift(image, &build.packages);
+        report_packages_lock_drift(image, &build.packages, arch);
     }
 
     if verify {
         // A second full build must hash identically. To a temp path, cleaned on every path.
         let tmp = artifacts_dir().join(format!("{}.verify", image.name));
-        let result = assemble_rootfs(image, &tmp);
+        let result = assemble_rootfs(image, &tmp, arch);
         let _ = std::fs::remove_dir_all(&tmp);
         let again = result?;
         if again.tree_sha256 != build.tree_sha256 {
@@ -492,8 +568,10 @@ fn tree_used_bytes(root: &Path) -> Result<u64> {
 /// The committed lockfile recording the exact guest package closure. Lives next to the build
 /// code, **not** in the gitignored `artifacts/`, so it's version-controlled and a diff shows
 /// exactly when Alpine's branch repo moved a package under the floating install.
-fn packages_lock_path(image: &ImageSpec) -> PathBuf {
-    workspace_root().join("xtask").join(image.lock)
+fn packages_lock_path(image: &ImageSpec, arch: GuestArch) -> PathBuf {
+    workspace_root()
+        .join("xtask")
+        .join(format!("{}.{}.lock", image.lock_stem, arch.name()))
 }
 
 /// The resolved package closure from a staging tree's apk database, as sorted `name-version-rN`.
@@ -524,8 +602,8 @@ fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
 }
 
 /// Write the committed package lockfile (the `--update-lock` action).
-fn write_packages_lock(image: &ImageSpec, packages: &[String]) -> Result<()> {
-    let path = packages_lock_path(image);
+fn write_packages_lock(image: &ImageSpec, packages: &[String], arch: GuestArch) -> Result<()> {
+    let path = packages_lock_path(image, arch);
     let flags = image
         .flags
         .iter()
@@ -547,8 +625,8 @@ fn write_packages_lock(image: &ImageSpec, packages: &[String]) -> Result<()> {
 
 /// Reports how the freshly-resolved closure differs from the committed lockfile. Never fatal: an
 /// Alpine bump is upstream's timing, and `.github/workflows/rootfs-packages.yml` is the enforcer.
-fn report_packages_lock_drift(image: &ImageSpec, built: &[String]) {
-    let path = packages_lock_path(image);
+fn report_packages_lock_drift(image: &ImageSpec, built: &[String], arch: GuestArch) {
+    let path = packages_lock_path(image, arch);
     let flags = image
         .flags
         .iter()
@@ -609,7 +687,7 @@ enum ApkSource<'a> {
 /// Installs [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`: no chroot, no
 /// root, no host `apk`. Offline from the vendored cache with `BSX_VENDOR_DIR` set. The tool is
 /// extracted to a scratch dir and removed; the packages are the product.
-fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
+fn install_guest_packages(image: &ImageSpec, staging: &Path, arch: GuestArch) -> Result<()> {
     if image.packages.is_empty() {
         return Ok(());
     }
@@ -623,7 +701,7 @@ fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
         Some(dir) => ApkSource::VendorCache(dir),
         None => ApkSource::Network,
     };
-    let result = run_apk_add(&apk, staging, &source, image);
+    let result = run_apk_add(&apk, staging, &source, image, arch);
 
     // The tool is scratch either way, clean it before propagating any install failure.
     let _ = std::fs::remove_dir_all(&tooldir);
@@ -663,12 +741,12 @@ fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf,
 /// The `--root`, `--arch` and `--repository` arguments every `apk.static` call starts with. The
 /// host's arch, not a literal, Alpine's names matching Rust's for the arches pinned here, so a
 /// second arch cannot silently install x86_64 into an aarch64 image.
-fn apk_base_args(image: &ImageSpec, staging: &Path) -> Vec<OsString> {
+fn apk_base_args(image: &ImageSpec, staging: &Path, arch: GuestArch) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--root"),
         staging.as_os_str().to_owned(),
         OsString::from("--arch"),
-        OsString::from(std::env::consts::ARCH),
+        OsString::from(arch.name()),
     ];
     for repo in image.repos {
         args.push(OsString::from("--repository"));
@@ -682,8 +760,14 @@ fn apk_base_args(image: &ImageSpec, staging: &Path) -> Vec<OsString> {
 /// Runs `apk.static add` for the image's packages into `staging`, sourced per [`ApkSource`]. Only
 /// the fetch flags differ between sources, so [`resolved_packages`] is the same online or
 /// vendored, which is what keeps the lockfile contract.
-fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource, image: &ImageSpec) -> Result<()> {
-    let mut args = apk_base_args(image, staging);
+fn run_apk_add(
+    apk: &Path,
+    staging: &Path,
+    source: &ApkSource,
+    image: &ImageSpec,
+    arch: GuestArch,
+) -> Result<()> {
+    let mut args = apk_base_args(image, staging, arch);
     args.push(OsString::from("--no-scripts"));
     match source {
         // `--no-cache`: don't leave apk's cache behind on an ordinary online build.
@@ -711,8 +795,14 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource, image: &ImageSpec
 /// `apk.static update` into `cache_dir`, fetch + cache the repo's `APKINDEX` so a later offline
 /// `add --no-network` can resolve against it. A plain `add --cache-dir` caches the packages it pulls
 /// but not necessarily the index, so the vendor snapshot seeds it explicitly.
-fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path, image: &ImageSpec) -> Result<()> {
-    let mut args = apk_base_args(image, staging);
+fn run_apk_update(
+    apk: &Path,
+    staging: &Path,
+    cache_dir: &Path,
+    image: &ImageSpec,
+    arch: GuestArch,
+) -> Result<()> {
+    let mut args = apk_base_args(image, staging, arch);
     args.push(OsString::from("--cache-dir"));
     args.push(absolute(cache_dir)?.into_os_string());
     args.push(OsString::from("update"));
@@ -741,9 +831,10 @@ pub(crate) fn populate_apk_cache(
     cache_dir: &Path,
     base_tar: &Path,
     apk_tools_tar: &Path,
+    arch: GuestArch,
 ) -> Result<()> {
     for image in IMAGES {
-        populate_apk_cache_for(image, cache_dir, base_tar, apk_tools_tar)?;
+        populate_apk_cache_for(image, cache_dir, base_tar, apk_tools_tar, arch)?;
     }
     Ok(())
 }
@@ -755,6 +846,7 @@ fn populate_apk_cache_for(
     cache_dir: &Path,
     base_tar: &Path,
     apk_tools_tar: &Path,
+    arch: GuestArch,
 ) -> Result<()> {
     if image.packages.is_empty() {
         return Ok(());
@@ -786,8 +878,15 @@ fn populate_apk_cache_for(
     let (tooldir, apk) = extract_apk_static(apk_tools_tar, scratch)?;
     // Seed the index first (`update`), then the packages (`add`), both into the cache, so a later
     // offline `add --no-network` can resolve the closure against the cached `APKINDEX`.
-    let result = run_apk_update(&apk, &staging, cache_dir, image)
-        .and_then(|()| run_apk_add(&apk, &staging, &ApkSource::PopulateCache(cache_dir), image));
+    let result = run_apk_update(&apk, &staging, cache_dir, image, arch).and_then(|()| {
+        run_apk_add(
+            &apk,
+            &staging,
+            &ApkSource::PopulateCache(cache_dir),
+            image,
+            arch,
+        )
+    });
     let _ = std::fs::remove_dir_all(&tooldir);
     let _ = std::fs::remove_dir_all(&staging);
     result
@@ -805,6 +904,99 @@ fn set_mode_0755(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The guest's arch picks the minirootfs, and each arch gets its own: an image built for one
+    /// and seeded from the other's base is a tree that cannot execute its own `/bin/sh`.
+    #[test]
+    fn each_guest_arch_has_its_own_pinned_base() {
+        let x86 = alpine_artifact(GuestArch::X86_64);
+        let arm = alpine_artifact(GuestArch::Aarch64);
+        assert!(
+            x86.url.contains("/x86_64/") && x86.url.ends_with("x86_64.tar.gz"),
+            "{}",
+            x86.url
+        );
+        assert!(
+            arm.url.contains("/aarch64/") && arm.url.ends_with("aarch64.tar.gz"),
+            "{}",
+            arm.url
+        );
+        assert_ne!(
+            x86.sha256, arm.sha256,
+            "two arches cannot share a base hash"
+        );
+        assert_ne!(
+            x86.dest, arm.dest,
+            "or one download would overwrite the other"
+        );
+    }
+
+    /// The agent is built for the **guest**, so the triple follows the image and not the builder.
+    #[test]
+    fn the_musl_triple_follows_the_guest() {
+        assert_eq!(GuestArch::X86_64.musl_target(), "x86_64-unknown-linux-musl");
+        assert_eq!(
+            GuestArch::Aarch64.musl_target(),
+            "aarch64-unknown-linux-musl"
+        );
+    }
+
+    /// Alpine's repository arch names and Rust's target-triple arch names agree, which is what
+    /// lets one string serve `apk --arch`, the base URL and the musl triple.
+    #[test]
+    fn the_arch_name_is_the_one_alpine_and_rust_share() {
+        for (name, arch) in [
+            ("x86_64", GuestArch::X86_64),
+            ("aarch64", GuestArch::Aarch64),
+        ] {
+            assert_eq!(arch.name(), name);
+            assert_eq!(GuestArch::parse(name).expect("a pinned arch"), arch);
+            assert!(
+                arch.musl_target().starts_with(name),
+                "{}",
+                arch.musl_target()
+            );
+        }
+        assert!(
+            GuestArch::parse("riscv64").is_err(),
+            "an unpinned arch is refused, not guessed"
+        );
+    }
+
+    /// `apk` is told the **guest's** arch, never the builder's, or a cross build silently fills an
+    /// aarch64 tree with x86_64 packages.
+    ///
+    /// **Both** arches are asked for, because one of them is always this builder's own: checking
+    /// only that one passes against the very bug this separates, which is reading
+    /// `std::env::consts::ARCH` here.
+    #[test]
+    fn apk_is_told_the_guests_arch() {
+        for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+            let args = apk_base_args(&GUEST, Path::new("/tmp/staging"), arch);
+            let at = args
+                .iter()
+                .position(|a| a == "--arch")
+                .expect("--arch is passed");
+            assert_eq!(args[at + 1], arch.name(), "asked for {arch:?}");
+        }
+    }
+
+    /// The closure differs between arches, so each records its own lockfile: one list cannot
+    /// describe both, and a shared name would report every cross build as drift.
+    #[test]
+    fn each_arch_records_its_own_lockfile() {
+        let x86 = packages_lock_path(&GUEST, GuestArch::X86_64);
+        let arm = packages_lock_path(&GUEST, GuestArch::Aarch64);
+        assert_ne!(x86, arm);
+        assert!(x86.ends_with("rootfs-packages.x86_64.lock"), "{x86:?}");
+        assert!(arm.ends_with("rootfs-packages.aarch64.lock"), "{arm:?}");
+        assert!(
+            x86.is_file(),
+            "the committed x86_64 lockfile must be where the code looks: {x86:?}"
+        );
+    }
+
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::artifacts::{Artifact, download_one, sha256_of};
-use crate::rootfs::{APK_CACHE_SUBDIR, alpine_artifact, apk_tools_artifact, populate_apk_cache};
+use crate::rootfs::{
+    APK_CACHE_SUBDIR, GuestArch, alpine_artifact, apk_tools_artifact, populate_apk_cache,
+};
 use crate::workspace_root;
 
 /// The manifest file the vendor snapshot writes: one `sha256  relpath` line per vendored file, so the
@@ -42,8 +44,11 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
 
     // The two single-file inputs: the Alpine base and the static apk tool. Retargeted to land in
     // the vendor dir, downloaded raw (bypassing the mirror).
-    let inputs = vec![alpine_artifact()?, apk_tools_artifact()?];
-    let alpine_tar = dir.join(artifact_name(&alpine_artifact()?));
+    // The builder's own arch: a vendor mirror is a snapshot for building *here*, and the tool half
+    // of it could not be anything else.
+    let arch = GuestArch::host()?;
+    let inputs = vec![alpine_artifact(arch), apk_tools_artifact()?];
+    let alpine_tar = dir.join(artifact_name(&alpine_artifact(arch)));
     let apk_tools_tar = dir.join(artifact_name(&apk_tools_artifact()?));
     for a in inputs {
         download_one(&retarget(a, &dir))?;
@@ -51,7 +56,12 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
 
     // An online `apk add` into a throwaway root, caching the closure the manifest below pins.
     println!("\n↓ resolving + caching the guest package closure ...");
-    populate_apk_cache(&dir.join(APK_CACHE_SUBDIR), &alpine_tar, &apk_tools_tar)?;
+    populate_apk_cache(
+        &dir.join(APK_CACHE_SUBDIR),
+        &alpine_tar,
+        &apk_tools_tar,
+        arch,
+    )?;
 
     // Record every vendored file's hash, so the set is auditable and re-verifiable offline.
     let entries = hash_tree(&dir)?;

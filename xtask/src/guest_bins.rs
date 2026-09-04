@@ -7,15 +7,12 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::cargo_reproducible;
-
-/// The musl target the guest agent is built for: a fully static binary that runs in the guest with
-/// no dynamic loader or libc to bake into the rootfs.
-pub(crate) const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
+use crate::rootfs::GuestArch;
 
 /// Whether the guest musl target is installed: the soft form `cargo xtask setup` reports (the hard
 /// `ensure_guest_target` is what the build path enforces). A missing or failing `rustup` reads as
 /// "not installed", which is the actionable answer for a host-readiness check.
-pub(crate) fn guest_target_installed() -> bool {
+pub(crate) fn guest_target_installed(arch: GuestArch) -> bool {
     Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
@@ -23,21 +20,22 @@ pub(crate) fn guest_target_installed() -> bool {
             out.status.success()
                 && String::from_utf8_lossy(&out.stdout)
                     .lines()
-                    .any(|t| t == GUEST_TARGET)
+                    .any(|t| t == arch.musl_target())
         })
 }
 
 /// Build the guest agent as a static binary for the guest and return its path. Kept out of the `ci`
 /// gate (it needs the musl target installed and produces an artifact the host doesn't run);
 /// `build-rootfs` bakes the result into the image.
-pub(crate) fn build_guest_agent() -> Result<PathBuf> {
-    build_guest_musl()
+pub(crate) fn build_guest_agent(arch: GuestArch) -> Result<PathBuf> {
+    build_guest_musl(arch)
 }
 
 /// Build the static musl guest agent (`--locked`, the guest musl target) and verify it's actually
 /// statically linked before returning its path.
-fn build_guest_musl() -> Result<PathBuf> {
-    ensure_guest_target()?;
+fn build_guest_musl(arch: GuestArch) -> Result<PathBuf> {
+    ensure_guest_target(arch)?;
+    let target = arch.musl_target();
     let (selector, subpath, label) = (
         &["--bin", "guest-agent"][..],
         "release/guest-agent",
@@ -45,9 +43,9 @@ fn build_guest_musl() -> Result<PathBuf> {
     );
     let mut args = vec!["build", "--release", "--locked", "-p", "bsx-guest-agent"];
     args.extend_from_slice(selector);
-    args.extend_from_slice(&["--target", GUEST_TARGET]);
+    args.extend_from_slice(&["--target", target]);
     cargo_reproducible(&args)?;
-    let bin = crate::target_dir().join(GUEST_TARGET).join(subpath);
+    let bin = crate::target_dir().join(target).join(subpath);
     verify_static(&bin, label)?;
     println!("\n✓ {label} built (static): {}", bin.display());
     Ok(bin)
@@ -55,7 +53,8 @@ fn build_guest_musl() -> Result<PathBuf> {
 
 /// Fail with a clear fix if the guest musl target isn't installed, cargo would otherwise error more
 /// obscurely deep in the build.
-fn ensure_guest_target() -> Result<()> {
+fn ensure_guest_target(arch: GuestArch) -> Result<()> {
+    let target = arch.musl_target();
     let installed = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
@@ -71,9 +70,9 @@ fn ensure_guest_target() -> Result<()> {
     }
     if !String::from_utf8_lossy(&installed.stdout)
         .lines()
-        .any(|t| t == GUEST_TARGET)
+        .any(|t| t == target)
     {
-        bail!("missing target {GUEST_TARGET} — run `rustup target add {GUEST_TARGET}` first");
+        bail!("missing target {target} — run `rustup target add {target}` first");
     }
     Ok(())
 }

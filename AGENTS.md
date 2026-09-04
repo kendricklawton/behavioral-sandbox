@@ -128,6 +128,13 @@ cargo install cargo-deny                      # run by the gate
 `/dev/kvm` must be readable and writable by your user, which usually means membership of the `kvm`
 group. No part of the build or the run needs root.
 
+**The guest image is built on Linux, for either arch.** `apk` installs by fetching and unpacking and
+the install runs `--no-scripts`, so `--arch` chooses the *guest's* architecture independently of the
+builder's; what follows the builder is `apk.static`, which has to execute there. That is also why
+the image cannot be built on macOS at all: `apk.static` is a Linux ELF, and `fakeroot` is a second
+such dependency. The closure differs per arch, so each records its own
+`xtask/rootfs-packages.<arch>.lock`.
+
 **On macOS the build has one more step, and it is a build step.** Hypervisor.framework refuses a
 process that does not carry `com.apple.security.hypervisor`. `cargo xtask sign` applies it (ad-hoc,
 so no Apple Developer identity), reads the granted **value** back off the binary, and is a no-op
@@ -146,6 +153,7 @@ cargo xtask ci               # the gate (and signs what it built, on macOS)
 cargo xtask sign             # macOS only: re-entitle the built `bsx` after any other build
 cargo xtask build-rootfs     # the guest image (Alpine + the GUEST_PACKAGES runtimes + static agent)
 cargo xtask build-rootfs --desktop   # the desktop image (+ cage, foot, seatd, udev, and bsx-session)
+cargo xtask build-rootfs --arch aarch64   # an image for the other arch, from either Linux builder
 ```
 
 ## Conventions

@@ -3,7 +3,9 @@
 # are not in it. The install floats within one Alpine branch deliberately (branch repos carry only
 # the latest revision per package, so an exact `pkg=ver-rN` pin would *fail* the build the day
 # upstream bumps, not reproduce it, see `GUEST_PACKAGES` in `xtask/src/rootfs.rs`), and
-# `xtask/rootfs-packages.lock` records what the last build actually resolved.
+# The lockfiles record what the last build actually resolved, one pair per guest arch, because the
+# closure differs between them. This job runs on an x86_64 runner and so re-records
+# `xtask/rootfs-packages.x86_64.lock` and `xtask/rootfs-desktop-packages.x86_64.lock`.
 #
 # This job is the only enforcer. Every `build-rootfs` mode *reports* closure drift and none fails on
 # it, because the build resolves fresh from the branch either way: refusing there costs a caller
@@ -60,14 +62,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if git diff --quiet -- xtask/rootfs-packages.lock xtask/rootfs-desktop-packages.lock; then
+          if git diff --quiet -- xtask/rootfs-packages.x86_64.lock xtask/rootfs-desktop-packages.x86_64.lock; then
             echo "Both image closures still match their lockfiles."
             exit 0
           fi
 
           echo "A resolved closure differs from its committed lockfile:"
           echo ""
-          git --no-pager diff -- xtask/rootfs-packages.lock xtask/rootfs-desktop-packages.lock
+          git --no-pager diff -- xtask/rootfs-packages.x86_64.lock xtask/rootfs-desktop-packages.x86_64.lock
           echo ""
           echo "::error::Alpine moved a package in the guest image's closure."
           echo ""
