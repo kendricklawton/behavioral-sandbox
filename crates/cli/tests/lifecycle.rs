@@ -15,8 +15,10 @@
 
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use bsx_test_support::ScratchDir;
 
@@ -438,5 +440,105 @@ fn a_name_already_running_is_refused_before_a_second_vm_boots() {
         listed.lines().filter(|l| l.starts_with("taken")).count(),
         1,
         "the refused second VM must not be running too"
+    );
+}
+
+/// How long a frame may take to cross and come back before the test calls it a hang. The command
+/// is `cat`, so anything near this is a path that stopped moving, not a slow guest.
+const ROUND_TRIP_GRACE: Duration = Duration::from_secs(30);
+
+/// One `bsx-channel` frame crosses the host unix socket into the guest and back (roadmap 0.7),
+/// spoken by the protocol crate itself rather than by `bsx exec`: the verb's evidence is that the
+/// path works, this one's is *what crosses it*.
+///
+/// The socket is the one `krun_add_vsock_port2` maps onto the guest's vsock port, so the bytes go
+/// host process -> unix socket -> libkrun -> guest vsock -> the agent, and the answer returns the
+/// same way. The payload is stdin the guest hands straight back, so a frame that arrived empty or
+/// truncated cannot pass.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
+fn a_channel_frame_crosses_the_vsock_mapping_to_the_guest_and_back() {
+    use bsx_channel::{ClientConnection, Response};
+
+    if skipped("a_channel_frame_crosses_the_vsock_mapping_to_the_guest_and_back") {
+        return;
+    }
+    let rt = runtime("channel-round-trip");
+    let _vm = up(&rt, "framed");
+    let socket = rt.path().join("bsx").join("framed.agent");
+    assert!(
+        socket.exists(),
+        "the VM's agent channel is the host end of the vsock mapping"
+    );
+
+    // The whole exchange by hand: connect, handshake, one `Exec` frame out, frames back until the
+    // terminal one. No `bsx exec`, no CLI agent module.
+    let sent = b"ping-1024".to_vec();
+    let mut client = {
+        let stream = UnixStream::connect(&socket).expect("dial the guest agent");
+        stream
+            .set_read_timeout(Some(ROUND_TRIP_GRACE))
+            .expect("bound the read");
+        ClientConnection::connect(stream).expect("the guest completed the handshake")
+    };
+    client
+        .send_exec(
+            &["cat".to_string()],
+            &sent,
+            &[] as &[(String, String)],
+            &[] as &[&str],
+            None,
+        )
+        .expect("the exec frame crossed");
+
+    let (mut back, mut errors, mut code) = (Vec::new(), Vec::new(), None);
+    while code.is_none() {
+        match client.recv_response().expect("a frame came back") {
+            Response::Stdout(bytes) => back.extend_from_slice(&bytes),
+            Response::Stderr(bytes) => errors.extend_from_slice(&bytes),
+            Response::Exit { code: got } => code = Some(got),
+            Response::Error(msg) => panic!("the agent refused: {msg}"),
+            other => panic!("a frame this test has not learned: {other:?}"),
+        }
+    }
+    assert_eq!(back, sent, "the payload came back byte for byte");
+    assert!(errors.is_empty(), "{}", String::from_utf8_lossy(&errors));
+    assert_eq!(code, Some(0));
+
+    // A second connection over the same mapping reaches the session the first left (roadmap 0.6):
+    // one booted guest, many commands.
+    let mut client = {
+        let stream = UnixStream::connect(&socket).expect("dial again");
+        stream
+            .set_read_timeout(Some(ROUND_TRIP_GRACE))
+            .expect("bound the read");
+        ClientConnection::connect(stream).expect("a second handshake")
+    };
+    client
+        .send_exec(
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo second > from-two".to_string(),
+            ],
+            &[] as &[u8],
+            &[] as &[(String, String)],
+            &[] as &[&str],
+            None,
+        )
+        .expect("the second exec frame crossed");
+    while !matches!(
+        client.recv_response().expect("a frame"),
+        Response::Exit { .. }
+    ) {}
+
+    let out = bsx(&rt)
+        .args(["exec", "framed", "--", "cat", "from-two"])
+        .output()
+        .expect("run bsx exec");
+    assert_eq!(
+        stdout_of(&out),
+        "second",
+        "a third caller sees what the second wrote: the session is the VM, not the connection"
     );
 }

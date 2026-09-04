@@ -126,6 +126,27 @@ impl Agent {
         Self { client, thread }
     }
 
+    /// A client already connected to an agent **listening on a real socket**, rather than one
+    /// served over a socketpair in this process: the path a host takes to a booted guest.
+    /// Retries until `deadline`, because a just-spawned listener has not bound yet.
+    pub fn connect(path: &Path, deadline: std::time::Duration) -> Self {
+        let until = std::time::Instant::now() + deadline;
+        let stream = loop {
+            match UnixStream::connect(path) {
+                Ok(stream) => break stream,
+                Err(e) if std::time::Instant::now() >= until => {
+                    panic!("no agent on {} within {deadline:?}: {e}", path.display())
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let client = ClientConnection::connect(stream).expect("client handshake");
+        Self {
+            client,
+            thread: std::thread::spawn(|| Ok(0)),
+        }
+    }
+
     /// Stages a file in the run's working directory.
     pub fn put_file(&mut self, path: &str, data: &[u8]) -> &mut Self {
         self.client
