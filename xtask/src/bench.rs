@@ -880,6 +880,11 @@ mod tests {
 
     /// The vCPU predicate has to discriminate, or every boot measurement is the poll interval. This
     /// process has no vCPU thread, which is the negative case the benches depend on.
+    ///
+    /// Linux-only, and declared rather than left to pass: `vm_is_running` reads `/proc/<pid>/task`
+    /// and answers `false` everywhere else, which would make both negative assertions hold without
+    /// showing that the predicate discriminates at all. Porting the benches is task 6.9.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_vcpu_predicate_says_no_for_a_process_that_is_not_a_vm() {
         assert!(

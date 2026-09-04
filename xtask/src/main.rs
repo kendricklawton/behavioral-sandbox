@@ -302,16 +302,10 @@ fn fuzz_smoke(seconds: u64) -> Result<()> {
     Ok(())
 }
 
-/// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
-/// check needs no libc call.
+/// This process's effective uid. Through `rustix` rather than `/proc/self/status`, which only
+/// Linux has; the call cannot fail, so the `Result` is the caller's shape, not a real error path.
 pub(crate) fn effective_uid() -> Result<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
-    status
-        .lines()
-        .find_map(|l| l.strip_prefix("Uid:"))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|f| f.parse().ok())
-        .context("read the effective uid from /proc/self/status")
+    Ok(rustix::process::geteuid().as_raw())
 }
 
 /// Is `cargo fuzz` installed? (Probed once, cheaply, so a missing tool is a clear message.)
@@ -362,8 +356,24 @@ fn ci() -> Result<()> {
     cargo(&["deny", "check"])?;
     deny_detached_workspaces(workspace_root())?;
     lint_detached_workspaces(workspace_root())?;
+    announce_compiled_out();
     println!("\n✓ all checks passed");
     Ok(())
+}
+
+/// What a green run on this host did **not** cover, printed rather than inferred: cargo counts a
+/// crate that compiles to nothing as passing, and that reads as coverage.
+fn announce_compiled_out() {
+    if !cfg!(target_os = "linux") {
+        println!(
+            "\nnot covered on this host: bsx-guest-agent and its four suites compile to nothing \
+             off Linux, because the agent reaps through a pidfd and listens on AF_VSOCK. The \
+             helper's own window is compiled out too: its event loop needs a thread other than \
+             the main one, which X11 and Wayland allow and macOS does not. The benches read \
+             `/proc` throughout, so the vCPU predicate's own test is compiled out with them \
+             (roadmap 6.9)."
+        );
+    }
 }
 
 /// The manifests `cargo deny check` at the root cannot reach: every path in the root workspace's

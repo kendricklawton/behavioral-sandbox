@@ -1,6 +1,9 @@
 //! Integration tests for the guest agent, driving [`bsx_guest_agent::serve`] through the **public**
 //! channel API ([`ClientConnection`]) over a unix socketpair, the same protocol the host will speak
 //! over vsock, but with no VM.
+// The agent, and so this suite, is Linux-only; the crate under test compiles to nothing
+// elsewhere. `cargo xtask ci` prints the skip, because an empty test binary passes.
+#![cfg(target_os = "linux")]
 // This is a test binary; the helpers aren't `#[test]` fns, so the workspace's no-unwrap/expect
 // lints don't auto-exempt them. Panicking on setup failure is correct in a test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

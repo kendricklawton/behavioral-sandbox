@@ -279,8 +279,10 @@ pub(crate) fn monotonic_ns() -> u128 {
 mod tests {
     use super::*;
 
-    /// Threads this process has, from the kernel's count.
-    fn threads() -> usize {
+    /// Threads this process has, where the kernel offers a count: `/proc` is Linux's, and a
+    /// `None` here is "this host cannot say", never zero, which would make a ceiling check pass
+    /// against itself.
+    fn threads() -> Option<usize> {
         std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|s| {
@@ -288,7 +290,6 @@ mod tests {
                     .find_map(|l| l.strip_prefix("Threads:"))
                     .and_then(|n| n.trim().parse().ok())
             })
-            .unwrap_or(0)
     }
 
     /// Dropping the feed ends its thread: for a name no VM answers under, the thread's retries
@@ -311,13 +312,24 @@ mod tests {
                 if name == "no-such-vm-for-this-test" && why.contains("control socket")),
             "{ended:?}"
         );
+        let Some(before) = before else {
+            eprintln!(
+                "skipped: the thread-count half of \
+                 dropping_the_feed_ends_its_thread needs /proc, which this host has not got; \
+                 the reported-to-the-feed half above ran"
+            );
+            return;
+        };
         // Other tests' threads come and go beside this one, so the count is a ceiling, not a
         // number: the lease thread is gone when the process holds no more than it did.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while threads() > before && std::time::Instant::now() < deadline {
+        while threads().is_some_and(|now| now > before) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(threads() <= before, "the lease thread is gone");
+        assert!(
+            threads().is_some_and(|now| now <= before),
+            "the lease thread is gone"
+        );
     }
 
     /// A cancelled stop ends the retry loop of a thread still waiting for a scanout: the thread

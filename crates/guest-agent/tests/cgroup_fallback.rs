@@ -2,6 +2,9 @@
 //!
 //! Separate from `exec.rs` because the report is latched once per agent *process*: sharing a binary
 //! with the other tests would make the assertion depend on which of them ran an exec first.
+// The agent, and so this suite, is Linux-only; the crate under test compiles to nothing
+// elsewhere. `cargo xtask ci` prints the skip, because an empty test binary passes.
+#![cfg(target_os = "linux")]
 // A test binary: panicking on setup failure is the idiomatic assertion here.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

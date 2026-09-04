@@ -653,20 +653,11 @@ pub mod socket {
         Ok(())
     }
 
-    /// This process's real uid, read from `/proc/self/status` so the crate keeps its
-    /// `#![forbid(unsafe_code)]` and takes no libc dependency for one integer.
+    /// This process's real uid. Through `rustix` rather than `/proc/self/status`, which is a
+    /// Linux-only path and left every macOS check failing closed against a uid nobody has. The
+    /// crate keeps its `#![forbid(unsafe_code)]`, because the `unsafe` is the dependency's.
     fn real_uid() -> u32 {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("Uid:"))
-                    .and_then(|l| l.split_whitespace().next().map(str::to_owned))
-            })
-            .and_then(|f| f.parse().ok())
-            // A `/proc` this cannot read is a host this cannot check, and claiming uid 0 would make
-            // the owner check pass by accident. `u32::MAX` is not a real uid, so it fails closed.
-            .unwrap_or(u32::MAX)
+        rustix::process::getuid().as_raw()
     }
 
     /// The rule a usable name satisfies, spelled by the function every refusal quotes.
@@ -1437,7 +1428,11 @@ pub mod control {
                 "the display answer carried no memfd".to_string(),
             ));
         };
-        stream.set_read_timeout(None)?;
+        // The lease blocks for frames, so the handshake's deadline is cleared here, and only
+        // tried: macOS refuses `SO_RCVTIMEO` with `EINVAL` once the peer has closed, and a peer
+        // that closed sends no more frames, so a socket left with the deadline reads EOF rather
+        // than waiting on it.
+        let _ = stream.set_read_timeout(None);
         Ok(DisplayLease {
             memfd: Some(memfd),
             scanout,
@@ -2012,16 +2007,46 @@ mod tests {
         assert!(!pid_is_live(pid), "the drop killed and reaped it");
     }
 
-    /// Whether `pid` still exists as a live (non-zombie) process, read from `/proc` rather than
-    /// with a signal: a reaped child's pid can be reused, and this test is asserting on the exact
-    /// pid it spawned.
+    /// Whether `pid` still exists as a live (non-zombie) process, read from the process table
+    /// rather than probed with a signal: a reaped child's pid can be reused, and this test is
+    /// asserting on the exact pid it spawned. The zombie half is the point, so a bare `kill(0)`
+    /// will not do; `/proc` where there is one, `ps` where there is not.
     fn pid_is_live(pid: u32) -> bool {
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-            return false;
-        };
-        !status
-            .lines()
-            .any(|l| l.starts_with("State:") && l.contains('Z'))
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+                return false;
+            };
+            !status
+                .lines()
+                .any(|l| l.starts_with("State:") && l.contains('Z'))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(out) = Command::new("ps")
+                .args(["-o", "state=", "-p", &pid.to_string()])
+                .output()
+            else {
+                return false;
+            };
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        }
+    }
+}
+
+/// Waits, bounded, for `path` to stop answering a connect.
+///
+/// Closing a listener is not synchronous on macOS: a connect can still be accepted for a moment
+/// after the close, so a test that binds, drops and immediately asserts staleness is asserting a
+/// promise the platform does not make. The window is why a stale socket can survive one
+/// `reap_stale` pass there and go on the next.
+#[cfg(test)]
+fn wait_until_not_live(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while socket::is_live(path) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 
@@ -2084,6 +2109,7 @@ mod socket_tests {
         // leaves behind when libkrun exits the process.
         drop(listener);
         assert!(path.exists(), "the file outlives the listener");
+        super::wait_until_not_live(&path);
         assert!(!socket::is_live(&path), "nothing is listening any more");
         assert!(
             socket::clear_if_stale(&path).expect("clear the leftover"),
@@ -2360,10 +2386,12 @@ mod discover_tests {
         // A leftover: bound, then closed, exactly as a helper leaves it.
         let ended = UnixListener::bind(d.join("ended.sock")).expect("bind then drop");
         drop(ended);
+        super::wait_until_not_live(&d.join("ended.sock"));
         // Not a socket at all, and a socket whose name could not be passed back into the API.
         std::fs::write(d.join("notes.txt"), b"not a vm").expect("write a stray file");
         let bad = UnixListener::bind(d.join("bad name.sock")).expect("bind a badly named socket");
         drop(bad);
+        super::wait_until_not_live(&d.join("bad name.sock"));
 
         let found = discover::live_in(d).expect("scan the directory");
         let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
@@ -2419,6 +2447,7 @@ mod discover_tests {
         let leftover = d.join("ended.sock");
         let _listener = UnixListener::bind(d.join("alive.sock")).expect("bind the live one");
         drop(UnixListener::bind(&leftover).expect("bind then drop"));
+        super::wait_until_not_live(&leftover);
 
         discover::live_in(d).expect("scan");
         assert!(leftover.exists(), "a read must not delete");

@@ -15,9 +15,14 @@ links = "krun"
 build = "build.rs"
 
 [dependencies]
-# The eventfd an input queue is polled through and the reads and writes that arm and clear it
-# (`event`); the sealed memfd a shared scanout lives in (`fs`); and the mapping of it (`mm`).
+# The fd a shared scanout lives in and the `ftruncate` that sizes it (`fs`), the mapping of it
+# (`mm`), and `event` for the poll both platforms use plus the eventfd only Linux has.
 rustix = { workspace = true, features = ["event", "fs", "mm"] }
+
+# macOS has neither Linux primitive: `shm` backs the shared scanout and `pipe` the readiness fd.
+# `crates/krun/src/platform.rs` says why each stands in for what.
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, features = ["shm", "pipe"] }
 
 [lints]
 workspace = true

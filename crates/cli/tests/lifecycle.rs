@@ -124,6 +124,23 @@ fn stdout_of(out: &Output) -> String {
 
 /// Whether a process is running and not a zombie, read from `/proc` rather than by signalling,
 /// since these tests are not the VM's parent and have nothing to `wait` on.
+/// A pipe whose ends are both `CLOEXEC`, or a child holds the write end open and its stdin never
+/// reaches EOF. macOS has no `pipe2`, so there the flag is set after the fact.
+fn cloexec_pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use rustix::io::{FdFlags, fcntl_setfd};
+        let (read, write) = rustix::pipe::pipe().expect("a pipe");
+        fcntl_setfd(&read, FdFlags::CLOEXEC).expect("cloexec the read end");
+        fcntl_setfd(&write, FdFlags::CLOEXEC).expect("cloexec the write end");
+        (read, write)
+    }
+}
+
 fn pid_is_live(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|status| {
         !status
@@ -278,9 +295,7 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
     let _vm = up(&rt, "instdin");
 
     let piped = |nonblocking: bool| -> String {
-        // `CLOEXEC`, or the child holds the write end open and its stdin never reaches EOF.
-        let (read, write) =
-            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+        let (read, write) = cloexec_pipe();
         if nonblocking {
             rustix::io::ioctl_fionbio(&read, true).expect("make the read end non-blocking");
         }
@@ -309,7 +324,7 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
 
     // An stdin nobody closes must not be read, so the write end stays open here. Waited with a
     // deadline rather than `output()`, because the failure being pinned is a hang.
-    let (read, _write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+    let (read, _write) = cloexec_pipe();
     let mut child = bsx(&rt)
         .args(["exec", "instdin", "--", "echo", "unblocked"])
         .stdin(std::process::Stdio::from(read))

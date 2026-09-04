@@ -61,6 +61,7 @@
 //! that is readable exactly while an event waits, because libkrun polls the fd level-triggered
 //! and never reads it: a fd left armed on an empty queue is a worker thread spinning.
 
+mod platform;
 mod sys;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -68,7 +69,7 @@ use std::ffi::{CString, NulError, OsStr};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::{NonZeroI32, NonZeroU8, NonZeroU32, NonZeroUsize};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -691,15 +692,9 @@ unsafe impl Send for SharedRegion {}
 unsafe impl Sync for SharedRegion {}
 
 impl SharedRegion {
-    /// A new memfd of `len` bytes, zero-filled, sealed, and mapped read-write.
+    /// A new region of `len` bytes, zero-filled, locked to that size, and mapped read-write.
     fn create(len: usize) -> std::io::Result<Self> {
-        use rustix::fs::{MemfdFlags, SealFlags};
-        let fd = rustix::fs::memfd_create(
-            "bsx-frames",
-            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-        )?;
-        rustix::fs::ftruncate(&fd, len as u64)?;
-        rustix::fs::fcntl_add_seals(&fd, SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL)?;
+        let fd = platform::size_locked_fd(len)?;
         let base = Self::map(
             &fd,
             len,
@@ -1624,16 +1619,14 @@ unsafe extern "C" fn c_query_properties(instance: *mut c_void, buf: *mut u8, len
 #[derive(Debug)]
 struct InputQueue {
     events: VecDeque<InputEvent>,
-    ready: OwnedFd,
+    ready: platform::Ready,
 }
 
 impl InputQueue {
     fn new() -> std::io::Result<Self> {
-        use rustix::event::EventfdFlags;
-        let ready = rustix::event::eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
         Ok(Self {
             events: VecDeque::new(),
-            ready,
+            ready: platform::Ready::new()?,
         })
     }
 
@@ -1644,7 +1637,7 @@ impl InputQueue {
             return Err(QueueFull);
         }
         self.events.extend(events);
-        let _ = rustix::io::write(&self.ready, &1u64.to_ne_bytes());
+        self.ready.arm();
         Ok(())
     }
 
@@ -1652,8 +1645,7 @@ impl InputQueue {
     fn pop(&mut self) -> Option<InputEvent> {
         let next = self.events.pop_front();
         if next.is_none() {
-            let mut counter = [0u8; 8];
-            let _ = rustix::io::read(&self.ready, &mut counter);
+            self.ready.disarm();
         }
         next
     }
@@ -2520,11 +2512,10 @@ mod tests {
         }
     }
 
-    /// A shared scanout lives in a memfd sealed to its size, and a second mapping of that fd
-    /// reads the frame the backend presented, by the slot the event named, with no copy between.
+    /// A shared scanout's fd refuses a resize, and a second mapping of it reads the frame the
+    /// backend presented, by the slot the event named, with no copy between.
     #[test]
-    fn a_shared_scanout_is_a_sealed_memfd_a_second_mapping_reads() {
-        use rustix::fs::SealFlags;
+    fn a_shared_scanout_refuses_a_resize_and_a_second_mapping_reads() {
         let mut fb = MemoryFramebuffer::shared();
         assert!(fb.share(0).expect("no scanout is not an error").is_none());
         fb.configure_scanout(0, 2, 2, 2, 2, PixelFormat::B8G8R8X8Unorm)
@@ -2548,8 +2539,18 @@ mod tests {
         );
         assert_eq!(layout.slot_bytes, 16);
         assert_eq!(layout.stride, 8);
-        let seals = rustix::fs::fcntl_get_seals(&fd).expect("seals readable");
-        assert!(seals.contains(SealFlags::SHRINK | SealFlags::GROW | SealFlags::SEAL));
+        // The property both platforms owe `SharedFrames`, asserted rather than the mechanism that
+        // supplies it: Linux seals the memfd, macOS gives a shm object one `ftruncate` for life,
+        // and either way a reader's mapping cannot be shrunk out from under it.
+        let bytes = layout.slot_bytes * u64::from(layout.slots);
+        assert!(
+            rustix::fs::ftruncate(&fd, bytes / 2).is_err(),
+            "a shared scanout's fd must refuse a resize"
+        );
+        assert!(
+            rustix::fs::ftruncate(&fd, bytes * 2).is_err(),
+            "in the growing direction too"
+        );
 
         let events = seen.lock().expect("unpoisoned").clone();
         assert!(
@@ -3084,6 +3085,55 @@ mod tests {
             unsafe { c_next_event(instance, std::ptr::null_mut()) },
             sys::KRUN_INPUT_ERR_INVALID_PARAM
         );
+        drop(sender);
+        input_finish(&queue, userdata, instance);
+    }
+
+    /// Many sends before any is read arm the fd repeatedly, and draining every event still disarms it.
+    ///
+    /// Separate from the ordering test above, which sends one batch and so arms once: an eventfd's
+    /// counter clears whatever it counted in a single read, and a pipe's bytes do not, so a
+    /// stand-in that reads one fixed-size chunk leaves libkrun polling a queue `next_event` reports
+    /// as empty. That is a spin, not a stall, which is why it is worth its own case.
+    #[test]
+    fn draining_disarms_a_fd_that_was_armed_more_than_once() {
+        let queue = Arc::new(Mutex::new(InputQueue::new().expect("a ready fd")));
+        let sender = InputSender(Arc::clone(&queue));
+        let (userdata, instance) = input_instance(&queue);
+        let fd_of = |q: &Arc<Mutex<InputQueue>>| {
+            let guard = q.lock().expect("unpoisoned");
+            guard.ready.try_clone().expect("dup")
+        };
+
+        // Comfortably more than any one read of the fd returns, so what is pinned is the drain,
+        // not a buffer that happened to be big enough: 200 separate sends before libkrun takes
+        // any is an ordinary burst from a pointer.
+        const SENDS: usize = 200;
+        for _ in 0..SENDS {
+            sender
+                .send(&[InputEvent::new(EV_KEY, 30, 1)])
+                .expect("queued");
+        }
+        assert!(readable(&fd_of(&queue)), "armed by the sends");
+
+        let mut out = sys::krun_input_event {
+            type_: 9,
+            code: 9,
+            value: 9,
+        };
+        for _ in 0..SENDS {
+            assert_eq!(unsafe { c_next_event(instance, &mut out) }, 1);
+        }
+        assert_eq!(
+            unsafe { c_next_event(instance, &mut out) },
+            0,
+            "the queue is empty"
+        );
+        assert!(
+            !readable(&fd_of(&queue)),
+            "every arm is drained, so nothing is left to poll"
+        );
+
         drop(sender);
         input_finish(&queue, userdata, instance);
     }

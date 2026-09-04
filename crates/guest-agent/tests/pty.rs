@@ -4,6 +4,9 @@
 //! machinery is the kernel's on both sides, so the gate covers the whole session shape and only
 //! the vsock transport and the VM around it wait for `/dev/kvm`.
 
+// The agent, and so this suite, is Linux-only; the crate under test compiles to nothing
+// elsewhere. `cargo xtask ci` prints the skip, because an empty test binary passes.
+#![cfg(target_os = "linux")]
 #![allow(clippy::expect_used)]
 #![allow(clippy::panic)]
 

@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# `geteuid` for the privilege checks, portably: `/proc/self/status` is Linux-only.
+rustix = { workspace = true, features = ["process"] }
 # The host↔guest contract constants (`VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
 # writes the guest's init line from the same definition the driver dials, so they cannot drift.
 bsx-channel = { path = "../crates/channel" }

@@ -23,8 +23,9 @@
 //!   be built the display runs without a window, warned once, and a `--screenshot` and a
 //!   `--frame-log` still work. That is what lets the end-to-end tests and `bench-frames` read
 //!   frames on a headless runner.
-//! - **Linux only, for now.** winit lets the loop run off the main thread on X11 and Wayland;
-//!   macOS insists on the main thread, which libkrun holds. That is phase 6's to reconcile.
+//! - **The window is Linux only.** winit lets the loop run off the main thread on X11 and
+//!   Wayland; macOS insists on the main thread, which libkrun holds. There it takes the same
+//!   path as a host with no display server: no window, warned once, sinks still written.
 
 use std::io::{self, Write};
 use std::num::NonZeroU32;
@@ -106,13 +107,21 @@ impl Drop for StopOnExit {
 }
 
 /// An event loop on this thread rather than the main one, which is about to enter libkrun.
-fn event_loop_off_main_thread() -> Result<EventLoop<()>, winit::error::EventLoopError> {
+#[cfg(target_os = "linux")]
+fn event_loop_off_main_thread() -> Result<EventLoop<()>, String> {
     use winit::platform::wayland::EventLoopBuilderExtWayland;
     use winit::platform::x11::EventLoopBuilderExtX11;
     let mut builder = EventLoop::builder();
     EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
     EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
-    builder.build()
+    builder.build().map_err(|why| why.to_string())
+}
+
+/// The same capability, answered by the platform rather than by a display server: macOS requires
+/// the event loop on the main thread, and `krun_start_enter` holds it for the life of the VM.
+#[cfg(not(target_os = "linux"))]
+fn event_loop_off_main_thread() -> Result<EventLoop<()>, String> {
+    Err("this platform runs its event loop on the main thread, which the VM holds".to_string())
 }
 
 /// The framebuffer's lock, recovered if poisoned: a backend that panicked already answered

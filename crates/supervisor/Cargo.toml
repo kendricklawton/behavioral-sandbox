@@ -11,7 +11,7 @@ description = "Spawn, track, stop and reap the helper processes that are VMs."
 
 [dependencies]
 # The fd handover a display lease rides on (`sendmsg`/`recvmsg` with `SCM_RIGHTS`).
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["net", "process"] }
 
 [dev-dependencies]
 bsx-test-support = { path = "../test-support" }

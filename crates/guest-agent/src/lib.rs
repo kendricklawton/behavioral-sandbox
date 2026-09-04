@@ -22,6 +22,14 @@
 //!   writable cgroup v2 mount, so a double-forked grandchild or `setsid` daemon holding the output
 //!   pipes open is killed with the rest. Where the cgroup cannot be made the agent warns and falls
 //!   back to killing the direct child only, which such a daemon survives.
+// The agent runs inside the guest, and the guest is always Linux: it reaps through a `pidfd`,
+// listens on `AF_VSOCK` and mounts. A stand-in on another platform would be code that never runs,
+// so the crate compiles to nothing there instead, and `cargo xtask ci` prints that it did, because
+// a crate that compiles to nothing also tests green.
+// The header above outlives the items it links to, which the `cfg` below takes with it, so off
+// Linux every link in it dangles. Stated before that `cfg`, because it strips what follows it.
+#![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};

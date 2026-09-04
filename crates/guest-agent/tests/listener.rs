@@ -6,6 +6,9 @@
 //! left. The transport here is `unix:<path>`, which is the shape `krun_add_vsock_port2` maps a
 //! guest port onto, so this is the whole exec path with no VM; the in-VM half of the same claim is
 //! `a_channel_frame_crosses_the_vsock_mapping_to_the_guest_and_back` in the CLI's suite.
+// The agent, and so this suite, is Linux-only; the crate under test compiles to nothing
+// elsewhere. `cargo xtask ci` prints the skip, because an empty test binary passes.
+#![cfg(target_os = "linux")]
 // This is a test binary; the helpers aren't `#[test]` fns, so the workspace's no-unwrap/expect
 // lints don't auto-exempt them. Panicking on setup failure is correct in a test.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
