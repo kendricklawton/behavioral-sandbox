@@ -46,10 +46,8 @@ const OUTPUT_TAIL: u64 = 256 * 1024;
 /// a glance, not a screen, and every present it takes is a whole window rebuild.
 const THUMBNAIL_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The most live displays the list leases at once, newest first. Each lease is a thread, a
-/// socket and a mapping of that guest's scanout, so the grid is bounded rather than growing with
-/// however many sandboxes are running. Held under `frame::MAX_TEXTURES`, which caps the textures
-/// those leases upload into, so the two cannot disagree and thrash.
+/// The most live displays the list leases at once, newest first. Each costs a thread, a socket
+/// and a scanout mapping.
 const MAX_THUMBNAILS: usize = 12;
 
 /// The grid's leases plus the open run must each have a texture to upload into, or the cache
@@ -482,12 +480,8 @@ impl App {
             .collect()
     }
 
-    /// The runs this window wants a lease on, and how often each wants a present.
-    ///
-    /// The run on screen is watched at the guest's own pace, because it is the one being used.
-    /// Every other live display is a thumbnail on the list, and asks for [`THUMBNAIL_EVERY`], so
-    /// a screen of sandboxes costs a bounded number of window rebuilds rather than the sum of
-    /// their frame rates.
+    /// The runs to lease and how often each wants a present: the open run at the guest's pace,
+    /// every other live display at [`THUMBNAIL_EVERY`].
     fn watches(&self) -> Vec<lease::Watch> {
         let open = match &self.screen {
             Screen::Run(id) => self.record(id).map(|r| r.name.clone()),
@@ -654,9 +648,7 @@ impl App {
                     "bsx-app: mapped {name} {}x{} {:?}, stride {}, {} slots",
                     layout.width, layout.height, layout.format, layout.stride, layout.slots
                 );
-                // A new mapping is a new scanout, so the history starts again: its frame ids and
-                // slots belonged to the old one. An input session already open for this run is
-                // kept, since a reconfigure does not close it.
+                // A new scanout, so the history starts again; a reconfigure leaves input open.
                 let input = self.displays.remove(&name).and_then(|d| d.input);
                 self.displays.insert(
                     name,
@@ -681,9 +673,7 @@ impl App {
                     return Task::none();
                 };
                 display.read += 1;
-                // The widget holds an `Arc` of this while it draws, so `make_mut` copies the
-                // history on the presents that land mid-draw. Bounded at `HISTORY` either way,
-                // and `VecDeque` keeps the drop of the oldest off the front.
+                // `make_mut` copies only while the widget holds this for a draw.
                 let history = Arc::make_mut(&mut display.history);
                 if history.len() >= HISTORY {
                     history.pop_front();
@@ -732,9 +722,7 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![timer::every_second()];
-        // One lease per watched run. A `Watch` is the subscription's identity, so a run that
-        // leaves the set has its subscription dropped, which cancels its lease and ends its
-        // thread; one that changes rate is a new lease at the new rate.
+        // Dropping a run's subscription cancels its lease and ends its thread.
         subs.extend(
             self.watches()
                 .into_iter()

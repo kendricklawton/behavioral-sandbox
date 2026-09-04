@@ -81,9 +81,7 @@ fn stdin_is_fed_to_the_command() {
 
 #[test]
 fn env_reaches_the_command_but_never_the_agents_own_process() {
-    // Both halves of the env contract: the injected variable reaches the spawned command, and it is set
-    // via `Command::env` only. `serve` runs in *this* process, so a `set_var` would be caught by the
-    // assertion on our own environment.
+    // Both halves: the variable reaches the command, and `serve` did not touch this process's env.
     let key = "BSX_TEST_ENV_SCOPE";
     assert!(
         std::env::var_os(key).is_none(),
@@ -103,13 +101,8 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
     );
 }
 
-/// A bare program reachable only through the **injected** `PATH` runs, rather than being refused by
-/// the up-front reachability check.
-///
-/// The check exists so "no such binary" stays a typed error instead of the trampoline's shell-style
-/// 127, which means it has to read the `PATH` the spawn will: both spawn paths resolve the program
-/// against the injected environment. The value here *adds* to the real `PATH` rather than replacing
-/// it, so nothing is taken away and the one directory it contributes is the whole difference.
+/// A bare program reachable only through the **injected** `PATH` runs: the up-front check has to
+/// read the same `PATH` the spawn will.
 #[test]
 fn a_program_on_the_injected_path_runs_rather_than_being_refused() {
     let scratch = bsx_test_support::ScratchDir::created("agent-injected-path");
@@ -150,10 +143,8 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
 
 #[test]
 fn session_state_persists_across_connections() {
-    // The stateful-session contract: two connections served with the same session dir see one working
-    // directory, so both an injected file and one the first exec writes survive into the second.
-    // A `ScratchDir` rather than a hand-rolled path: its `Drop` reclaims the session dir even when
-    // an assertion below panics.
+    // Two connections on one session dir share a working directory, across both an injected file
+    // and one the first exec wrote.
     let scratch = bsx_test_support::ScratchDir::new("agent-session");
 
     // Exec 1: read the injected file, append to it, and write a new one.
@@ -179,9 +170,7 @@ fn session_state_persists_across_connections() {
 
 #[test]
 fn a_relative_program_built_in_the_session_runs_by_its_path() {
-    // The pre-flight program check must resolve a `/`-bearing relative program against the run's working
-    // dir, not the agent's own cwd, or a `./tool` an earlier exec built is falsely rejected as "no such
-    // binary".
+    // A `/`-bearing relative program resolves against the run's dir, not the agent's cwd.
     let scratch = bsx_test_support::ScratchDir::new("agent-relprog");
 
     // One exec per connection against the shared session dir: build the executable, then run it.
@@ -287,9 +276,7 @@ fn a_run_carries_both_streams_and_only_the_requested_artifacts() {
 
 #[test]
 fn bad_handshake_is_rejected_not_hung() {
-    // Garbage with a wrong magic must make `serve` fail promptly rather than block. No deadline needed:
-    // `read_exact` gets its 6 bytes and the magic check fails. Built by hand rather than through
-    // `Agent`, because the subject is what happens *instead of* the handshake.
+    // A wrong magic fails promptly: `read_exact` gets its 6 bytes and the check fails.
     let (mut host, guest) = UnixStream::pair().expect("socketpair");
     let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
     host.write_all(b"XXXXXX not a handshake")
@@ -300,10 +287,7 @@ fn bad_handshake_is_rejected_not_hung() {
 
 #[test]
 fn stalled_host_does_not_wedge_the_guest() {
-    // A host that handshakes and requests, then stops reading, against a command that floods output.
-    // With a write deadline on the guest stream, `serve` must return an `Err` in bounded time rather
-    // than hang: the pump's forward times out, drains and discards, and the child exits. The guest end
-    // is armed before the spawn, so this builds its own pair rather than taking `Agent`'s.
+    // A host that stops reading against a flooding command: the write deadline bounds `serve`.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     guest
         .set_write_timeout(Some(Duration::from_millis(200)))
@@ -343,10 +327,7 @@ fn stalled_host_does_not_wedge_the_guest() {
 
 #[test]
 fn a_host_that_stalls_mid_frame_is_a_bounded_typed_error() {
-    // The read-side twin of `stalled_host_does_not_wedge_the_guest`, pinning the caller's half of the
-    // contract: deadlines are the transport owner's job, and the crate arms none itself. With a read
-    // deadline armed, a host that goes silent mid-frame is a typed error within the deadline. A
-    // trusted-but-dead host is the realistic failure; a hostile one is outside the guest's threat model.
+    // The read-side twin: deadlines are the transport owner's job, and the crate arms none.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     guest
         .set_read_timeout(Some(Duration::from_millis(200)))

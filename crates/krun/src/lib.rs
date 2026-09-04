@@ -191,19 +191,13 @@ fn c_bytes(what: &'static str, s: &OsStr) -> Result<CString, Error> {
     CString::new(s.as_bytes()).map_err(|_: NulError| Error::InteriorNul { what })
 }
 
-/// The DAX SHM window size passed with every virtiofs device here: none.
-///
-/// `krun_set_root` was the whole root surface until [`Context::root`] moved to the long form, and
-/// it takes no window, so zero is what the tree has always run. Sizing one is a performance
-/// question with its own measurement, not something to change while changing the access mode.
+/// The DAX SHM window size passed with every virtiofs device here: none. Sizing one is a
+/// performance question with its own measurement.
 const NO_DAX_WINDOW: u64 = 0;
 
 /// What a guest may do to a virtiofs tree: the `read_only` flag `krun_add_virtiofs3` takes.
 ///
-/// An enum rather than the header's `bool`, so `root(path, ReadOnly)` says at the call site what
-/// `root(path, true)` would not. Deliberately this crate's own type and not a re-export of a
-/// posture from higher up: this one is a device flag, and the product's posture is
-/// `bsx_supervisor`'s business.
+/// An enum, not the header's `bool`, so `root(path, ReadOnly)` reads at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum FsAccess {
@@ -412,17 +406,13 @@ impl<'a> FrameAllocation<'a> {
     }
 }
 
-/// Where the guest's frames land: what libkrun's virtio-gpu device calls, from its own thread, as
-/// the guest configures scanouts and renders into them.
+/// Where the guest's frames land: what libkrun's virtio-gpu device calls, from its own thread.
 ///
 /// # Safety
 ///
-/// libkrun keeps writing into the buffer [`alloc_frame`](Self::alloc_frame) returned **after the
-/// borrow has ended**, until it presents that frame id, disables the scanout, or reconfigures it.
-/// An implementation must not move, shrink, or free that memory in between, and the compiler
-/// cannot check that: a `configure_scanout` that reallocates the `Vec` a frame was handed out of
-/// is safe Rust and a write into freed memory. Implementing this trait is the promise that it does
-/// not happen.
+/// libkrun writes into the buffer [`alloc_frame`](Self::alloc_frame) returned **after the borrow
+/// ends**, until that frame is presented or the scanout reconfigured. An implementation must not
+/// move, shrink or free it in between.
 pub unsafe trait DisplayBackend: Send {
     /// Configures or reconfigures scanout `scanout_id`. After this, any frame handed out for it
     /// is abandoned by libkrun and the backend may reuse or free that memory.
@@ -465,12 +455,8 @@ fn code_of(outcome: Result<(), DisplayError>) -> i32 {
     }
 }
 
-/// Runs `f` on the backend behind `instance`, doing what every callback must do once: refuse a
-/// null instance, take the lock, and catch a panic, which must not unwind into libkrun.
-///
-/// A poisoned lock is recovered rather than refused: the panic that poisoned it was already
-/// reported as `KRUN_DISPLAY_ERR_INTERNAL` on the call that panicked, and a backend that has
-/// stopped working keeps answering that way from its own methods.
+/// Runs `f` on the backend behind `instance`: refuse a null instance, take the lock, and catch a
+/// panic, which must not unwind into libkrun. A poisoned lock is recovered, not refused.
 fn with_backend<B: DisplayBackend>(instance: *mut c_void, f: impl FnOnce(&mut B) -> i32) -> i32 {
     if instance.is_null() {
         return sys::KRUN_DISPLAY_ERR_INVALID_PARAM;
@@ -921,17 +907,12 @@ impl FrameView<'_> {
 /// What [`MemoryFramebuffer::watch`] registers: told each event, kept while it answers `true`.
 type Watcher = Box<dyn Fn(&Event) -> bool + Send>;
 
-/// A display backend that keeps each scanout's latest frame in host RAM, for a compositor in
-/// this process to read under the lock, or in a memfd a second process maps.
+/// A display backend keeping each scanout's latest frame in host RAM, read under the lock or
+/// through a memfd a second process maps.
 ///
-/// **No history, and no allocation once warm.** A scanout owns `SLOTS` regions of one allocation:
-/// `RING` to hand out and one holding the latest frame. Presenting marks the filled slot latest
-/// and frees the previous one, so at steady state nothing is copied, allocated or zeroed. A
-/// history of frames would be that many copies of the screen for a reader that wants the newest.
-///
-/// **A watcher learns of a present under the lock.** Each present calls every watcher from
-/// libkrun's gpu thread with the slot the frame landed in; a watcher that returns `false` is
-/// dropped, which is how a client whose socket has gone leaves without a list to be cleaned.
+/// **No history, no allocation once warm**: one allocation of `SLOTS` regions, and presenting
+/// frees the previous latest. Watchers are called under the lock, and dropped when they return
+/// `false`.
 #[derive(Default)]
 pub struct MemoryFramebuffer {
     scanouts: HashMap<u32, Scanout>,
@@ -1047,13 +1028,11 @@ impl MemoryFramebuffer {
     }
 }
 
-/// A scanout's slots as a second process sees them: the memfd from
-/// [`MemoryFramebuffer::share`] mapped read-only, addressed by the layout that came with it.
+/// A scanout's slots as a second process sees them: [`MemoryFramebuffer::share`]'s memfd mapped
+/// read-only, addressed by the layout that came with it.
 ///
-/// **A slot is read while the helper may be reusing it.** The helper frees a slot two presents
-/// after it was the latest, and hands it out again after that; a reader that takes longer than
-/// that to consume a frame sees the next-but-one frame's pixels in it. A torn read is the cost
-/// of no copy; a fault is not possible, because the region's size is sealed.
+/// **A slot is read while the helper may be reusing it**, two presents after it was latest, so a
+/// slow reader tears. It cannot fault: the region's size is sealed.
 pub struct SharedFrames {
     region: SharedRegion,
     layout: SharedLayout,
@@ -1103,10 +1082,9 @@ impl fmt::Debug for SharedFrames {
     }
 }
 
-// SAFETY: the memory handed out is a region of a scanout's `storage`, whose allocation changes
-// only in `configure_scanout` (to a new size, after which the header says libkrun has abandoned
-// every frame of that scanout) and `disable_scanout`. A slot is handed out only while `Free` and
-// no other slot's region overlaps it, so nothing else touches a handed-out slot.
+// SAFETY: a slot is a region of a scanout's `storage`, whose allocation changes only in
+// `configure_scanout` and `disable_scanout`, both of which abandon every frame first. A slot is
+// handed out only while `Free`, and no two slots overlap.
 unsafe impl DisplayBackend for MemoryFramebuffer {
     fn configure_scanout(
         &mut self,
@@ -1140,9 +1118,8 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
                 Ok(Storage::Heap(vec![0; total]))
             }
         };
-        // A generation is unique for the framebuffer's life, not per scanout: a scanout disabled
-        // and configured again is a new allocation, and a reader holding the old one must see a
-        // number it has not seen.
+        // Unique for the framebuffer's life, not per scanout: a reader holding an old mapping
+        // must see a number it has not seen.
         let mut reconfigured = None;
         match self.scanouts.get_mut(&scanout_id) {
             Some(scanout) if scanout.config == config => {
@@ -1262,11 +1239,8 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
 /// What [`Machine::display_backend`] hands libkrun and keeps alive: the count behind
 /// `create_userdata`, and the table itself.
 ///
-/// The count is taken back if the machine is dropped without starting (a failed `enter`, or a
-/// caller that changed its mind); once started, `c_create` takes its own and the process ends
-/// before this one could matter. The table is retained by the crate's rule for anything libkrun
-/// is given a pointer to, though it was measured copying it (2026-09-02: overwriting the struct
-/// after the call left `create` working).
+/// The count is taken back if the machine is dropped without starting. The table is retained by
+/// the crate's rule for anything libkrun is given a pointer to.
 struct DisplayHandle {
     userdata: *const c_void,
     /// Returns the count for the concrete `B` the pointer was made from; the handle itself is
@@ -1783,10 +1757,8 @@ impl fmt::Debug for InputHandle {
 
 /// The context id, freed on drop.
 ///
-/// `PhantomData<*const ()>` makes every handle `!Send` and `!Sync`. libkrun documents no
-/// thread-safety for its context table, and an FFI handle whose threading rules are unstated is one
-/// a caller should not be able to move across threads by accident. The helper process that calls
-/// [`Machine::enter`] does so on the thread that built the context, which is all this project needs.
+/// `PhantomData<*const ()>` makes every handle `!Send` and `!Sync`: libkrun documents no
+/// thread-safety for its context table.
 #[derive(Debug)]
 struct Ctx {
     id: u32,
@@ -1795,9 +1767,7 @@ struct Ctx {
 
 impl Drop for Ctx {
     fn drop(&mut self) {
-        // Nothing useful to do with a failure here: the process is either about to exit or has
-        // already reported the error that got us here, and a panic in `drop` would replace a
-        // legible error with an abort.
+        // A panic in `drop` would replace a legible error with an abort.
         let _ = unsafe { sys::krun_free_ctx(self.id) };
     }
 }
@@ -1837,13 +1807,11 @@ impl Context {
         Ok(self)
     }
 
-    /// Serves `path`, a host directory, as the guest's root over virtiofs under `access`, and
-    /// moves on to the stage where the rest of the machine is configured.
+    /// Serves `path` as the guest's root over virtiofs under `access`, and moves on to the stage
+    /// where the rest of the machine is configured.
     ///
-    /// `krun_add_virtiofs3` with [`KRUN_FS_ROOT_TAG`] rather than `krun_set_root`, because the
-    /// header names it as the way to get the read-only flag; the two are otherwise the same
-    /// device. [`FsAccess::ReadOnly`] is enforced by the device, so a guest write fails with
-    /// `EROFS` and nothing reaches the host tree (measured, 2026-09-01, libkrun 1.19.4).
+    /// `krun_add_virtiofs3`, not `krun_set_root`, because only it takes the read-only flag, which
+    /// the device enforces as `EROFS`.
     pub fn root(mut self, path: &Path, access: FsAccess) -> Result<Machine, Error> {
         let c_tag = c_bytes("the root tag", OsStr::new(sys::KRUN_FS_ROOT_TAG))?;
         let c_dir = c_path("the root path", path)?;
@@ -1899,13 +1867,10 @@ impl Machine {
     }
 
     /// Replaces libkrun's implicit vsock device with an explicit one carrying exactly
-    /// `tsi_features`. `0` is a vsock with **no** transparent socket proxying: the guest's
-    /// network syscalls are not hijacked onto the host, which is the no-network posture. The
-    /// implicit device libkrun would otherwise add enables TSI hijacking by heuristic, so a
-    /// machine that says nothing about the network still gets one; this is how a caller says no.
+    /// `tsi_features`. `0` is no transparent socket proxying, which is the no-network posture;
+    /// the implicit device enables TSI by heuristic, so this is how a caller says no.
     ///
-    /// Must come before [`vsock_port`](Self::vsock_port): the port mapping attaches to the vsock
-    /// device, and libkrun allows only one, so the explicit device has to exist first.
+    /// Must come before [`vsock_port`](Self::vsock_port), which attaches to this device.
     pub fn vsock(self, tsi_features: u32) -> Result<Self, Error> {
         check("krun_disable_implicit_vsock", unsafe {
             sys::krun_disable_implicit_vsock(self.ctx.id)
@@ -1938,9 +1903,8 @@ impl Machine {
 
     /// Sets the guest executable, its arguments, and its environment.
     ///
-    /// `argv` is the arguments **after** the program name, matching how libkrun reads it. `env`
-    /// entries are `KEY=VALUE`; neither array may contain an interior NUL, which is refused rather
-    /// than truncated.
+    /// `argv` excludes the program name and `env` entries are `KEY=VALUE`; an interior NUL in
+    /// either is refused, not truncated.
     pub fn exec(mut self, program: &Path, argv: &[&OsStr], env: &[&OsStr]) -> Result<Self, Error> {
         let c_prog = c_path("the guest program", program)?;
         let mut argv_c = Vec::with_capacity(argv.len());
@@ -2022,11 +1986,8 @@ impl Machine {
 
     /// Adds the virtio-gpu device a display needs, with the one flag set measured to carry frames.
     ///
-    /// Three were tried on this host (2026-09-02, libkrun 1.19.4): `0` segfaults the VMM inside
-    /// `virgl_renderer_init`; `NO_VIRGL` boots but every guest `ResourceCreate2d` fails with
-    /// rutabaga `ComponentError(22)`, so no scanout is ever configured; virgl on a surfaceless
-    /// EGL/GLES context carries a dumb-buffer frame end to end. Only the last is offered. Phase
-    /// 5's accelerated posture is a separate call, gated on `krun_has_feature`.
+    /// `0` segfaults `virgl_renderer_init` and `NO_VIRGL` fails every `ResourceCreate2d`, so only
+    /// virgl on a surfaceless EGL/GLES context is offered (roadmap 0.9).
     pub fn gpu_device(self) -> Result<Self, Error> {
         check("krun_set_gpu_options", unsafe {
             sys::krun_set_gpu_options(self.ctx.id, DISPLAY_GPU_FLAGS)
@@ -2034,15 +1995,11 @@ impl Machine {
         Ok(self)
     }
 
-    /// Adds a virtio-snd device, backed by the host audio server libkrun links (pipewire on this
-    /// build). One boolean, so the guest gets a full sound card: **playback to the host's output
-    /// and capture from its input**, the microphone included. libkrun's API cannot split the two,
-    /// so a caller enabling audio opens both directions; the posture that keeps it off by default
-    /// lives above this, in the supervisor's config and the CLI's `--sound` flag.
+    /// Adds a virtio-snd device backed by the host audio server. One boolean, so the guest gets
+    /// **playback and capture**, the microphone included: libkrun's API cannot split the two.
     ///
-    /// Gated by the caller on [`has_feature`]`(`[`KRUN_FEATURE_SND`]`)`: a libkrun built without
-    /// snd exports this symbol but adds no device, so a caller that did not probe would enable
-    /// nothing and not know it.
+    /// Gate on [`has_feature`]`(`[`KRUN_FEATURE_SND`]`)`: a build without snd exports the symbol
+    /// and adds no device.
     pub fn sound_device(self) -> Result<Self, Error> {
         check("krun_set_snd_device", unsafe {
             sys::krun_set_snd_device(self.ctx.id, true)
@@ -2150,20 +2107,15 @@ impl Machine {
 
     /// Starts the microVM, **and does not return.**
     ///
-    /// libkrun takes over the calling process and exits with the guest's status, so the only way
-    /// this function returns is failure, which is why it returns [`Error`] rather than a `Result`.
-    /// A caller cannot write code after a successful start, because there is no "after": this is
-    /// the fact that makes every VM a helper process rather than a thread.
-    ///
-    /// The context is freed on the way out of the failure path, since `self` is consumed here.
+    /// libkrun takes over the process and exits with the guest's status, so the only return is a
+    /// failure, hence [`Error`] and not a `Result`. There is no "after", which is what makes a VM
+    /// a helper process rather than a thread.
     pub fn enter(self) -> Error {
         match check("krun_start_enter", unsafe {
             sys::krun_start_enter(self.ctx.id)
         }) {
             Err(e) => e,
-            // libkrun returned a success code from a call that is documented never to return. That
-            // is not something to paper over with an `unreachable!`: report it as the library
-            // behaving other than its contract, and let the caller exit.
+            // A success code from a call documented never to return: the library broke contract.
             Ok(rc) => Error::Call {
                 call: "krun_start_enter",
                 source: std::io::Error::other(format!(
@@ -2186,9 +2138,8 @@ fn null_terminated(items: &[CString]) -> Vec<*const c_char> {
 
 /// Whether this libkrun build carries a `KRUN_FEATURE_*` capability.
 ///
-/// A probe, never a version compare: which features a build has depends on how it was compiled.
-/// An unknown constant is `-EINVAL` from an older library, which surfaces as an error rather than
-/// as a silent `false`, so "this libkrun is too old to be asked" is distinguishable from "no".
+/// A probe, never a version compare. An unknown constant is `-EINVAL`, surfaced as an error, so
+/// "too old to be asked" stays distinguishable from "no".
 pub fn has_feature(feature: u64) -> Result<bool, Error> {
     Ok(check("krun_has_feature", unsafe {
         sys::krun_has_feature(feature)
@@ -2309,21 +2260,15 @@ mod tests {
             .expect_err("a negative return is a failure")
             .to_string();
         assert!(msg.contains("krun_set_root"), "{msg}");
-        // Case-insensitive: the wording comes from the platform's `strerror`, and macOS and glibc
-        // do not agree on capitalisation. What is being pinned is that the errno reached the
-        // message at all, not how libc spells it.
+        // Case-insensitive: macOS and glibc `strerror` disagree on capitalisation.
         assert!(msg.to_lowercase().contains("permission denied"), "{msg}");
     }
 
     /// The handles are `!Send` by construction, so a context cannot be built on one thread and
-    /// entered on another. libkrun documents no thread-safety for its context table, and an FFI
-    /// handle whose threading rules are unstated should not be movable across threads by accident.
+    /// entered on another.
     ///
-    /// A negative bound cannot be written in a where-clause, so this uses the stable
-    /// inherent-method-beats-trait-method trick, and checks the probe against a known-`Send` type
-    /// and a known-`!Send` one in the same test: a probe that answered `false` for everything would
-    /// pass this assertion while proving nothing, which is exactly how the first version of this
-    /// test was wrong.
+    /// A negative bound needs the inherent-method-beats-trait trick, checked against a known-`Send`
+    /// and a known-`!Send` type, or a probe answering `false` for everything would pass.
     #[test]
     fn a_context_cannot_cross_threads() {
         assert!(

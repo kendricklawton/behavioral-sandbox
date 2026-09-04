@@ -41,13 +41,11 @@ pub fn check(root: &Path) -> Result<()> {
     for rel in &tracked {
         let is_rs = rel.ends_with(".rs");
         let is_md = rel.ends_with(".md");
-        // Prose lives in `.rs` (comments) and `.md` (docs, incl. the `AGENTS.md` operating manual).
-        // A `cargo … -p` command is read out of any tracked text file, so the read is unconditional
-        // and the *prose* checks below are the ones gated on the extension.
+        // The `-p` check reads any tracked text file; only the prose checks are gated on `.rs`
+        // and `.md`.
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
-            // A tracked-but-unreadable prose file (for example deleted in the working tree) is
-            // itself drift: the tree no longer matches what git says it holds. Anything else that
-            // does not decode as UTF-8 is a binary fixture (`fuzz/seeds/`), not a claim.
+            // A tracked prose file that will not read is itself drift; anything else non-UTF-8
+            // is a binary fixture.
             if is_rs || is_md {
                 violations.push(format!(
                     "{rel}: tracked but missing/unreadable in the working tree"
@@ -56,12 +54,9 @@ pub fn check(root: &Path) -> Result<()> {
             continue;
         };
 
-        // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
-        // directory and the package name are allowed to differ here (`crates/cli` builds
-        // `bsx`), which is how five copies of a `-p cli` invocation came to be printed at
-        // people, in the docs, in two test headers, and in xtask's own output. Every one errored
-        // with "package(s) not found in workspace". Scoping this to `.rs`/`.md` is what let two
-        // more of them survive outside those extensions, so it runs over every tracked text file.
+        // A `-p <name>` a reader is told to run must name a real package: the directory and the
+        // package differ here (`crates/cli` builds `bsx`). Over every tracked text file, since
+        // scoping it to `.rs`/`.md` let others survive.
         for (line_no, pkg) in cargo_package_refs(&text) {
             pkg_refs += 1;
             if !packages.contains(&pkg) {
@@ -92,9 +87,8 @@ pub fn check(root: &Path) -> Result<()> {
                     violations.push(format!("{rel}:{line_no}: links to missing file {target}"));
                 }
             }
-            // A `#fragment` has to name a heading that exists. The link check above is satisfied
-            // as soon as the *file* resolves, so a fragment naming a section that has moved to
-            // another page passes it while pointing at nothing.
+            // The link check above is satisfied by the file resolving, so a moved section still
+            // passes it while pointing at nothing.
             for (line_no, target, frag) in markdown_anchor_links(&text) {
                 let page = if target.is_empty() {
                     root.join(rel)
@@ -190,9 +184,8 @@ fn cargo_package_refs(text: &str) -> Vec<(usize, String)> {
                 continue;
             }
             let Some(pkg) = tokens.next() else { continue };
-            // A placeholder or a shell interpolation names no package this lint can resolve, and it
-            // must not guess: `-p <name>` in a doc comment, `-p {pkg}` in a format string, `-p $PKG`
-            // in a script. Checked before trimming, since trimming is what would hide them.
+            // A placeholder or shell interpolation names no resolvable package. Checked before
+            // trimming, which would hide them.
             if pkg.starts_with(['<', '{', '$', '"']) {
                 continue;
             }
@@ -228,18 +221,13 @@ fn tracked_files(root: &Path) -> Result<BTreeSet<String>> {
         .collect())
 }
 
-/// Backticked tokens in the text that look like repo paths, with their 1-based line. Deliberately
-/// conservative: a token must be slash-separated with a path-safe charset and its first segment
-/// must be a known anchor (a top-level source dir or a crate's dir name, so crate-relative
-/// references like `guest-agent/src/lib.rs` still count). Everything else, `stdout/stderr`,
-/// `10.200.0.1/30`, guest-rootfs paths like `sbin/apk.static`, illustrative paths like
-/// `out/x.txt`, never matches. Build outputs (`target/`, `artifacts/`) exist only after a build,
-/// so they are not checkable and never anchor.
+/// Backticked tokens that look like repo paths, with their 1-based line. Conservative: a token
+/// must be slash-separated and anchored on a known top-level or crate directory, so `stdout/stderr`
+/// and `10.200.0.1/30` never match. Build outputs never anchor, since they exist only after a build.
 fn path_candidates(text: &str, anchors: &BTreeSet<String>) -> Vec<(usize, String)> {
     let mut found = Vec::new();
-    // Skip fenced code blocks: a `.md` example (or a shown command) may name a path that
-    // needn't exist. A ```` ``` ```` fence toggles at a line's start; in `.rs` the doc-comment
-    // fences are prefixed (`//! ```), so this never triggers there, leaving `.rs` behavior unchanged.
+    // Fenced blocks are skipped: a shown command may name a path that need not exist. The fence
+    // toggles at a line's start, which a prefixed `//!` doc fence never is.
     let mut in_fence = false;
     for (idx, line) in text.lines().enumerate() {
         if line.trim_start().starts_with("```") {
@@ -302,13 +290,9 @@ fn path_exists(tracked: &BTreeSet<String>, cand: &str) -> bool {
         })
 }
 
-/// Relative link targets in Markdown (`[text](target)`), with their 1-based line. External
-/// (`http`, `mailto:`), in-page (`#anchor`), and fenced-code-block content are skipped; a
-/// `path#anchor` target is checked as `path`.
-/// Blank out inline code spans (backtick-delimited) in one line, so link syntax shown *as code*
-/// isn't scanned as a live link. Backticks toggle in/out of a span; an unbalanced backtick drops the
-/// rest of the line (conservative: a lint skips rather than false-positives). Only the surviving
-/// text matters to the caller (it reports line numbers, not columns), so spans are dropped outright.
+/// Blanks inline code spans, so link syntax shown *as code* is not scanned as a live link. An
+/// unbalanced backtick drops the rest of the line, which makes the lint skip rather than
+/// false-positive.
 fn strip_inline_code(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut in_code = false;
@@ -359,13 +343,9 @@ fn markdown_anchor_links(text: &str) -> Vec<(usize, String, String)> {
     found
 }
 
-/// The anchors a Markdown file offers, derived from its headings the way mdbook and GitHub derive
-/// them: strip code spans and link syntax, lowercase, drop everything that is not alphanumeric,
-/// `-`, `_`, or a space, then spaces to `-`. A repeated slug takes a `-1`, `-2`, … suffix, which is
-/// how a second `## Setting` would be reachable at all.
-///
-/// Kept deliberately close to the two generators rather than exhaustive: a rule this misses shows
-/// up as a false positive on a link that works, which is loud, not as a missed broken link.
+/// The anchors a Markdown file offers, derived as mdbook and GitHub derive them: strip code and
+/// link syntax, lowercase, drop all but alphanumerics, `-`, `_` and spaces, then spaces to `-`. A
+/// repeated slug takes a `-1`, `-2` suffix. A rule this misses is a loud false positive.
 fn heading_anchors(text: &str) -> BTreeSet<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut out = BTreeSet::new();
@@ -386,10 +366,8 @@ fn heading_anchors(text: &str) -> BTreeSet<String> {
         if !title.starts_with(' ') {
             continue;
         }
-        // `[text](url)` renders as `text`, so the anchor is built from the text alone. Note this
-        // does *not* use `strip_inline_code`: that blanks a code span's contents, which is right
-        // for a link target and wrong here, since `## Setting `require_jail`` is reached at
-        // `#setting-require_jail`. Only the backticks come out.
+        // Built from the link text alone. Not `strip_inline_code`, which blanks a span's
+        // contents: only the backticks come out, so `` `require_jail` `` stays in the slug.
         let chars: Vec<char> = title.trim().chars().collect();
         let mut plain = String::new();
         let mut i = 0;
@@ -427,6 +405,8 @@ fn heading_anchors(text: &str) -> BTreeSet<String> {
     out
 }
 
+/// Relative link targets in Markdown, with their 1-based line. External, in-page and
+/// fenced-code content are skipped; a `path#anchor` target is checked as `path`.
 fn markdown_links(text: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut in_fence = false;
@@ -465,14 +445,9 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
 mod tests {
     use super::*;
 
-    /// The project targets kernels, not distributions (`AGENTS.md`, under Conventions): a host
-    /// difference is probed as a capability, never read off the host's identity papers. This is
-    /// the enforcer for that sentence. It scans every tracked source file in the shipped crates
-    /// for the files and commands that answer "which distro is this": if one appears outside a
-    /// comment, either
-    /// a capability probe exists that should replace it, or this test's list is teaching you what
-    /// it is. The `Containerfile` is exempt: package manager use *inside* the image is that
-    /// image's own pinned userspace, not host detection.
+    /// The enforcer for `AGENTS.md`'s "target kernels, not distros": a host difference is probed
+    /// as a capability, never read off its identity papers. The `Containerfile` is exempt, since
+    /// package use inside the image is that image's own userspace.
     #[test]
     fn shipped_code_probes_capabilities_never_distro_identity() {
         let root = crate::workspace_root();

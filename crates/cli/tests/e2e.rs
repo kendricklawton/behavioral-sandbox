@@ -99,11 +99,8 @@ fn run_exits_with_the_guest_commands_code() {
     assert_eq!(status.code(), Some(7));
 }
 
-/// The shell verb without a terminal: the guest command still runs on a real guest pty of the
-/// default 80x24, its output crosses the channel, and its exit code is the verb's. The
-/// interactive half (raw mode, keystrokes, live resize) needs a terminal on this side and is
-/// verified by hand through a pty driver; what this pins is the whole boot-agent-vsock-session
-/// path.
+/// The shell verb without a terminal: the command still runs on a guest pty at 80x24, its output
+/// crosses the channel, and its exit code is the verb's. Pins the whole boot-agent-vsock path.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
 fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
@@ -144,12 +141,9 @@ fn shell_runs_the_command_on_a_guest_pty_and_returns_its_exit() {
     );
 }
 
-/// The 3.6 contract, and the finding behind it: by default the guest cannot reach the host's
-/// network. libkrun's own default is an implicit vsock whose TSI hijacking proxies the guest's
-/// sockets onto the host, so a guest with no config could reach a host-only loopback service;
-/// `--net none` (the default) replaces that device with one that does no hijacking. A host HTTP
-/// server on 127.0.0.1 stands in for "the host's network": a network-isolated guest's own
-/// loopback has no such server, so reaching it would prove the isolation is not there.
+/// The 3.6 contract: by default the guest cannot reach the host's network. libkrun's implicit
+/// vsock proxies guest sockets onto the host, which `--net none` replaces. A host server on
+/// 127.0.0.1 stands in for the host's network, which an isolated guest's own loopback lacks.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn the_default_guest_cannot_reach_the_host_network() {
@@ -158,14 +152,9 @@ fn the_default_guest_cannot_reach_the_host_network() {
     }
     let server = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a host-only server");
     let port = server.local_addr().expect("addr").port();
-    // A minimal HTTP reply in the background, because the guest probes with `wget`, which reports
-    // failure on a bare connect that carries no response. So the server must actually answer for
-    // a reached connection to read as REACHED; a blocked one never connects at all.
-    //
-    // The request is **read before the reply is written**. Closing a socket with unread data in
-    // its receive queue sends an RST, which discards the reply the guest had not read yet: the
-    // connection arrives, the answer never does, and a working `tsi` reports as blocked (watched
-    // happen).
+    // The guest probes with `wget`, which fails on a connect carrying no response, so the server
+    // must answer. The request is read **before** the reply is written: closing with unread data
+    // sends an RST that discards the reply.
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for mut s in server.incoming().take(4).flatten() {
@@ -333,16 +322,9 @@ fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
     );
 }
 
-/// The 0.8 contract: a host directory reaches the guest under a **second virtiofs tag**, the one
-/// the caller named, and a file written there appears on the host. `--share` hands the guest a
-/// device and nothing else, so the guest mounts it itself: this is the path for an image that
-/// knows its own tags, where `--mount` is the path for one that does not.
-///
-/// Both tags are exercised in one boot, because the tag is what the guest mounts by and two
-/// devices sharing one would leave the kernel matching whichever it saw first (the finding behind
-/// `RESERVED_TAG_PREFIX`, until now pinned only by the refusal `--share bsx-…` gets). Here the
-/// helper's own `bsx-mnt-0` and the caller's `work` each land on their own directory, and each
-/// carries writes back to its own host directory.
+/// The 0.8 contract: a host directory reaches the guest under a **second virtiofs tag**, which
+/// `--share` hands over as a device the guest mounts itself. Both tags in one boot, since two
+/// sharing one would leave the kernel matching whichever it saw first.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_second_virtiofs_tag_carries_a_directory_the_guest_mounts_itself() {
@@ -413,13 +395,10 @@ fn a_second_virtiofs_tag_carries_a_directory_the_guest_mounts_itself() {
     );
 }
 
-/// The 3.7 contract, and the finding behind it: the image tree is shared by every sandbox this
-/// host boots, so by default a guest cannot write it. Asserted by *writing*, because the posture
-/// lives on the virtiofs device and the guest cannot see it: `/proc/mounts` still reports the
-/// root `rw` either way (measured 2026-09-01, libkrun 1.19.4).
+/// The 3.7 contract: the image tree is shared by every sandbox, so by default a guest cannot
+/// write it. Asserted by writing, since `/proc/mounts` reports the root `rw` either way.
 ///
-/// Both directions, because "the write failed" alone would also be true of a guest that could
-/// not run `echo`: `--rootfs writable` must put the file in the image tree.
+/// Both directions, or "the write failed" would also hold for a guest that cannot run `echo`.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn the_default_guest_cannot_write_the_image_it_boots_from() {
@@ -557,12 +536,9 @@ fn a_share_tag_that_would_shadow_a_mount_is_refused_before_boot() {
     assert!(err.contains("reserved"), "names the rule: {err}");
 }
 
-/// Roadmap 0.9 and the whole of 4.2's frame path: a guest that draws through a DRM dumb buffer
-/// puts a known pattern on its scanout, and the pixels arrive on the host. The drawer needs no
-/// libdrm (`drm_draw.py`, ioctls by hand), runs on the phase-3 image because `python3` is in it,
-/// and paints red, green, blue and white corners on grey. The display runs headless here, so a
-/// runner with no display server can read the frame too; the window is the same path with a
-/// surface on the end.
+/// Roadmap 0.9 and 4.2's frame path: a guest drawing through a DRM dumb buffer puts a known
+/// pattern on its scanout and the pixels arrive on the host. Headless, so a runner with no
+/// display server reads the frame too; the window is the same path with a surface on the end.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_frame_the_guest_draws_reaches_the_host() {
@@ -611,12 +587,9 @@ fn a_frame_the_guest_draws_reaches_the_host() {
     assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
 }
 
-/// Roadmap 0.11, the guest half: what a `--display` guest is *offered* at the GPU boundary. The
-/// kernel driver is `virtio_gpu` with a render node beside the card, and the device advertises 3D
-/// with the VIRGL, VIRGL2 and VENUS capsets answered. None of that is reachable from guest
-/// userspace today, because neither image carries a Mesa driver, which `gpu_probe.py` reports in
-/// the same breath: the point of pinning both together is that the offer and the absence move
-/// independently, and a change to either is a change to what crosses.
+/// Roadmap 0.11, the guest half: a `--display` guest is offered `virtio_gpu` with a render node
+/// and 3D capsets, none of it reachable without a Mesa driver. The offer and the absence are
+/// pinned together, because they move independently.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
 fn a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for() {
@@ -871,12 +844,8 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
             "foot",
             "sh",
             "-c",
-            // No double-quote-space in the arg: libkrun's cmdline codec corrupts that,
-            // and the sentinel word has no spaces, so it needs no quoting.
-            // Signal readiness on the mount, then read one line and write it back: the wait on
-            // the ready file replaces a fixed sleep, so the test types only once the shell is at
-            // its read. No double-quote-space in the arg (libkrun's cmdline codec corrupts that),
-            // and the words have no spaces, so they need no quoting.
+            // Readiness on the mount replaces a fixed sleep, so the test types only once the
+            // shell is at its read. No double-quote-space: the cmdline codec corrupts it.
             "echo ready > /mnt/ready; read word; printf %s $word > /mnt/typed",
         ])
         .stdin(std::process::Stdio::null())
@@ -905,10 +874,8 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
         ready.exists(),
         "the session's terminal never reached its shell within 40 s\nstderr so far: (see below)"
     );
-    // The FIFO handle stays open across the loop: the replay thread reads until EOF, so closing
-    // it would end input after one batch. The shell reads one line and the rest buffer, so
-    // retyping is safe, which is what lets the loop ride out the second or so cage needs to route
-    // keyboard focus to foot's surface after the shell is already at its read.
+    // The FIFO stays open across the loop, since the replay thread reads to EOF. Retyping is
+    // safe, which rides out the second cage needs to route focus to foot.
     let sentinel = dir.path().join("typed");
     let mut keys = std::fs::OpenOptions::new()
         .write(true)

@@ -53,11 +53,8 @@ fn build_guest_musl() -> Result<PathBuf> {
     Ok(bin)
 }
 
-/// Where cargo actually placed the build: `CARGO_TARGET_DIR` when set, else the workspace's default
-/// `target/`. `build_guest_musl` must resolve the built binary from the *same* directory `cargo`
-/// wrote it to; hardcoding `target/` made `verify_static` (and the returned path staged into the
-/// rootfs) read an absent or stale binary whenever `CARGO_TARGET_DIR` pointed elsewhere, which is
-/// what a root test run sets to keep its artifacts out of `./target`.
+/// Where cargo actually placed the build: `CARGO_TARGET_DIR` when set, else `target/`. The built
+/// binary must be resolved from the directory cargo wrote it to, or a stale one is staged.
 fn guest_target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from)
@@ -88,12 +85,9 @@ fn ensure_guest_target() -> Result<()> {
     Ok(())
 }
 
-/// Verify the built binary is actually statically linked. A sys-crate or
-/// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
-/// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Two checks,
-/// so the guarantee matches the claim: `readelf -d` finds no `(NEEDED)` shared objects, **and**
-/// `readelf -l` finds no `INTERP` program header, a fully static binary needs no runtime loader, so
-/// a static-PIE (no `NEEDED` but with an interpreter) is also rejected.
+/// Verifies the built binary is statically linked, since a sys-crate can reintroduce a `NEEDED`
+/// dependency and a dynamic binary fails at boot with a loader error. Both no `(NEEDED)` and no
+/// `INTERP`, so a static-PIE is rejected too.
 pub(crate) fn verify_static(bin: &Path, what: &str) -> Result<()> {
     // `readelf -d` (dynamic section): a static binary lists no `(NEEDED)` shared objects.
     let Some(dynamic) = readelf(bin, "-d")? else {

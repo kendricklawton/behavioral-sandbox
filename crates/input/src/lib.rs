@@ -156,10 +156,8 @@ impl Area {
     }
 }
 
-/// A position report for the window point `(x, y)`, measured against where the frame sits:
-/// the frame's left edge is `0`, its right edge `ABS_MAX`, and a point outside it is clamped to
-/// the nearest edge rather than dropped, so a drag that leaves the frame keeps its button down
-/// somewhere sensible.
+/// A position report for the window point `(x, y)`, measured against where the frame sits: its
+/// left edge is `0`, its right `ABS_MAX`, and a point outside is clamped to the nearest edge.
 #[must_use]
 pub fn position(x: f64, y: f64, area: Area) -> [InputEvent; 3] {
     let axis = |v: f64, origin: f64, extent: f64| -> i32 {

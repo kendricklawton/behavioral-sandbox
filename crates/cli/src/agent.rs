@@ -77,11 +77,8 @@ pub(crate) fn dial(sock: &Path, vm: &mut Vm) -> Result<Dialed, Error> {
     dial_while(sock, ended, vm)
 }
 
-/// Dials the agent of a VM this process does not hold, watching the VM's **control socket** for
-/// the end this process cannot `wait` for.
-///
-/// Without it a VM that ends mid-call is indistinguishable from one that is slow, so the caller
-/// waits out the whole grace and is then told the agent was silent, which is true and useless.
+/// Dials the agent of a VM this process does not hold, watching the **control socket** for the
+/// end this process cannot `wait` for, or a dead VM reads as a slow one.
 pub(crate) fn connect(sock: &Path, control: &Path) -> Result<Dialed, Error> {
     let ended = |control: &mut &Path| {
         (!bsx_supervisor::socket::is_live(control))

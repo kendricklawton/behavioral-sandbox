@@ -30,10 +30,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// the intent is legible at the `ExitCode::from` sites.
 const EXIT_OPERATIONAL: u8 = 2;
 
-/// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
-/// `vsock:<port>` the host scans for is one definition. The vsock one comes from [`bsx_channel`]
-/// because the rootfs build writes it into the guest's init line too; `unix:` is host-side dev
-/// transport only, so it stays local.
+/// The listen-spec scheme tokens, shared by the parser and the readiness announcement. The vsock
+/// one comes from [`bsx_channel`], which the rootfs build also writes into the guest's init line.
 use bsx_channel::VSOCK_SCHEME;
 const UNIX_SCHEME: &str = "unix";
 
@@ -75,13 +73,9 @@ fn run(spec: &str) -> Result<(), String> {
 /// Serves connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on the
 /// console *after* the bind, so the host never dials before we're accepting.
 fn run_vsock(port: u32) -> Result<(), String> {
-    // Serving vsock is the one state that proves this process is inside a guest, so this is
-    // where the guest-only setup belongs: without it, every session directory this agent writes
-    // under `/tmp` goes through the rw root virtiofs into the shared image tree on the host and
-    // survives the VM (found as a pile of `bsx-session-*` dirs in the built image). A tmpfs over
-    // `/tmp` keeps session scratch in guest RAM, bounded by the VM's own memory cap. Best-effort:
-    // a guest that refuses the mount still serves, it just scribbles, which `build-rootfs
-    // --verify` reports as drift.
+    // Serving vsock is what proves this process is inside a guest, so guest-only setup belongs
+    // here: without the tmpfs, session dirs under `/tmp` reach the shared image tree through the
+    // rw root and outlive the VM. Best-effort; `build-rootfs --verify` reports the drift.
     if let Err(e) = rustix::mount::mount(
         "tmpfs",
         "/tmp",
@@ -140,12 +134,8 @@ fn serve_incoming<S, E>(
     }
 }
 
-/// The one working directory every connection this process serves runs in, which is what makes a
-/// sequence of execs against one agent a **stateful session**. One agent process per VM, so the VM
-/// *is* the session.
-///
-/// The pid in the name is for the host-side `unix:` dev transport, where several agent processes may
-/// share one `/tmp`.
+/// The one working directory every connection this process serves runs in: one agent per VM, so
+/// the VM **is** the session. The pid in the name separates dev-transport agents sharing `/tmp`.
 fn session_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bsx-session-{}", std::process::id()))
 }
@@ -153,18 +143,13 @@ fn session_dir() -> std::path::PathBuf {
 /// Serves one connection, logging rather than propagating a failure so one bad peer never ends the
 /// loop. `serve_session` emits its own `exec` span, so only failures need a line here.
 fn serve_one<S: bsx_guest_agent::SplitStream + 'static>(stream: S) {
-    // One thread per connection, so a wedged session cannot take the listener down: the whole-tree
-    // reap needs cgroup v2, so on an off-spec guest a command that double-forks a daemon holds the
-    // output pipes open and its `pump` never sees EOF. Served inline, that one stuck exec would
-    // block `accept`. The session dir stays shared, since it is the session's state.
+    // One thread per connection, so a session wedged without cgroup v2 cannot block `accept`.
     let spawned = std::thread::Builder::new()
         .name("bsx-session".to_string())
         .spawn(move || {
             match serve_session(stream, &session_dir()) {
                 Ok(_) => {}
-                // A peer that hands back nothing after the handshake is a readiness probe, not a
-                // failure: reporting it as one would put a warning on the console of every
-                // healthy `bsx up`.
+                // Nothing after the handshake is a readiness probe, not a failure.
                 Err(e) if e.is_disconnect() => tracing::debug!("connection closed: {e}"),
                 Err(e) => tracing::warn!("connection failed: {e}"),
             }

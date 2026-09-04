@@ -18,9 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// Why `/dev/kvm` cannot back a VM from this process, or `None` when it can.
 ///
-/// Opened read-write, which is what a VMM needs, rather than tested for existence: the common
-/// failure is a user outside the `kvm` group, where the device exists, every boot dies, and an
-/// existence check reads that as "the VM never started" instead of naming the fix.
+/// Opened read-write, as a VMM needs: the common failure is a user outside the `kvm` group.
 #[must_use]
 pub fn kvm_unusable() -> Option<String> {
     match std::fs::OpenOptions::new()
@@ -39,10 +37,8 @@ pub fn kvm_unusable() -> Option<String> {
 
 /// A `Write` sink that appends into a shared buffer, for a test asserting on what was **logged**.
 ///
-/// `tracing::subscriber::with_default` is thread-local, so [`subscriber`](Self::subscriber) hands
-/// out one per thread over the same [`LogSink`] and [`contents`](Self::contents) reads them all
-/// back. Behind the `tracing-capture` feature, so crates borrowing only the pure-std helpers keep
-/// an empty dependency list.
+/// `with_default` is thread-local, so [`subscriber`](Self::subscriber) hands out one per thread
+/// over the same sink and [`contents`](Self::contents) reads them all back.
 #[cfg(feature = "tracing-capture")]
 #[derive(Clone, Default)]
 pub struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -86,10 +82,8 @@ impl LogSink {
     }
 }
 
-/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only
-/// sprays varied bytes at a decoder reproducibly, so a failure replays from its seed and the gate
-/// never flakes. Shared because the crates that fuzz their decoders in-gate are leaves that will
-/// not take a `proptest`/`arbitrary` tree as a dev-dependency.
+/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic; it sprays
+/// varied bytes at a decoder reproducibly, so a failure replays from its seed.
 pub struct Rng(u64);
 
 impl Rng {

@@ -101,11 +101,9 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         settle_secs: u64,
     },
-    /// Measure the guest-to-host frame path: a guest draws frames as fast as its chosen path
-    /// allows, the helper logs each frame's arrival, and the intervals are reported as
-    /// percentiles, with the guest's own view beside them. Headless: it measures throughput
-    /// into the host process, not presentation on a panel. Needs `/dev/kvm`, the guest tree and
-    /// a **release** `bsx`.
+    /// Measure the guest-to-host frame path: frame arrival intervals as percentiles, with the
+    /// guest's own view beside them. Headless, so it measures throughput into the host process,
+    /// not presentation. Needs `/dev/kvm`, the guest tree and a **release** `bsx`.
     BenchFrames {
         /// The display the guest gets, `WIDTHxHEIGHT[@HZ]`; `@HZ` is what the guest paces its
         /// page flips to. Default 640x480.
@@ -118,12 +116,9 @@ enum Cmd {
         #[arg(long)]
         app: bool,
     },
-    /// Fuzz the untrusted-input decoders (the host↔guest channel, the
-    /// config parser) with `cargo fuzz` (libFuzzer), the deep,
-    /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
-    /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
-    /// `ci`. `--help` lists the targets, generated from [`FUZZ_TARGETS`] rather than restated
-    /// here, where the copy would drift.
+    /// Fuzz the untrusted-input decoders with `cargo fuzz`, the nightly-only counterpart to the
+    /// in-gate mutation tests, seeded from `fuzz/seeds/<target>/`. Needs cargo-fuzz and a nightly
+    /// toolchain; never part of `ci`. `--help` lists the targets from [`FUZZ_TARGETS`].
     Fuzz {
         /// The libFuzzer target to run.
         #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
@@ -190,12 +185,9 @@ fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
     clap::builder::PossibleValuesParser::new(FUZZ_TARGETS)
 }
 
-/// Every libFuzzer target in `fuzz/`, ordered by value (outermost untrusted boundary first). The
-/// single source of truth: the smoke run iterates it and `--help` is generated from it, so neither
-/// can drift by construction. Three copies can, because neither a workflow file nor a cargo manifest
-/// can resolve a Rust constant: `fuzz/Cargo.toml`'s `[[bin]]` entries, the sources in
-/// `fuzz/fuzz_targets/`, and the nightly matrix in `.github/workflows/fuzz.yml`.
-/// `fuzz_targets_are_single_sourced` is what holds those three to this list.
+/// Every libFuzzer target in `fuzz/`, outermost untrusted boundary first, and the source the
+/// smoke run and `--help` are generated from. Three copies cannot read a Rust constant, so
+/// `fuzz_targets_are_single_sourced` holds them to this list.
 const FUZZ_TARGETS: &[&str] = &[
     "channel_response",
     "channel_request",
@@ -203,14 +195,12 @@ const FUZZ_TARGETS: &[&str] = &[
     "channel_handshake",
 ];
 
-/// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
-/// rather than pretending. Fuzzing is never wired into `ci` (the in-gate coverage is the crates' own
-/// dependency-light mutation tests).
-/// The pinned nightly `cargo fuzz` runs under. Single-sourced here: a bare `+nightly` would take
-/// whatever the last `rustup update` fetched, so a crash found here could be unreproducible on the
-/// next machine.
+/// The pinned nightly `cargo fuzz` runs under: a bare `+nightly` would take whatever the last
+/// `rustup update` fetched, so a crash found here could be unreproducible elsewhere.
 const FUZZ_NIGHTLY: &str = "nightly-2026-07-20";
 
+/// Bails with guidance when cargo-fuzz or its nightly is absent, both being opt-in installs.
+/// Fuzzing is never wired into `ci`, whose coverage is the crates' own mutation tests.
 fn require_cargo_fuzz() -> Result<()> {
     if cargo_fuzz_available() {
         return Ok(());
@@ -222,17 +212,13 @@ fn require_cargo_fuzz() -> Result<()> {
     )
 }
 
-/// Build the `+<pinned nightly> fuzz run <target> <corpus> <seeds>` argv. The writable corpus
-/// (libFuzzer accumulates new inputs here; generated, gitignored) is created so naming it explicitly
-/// (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default. The committed
-/// read-only seed corpus is folded in so a run starts *past* the first-byte reject, with real
-/// inputs reaching the decode logic.
+/// Builds the `+<pinned nightly> fuzz run <target> <corpus> <seeds>` argv. The writable corpus is
+/// created, since naming it explicitly is what passing the seeds costs, and the committed seeds are
+/// folded in so a run starts past the first-byte reject.
 fn cargo_fuzz_run_argv(target: &str, root: &Path) -> Result<Vec<String>> {
     let corpus = root.join("fuzz/corpus").join(target);
     std::fs::create_dir_all(&corpus).context("create the fuzz corpus dir")?;
-    // `+<pinned>`, not a bare `+nightly`: the alias is whatever the last `rustup update` fetched, so
-    // a bare `+nightly` would ignore the pin entirely and a crash found here could be unreproducible
-    // on the next machine. One nightly serves the whole repo (see [`probes_nightly`]).
+    // `+<pinned>`, not the `nightly` alias, which is whatever the last `rustup update` fetched.
     let toolchain = format!("+{FUZZ_NIGHTLY}");
     let mut args: Vec<String> = [toolchain.as_str(), "fuzz", "run", target]
         .iter()
@@ -246,11 +232,8 @@ fn cargo_fuzz_run_argv(target: &str, root: &Path) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// Invoke `cargo <args>` from the repo root (cargo-fuzz discovers the `fuzz/` crate there). The
-/// leading `+<pinned nightly>` in `args` forces that toolchain via the rustup proxy: libFuzzer builds
-/// with `-Zsanitizer=address`, nightly-only, so inheriting a stable default would fail with "the
-/// option `Z` is only accepted on the nightly compiler". rustup propagates the selection to the
-/// inner build.
+/// Invokes `cargo <args>` from the repo root, where cargo-fuzz discovers the `fuzz/` crate. The
+/// leading `+<pinned nightly>` forces that toolchain, since `-Zsanitizer=address` is nightly-only.
 fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let status = Command::new("cargo")
@@ -279,14 +262,11 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
     run_cargo_fuzz(&args, root)
 }
 
-/// Warn about a `fuzz/corpus/<name>` directory that is not a [`FUZZ_TARGETS`] entry, with how many
-/// inputs it holds. Renaming a target leaves its corpus behind under the old name and cargo-fuzz
-/// starts the new one from empty, so accumulated coverage goes *quiet* rather than missing: the
-/// inputs are still on disk, just under a name nothing reads.
+/// Warns about a `fuzz/corpus/<name>` directory no [`FUZZ_TARGETS`] entry names: a renamed target
+/// leaves its corpus under the old name and starts from empty, so coverage goes quiet.
 ///
-/// A warning from a dev command rather than an assertion in `ci`, because `fuzz/corpus/` is
-/// gitignored working data. A gate reading it would pass or fail on whatever the developer happened
-/// to have run locally, and would fail on a fresh clone that has no corpus at all.
+/// A warning, not a gate assertion: `fuzz/corpus/` is gitignored working data, absent on a fresh
+/// clone.
 fn warn_orphan_corpora(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root.join("fuzz/corpus")) else {
         return; // nothing fuzzed here yet
@@ -378,14 +358,8 @@ fn ci() -> Result<()> {
         &["test", "--workspace", "--locked"],
         &[("RUSTFLAGS", "-D warnings")],
     )?;
-    // What this step buys is `-D warnings` over rustdoc's lints, above all
-    // `broken_intra_doc_links`: a `[`Type`]` that no longer resolves is a dead pointer in prose,
-    // the same class the drift lint catches for repo paths. The rendered HTML is not the point and
-    // is never published (`.github/workflows/docs.yml` builds the mdBook, not rustdoc).
-    //
-    // A bin and a lib both named `bsx` in *different* packages would render to the same path and
-    // collide here. Both live in the CLI package, where cargo resolves them, so `target/doc/` holds
-    // one directory per crate and nothing is suppressed.
+    // For `-D warnings` over rustdoc's lints, above all `broken_intra_doc_links`: an unresolved
+    // `[`Type`]` is a dead pointer in prose. The rendered HTML is never published.
     cargo_env(
         &["doc", "--no-deps", "--workspace", "--locked"],
         &[("RUSTDOCFLAGS", "-D warnings")],
@@ -398,11 +372,8 @@ fn ci() -> Result<()> {
 }
 
 /// The manifests `cargo deny check` at the root cannot reach: every path in the root workspace's
-/// `exclude`, read from the tree rather than listed here.
-///
-/// A hand-written list is the thing that rots. `detached_workspaces_are_all_scanned` holds this to
-/// `exclude`, so a third detached workspace has to be decided about instead of defaulting into an
-/// unscanned gap, which is how the first two got there.
+/// `exclude`, read from the tree. `detached_workspaces_are_all_scanned` holds it there, so a third
+/// one has to be decided about rather than defaulting into a gap.
 fn detached_manifests(root: &Path) -> Result<Vec<PathBuf>> {
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .context("read the root Cargo.toml to find the excluded workspaces")?;
@@ -430,10 +401,8 @@ fn excluded_dirs(manifest: &str) -> Vec<String> {
 
 /// The `[workspace.lints.clippy]` entries the root manifest sets to `deny`, as `-D` flags.
 ///
-/// Read from the root manifest so the detached workspaces cannot carry a second, drifting copy of
-/// the list. They are `exclude`d, so `[lints] workspace = true` is not available to them: cargo
-/// only inherits lints for members. Passing the same denies on the command line is the way to give
-/// one policy to both halves of the tree.
+/// Read from the root, since an `exclude`d workspace cannot inherit `[lints]` and would otherwise
+/// carry a drifting copy.
 fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .context("read the root Cargo.toml for its clippy lint policy")?;
@@ -449,14 +418,11 @@ fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-/// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces.
+/// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces, which a
+/// root-workspace clippy does not walk.
 ///
-/// The detached workspaces are linted under the toolchain each one pins
-/// in the release tarball, yet a root-workspace `clippy` walks neither detached workspace.
-///
-/// Each command runs with the cwd **inside** its workspace, so rustup honours that directory's own
-/// `rust-toolchain.toml`. Clippy on a detached workspace skips cleanly when its toolchain is
-/// absent, since the everyday gate has to run everywhere.
+/// The cwd is **inside** each workspace, so rustup honours its own `rust-toolchain.toml`; a
+/// missing toolchain skips, since the gate runs everywhere.
 fn lint_detached_workspaces(root: &Path) -> Result<()> {
     let denies = workspace_clippy_denies(root)?;
     for manifest in detached_manifests(root)? {
@@ -465,9 +431,7 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
         // `fuzz` builds on whatever toolchain the caller has.
         let toolchain: Option<&str> = None;
         run_in(&dir, toolchain, &["fmt", "--check"], &shown)?;
-        // No `--all-targets`: it adds a test harness, and a detached crate may be `no_std` for a target
-        // with no `test` crate and no panic handler, so the harness cannot build at all. The
-        // default targets are the ones that ship.
+        // No `--all-targets`: the test harness it adds cannot build for a `no_std` target.
         let mut args = vec!["clippy", "--", "-Dwarnings"];
         args.extend(denies.iter().map(String::as_str));
         run_in(&dir, toolchain, &args, &shown)?;
@@ -477,10 +441,8 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
 
 /// One cargo invocation inside `dir`, under the toolchain that directory pins.
 ///
-/// `toolchain` names it explicitly rather than letting the `rust-toolchain.toml` in `dir` be found,
-/// because a parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN=stable` into every child and that
-/// overrides the file. A command that passes by hand and fails from the gate is the signature of
-/// an inherited variable rather than a broken command.
+/// Named explicitly rather than found, because a parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN`
+/// into every child and that overrides the file.
 fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Result<()> {
     let mut cmd = match toolchain {
         Some(t) => {
@@ -507,18 +469,8 @@ fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Re
 
 /// `cargo deny check advisories` for the workspaces the root check cannot see.
 ///
-/// `fuzz` carries its own `[workspace]` and lockfile and is excluded from the root
-/// one, so `cargo deny check` walks it separately. It matters, being the one
-/// allowed `unsafe` and the one whose object ships in the tarball.
-///
-/// Advisories only: bans, licenses, and sources describe the shipped dependency graph the root check
-/// already owns, and re-running them here would mean a second policy to keep in step for no coverage.
-///
-/// **No `--config`, deliberately.** Pointing these at the root `deny.toml` buys one line over cargo-deny's
-/// defaults (`yanked = "deny"` instead of `warn`) and costs a version-sensitive argument: `--config`
-/// belongs to the `check` subcommand in some releases and is global in others, which passes on a dev box
-/// and fails CI. Vulnerabilities are denied by default, which is why this scan exists; a yanked crate here
-/// warning rather than failing is an accepted trade.
+/// Advisories only, the rest describing the shipped graph the root check owns. **No `--config`**,
+/// whose place moved between releases, so a yanked crate warning here is the trade.
 fn deny_detached_workspaces(root: &Path) -> Result<()> {
     for manifest in detached_manifests(root)? {
         let shown = manifest.strip_prefix(root).unwrap_or(&manifest);
@@ -539,14 +491,10 @@ fn deny_detached_workspaces(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Asserts `fuzz/Cargo.lock` still resolves. That workspace is **detached**, with its own `[workspace]` and
-/// lockfile, and takes the rest of the tree by path, so a dependency edit in the main workspace ages it.
-/// `cargo xtask fuzz` lets cargo repair the lockfile in place, which turns drift into a silent rewrite
-/// rather than a report. The detached workspace's build passes `--locked`, so only
-/// this one can rot unobserved.
+/// Asserts `fuzz/Cargo.lock` still resolves: that workspace is detached and takes the tree by path,
+/// so a dependency edit ages it, and `cargo xtask fuzz` would repair it silently.
 ///
-/// Resolution is the whole check: building the targets needs nightly plus cargo-fuzz, neither of which
-/// belongs in a gate that has to run everywhere.
+/// Resolution is the whole check; building the targets needs nightly and cargo-fuzz.
 fn fuzz_lockfile_resolves(root: &Path) -> Result<()> {
     let out = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--locked"])
@@ -566,12 +514,9 @@ fn fuzz_lockfile_resolves(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Assert the pinned stable toolchain (`rust-toolchain.toml`'s `channel`) and the declared MSRV
-/// floor (`[workspace.package] rust-version` in the root `Cargo.toml`) agree at `major.minor`. They
-/// are kept in step by hand, so a bump touching only one silently makes the gate build at
-/// a compiler that differs from the floor it advertises, and a downstream pinning our MSRV would
-/// then build against a Rust we never test. A named channel (`stable`/`nightly`) carries no version
-/// to compare, so the numeric check is skipped there; today's pin is numeric.
+/// Asserts the pinned toolchain and the declared MSRV floor agree at `major.minor`: kept in step
+/// by hand, so a one-sided bump builds the gate at a compiler the floor does not advertise. A
+/// named channel carries no version, so the check is skipped there.
 fn toolchain_msrv_agree(root: &Path) -> Result<()> {
     let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml"))
         .context("reading rust-toolchain.toml")?;
@@ -638,10 +583,7 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
 fn setup() -> Result<()> {
     println!("bsx: host capability check\n");
 
-    // Asked of the host, not of a distro list: the device either opens read-write or it does not.
-    // This is the whole runtime check today. The engine's checklist went with the engine, and its
-    // libkrun successor arrives with the supervisor (`scratch/ROADMAP.md` phase 2), so this refuses
-    // to print rows it cannot stand behind.
+    // Asked of the host, not a distro list: the device either opens read-write or it does not.
     check(
         "/dev/kvm readable and writable (hardware virtualization)",
         std::fs::OpenOptions::new()
@@ -651,9 +593,7 @@ fn setup() -> Result<()> {
             .is_ok(),
     );
 
-    // Dev-toolchain checks, only `xtask` needs these (building the guest agent, verifying static
-    // links). Verified, not just announced: a row that printed the pin while any version satisfied
-    // it would be the same hollow green this command exists to refuse.
+    // Verified, not announced: a row printing the pin while any version satisfied it is hollow.
     println!("\ndev toolchain (for building, not running):");
     check(
         &format!("pinned nightly {FUZZ_NIGHTLY} (`cargo xtask fuzz`)"),
@@ -688,12 +628,8 @@ const PINNED_SURFACE_CRATES: [&str; 2] = ["bsx-channel", "bsx-supervisor"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///
-/// **Every crate is named with its own `-p`**, because `cargo-semver-checks` drops
-/// `publish = false` packages from its default set without saying so, and every crate here is
-/// `publish = false` by decision. Run bare against this workspace it
-/// prints one "Cloning" line, checks nothing, and exits `0`: a pass that verified nothing, which is
-/// the hollow green the two gates exist to prevent. This refuses that outcome instead of reporting
-/// it, so a green here means checks actually ran.
+/// **Every crate is named with its own `-p`**: `cargo-semver-checks` silently drops
+/// `publish = false` packages, which all of these are, and exits `0` having checked nothing.
 fn semver_check(baseline: Option<&str>) -> Result<()> {
     if !in_path("cargo-semver-checks") {
         bail!(
@@ -706,9 +642,8 @@ fn semver_check(baseline: Option<&str>) -> Result<()> {
         None => latest_version_tag(root)?,
     };
 
-    // At `0.0.x` cargo's own rules make every bump a major one, so no change can be a violation and
-    // every lint is skipped: the run is green no matter what the diff did. Say so rather than
-    // print a pass that means nothing.
+    // At `0.0.x` every bump is major by cargo's rules, so every lint is skipped and the run is
+    // green whatever the diff did.
     let version = toml_string_value(
         &std::fs::read_to_string(root.join("Cargo.toml")).context("reading the root Cargo.toml")?,
         "version",
@@ -766,15 +701,12 @@ fn nightly_ready() -> bool {
     let Some(rustup) = dev_tool_path("rustup") else {
         return false;
     };
-    // The *pinned* toolchain, not the `nightly` alias: with an exact date pinned, having some
-    // nightly installed says nothing about having this one, and reporting ready on the wrong
-    // toolchain would turn a clean skip into a confusing build failure.
+    // The pinned toolchain, not the alias: having some nightly says nothing about having this one.
     let nightly = FUZZ_NIGHTLY;
     let mut cmd = Command::new(rustup);
     cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
-    // Under a sudo that reset `$HOME` to root's, `rustup` would read root's empty `~/.rustup` and
-    // report no nightly. Point it at the *invoking* user's toolchain home so the row is honest
-    // whichever way setup is run (only when `RUSTUP_HOME` isn't already pinned by the environment).
+    // Under a sudo that reset `$HOME`, rustup reads root's empty `~/.rustup`: point it at the
+    // invoking user's, unless the environment already pinned one.
     if std::env::var_os("RUSTUP_HOME").is_none()
         && let Some(user) = std::env::var_os("SUDO_USER")
         && let Some(home) = user_home(&user)
@@ -852,11 +784,8 @@ fn in_path(bin: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
 }
 
-/// Resolve a per-user dev-toolchain binary: `$PATH` first, then the cargo bin dirs. `cargo install`
-/// places these build-only tools (`rustup`, `cargo-fuzz`) in `~/.cargo/bin`, which `sudo` drops from
-/// root's PATH, so the natural `sudo cargo xtask setup` (run to green the *runtime* rows) would
-/// otherwise report an installed tool as missing. Checking the cargo bin dirs, including the
-/// *invoking* user's under sudo, keeps the dev-toolchain rows honest whichever way setup is invoked.
+/// Resolves a per-user dev-toolchain binary: `$PATH`, then the cargo bin dirs, including the
+/// invoking user's under sudo, which drops `~/.cargo/bin` from root's `PATH`.
 pub(crate) fn dev_tool_path(bin: &str) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH")
         && let Some(hit) = std::env::split_paths(&path)
@@ -909,17 +838,11 @@ fn cargo(args: &[&str]) -> Result<()> {
     cargo_env(args, &[])
 }
 
-/// Run cargo with this host's identity remapped out of whatever it builds. For the binaries a
-/// release ships, never for a build a developer runs and debugs.
+/// Runs cargo with this host's identity remapped out of what it builds, for release binaries only.
 ///
-/// A release build carries no debug info, but `panic!` location strings are baked in regardless, and for
-/// std and every registry dependency those are absolute paths under this host's `CARGO_HOME` and rustup
-/// directory. Two hosts building the same commit therefore emit different bytes, enough on its own to give
-/// the guest tree a different hash under the same pinned toolchain and package closure.
-///
-/// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS`, so a home directory containing a space cannot
-/// split one flag into two. Either form *replaces* configured `rustflags` rather than appending, which is
-/// why this stays on the packaging paths and out of the gate.
+/// `panic!` locations are baked in regardless of debug info, so two hosts emit different bytes.
+/// `CARGO_ENCODED_RUSTFLAGS` *replaces* configured `rustflags`, which is why this stays off the
+/// gate.
 fn cargo_reproducible(args: &[&str]) -> Result<()> {
     let flags = remap_flags(
         &cargo_home(),
@@ -929,15 +852,10 @@ fn cargo_reproducible(args: &[&str]) -> Result<()> {
     cargo_env(args, &[("CARGO_ENCODED_RUSTFLAGS", &flags.join("\x1f"))])
 }
 
-/// The `--remap-path-prefix` flags [`cargo_reproducible`] passes: `CARGO_HOME` and the toolchain's
-/// vendored std sources, each onto a fixed token.
+/// The `--remap-path-prefix` flags [`cargo_reproducible`] passes, onto fixed tokens.
 ///
-/// The std mapping is the subtle one. rustc ships std with its paths already remapped to
-/// `/rustc/<commit>/…`, but rewrites them back to the local checkout whenever the `rust-src`
-/// component is installed, so a host carrying that component disagrees with one that does not, on
-/// the same toolchain. Mapping the checkout onto `/rustc/<commit>` is what makes the two agree.
-/// Without a commit hash there is no canonical form to map onto, so that flag is dropped rather
-/// than invented: a wrong token would make every host agree with itself and none with upstream.
+/// rustc rewrites std's paths back to the local checkout wherever `rust-src` is installed, so the
+/// checkout maps onto `/rustc/<commit>`; without a commit hash the flag is dropped.
 fn remap_flags(cargo_home: &Path, sysroot: &Path, commit_hash: Option<&str>) -> Vec<String> {
     let mut flags = vec![format!(
         "--remap-path-prefix={}=/cargo",
@@ -991,9 +909,7 @@ fn rustc_commit_hash() -> Option<String> {
 fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let mut cmd = Command::new(env!("CARGO"));
-    // From the workspace root regardless of the invoker's cwd. Cargo's own subcommands walk up to
-    // the workspace on their own, but plugins resolve from the cwd (`cargo deny check` looks for
-    // ./Cargo.toml there), so a `cargo xtask ci` run from a subdirectory died at exactly that step.
+    // From the workspace root: cargo's own subcommands walk up, but a plugin resolves from the cwd.
     cmd.current_dir(workspace_root());
     cmd.args(args);
     for (k, v) in env {
@@ -1024,11 +940,8 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// Every workspace the root `cargo deny check` cannot walk must still get an advisory scan.
-    ///
-    /// Both detached workspaces went unscanned from the day they were excluded, and nothing said
-    /// so: `audit.yml` is named "audit" and reads like it covers the repo. Deriving the set from
-    /// `exclude` means a third one cannot repeat that silently.
+    /// Every workspace the root `cargo deny check` cannot walk still gets an advisory scan.
+    /// Derived from `exclude`, so a third detached workspace cannot go unscanned silently.
     #[test]
     fn detached_workspaces_are_all_scanned() {
         let root = workspace_root();
@@ -1089,21 +1002,14 @@ exclude = ["fuzz"]
 
     #[test]
     fn the_fakeroot_decision_reads_through_the_shared_parse() {
-        // The field-index discipline (the setuid-shaped line a live read cannot produce) is
-        // pinned where the parse lives, in the CLI's ids tests; here only the live read, so
-        // format drift on this host surfaces as a loud error rather than a rootfs build that
-        // silently decides it is already root.
+        // Only the live read here; the parse is pinned in the CLI's ids tests. Format drift
+        // surfaces loudly rather than as a rootfs build deciding it is already root.
         assert!(effective_uid().is_ok());
     }
 
-    /// The repo-layout table is restated in three places for three audiences: `AGENTS.md` for an
-    /// agent, `README.md` for someone who never clones, and `docs/architecture.md` for the book.
-    /// Three hand-maintained copies of one list drift, and this one did: `README.md` silently
-    /// omitted `bsx-test-support` while the other two carried all ten.
-    ///
-    /// Asserts each table names every workspace package, and that the directory it pairs with is
-    /// the real one, so a rename cannot leave a table half-updated. The tables may say anything
-    /// else they like; only the name/directory pairing is pinned here.
+    /// The repo-layout table is restated in three places for three audiences, and three copies
+    /// drift. Asserts each names every workspace package against its real directory; only the
+    /// name/directory pairing is pinned.
     #[test]
     fn every_layout_table_lists_every_package() {
         let root = workspace_root();
@@ -1189,13 +1095,8 @@ exclude = ["fuzz"]
         map
     }
 
-    /// Every workspace crate forbids `unsafe` except the raw libkrun bindings. Two doc pages state
-    /// that rule; this is what makes it a checked claim rather than a list.
-    ///
-    /// Derived from the tree, so a new crate fails here until someone decides which side it is on,
-    /// and asserted as an **equality** rather than a subset: a second crate dropping the attribute
-    /// fails, and so does `krun-sys` gaining it, since the `unsafe extern` block it exists for
-    /// would then not compile.
+    /// Every workspace crate forbids `unsafe` except the raw libkrun bindings, which two doc pages
+    /// state and this checks. An **equality**, so a new crate must be decided about either way.
     #[test]
     fn every_crate_forbids_unsafe() {
         let root = workspace_root();
@@ -1240,14 +1141,9 @@ exclude = ["fuzz"]
     /// The single directory under `crates/` exempt from `#![forbid(unsafe_code)]`.
     const UNSAFE_CRATE: &str = "krun";
 
-    /// The three copies of [`FUZZ_TARGETS`] that no constant can reach: a cargo manifest and a
-    /// workflow file cannot read a Rust `const`, and a target's source file is named by the
-    /// filesystem. Each drifts in its own direction and each failure is silent. A target in the
-    /// constant but not the workflow never runs its nightly 15 minutes, so a boundary reads as
-    /// fuzzed while nothing fuzzes it; one in the workflow but not `fuzz/Cargo.toml` fails the
-    /// nightly run on a target cargo-fuzz cannot build.
-    ///
-    /// Compared as sorted sets, since [`FUZZ_TARGETS`] is ordered by value and the others are not.
+    /// The three copies of [`FUZZ_TARGETS`] no constant can reach, each drifting silently: a
+    /// target missing from the workflow never runs, so a boundary reads as fuzzed while nothing
+    /// fuzzes it. Compared as sorted sets, since only the constant is ordered.
     #[test]
     fn fuzz_targets_are_single_sourced() {
         let root = workspace_root();
@@ -1309,11 +1205,8 @@ exclude = ["fuzz"]
         );
     }
 
-    /// No flag may carry a path that only exists on the machine that built the artifact.
-    ///
-    /// This is the whole point of the remap, and it is the part a plausible-looking edit breaks
-    /// silently: the build still succeeds, the binary still runs, and the divergence only shows up
-    /// as two hosts disagreeing on an image hash weeks later.
+    /// No flag may carry a path that exists only on the machine that built the artifact: a broken
+    /// remap still builds and still runs, and shows up as two hosts disagreeing weeks later.
     #[test]
     fn remap_flags_leave_no_host_path_in_the_build() {
         let flags = remap_flags(

@@ -74,10 +74,8 @@ pub(crate) fn spawn(
                     return;
                 }
             };
-            // From here the window is the sandbox's lifetime: however this thread ends, on the
-            // loop returning after a close or on a panic unwinding out of it, the guard stops
-            // the VM the way `bsx stop` does. A window that vanished from a VM still running
-            // would be a sandbox nobody can see and nobody asked to keep.
+            // From here the window is the sandbox's lifetime: however this thread ends, the
+            // guard stops the VM, or a closed window leaves a sandbox nobody can see.
             let _stop = StopOnExit;
             let proxy = event_loop.create_proxy();
             lock(&framebuffer).set_wake(move || {
@@ -443,11 +441,9 @@ pub(crate) fn rgb_offsets(format: PixelFormat) -> Option<[usize; 3]> {
     })
 }
 
-/// Draws `frame` into the `place` rectangle of `out`, a surface `width` pixels wide of
-/// `0x00RRGGBB` pixels (softbuffer's layout), nearest-neighbour when the sizes differ and one
-/// to one when they do not. The rest of `out` is left as it was, as is all of it for a place that
-/// does not fit or a format this cannot read. Pure, so the conversion is testable without a
-/// window.
+/// Draws `frame` into the `place` rectangle of `out`, softbuffer's `0x00RRGGBB` layout,
+/// nearest-neighbour when the sizes differ. The rest of `out` is untouched, as is all of it for a
+/// place that does not fit. Pure, so it is testable without a window.
 pub(crate) fn composite(frame: &Frame, place: Placement, width: u32, out: &mut [u32]) {
     let Some([r, g, b]) = rgb_offsets(frame.format) else {
         return;

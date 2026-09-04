@@ -232,9 +232,7 @@ fn button_of(button: mouse::Button) -> Option<u16> {
 
 /// What one redraw draws: the latest present in `history`, uploaded from `frames`.
 ///
-/// **`run` is which sandbox's frame this is.** iced keys a shader pipeline by the primitive's
-/// type, not by the widget, so every frame on screen shares one [`Pipeline`]; the texture and the
-/// placement live in it under this name, or the grid's thumbnails would overwrite each other.
+/// `run` keys its texture in the [`Pipeline`], which iced shares across every frame on screen.
 #[derive(Debug)]
 pub(crate) struct Primitive {
     run: Arc<str>,

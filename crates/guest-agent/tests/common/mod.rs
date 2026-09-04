@@ -168,10 +168,7 @@ impl Agent {
 
     /// Reads responses until a terminal frame, collecting both streams and any artifacts.
     ///
-    /// Every frame the protocol defines today is legal here; which of them a given test will accept
-    /// is the test's own assertion on the returned [`Outcome`], not this loop's business.
-    /// `Response` is `#[non_exhaustive]`, so the wildcard is required from outside the crate: it
-    /// panics by name, in one place, rather than being skipped in each of thirteen loops.
+    /// Every frame is legal here; what a test accepts is its own assertion on the [`Outcome`].
     pub fn drain(&mut self) -> Run {
         let (mut stdout, mut stderr, mut files) = (Vec::new(), Vec::new(), Vec::new());
         let outcome = loop {

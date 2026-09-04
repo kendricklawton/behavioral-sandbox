@@ -346,11 +346,7 @@ pub(crate) fn run<'a>(app: &'a App, id: &str) -> Element<'a, Message> {
 /// The width the label column of a pane takes, in logical pixels: the longest label plus a gap.
 const LABEL: f32 = 74.0;
 
-/// A titled box of `label`, `value` rows.
-///
-/// The two are separate widgets rather than one padded string, so a value too long for the pane
-/// wraps under itself and stays in its column. Padding a monospace line only lines up while
-/// nothing wraps, and a guest root is a path with no length limit.
+/// A titled box of `label`, `value` rows, as two widgets so a long value wraps in its column.
 fn pane<'a>(title: &'a str, rows: Vec<(String, String)>) -> Element<'a, Message> {
     let mut body = column![heading(title)].spacing(3);
     for (label, value) in rows {

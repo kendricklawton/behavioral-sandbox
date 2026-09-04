@@ -119,13 +119,11 @@ pub(crate) struct VmmArgs {
     pub(crate) sound: bool,
 }
 
-/// What the guest may do to its root filesystem. The default is
-/// [`ReadOnly`](RootFsPosture::ReadOnly) because one image tree boots every sandbox: a guest that
-/// can write it is a guest editing what every later guest starts from.
+/// What the guest may do to its root filesystem, [`ReadOnly`](RootFsPosture::ReadOnly) by default
+/// because one image tree boots every sandbox.
 ///
-/// Enforced by the virtiofs device rather than by a guest mount option, so the guest cannot undo
-/// it and cannot see it either: `/proc/mounts` still reports the root `rw`, and only an attempted
-/// write reports the truth (measured 2026-09-01, libkrun 1.19.4).
+/// Enforced by the virtiofs device, so the guest can neither undo nor see it: `/proc/mounts`
+/// still reports the root `rw`.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum RootFsPosture {
     /// Guest writes to the root fail with `EROFS`. Writable state comes from a `--mount`.
@@ -211,11 +209,8 @@ pub(crate) fn split_display(spec: &str) -> Option<(NonZeroU32, NonZeroU32, Optio
 }
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
-/// survives. The guest path must be absolute (it names a mount point inside the guest, and a
-/// relative one would mean "relative to wherever init happens to be"), must not be `/` itself
-/// (mounting over the guest root mid-boot shadows the running system, which is never what a
-/// project mount meant), and must carry no `..` component, since [`mount_point_in_image`]
-/// resolves it against the host's image tree.
+/// survives. The guest path must be absolute, must not be `/`, and must carry no `..`, since
+/// [`mount_point_in_image`] resolves it against the host's image tree.
 pub(crate) fn split_mount(spec: &str) -> Option<(&Path, &Path)> {
     let (guest, host) = spec.split_once('=')?;
     if !guest.starts_with('/') || guest == "/" || host.is_empty() {
@@ -246,11 +241,8 @@ fn sh_quote(s: &str) -> String {
 
 /// The prefix every tag this helper invents carries, and which a caller's `--share` may not use.
 ///
-/// **The tag is what the guest mounts by, not the flag it came from.** Two virtiofs devices under
-/// one tag leave the guest mounting whichever the kernel matches first, so a `--share bsx-mnt-0`
-/// beside a `--mount` put the caller's share at the mount point and the mount nowhere: the guest
-/// saw a host directory nobody asked for there, silently, and `--dry-run` printed the mount that
-/// did not happen (measured 2026-09-01).
+/// **The tag is what the guest mounts by**, so two devices sharing one leave the kernel matching
+/// whichever it saw first, silently.
 const RESERVED_TAG_PREFIX: &str = "bsx-";
 
 /// The virtiofs tag for mount `i`. Ours by construction, since [`RESERVED_TAG_PREFIX`] is refused
@@ -260,25 +252,11 @@ fn mount_tag(i: usize) -> String {
     format!("{RESERVED_TAG_PREFIX}mnt-{i}")
 }
 
-/// The `sh -c` script that creates every `--mount`'s guest directory, mounts its tag there, and
-/// then becomes the real workload, with the command spliced in as single-quoted words so its
-/// exit code and PATH resolution match the unwrapped exec. A failed step stops the boot loudly
-/// (exit 2 on the console) rather than running the command with a directory silently missing.
+/// The `sh -c` script that mounts every `--mount` tag and then becomes the workload. A failed
+/// step exits 2 rather than running with a directory missing.
 ///
-/// **The script's grammar is dictated by the transport, not by taste.** It travels as one argv
-/// entry on the kernel command line, whose codec was measured (2026-09-01, libkrun 1.19.4)
-/// corrupting a space inside a double-quoted span (`a "b c" d` arrives as `a "bc" d"`) while
-/// carrying single-quoted spans intact. So: one line, no double quote anywhere, every path and
-/// command word through [`sh_quote`], and the usual `exec "$0" "$@"` tail replaced by splicing.
-///
-/// `mkdir -p` on a path the image already has succeeds without writing, which is the whole of
-/// what it does under the default read-only root: [`build_and_enter`] refuses a mount point the
-/// image lacks before boot, so the guest is never asked to create one it cannot. Under
-/// `--rootfs writable` it can, and the empty directory then lands in the shared image tree and
-/// survives the VM, which `build-rootfs --verify` reports as drift. `krun_fs_add_overlay_dir`
-/// was the way to have the mount point without either, and is unusable: against libkrun 1.19.4 a
-/// configuration it accepted aborts the VMM inside `krun_start_enter` (`InvalidAscii`,
-/// `src/vmm/src/builder.rs:1073`), measured 2026-09-01 with `KRUN_FEATURE_INIT_BLOB` present.
+/// **The grammar is the transport's**: one argv entry whose codec corrupts a space inside a
+/// double-quoted span, so one line, no double quote, every word through [`sh_quote`].
 fn mount_preamble(mounts: &[(&Path, &Path)], exec: &Path, args: &[String]) -> String {
     let mut script = String::new();
     for (i, (guest, _)) in mounts.iter().enumerate() {
@@ -298,22 +276,17 @@ fn mount_preamble(mounts: &[(&Path, &Path)], exec: &Path, args: &[String]) -> St
     script
 }
 
-/// Whether `s` can ride the kernel command line, which is how libkrun hands the guest its
-/// workload: **printable ASCII only**. Not a style choice: a byte outside this range aborts the
-/// whole VMM inside `krun_start_enter` (`InvalidAscii`, unwrapped in libkrun's builder; measured
-/// 2026-09-01 against 1.19.4 with `echo é`, a newline argument, and a non-ASCII `--env` value),
-/// so the helper refuses here, where it can still be a typed error naming the byte.
+/// Whether `s` can ride the kernel command line: **printable ASCII only**, because a byte outside
+/// that range aborts the VMM inside `krun_start_enter`. Refused here, where it is a typed error.
 fn cmdline_safe(s: &OsStr) -> bool {
     s.as_encoded_bytes()
         .iter()
         .all(|b| (0x20..=0x7e).contains(b))
 }
 
-/// Whether `s` survives the codec unchanged: the same measurement found a space inside a
-/// double-quoted span silently corrupted (`a "b c" d` arrives as `a "bc" d"`), which is worse
-/// than an abort because the guest runs a command nobody wrote. Refusing every entry that mixes
-/// `"` with a space is deliberately wider than the observed corruption, because the codec's
-/// exact grammar is libkrun's private business and a guess that under-refuses corrupts silently.
+/// Whether `s` survives the codec unchanged: a space inside a double-quoted span is corrupted
+/// silently, so the guest would run a command nobody wrote. Refusing every `"`-with-space entry
+/// is wider than the observed corruption, because under-refusing is silent.
 fn codec_safe(s: &OsStr) -> bool {
     let bytes = s.as_encoded_bytes();
     !(bytes.contains(&b'"') && bytes.contains(&b' '))
@@ -543,10 +516,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     for spec in &args.mounts {
         let (guest, host) = split_mount(spec).ok_or_else(|| HelperError::Mount(spec.clone()))?;
         require_dir("a mount", host)?;
-        // The preamble's `mkdir -p` is idempotent on a path the image already has and writes
-        // nothing, but it cannot create one through a read-only root. Checked here rather than
-        // left to the guest, because a failed mount there is an exit 2 on a console nobody is
-        // reading.
+        // `mkdir -p` cannot create a mount point through a read-only root, and a failed mount in
+        // the guest is an exit 2 on a console nobody reads.
         if args.rootfs == RootFsPosture::ReadOnly {
             let in_image = mount_point_in_image(&args.root, guest);
             if !in_image.is_dir() {
@@ -559,16 +530,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         mounts.push((guest, host));
     }
 
-    // Bound **before** entering, and served from a thread, because `krun_start_enter` never gives
-    // this one back. That other threads keep running under it is not an assumption: a C program
-    // with a ticker thread was watched printing straight through a guest's boot, life and exit.
-    //
-    // The listener moves into its accept thread and nothing here holds it. libkrun exits the
-    // process when the guest ends, which does not unwind, so there is nothing a `Drop` here could
-    // clean up: the socket file outliving this process is the normal case, and the supervisor's
-    // stale check is what handles it.
-    // The display's framebuffer does not exist yet when the socket is bound, and the control
-    // thread has to answer a display lease from it once it does: the slot is filled below.
+    // The framebuffer does not exist when the socket is bound, but the control thread has to
+    // answer a lease from it once it does: these slots are filled below.
     let display_share: DisplayShare = Arc::new(OnceLock::new());
     let input_share: InputShare = Arc::new(OnceLock::new());
     if let Some(name) = args.name.as_deref() {
@@ -591,10 +554,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         // The device carrying the host directory; the guest path is the preamble's business.
         machine = machine.share(&mount_tag(i), host)?;
     }
-    // The network posture is set before any port mapping, because the port attaches to the vsock
-    // device and libkrun allows only one. `None` replaces libkrun's TSI-hijacking implicit device
-    // with a plain one; `Tsi` keeps the hijacking but names it. Either way the device is now
-    // explicit, so the agent's port mapping still has one to attach to.
+    // Before any port mapping, which attaches to the vsock device libkrun allows only one of.
+    // `None` replaces libkrun's TSI-hijacking implicit device; `Tsi` keeps it but names it.
     let tsi = match args.net {
         NetPosture::None => 0,
         NetPosture::Tsi => bsx_krun::KRUN_TSI_HIJACK_INET,
@@ -641,10 +602,8 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         )
         .map_err(HelperError::Window)?;
     }
-    // Audio is off unless asked (design rule 3): the device is a two-way path to the host's
-    // sound server, so it is a named hole, not ambient. Probed, not assumed: a libkrun without
-    // the snd feature exports the symbol but adds no device, so `--sound` there would enable
-    // nothing silently.
+    // Off unless asked (rule 3): a two-way path to the host's sound server is a named hole.
+    // Probed, because a build without snd exports the symbol and adds no device.
     if args.sound {
         if !bsx_krun::has_feature(bsx_krun::KRUN_FEATURE_SND)? {
             return Err(HelperError::SoundUnsupported);
@@ -681,12 +640,10 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     Err(HelperError::Krun(machine.enter()))
 }
 
-/// What this VM answers `bsx ls` with: its shape as configured, plus whether a caller can reach an
-/// agent inside it.
+/// What this VM answers `bsx ls` with: its shape as configured, and whether an agent is reachable.
 ///
-/// Read off the arguments rather than from anything libkrun reports back, because libkrun reports
-/// nothing back: `--vcpus 24` is answered as 24 even though the count is silently clamped to 16
-/// (measured, see [`MEASURED_VCPU_CLAMP`]). This is the ask, which is also what `ps` would show.
+/// Read off the arguments, because libkrun reports nothing back and clamps some of them (see
+/// [`MEASURED_VCPU_CLAMP`]). This is the ask, which is what `ps` shows too.
 fn control_info(args: &VmmArgs) -> bsx_supervisor::control::Info {
     use bsx_supervisor::control::{Channel, Info};
     Info::new(
@@ -705,12 +662,8 @@ fn control_info(args: &VmmArgs) -> bsx_supervisor::control::Info {
 
 /// Binds this VM's control socket and serves it from a background thread.
 ///
-/// The socket is how a caller that did not start this VM reaches it: it answers
-/// [`Request::Info`](bsx_supervisor::control::Request::Info) with `info`, and
-/// [`Request::Stop`](bsx_supervisor::control::Request::Stop) by ending this process, which is what
-/// ending a VM is. Its liveness is also what discovery reads, so a VM is listed for exactly as
-/// long as it can answer.
-/// The framebuffer the control thread leases displays from, filled once the display exists.
+/// How a caller that did not start this VM reaches it, and what discovery reads: a VM is listed
+/// for exactly as long as it can answer.
 type DisplayShare = Arc<OnceLock<Arc<Mutex<bsx_krun::MemoryFramebuffer>>>>;
 /// The device senders an `input` session feeds, filled beside the framebuffer.
 type InputShare = Arc<OnceLock<crate::input::Inputs>>;
@@ -879,15 +832,11 @@ fn lease_display(
     });
 }
 
-/// Ends this process, which is what ending a VM is: `krun_start_enter` never returns, so there is
-/// no unwinding to do and nothing to hand back to.
+/// Ends this process, which is what ending a VM is: `krun_start_enter` never returns.
 ///
-/// SIGKILL to itself rather than `exit`, for two reasons. It is the same power cut a caller with
-/// the handle gets from `Vm::stop`, so a VM stopped over the socket and one stopped by its parent
-/// end the same way; and `exit` would run libkrun's C atexit handlers on a thread that is not the
-/// one inside the VMM. The signal is sent to this process by pid, which is safe here where the
-/// generic case is not: the process cannot have been reaped and replaced while it is the one
-/// asking.
+/// SIGKILL to itself, not `exit`: it is the same power cut `Vm::stop` gives, and `exit` would run
+/// libkrun's atexit handlers off the VMM's thread. By pid, which is safe only because the process
+/// asking cannot have been reaped and replaced.
 pub(crate) fn stop_this_vm() {
     let _ = rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::KILL);
 }
@@ -900,15 +849,9 @@ const BIND_POLL: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Tightens the agent channel socket to `0600` once libkrun has bound it.
 ///
-/// **The channel runs commands in the sandbox**, so it deserves the lock its control socket has.
-/// libkrun binds it inside `krun_start_enter`, under the caller's umask, which commonly leaves it
-/// world-connectable (measured: `srwxr-xr-x` against the control socket's `srw-------`), and there
-/// is no call to hand it a mode. So this waits for the file and fixes it, from a thread, because
-/// the one that would have done it is about to become a guest.
-///
-/// The runtime directory is `0700` and checked on every resolution, which is what actually keeps
-/// another user out during the window between bind and this; the mode is the second lock, for the
-/// same reason the control socket sets one.
+/// **The channel runs commands in the sandbox.** libkrun binds it under the caller's umask with
+/// no call to set a mode, so this waits for the file from a thread. The `0700` runtime directory
+/// is what holds the window; this is the second lock.
 fn restrict_when_bound(path: &Path) {
     let path = path.to_path_buf();
     // Best-effort by construction: a VM whose socket could not be tightened still runs, and a
@@ -1216,12 +1159,8 @@ mod tests {
         assert!(!well_formed_env(""), "empty");
     }
 
-    /// Every flag the supervisor will write has to parse back into the field it meant. Exercised
-    /// through the real parser rather than by reading the `#[arg]` attributes, and including a
-    /// share whose host path contains `=`, which is the case a rightmost split would corrupt.
-    ///
-    /// The writing half is the supervisor's (2.4). Two spellings with no dependency edge between
-    /// them is exactly what `xtask`'s lints are for, and that pin lands with the writer.
+    /// Every flag the supervisor writes parses back into the field it meant, through the real
+    /// parser, including a share whose host path contains `=`.
     #[test]
     fn every_helper_flag_parses_into_the_field_it_names() {
         use clap::Parser;

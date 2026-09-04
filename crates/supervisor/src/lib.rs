@@ -31,10 +31,8 @@ pub const HELPER_SUBCOMMAND: &str = "__vmm";
 
 /// Set on every helper this crate spawns, and refused if it is already set.
 ///
-/// **This stops a fork bomb.** [`Vm::spawn`] re-executes `current_exe()`, so a binary that links
-/// this crate but does not dispatch [`HELPER_SUBCOMMAND`] before it spawns re-executes *itself*,
-/// which spawns again, without bound. Observed while wiring this up. The marker turns that into one
-/// wasted process and a message naming the mistake.
+/// **This stops a fork bomb**: [`Vm::spawn`] re-executes `current_exe()`, so a binary that does
+/// not dispatch [`HELPER_SUBCOMMAND`] re-executes itself without bound.
 const HELPER_MARKER: &str = "BSX_VMM";
 
 /// The guest's network posture, mirrored from the CLI so the supervisor writes the helper flag
@@ -64,11 +62,8 @@ impl Net {
 
 /// What the guest may do to the image tree its root filesystem comes from.
 ///
-/// [`ReadOnly`](Self::ReadOnly) is the default because the image is **shared**: one tree boots
-/// every sandbox, so a guest that can write it edits what every later guest starts from. Enforced
-/// at the virtiofs device, so it is not a guest-side setting a guest can undo, and invisible to the
-/// guest: `/proc/mounts` still reports `rw` and only an attempted write reports the truth
-/// (measured 2026-09-01, libkrun 1.19.4).
+/// [`ReadOnly`](Self::ReadOnly) is the default because one image tree boots every sandbox.
+/// Enforced at the virtiofs device, and invisible to the guest: `/proc/mounts` still says `rw`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RootFs {
@@ -194,23 +189,13 @@ pub struct VmConfig {
     pub sound: bool,
     /// A file to take everything this VM says, instead of the caller's stderr.
     ///
-    /// **A VM that outlives its caller must not hold the caller's stderr.** Inherited, the helper
-    /// keeps the write end open after the caller has exited, so a caller whose stderr is a pipe
-    /// waits for an EOF that never comes (watched: `bsx up` read through a pipe never returned),
-    /// and anything the guest says later lands in whatever that terminal has since become.
-    ///
-    /// Takes the helper's own stderr always, and the **guest console** as well where
-    /// [`Console::Detached`] would otherwise discard it: a detached VM that failed to boot has
-    /// its explanation on that console, and a log without it is a file a caller is pointed at
-    /// and finds empty (watched).
+    /// **A VM outliving its caller must not hold the caller's stderr**, which a pipe would leave
+    /// waiting for an EOF. Takes the guest console too, which [`Console::Detached`] discards.
     pub log: Option<PathBuf>,
 }
 
 /// What the guest's console is attached to: the helper's stdin feeds it and its output is the
-/// helper's stdout, so the two travel together.
-///
-/// stderr stays inherited either way: it is where the helper reports a refusal, and a caller
-/// detaching the console should still see why a boot failed.
+/// helper's stdout. stderr stays inherited either way, since it carries a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Console {
@@ -218,11 +203,9 @@ pub enum Console {
     /// it wraps.
     #[default]
     Inherited,
-    /// Nothing of the caller's: input from `/dev/null`, output to [`VmConfig::log`] if there is
-    /// one and discarded if there is not. For a caller whose session travels a channel of its own
-    /// (the interactive shell), where an attached console would *compete for the caller's stdin*
-    /// — libkrun reads it into the guest console, so every keystroke it won would vanish from the
-    /// session (watched happen) — and interleave boot noise into a raw terminal.
+    /// Nothing of the caller's: input from `/dev/null`, output to [`VmConfig::log`] or discarded.
+    /// For a caller with its own session channel, where an attached console would compete for the
+    /// caller's stdin.
     Detached,
     /// The caller's stdin, and pipes for the console and the helper's stderr that the caller
     /// drains through [`Vm::take_stdout`] and [`Vm::take_stderr`]: how `bsx run` copies the
@@ -265,10 +248,8 @@ impl VmConfig {
 
     /// The argument vector that re-enters this executable as this machine, named `name`.
     ///
-    /// The name is on the argv because the helper is what binds the control socket: a spawn that
-    /// kept the name to itself would start a VM that discovery cannot see. Public so a caller can
-    /// print what would be run, and so the flag spellings have exactly one definition for the lint
-    /// in `xtask` to compare against the parser.
+    /// The name travels here because the helper binds the control socket; keeping it would start
+    /// a VM discovery cannot see. Public so the flag spellings have one definition.
     #[must_use]
     pub fn helper_argv(&self, name: &str) -> Vec<OsString> {
         let mut argv: Vec<OsString> = vec![
@@ -394,11 +375,8 @@ impl std::error::Error for Error {
     }
 }
 
-/// This executable, for re-execution as a VM.
-///
-/// `current_exe()` rather than the name `bsx`: a `PATH` lookup runs whichever build the environment
-/// points at, and the helper has to be *this* one, since the two halves share an argv contract that
-/// only matches within a single build.
+/// This executable, for re-execution as a VM. `current_exe()`, not a `PATH` lookup: the two
+/// halves share an argv contract that only matches within one build.
 pub fn helper_path() -> Result<PathBuf, Error> {
     std::env::current_exe().map_err(Error::HelperPath)
 }
@@ -432,12 +410,10 @@ pub struct Vm {
 
 impl Vm {
     /// Spawns a helper process for `cfg`, re-executing this binary through [`helper_path`]. The
-    /// name travels on the helper's argv and becomes its control socket, so the VM this starts is
-    /// one [`discover`] can list; a name [`socket::valid_name`] refuses is refused here, before
-    /// there is a process to fail asynchronously.
+    /// name becomes its control socket, so [`discover`] can list it; one
+    /// [`socket::valid_name`] refuses is refused here.
     ///
-    /// The helper inherits stdio: a VM's output is the caller's output, which is what makes
-    /// `bsx run` behave like running the command. Redirecting it is the caller's business.
+    /// The helper inherits stdio, so a VM's output is the caller's.
     pub fn spawn(name: impl Into<String>, cfg: &VmConfig) -> Result<Self, Error> {
         let name = name.into();
         let child = helper_command(&name, cfg)?.spawn().map_err(Error::Spawn)?;
@@ -490,46 +466,24 @@ impl Vm {
 
     /// Stops the VM and reaps it, reporting how it ended.
     ///
-    /// **This is a power cut, not a shutdown.** The guest is given no chance to run an exit
-    /// handler, flush a buffer, or unmount anything: the VMM process dies and the guest ceases to
-    /// exist with it. Measured, not assumed — a guest with `trap ... TERM` installed, sent SIGTERM
-    /// through its helper, never ran the trap and the helper died 143.
-    ///
-    /// libkrun's only graceful surface is `krun_get_shutdown_eventfd`, which is efi-only and
-    /// returns `-ENOTSUP` against a stock build, so there is nothing gentler to call. A guest that
-    /// must finish work first has to be asked in-band before this, which is what phase 3's agent is
-    /// for; until then, anything a guest needs to keep it must write as it goes.
-    ///
-    /// Sends SIGKILL rather than SIGTERM. With no handler in libkrun the two are indistinguishable
-    /// to the guest, and reaching for a signal crate to send a politer one that behaves identically
-    /// would be a dependency buying a gesture.
+    /// **A power cut, not a shutdown**: no exit handler runs, libkrun's graceful surface being
+    /// efi-only. SIGKILL, which with no handler is indistinguishable from SIGTERM.
     pub fn stop(mut self) -> Result<Exit, Error> {
         let Some(mut child) = self.child.take() else {
             return Err(Error::Wait(std::io::Error::other(
                 "the helper was already reaped",
             )));
         };
-        // An `ESRCH` here is the VM having ended on its own between a caller's check and this call,
-        // which is a race no caller can close and not a failure to stop anything: the `wait` below
-        // still reports how it went.
+        // `ESRCH` is the VM ending on its own, a race no caller can close; `wait` still reports.
         let _ = child.kill();
         let status = child.wait().map_err(Error::Wait)?;
         Ok(exit_of(&status))
     }
 
-    /// Gives up ownership of the helper and returns its process id: the VM keeps running, and
-    /// dropping the returned nothing does not tear it down.
+    /// Gives up ownership of the helper and returns its process id: the VM keeps running.
     ///
-    /// **This is how a VM outlives the command that started it.** Every other path here is built
-    /// so a dropped [`Vm`] cannot strand a helper; this one is the deliberate exception, and it
-    /// consumes `self` so the value that would have reaped it is gone rather than disarmed. What
-    /// takes over is the kernel: the helper is reparented when this process exits, and a caller
-    /// that detaches and then keeps running should exit soon after, since nothing here will reap
-    /// the child if it ends first.
-    ///
-    /// The VM stays reachable by **name**, through the control socket [`discover`] lists. A
-    /// detached VM with no name is unreachable except by pid, which is why
-    /// [`spawn`](Self::spawn) puts the name on the argv.
+    /// **How a VM outlives the command that started it**, and the one exception to the rule that a
+    /// dropped [`Vm`] cannot strand a helper. It stays reachable by name through [`discover`].
     pub fn detach(mut self) -> Result<u32, Error> {
         let Some(child) = self.child.take() else {
             return Err(Error::Wait(std::io::Error::other(
@@ -559,13 +513,8 @@ impl Vm {
 
 impl Drop for Vm {
     fn drop(&mut self) {
-        // A dropped `Vm` must not leave a helper running: that is a stranded VM holding a laptop's
-        // RAM with nothing left that knows about it. `kill` then `wait`, because a killed child
-        // that is never waited on is a zombie, and this process may be long-lived.
-        //
-        // Both results are discarded deliberately. The child may have exited on its own between the
-        // last check and here, which makes `kill` fail with ESRCH and is not a problem; and a panic
-        // in `drop` would replace whatever error is unwinding with an abort.
+        // `kill` then `wait`, or a killed child is a zombie in a long-lived process. Both results
+        // are discarded: an `ESRCH` is a child that already exited, and a panic here would abort.
         let Some(child) = self.child.as_mut() else {
             return;
         };
@@ -582,11 +531,8 @@ fn helper_command(name: &str, cfg: &VmConfig) -> Result<Command, Error> {
     helper_command_unless_helper(name, cfg, std::env::var_os(HELPER_MARKER).is_some())
 }
 
-/// The body of [`helper_command`] with the environment read lifted out.
-///
-/// Split so the recursion guard is a pure decision a test can drive both ways. Setting an
-/// environment variable is `unsafe` in this edition and this crate forbids `unsafe`, so a test that
-/// exercised the guard through the real environment could not be written here at all.
+/// The body of [`helper_command`] with the environment read lifted out, so a test can drive the
+/// recursion guard both ways without setting a variable this crate cannot set.
 fn helper_command_unless_helper(
     name: &str,
     cfg: &VmConfig,
@@ -642,24 +588,16 @@ fn exit_of(status: &std::process::ExitStatus) -> Exit {
     match (status.code(), status.signal()) {
         (Some(code), _) => Exit::Code(code),
         (None, Some(sig)) => Exit::Signal(sig),
-        // `ExitStatus` on Unix is one or the other; a status that is neither is the kernel telling
-        // us something this code does not model, and reporting it as a signal-less kill is more
-        // honest than claiming a zero exit.
+        // Neither code nor signal is something this code does not model; not a zero exit.
         (None, None) => Exit::Signal(0),
     }
 }
 
 /// Where a VM's control socket lives, and how a caller tells a live one from a leftover.
 ///
-/// Each helper binds `<runtime>/<name>.sock` before it becomes a VM, and that socket is live for
-/// exactly as long as the VM is. There is no daemon: the sockets *are* the registry, which is what
-/// lets a VM started by the GUI be visible to the CLI.
-///
-/// **A socket file outliving its helper is expected, not exceptional.** `krun_start_enter` exits the
-/// process for us, which does not unwind, so nothing in the helper gets to remove its own socket. A
-/// leftover is therefore normal after every clean shutdown, and [`socket::is_live`] is what separates the
-/// two: it connects, and a socket nobody is listening on refuses. Presence is never taken as
-/// evidence of a running VM.
+/// There is no daemon: the sockets **are** the registry. One outliving its helper is expected,
+/// since `krun_start_enter` exits without unwinding, so [`socket::is_live`] connects rather than
+/// checking presence.
 pub mod socket {
     use std::io;
     use std::os::unix::fs::PermissionsExt;
@@ -675,19 +613,15 @@ pub mod socket {
 
     /// The runtime directory, created `0700` if absent.
     ///
-    /// `$XDG_RUNTIME_DIR` first, which is per-user and already `0700` on a systemd host. Falling
-    /// back to `$TMPDIR` covers macOS, where `TMPDIR` is per-user, and `/tmp` is the last resort,
-    /// which is **shared**, and is why the mode and owner are checked rather than assumed.
+    /// `$XDG_RUNTIME_DIR`, else `$TMPDIR` (per-user on macOS), else `/tmp`, which is **shared**
+    /// and is why the mode and owner are checked rather than assumed.
     pub fn runtime_dir() -> io::Result<PathBuf> {
         use std::os::unix::fs::DirBuilderExt;
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .or_else(|| std::env::var_os("TMPDIR"))
             .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         let dir = base.join(DIR_NAME);
-        // Created at its final mode rather than created and then tightened: create-then-chmod
-        // leaves a window at the caller's umask, and this directory can sit under a shared `/tmp`.
-        // Recursive, so a directory that already exists is not an error; whether the existing one
-        // is acceptable is the check below, on every resolution.
+        // Created at its final mode: create-then-chmod leaves a window at the caller's umask.
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
         builder.mode(0o700);
@@ -696,11 +630,8 @@ pub mod socket {
         Ok(dir)
     }
 
-    /// Refuses a runtime directory anyone else can write or that anyone else owns.
-    ///
-    /// The fallback path can be `/tmp`, where another local user can create `bsx/` first and then
-    /// read every control socket placed in it. Checked on every resolution rather than only at
-    /// creation, because the directory outlives the process that made it.
+    /// Refuses a runtime directory anyone else can write or own: under `/tmp` another user could
+    /// create `bsx/` first. Checked on every resolution, since the directory outlives its maker.
     fn require_private(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(dir)?;
@@ -755,11 +686,7 @@ pub mod socket {
 
     /// Whether `name` may become a socket file.
     ///
-    /// **A VM name reaches the filesystem**, so `../../etc/x` or an absolute path would place a
-    /// socket outside the runtime directory, and an empty name would collide with the directory
-    /// itself. Restricted to an explicit alphabet rather than filtered for known-bad sequences: a
-    /// deny-list is a guess about what is dangerous, and an allow-list is a statement about what is
-    /// permitted.
+    /// **A VM name reaches the filesystem**, so this is an allow-list, not a filter.
     pub fn valid_name(name: &str) -> bool {
         !name.is_empty()
             && name.len() <= MAX_NAME
@@ -798,12 +725,8 @@ pub mod socket {
         Ok(base.join(DIR_NAME).join(format!("{name}.sock")))
     }
 
-    /// The agent-channel socket path for `name`, beside its control socket.
-    ///
-    /// A VM's exec channel has to be somewhere a process that did not start the VM can find it,
-    /// which is the same requirement the control socket has, so it lives in the same directory
-    /// under the same name. The **helper** binds this one (libkrun does, for the vsock mapping),
-    /// so its presence says a channel was configured, not that the guest is answering on it.
+    /// The agent-channel socket path for `name`, beside its control socket so a process that did
+    /// not start the VM finds both. libkrun binds it, so presence says configured, not answering.
     pub fn agent_path_for(name: &str) -> io::Result<PathBuf> {
         // Through `path_for` for the name check, so an unusable name is refused with the same
         // message here as there rather than becoming a second rule.
@@ -820,11 +743,8 @@ pub mod socket {
         dir.join(format!("{name}{AGENT_SUFFIX}"))
     }
 
-    /// Where a detached VM's stderr goes, beside its sockets.
-    ///
-    /// A VM that outlives its caller cannot keep writing to the caller's terminal, and cannot
-    /// hold its pipe either ([`VmConfig::log`](super::VmConfig::log)); this is where the boot's
-    /// own report goes instead, so a VM that came up wrong can still say why.
+    /// Where a detached VM's stderr goes, beside its sockets: it can neither write the caller's
+    /// terminal nor hold its pipe, and a VM that came up wrong still has to say why.
     pub fn log_path_for(name: &str) -> io::Result<PathBuf> {
         let control = path_for(name)?;
         let dir = control
@@ -846,11 +766,8 @@ pub mod socket {
     /// `SUFFIX`, and different from it, so a scan for VMs never counts a channel as one.
     const AGENT_SUFFIX: &str = ".agent";
 
-    /// Whether something is listening on `path` right now.
-    ///
-    /// Connects rather than checking for the file: a socket file is left behind by every helper
-    /// that ends, so presence proves nothing. A refused connection is the kernel saying the bound
-    /// socket has no listener, which is exactly "the VM is gone".
+    /// Whether something is listening on `path` right now. Connects rather than checking for the
+    /// file, which every ended helper leaves behind.
     #[must_use]
     pub fn is_live(path: &Path) -> bool {
         std::os::unix::net::UnixStream::connect(path).is_ok()
@@ -858,9 +775,8 @@ pub mod socket {
 
     /// Removes `path` if nothing is listening on it. Returns whether it removed anything.
     ///
-    /// The race is real and deliberately narrow: a helper could bind between the check and the
-    /// unlink, and lose its socket. Callers run this on a name they are about to reuse or have just
-    /// reaped, where no other helper is entitled to that name.
+    /// A helper binding between the check and the unlink would lose its socket, so callers run
+    /// this only on a name they own.
     pub fn clear_if_stale(path: &Path) -> io::Result<bool> {
         if !path.exists() || is_live(path) {
             return Ok(false);
@@ -876,17 +792,9 @@ pub mod socket {
 
 /// The request/response grammar a VM's control socket speaks, and the client half of it.
 ///
-/// This is how a caller reaches a VM **it did not start**. There is no daemon: the caller connects
-/// to the socket the helper bound, asks one question, and reads the answer, so the VM's own process
-/// is the only authority on its state.
-///
-/// - **One request, one response, then the connection closes.** No session, because there is no
-///   state to keep between two questions and a session would be a thing to leak.
-/// - **The identity is the socket, not a pid.** [`Request::Stop`](control::Request::Stop) asks
-///   the VM to die, and the VM is whatever is listening: no `kill` on a number the kernel may
-///   have handed to somebody else between the lookup and the signal.
-/// - **The grammar is lines of ASCII tokens, and carries no path.** A path can contain a newline,
-///   which a line-based grammar cannot survive; `ps` shows the helper's argv, which has them all.
+/// - **One request, one response, then close.** No session is state to leak.
+/// - **The identity is the socket, not a pid**, so no `kill` on a number the kernel may have reused.
+/// - **Lines of ASCII tokens, carrying no path**, which can contain a newline.
 pub mod control {
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::num::{NonZeroU8, NonZeroU32};
@@ -1039,11 +947,8 @@ pub mod control {
             writeln!(out, "channel {}", self.channel.as_word())
         }
 
-        /// Reads back what [`write_body`](Self::write_body) wrote. `pub(crate)` so the round trip
-        /// is testable without exposing half a codec: a caller gets [`info`], not the parser.
-        ///
-        /// Every field is required: a partial answer is a VM this build cannot describe, and
-        /// filling the gaps with defaults would report a machine nobody configured.
+        /// Reads back what [`write_body`](Self::write_body) wrote; `pub(crate)` so the round trip
+        /// is testable. Every field is required: defaults would report a machine nobody configured.
         pub(crate) fn parse_body(text: &str) -> Result<Self, Error> {
             let mut fields: Vec<(&str, &str)> = Vec::new();
             for line in text.lines().filter(|l| !l.is_empty()) {
@@ -1256,9 +1161,7 @@ pub mod control {
 
     /// Writes the answer to `request`, or the refusal for a word this build does not know.
     ///
-    /// The server half. Answering [`Request::Stop`] does not stop anything: the caller writes the
-    /// reply, flushes, and then ends its own process, because what ends a VM is the process
-    /// ending and this crate cannot do that from a library.
+    /// Answering [`Request::Stop`] stops nothing: the helper replies, then ends its own process.
     pub fn write_answer(
         out: &mut impl Write,
         request: Option<Request>,
@@ -1270,10 +1173,8 @@ pub mod control {
                 info.write_body(out)?;
             }
             Some(Request::Stop) => writeln!(out, "ok")?,
-            // The display answer carries an fd, which a plain writer cannot send: the server
-            // answers it with [`write_display_answer`] or [`write_refusal`], never here.
-            // Both need the devices a display brings: the server answers them itself when it has
-            // them, and this is the answer when it has not.
+            // The display answer carries an fd a plain writer cannot send, and input needs the
+            // same devices: the server answers both itself when it has them.
             Some(Request::Display | Request::Input) => {
                 writeln!(out, "err this VM has no display")?;
             }
@@ -1559,9 +1460,8 @@ pub mod control {
 
     /// Asks the VM listening on `socket` to stop, and returns once it has accepted.
     ///
-    /// **A power cut, not a shutdown**, the same as [`Vm::stop`](super::Vm::stop): libkrun's only
-    /// graceful surface is efi-only and returns `-ENOTSUP`, so there is nothing gentler to ask
-    /// for. Returning means the VM took the request, not that the process is already gone.
+    /// **A power cut, not a shutdown**, as [`Vm::stop`](super::Vm::stop). Returning means the
+    /// request was taken, not that the process is gone.
     pub fn stop(socket: &Path) -> Result<(), Error> {
         exchange(socket, Request::Stop).map(drop)
     }
@@ -1629,13 +1529,8 @@ pub mod control {
 
 /// Every live VM on this machine, found by scanning the runtime directory.
 ///
-/// **There is no daemon and no registry.** The sockets are the state: a VM exists because a helper
-/// is listening, and it stops existing when that helper does. This is what lets a VM started by the
-/// GUI be visible to the CLI, and the reverse, with neither process knowing about the other.
-///
-/// The cost is that a scan is a point-in-time answer. A VM can end between the scan and the caller
-/// reading the result, which no design without a supervising daemon can avoid, and which a caller
-/// must handle anyway because that is also true of a VM it started itself.
+/// **There is no daemon and no registry**: a VM exists because a helper is listening. The cost is
+/// that a scan is point-in-time, which a caller must handle anyway.
 pub mod discover {
     use std::io;
     use std::path::{Path, PathBuf};
@@ -1655,12 +1550,8 @@ pub mod discover {
     /// The socket-file extension, so the scan and the path builder agree on what a VM looks like.
     const SUFFIX: &str = ".sock";
 
-    /// Lists the VMs currently listening, in name order.
-    ///
-    /// Skips leftovers rather than reporting them: a socket nobody is listening on is a VM that has
-    /// already ended, and listing it would make `ls` grow forever. Skips, deliberately, without
-    /// deleting: this is a read, and a caller running it has no claim on names it does not own.
-    /// [`reap_stale`] is the write.
+    /// Lists the VMs currently listening, in name order. Skips leftovers without deleting them:
+    /// this is a read, and [`reap_stale`] is the write.
     pub fn live() -> io::Result<Vec<Found>> {
         live_in(&socket::runtime_dir()?)
     }
@@ -1679,11 +1570,8 @@ pub mod discover {
         Ok(found)
     }
 
-    /// Removes every socket file nobody is listening on, returning how many went.
-    ///
-    /// Separate from [`live`] because deleting is not a side effect a lister should have: a caller
-    /// asking what is running should not silently modify the directory, and a caller tidying up
-    /// should have to say so.
+    /// Removes every socket file nobody is listening on, returning how many went. Separate from
+    /// [`live`], because a caller asking what runs should not modify the directory.
     pub fn reap_stale() -> io::Result<usize> {
         reap_stale_in(&socket::runtime_dir()?)
     }
@@ -1694,10 +1582,7 @@ pub mod discover {
         for (name, path) in entries_in(dir)? {
             if socket::clear_if_stale(&path)? {
                 removed += 1;
-                // The VM is gone, so its agent channel is too: a socket libkrun bound and nothing
-                // is behind. Left in place it would make `exec` connect to a dead VM's channel
-                // and block. Best-effort, because the control socket is the one that decides a
-                // VM exists and this is the tidying that follows it.
+                // The channel goes with the VM, or `exec` connects to a dead one and blocks.
                 let _ = std::fs::remove_file(socket::agent_in(dir, &name));
                 let _ = std::fs::remove_file(socket::log_in(dir, &name));
             }
@@ -1705,11 +1590,8 @@ pub mod discover {
         Ok(removed)
     }
 
-    /// Every `<name>.sock` in the runtime directory, live or not.
-    ///
-    /// A name that would not be accepted by [`socket::valid_name`] is skipped: the directory is
-    /// this user's, but a file placed there by hand should not be able to produce a `Found` whose
-    /// name cannot be passed back into the API that produced it.
+    /// Every `<name>.sock` in the runtime directory, live or not. A name
+    /// [`socket::valid_name`] refuses is skipped, or a `Found` could not be passed back in.
     fn entries_in(dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(dir)? {
@@ -1923,12 +1805,8 @@ mod tests {
         assert_eq!(vm.wait().expect("wait on the child"), Exit::Code(7));
     }
 
-    /// The recursion guard. A binary that links this crate and forgets to dispatch the helper
-    /// subcommand re-executes itself, which spawns again, without bound; the marker turns that into
-    /// one refusal. Asserted with the variable set, because that is the state a helper is in.
-    ///
-    /// Driven through the pure half rather than `Vm::spawn`, so a regression fails here instead of
-    /// by filling the machine with processes.
+    /// The recursion guard, driven through the pure half rather than `Vm::spawn`, so a regression
+    /// fails here instead of by filling the machine with processes.
     #[test]
     fn a_helper_refuses_to_spawn_another_helper() {
         let err = helper_command_unless_helper("vm", &cfg(), true)
@@ -2046,10 +1924,8 @@ mod tests {
             ),
             name: "gone".to_string(),
         };
-        // Wait for it to exit *without* reaping through `try_wait`, so `stop` meets a finished but
-        // unreaped child, which is exactly the race being modelled. An unreaped exit shows as a
-        // zombie in `/proc`, so that is what is polled for: a fixed sleep was watched losing this
-        // race under a loaded gate run and reporting the kill it caused as the failure.
+        // Exit without reaping, so `stop` meets a finished but unreaped child: polled as a
+        // zombie in `/proc`, because a fixed sleep loses the race under load.
         let pid = vm.pid();
         for _ in 0..500 {
             if !pid_is_live(pid) {
@@ -2110,11 +1986,8 @@ mod tests {
         drop(vm);
     }
 
-    /// Dropping a `Vm` must not leave the helper running. Spawns something long-lived, drops it,
-    /// and asks the kernel whether the pid is gone.
-    /// The one path that leaves a helper running. Everything else here exists to make a stranded
-    /// VM impossible, so this asserts the exception works *and* that the value is consumed: after
-    /// a detach there is nothing left that would reap the process.
+    /// The one path that leaves a helper running, so this asserts the exception works and that
+    /// the value is consumed: after a detach nothing is left that would reap the process.
     #[test]
     fn a_detached_vm_outlives_the_handle_that_started_it() {
         let child = Command::new("/bin/sleep")
@@ -2133,6 +2006,8 @@ mod tests {
         let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
     }
 
+    /// Dropping a `Vm` must not leave the helper running: drops one and asks the kernel whether
+    /// the pid is gone.
     #[test]
     fn dropping_a_vm_kills_and_reaps_its_helper() {
         let child = Command::new("/bin/sleep")
@@ -2512,11 +2387,8 @@ mod discover_tests {
         assert_eq!(found[0].socket, d.join("alive.sock"));
     }
 
-    /// Listing must not delete. A caller asking what is running should not quietly change the
-    /// directory, so the leftover survives a scan and only `reap_stale` removes it.
-    /// A VM's agent channel sits beside its control socket, under the same name, so a caller with
-    /// only the name can find both. It must **not** look like a VM to a scan: the control socket
-    /// is what says a VM exists, and counting the channel would list every VM twice.
+    /// A VM's agent channel sits beside its control socket under the same name, and must not look
+    /// like a VM to a scan, or every VM would be listed twice.
     #[test]
     fn the_agent_channel_sits_beside_the_control_socket_and_is_not_a_vm() {
         let control = socket::path_for("chan-test").expect("a usable name");
@@ -2551,6 +2423,7 @@ mod discover_tests {
         assert!(!channel.exists(), "its channel went with it");
     }
 
+    /// Listing must not delete: a leftover survives a scan, and only `reap_stale` removes it.
     #[test]
     fn a_scan_does_not_remove_leftovers_but_reaping_does() {
         let dir = bsx_test_support::ScratchDir::created("discover-reap");

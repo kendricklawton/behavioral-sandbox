@@ -19,11 +19,8 @@ use crate::{artifacts_dir, run_tool, vendor_dir, workspace_root};
 /// `rootfs`, not a cycle).
 pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 
-/// Soft ceiling on the base rootfs's real footprint ("keep the base small"). `build-rootfs`
-/// fails past it, a regression guard against accidental bloat. The tree is ~132 MiB (Alpine +
-/// python3 + **Node** + the agent); this leaves ~28 MiB headroom. Adding another runtime is a
-/// deliberate bump of this, not a silent creep, and a prompt to ask whether the base is still
-/// "small."
+/// Soft ceiling on the base rootfs's footprint, which `build-rootfs` fails past. Adding a runtime
+/// is a deliberate bump of this rather than a silent creep.
 const ROOTFS_BUDGET_MIB: u64 = 160;
 
 /// The desktop image's ceiling. Measured 2026-09-02: 291 MiB, of which `libLLVM` is 182 and
@@ -44,15 +41,10 @@ fn in_staging(staging: &Path, guest_path: &str) -> PathBuf {
 
 const ALPINE_BRANCH: &str = "v3.24";
 
-/// The language runtimes baked into the guest image: python3 (the reference runtime) + **nodejs** (its
-/// second, differently-shaped interpreter, proving the rootfs isn't Python-specific, a static native
-/// ELF is injected at runtime rather than baked, so it isn't listed here). Installed by `apk.static`
-/// from the pinned branch. The install **floats** within that stable
-/// branch, Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
-/// pin would just *fail* the build the day upstream bumps (the old `.apk` is gone from the CDN), not
-/// reproduce it. Instead the build **records** the resolved closure in a committed lockfile and detects
-/// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
-/// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
+/// The language runtimes baked into the guest image, installed by `apk.static`.
+///
+/// The install **floats** within the pinned branch, which carries only the latest revision, so
+/// the resolved closure is recorded in a lockfile rather than pinned per package.
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 
 /// The desktop image's packages: a single-window Wayland compositor (`cage`, on wlroots), a
@@ -143,25 +135,11 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
     }
 }
 
-/// The pinned static `apk` (from Alpine's `apk-tools-static` package, itself a tarball): the
-/// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
+/// The pinned static `apk` that installs [`GUEST_PACKAGES`] into the staging dir **rootless**.
 ///
-/// **Mirrored, because the upstream URL expires.** An Alpine branch repo carries only the newest revision
-/// of each package, so a pinned `pkg-ver-rN` filename 404s the day upstream publishes the next one,
-/// breaking every fresh clone while cached hosts keep building. The version cannot float either, since
-/// this is the installer itself and the sha256 is the only thing between a fresh clone and executing an
-/// unverified binary as part of the build.
-///
-/// The mirror is the `build-inputs` pre-release, so it stays out of `releases/latest`, which
-/// `install.sh` reads. The sha256 below is upstream's, so the copy is checkable against Alpine rather than
-/// trusted on this repo's say-so:
-/// `https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/apk-tools-static-3.0.7-r0.apk`, GPL-2.0-only
-/// with source at `https://gitlab.alpinelinux.org/alpine/apk-tools`. The asset carries a `.tgz` extension
-/// because GitHub's uploader rejects `.apk`, and an `.apk` *is* a gzip-compressed tar, so the bytes are
-/// untouched.
-///
-/// Bumping it means uploading the new revision to that release and putting the filename and `sha256sum`
-/// here, then rebuilding: the installer writes the package database the guest image hashes over.
+/// **Mirrored, because the upstream URL expires**, and unable to float, being the installer whose
+/// sha256 stands between a fresh clone and an unverified binary. The sha256 is upstream's, so the
+/// mirrored copy stays checkable against Alpine.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
@@ -176,11 +154,8 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     }
 }
 
-/// One full rootfs assembly into `out_dir`: extract the pinned Alpine base, install the guest
-/// packages, and bake the static agent in. The product is a **directory tree**, which is what
-/// libkrun's virtiofs root takes; there is no image and nothing here needs root or a loopback.
-/// Returns the tree's hash and the resolved package closure, so [`build_rootfs`] can check
-/// reproducibility.
+/// One full rootfs assembly into `out_dir`, producing a **directory tree** for libkrun's virtiofs
+/// root: no image, no loopback, no root. Returns the tree's hash and the resolved closure.
 fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
     let agent = build_guest_agent()?;
 
@@ -188,10 +163,7 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
     fetch_one(&base)?;
 
     let dir = artifacts_dir();
-    // Per-pid staging so two concurrent `xtask` invocations (or a build racing a `--verify`
-    // rebuild) don't extract into and clean the same scratch tree. Removed at the end of a
-    // successful build; a crashed run leaves at most one stale `rootfs-staging.<pid>` under the
-    // gitignored `artifacts/`.
+    // Per-pid staging, so two concurrent invocations cannot clean each other's scratch tree.
     let staging = dir.join(format!("rootfs-staging.{}", std::process::id()));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)
@@ -210,10 +182,8 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
         ],
     )?;
 
-    // Install the guest runtimes (python3) into the staging root with the pinned static apk,
-    // rootless, on any host distro. Packages are signature-verified against the keys the minirootfs
-    // itself ships (`/etc/apk/keys`). `--no-scripts` because pre/post-install scripts need a chroot
-    // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
+    // Rootless, verified against the keys the minirootfs ships. `--no-scripts`, since those need
+    // a chroot; the packages are file payloads and the in-VM exec test proves they run.
     install_guest_packages(image, &staging)?;
 
     // Bake the static agent in at the path the init line respawns.
@@ -252,9 +222,7 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
         let _ = std::fs::remove_dir_all(staging.join(scratch));
     }
 
-    // Rename last, so the canonical path only ever names a fully-staged tree. A crashed build
-    // leaves an obvious `rootfs-staging.<pid>` under the gitignored `artifacts/` instead of a
-    // half-populated tree at the path every consumer reads.
+    // Renamed last, so the canonical path only ever names a fully-staged tree.
     let tree_sha256 = tree_sha256(&staging)?;
     if out_dir.exists() {
         std::fs::remove_dir_all(out_dir).with_context(|| format!("clear {}", out_dir.display()))?;
@@ -273,13 +241,9 @@ fn assemble_rootfs(image: &ImageSpec, out_dir: &Path) -> Result<RootfsBuild> {
     })
 }
 
-/// A single hash over the whole staged tree: one `mode kind sha256-or-target path` line per entry,
-/// sorted by path, hashed. This is what `--verify` compares, so it has to cover everything a guest
-/// can observe, which a hash of file *contents* alone would not: an exec bit dropped from the agent,
-/// or a symlink retargeted, changes the image without changing any file's bytes.
-///
-/// Directories contribute their mode and nothing else; their membership is already implied by the
-/// paths beneath them.
+/// A single hash over the staged tree: one `mode kind sha256-or-target path` line per entry,
+/// sorted, hashed. Covers what a content hash would not, such as a dropped exec bit or a
+/// retargeted symlink. Directories contribute only their mode.
 fn tree_sha256(root: &Path) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -334,24 +298,11 @@ fn walk_tree(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// The guest-image contract, checked against the staged tree before it is published.
-/// Reads back the same constants the writes above use, so a rename applied to only one of a path's
-/// two places (the file, and the init line or command line naming it) fails the build here instead
-/// of producing an image that boots into something absent.
+/// The guest-image contract, checked against the staged tree before it is published: a
+/// half-applied rename fails here rather than booting into something absent.
 ///
-/// It proves the staged tree carries what the constants promise at the modes the guest needs.
-/// It does not prove the image *boots*, since nothing here runs a kernel, and nothing in the tree
-/// does today.
-///
-/// The staged tree has to be owned by uid/gid **0**, which is what the Alpine tarball ships and what a
-/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership, so without the `fakeroot`
-/// re-exec the tree hash depends on who ran the build, which the
-/// reproducibility check cannot see: it builds twice inside one process and so compares two builds sharing
-/// a uid.
-///
-/// Separate from [`verify_guest_contract`] on purpose. That one checks paths and content, and its unit
-/// tests construct minimal trees as whoever runs `cargo test`; this checks a property of the *build
-/// environment*, so it belongs on the build path rather than in a contract a fixture can satisfy.
+/// Ownership is checked separately, being a property of the build environment rather than the
+/// tree, which the reproducibility check cannot see.
 fn verify_staged_ownership(staging: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -392,9 +343,8 @@ fn verify_guest_contract(image: &ImageSpec, staging: &Path) -> Result<()> {
              execute it ({consequence})"
         );
     }
-    // The agent's pty path spawns through `setsid -c`, the session/ctty step its
-    // `#![forbid(unsafe_code)]` cannot take between fork and exec. Present as a symlink into
-    // busybox on Alpine, so this asks for existence, not a file kind.
+    // The agent's pty path spawns through `setsid -c`. A busybox symlink on Alpine, so existence
+    // is asked for, not a file kind.
     let setsid = "/usr/bin/setsid";
     if !in_staging(staging, setsid).exists() {
         bail!(
@@ -431,22 +381,11 @@ struct RootfsBuild {
     packages: Vec<String>,
 }
 
-/// `cargo xtask build-rootfs [--verify] [--update-lock]`. The default (no flags) is one command: it
-/// assembles the deterministic guest tree and prints its hash. `--update-lock` re-records the
-/// package lockfile (the "re-pin" after an upstream bump); `--verify` proves reproducibility, a
-/// second build must hash identically. Every mode reports package-closure drift and none fails on
-/// it, so an Alpine bump never costs a gate run.
-/// Re-exec this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it ran
-/// the build in a child (so the caller should stop).
+/// Re-execs this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it
+/// ran the build in a child.
 ///
-/// The guest rootfs must be owned by uid/gid **0**, what the Alpine tarball ships and what a guest expects
-/// of its own `/`. Unprivileged `tar` cannot set ownership and `tar --owner` does not override it, so an
-/// unprivileged build without this yields a tree owned by the builder's uid and a hash that depends on
-/// who ran it.
-///
-/// One `fakeroot` has to wrap the *whole* assembly rather than each command, because the faked ownership
-/// lives in one process's bookkeeping, so extracting under one invocation and staging under
-/// another loses it. `FAKEROOTKEY` is set inside a session, which is what stops this recursing.
+/// The tree must be owned by uid/gid **0**, which unprivileged `tar` cannot set. One `fakeroot`
+/// wraps the whole assembly, the faked ownership living in one process.
 fn reexec_under_fakeroot_if_needed(
     image: &ImageSpec,
     verify: bool,
@@ -464,9 +403,8 @@ fn reexec_under_fakeroot_if_needed(
         );
     }
     let exe = std::env::current_exe().context("locate the xtask binary to re-exec")?;
-    // Re-exec **only the rootfs build**, reconstructed from this call's own arguments, never the
-    // caller's argv: replaying argv would re-run whatever invoked us (under `dist`, the entire
-    // packaging, twice). Only this build needs uid 0.
+    // Reconstructed from this call's arguments, never the caller's argv, which would re-run
+    // whatever invoked us.
     let mut args: Vec<&str> = vec!["build-rootfs"];
     if verify {
         args.push("--verify");
@@ -482,6 +420,9 @@ fn reexec_under_fakeroot_if_needed(
     Ok(true)
 }
 
+/// `cargo xtask build-rootfs [--verify] [--update-lock]`: assembles the deterministic guest tree
+/// and prints its hash. `--update-lock` re-records the package lockfile, `--verify` builds twice
+/// and requires an identical hash. Every mode reports closure drift and none fails on it.
 pub(crate) fn build_rootfs(image: &ImageSpec, verify: bool, update_lock: bool) -> Result<()> {
     if reexec_under_fakeroot_if_needed(image, verify, update_lock)? {
         return Ok(());
@@ -519,9 +460,7 @@ pub(crate) fn build_rootfs(image: &ImageSpec, verify: bool, update_lock: bool) -
     }
 
     if verify {
-        // Prove determinism: a second full build must produce an identical tree. Built to a temp
-        // path so the canonical tree stays in place, and cleaned up on *every* path, before
-        // propagating a build error, so a failed second build leaks nothing.
+        // A second full build must hash identically. To a temp path, cleaned on every path.
         let tmp = artifacts_dir().join(format!("{}.verify", image.name));
         let result = assemble_rootfs(image, &tmp);
         let _ = std::fs::remove_dir_all(&tmp);
@@ -615,11 +554,8 @@ fn write_packages_lock(image: &ImageSpec, packages: &[String]) -> Result<()> {
     std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))
 }
 
-/// Report how the freshly-resolved closure differs from the committed lockfile, naming each package
-/// that moved. Never fatal: an Alpine bump is upstream's timing, not a defect in the tree, and
-/// failing here costs a whole gate run without producing a reviewed image (the build already
-/// resolved fresh from the branch either way). `.github/workflows/rootfs-packages.yml` is the
-/// enforcer, where re-pinning is a person reading the diff.
+/// Reports how the freshly-resolved closure differs from the committed lockfile. Never fatal: an
+/// Alpine bump is upstream's timing, and `.github/workflows/rootfs-packages.yml` is the enforcer.
 fn report_packages_lock_drift(image: &ImageSpec, built: &[String]) {
     let path = packages_lock_path(image);
     let flags = image
@@ -679,11 +615,9 @@ enum ApkSource<'a> {
     PopulateCache(&'a Path),
 }
 
-/// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`, no chroot, no
-/// root, no host `apk`. Vendor-aware: with `BSX_VENDOR_DIR` set it installs offline from the
-/// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
-/// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
-/// `staging`, the tool is ephemeral).
+/// Installs [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`: no chroot, no
+/// root, no host `apk`. Offline from the vendored cache with `BSX_VENDOR_DIR` set. The tool is
+/// extracted to a scratch dir and removed; the packages are the product.
 fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
     if image.packages.is_empty() {
         return Ok(());
@@ -704,9 +638,8 @@ fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&tooldir);
     result?;
 
-    // Drop apk's install log: it records each action with a **wall-clock** timestamp, the one piece
-    // of the install that isn't reproducible (the package db itself is deterministic). It has no
-    // runtime purpose in the guest, so removing it makes the image byte-identical across builds.
+    // apk's install log carries a wall-clock timestamp, the one part of the install that is not
+    // reproducible, and nothing in the guest reads it.
     let apk_log = staging.join("var/log/apk.log");
     if apk_log.exists() {
         std::fs::remove_file(&apk_log).with_context(|| format!("remove {}", apk_log.display()))?;
@@ -714,12 +647,9 @@ fn install_guest_packages(image: &ImageSpec, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract the pinned static `apk` from its (already-fetched) tarball into
-/// `<scratch_base>/apk-tools.<pid>`, returning `(tooldir, apk_static_path)`. The caller removes
-/// `tooldir` when done, the tool is ephemeral, the packages it installs are the product.
-/// `scratch_base` is caller-chosen so the `vendor` command keeps its scratch inside the mirror dir,
-/// not the workspace `artifacts/`. The dir is per-pid (like the `rootfs-staging.<pid>` tree) so two
-/// concurrent builds can't `remove_dir_all` each other's tool mid-`apk`.
+/// Extracts the pinned static `apk` into `<scratch_base>/apk-tools.<pid>`, returning
+/// `(tooldir, apk_static_path)` for the caller to remove. `scratch_base` is caller-chosen so
+/// `vendor` keeps its scratch in the mirror; per-pid, so concurrent builds do not collide.
 fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf, PathBuf)> {
     let tooldir = scratch_base.join(format!("apk-tools.{}", std::process::id()));
     if tooldir.exists() {
@@ -817,14 +747,11 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
-/// Populate a vendored apk cache with the resolved guest-package closure (the `.apk` files **and**
-/// the `APKINDEX`) by running one **online** `apk add` into a throwaway root. Called by
-/// `cargo xtask vendor`; afterwards an offline build installs from this cache (`--no-network`), so a
-/// fresh host never touches the Alpine CDN, the one hardening the reproducible-rootfs build had
-/// deferred. The
-/// throwaway root exists only so apk has the base's `/etc/apk/keys` to verify signatures against; it
-/// is removed, leaving just the cache. `base_tar`/`apk_tools_tar` are the (already sha-verified)
-/// vendored tarballs, so this reuses them rather than re-downloading.
+/// Populates a vendored apk cache with the resolved closure and its `APKINDEX`, by one online
+/// `apk add` into a throwaway root, so a later build installs `--no-network`.
+///
+/// The throwaway root exists only for the base's `/etc/apk/keys`. The tarballs are the already
+/// sha-verified vendored ones.
 pub(crate) fn populate_apk_cache(
     cache_dir: &Path,
     base_tar: &Path,

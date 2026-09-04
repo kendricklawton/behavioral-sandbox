@@ -17,9 +17,7 @@ fn main() {
     println!("cargo::rerun-if-env-changed=BSX_KRUN_LIB_DIR");
 
     if let Some(dir) = std::env::var_os("BSX_KRUN_LIB_DIR") {
-        // An explicit override wins and is trusted: the operator naming a directory is asserting
-        // the library is there, so a wrong path should fail loudly at link rather than be probed
-        // away into a silent skip.
+        // An override is trusted: a wrong path should fail at link, not be probed into a skip.
         println!("cargo::rustc-link-search=native={}", dir.to_string_lossy());
         emit_link();
         return;

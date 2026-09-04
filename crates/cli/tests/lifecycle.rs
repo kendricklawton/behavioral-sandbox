@@ -149,10 +149,8 @@ fn a_sandbox_started_by_up_outlives_the_command_that_started_it() {
         pid_is_live(pid),
         "the VM ended with the command that started it, which is the whole of 3.9"
     );
-    // Its stderr is the log beside its sockets, not the caller's. Read directly off the process,
-    // because this is the mechanism and not a side effect: with the caller's stderr inherited, a
-    // detached VM holds that pipe open forever and `bsx up | anything` never returns (watched
-    // happen, and it hung this suite).
+    // Its stderr is the log beside its sockets, not the caller's: an inherited one is a pipe a
+    // detached VM holds open forever.
     let log = rt.path().join("bsx/outlives.log");
     assert_eq!(
         std::fs::read_link(format!("/proc/{pid}/fd/2")).expect("the VM's stderr"),
@@ -164,10 +162,8 @@ fn a_sandbox_started_by_up_outlives_the_command_that_started_it() {
         "the log the boot would report into is missing"
     );
 
-    // The log takes the **guest console** as well as the helper's own stderr, which is the half
-    // that makes it worth pointing a caller at: a detached VM's console is otherwise discarded,
-    // and a boot that failed on it left the operator reading an empty file (watched). The agent
-    // announces itself on that console, so a healthy boot proves the plumbing.
+    // The log takes the guest console too, which is otherwise discarded: the agent announces
+    // itself there, so a healthy boot proves the plumbing.
     let announced = std::fs::read_to_string(&log).expect("the log is readable");
     assert!(
         announced.contains(bsx_channel::GUEST_READY_MARKER),
@@ -269,13 +265,9 @@ fn the_lifecycle_verbs_reach_a_vm_this_process_did_not_start() {
     }
 }
 
-/// Stdin reaches the guest command, including from a **non-blocking** description.
-///
-/// `O_NONBLOCK` belongs to the open file description, which a caller shares with whoever handed
-/// stdin over, so a read can return `EAGAIN` meaning "nothing yet". Read as a failure, that made
-/// `bsx exec` refuse to run anything at all: found because this suite's own harness passed one
-/// down. Both are asserted, since a fix that simply ignored `EAGAIN` would drop the input rather
-/// than wait for it, and the ordinary pipe would not notice.
+/// Stdin reaches the guest command, including from a **non-blocking** description, where a read
+/// returns `EAGAIN` meaning "nothing yet". Both are asserted, since ignoring `EAGAIN` would drop
+/// the input and the ordinary pipe would not notice.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
 fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
@@ -317,12 +309,8 @@ fn stdin_reaches_the_guest_command_even_when_it_cannot_be_read_at_once() {
         "a non-blocking description"
     );
 
-    // Without the flag, an stdin nobody ever closes must not be read: a job runner's idle pipe
-    // has no end of input, and reading one made `bsx exec vm -- echo hi` hang forever with no
-    // output (watched). The write end stays open here for exactly that reason.
-    //
-    // Waited with a deadline rather than `output()`, because the failure being pinned is a
-    // *hang*: `output()` would block this suite instead of reporting, which is what it did.
+    // An stdin nobody closes must not be read, so the write end stays open here. Waited with a
+    // deadline rather than `output()`, because the failure being pinned is a hang.
     let (read, _write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
     let mut child = bsx(&rt)
         .args(["exec", "instdin", "--", "echo", "unblocked"])
@@ -448,13 +436,9 @@ fn a_name_already_running_is_refused_before_a_second_vm_boots() {
 const ROUND_TRIP_GRACE: Duration = Duration::from_secs(30);
 
 /// One `bsx-channel` frame crosses the host unix socket into the guest and back (roadmap 0.7),
-/// spoken by the protocol crate itself rather than by `bsx exec`: the verb's evidence is that the
-/// path works, this one's is *what crosses it*.
+/// spoken by the protocol crate rather than by `bsx exec`: the evidence is *what* crosses.
 ///
-/// The socket is the one `krun_add_vsock_port2` maps onto the guest's vsock port, so the bytes go
-/// host process -> unix socket -> libkrun -> guest vsock -> the agent, and the answer returns the
-/// same way. The payload is stdin the guest hands straight back, so a frame that arrived empty or
-/// truncated cannot pass.
+/// The payload is stdin the guest hands back, so an empty or truncated frame cannot pass.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm and the guest tree (with the agent baked in)"]
 fn a_channel_frame_crosses_the_vsock_mapping_to_the_guest_and_back() {

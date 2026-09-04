@@ -25,9 +25,7 @@
 //!
 //! Verified against libkrun 1.19.4.
 
-// Transcribed as a set against the header, so the arity check covers the whole subset rather than
-// only the part wrapped so far. Phase 3 wraps the network and rlimit calls; 0.4 has yet to settle
-// what stops a running VM, and `krun_get_shutdown_eventfd` is efi-only, so neither is wrapped here.
+// Transcribed as a set, so the arity check covers the whole subset, not only what is wrapped.
 #![allow(dead_code)]
 
 use std::os::raw::{c_char, c_int, c_void};
@@ -439,10 +437,9 @@ pub struct krun_input_event_provider {
     pub vtable: krun_input_event_provider_vtable,
 }
 
-// Every declaration is transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`
-// and `gid_t` are `u32` on both targets this project builds for; naming them as such keeps this
-// crate free of a libc dependency, and `the_uid_type_is_the_width_the_header_uses` pins the
-// assumption rather than leaving it to a comment.
+// Transcribed from `/usr/include/libkrun.h`, argument for argument. `uid_t`/`gid_t` are `u32` on
+// both targets, which keeps this crate free of libc; `the_uid_type_is_the_width_the_header_uses`
+// pins it.
 #[cfg(krun_linked)]
 unsafe extern "C" {
     // --- context lifecycle -------------------------------------------------------------------
@@ -614,15 +611,10 @@ unsafe extern "C" {
     pub fn krun_check_nested_virt() -> i32;
 }
 
-/// Stub twins of every symbol the wrapper calls, compiled where `build.rs` found no libkrun.
+/// Stub twins of every symbol the wrapper calls, compiled where `build.rs` found no libkrun, so
+/// the gate builds without the library. Each returns [`NOT_LINKED`].
 ///
-/// A workspace build (and the gate) has to succeed on a host with no libkrun, and an undefined
-/// symbol fails at link even when the call that references it is unreachable. Each stub returns
-/// [`NOT_LINKED`], and the wrapper reports that as its not-linked error rather than reading an
-/// errno the stub would have had to invent.
-///
-/// Only the symbols with a caller: a declaration alone links fine, and an unstubbed symbol that
-/// gains a caller fails the no-libkrun build at link, which is the reminder to add its stub here.
+/// Only symbols with a caller: an unstubbed one fails the no-libkrun build at link.
 #[cfg(not(krun_linked))]
 #[allow(clippy::missing_safety_doc)] // stubs of foreign declarations; nothing here dereferences
 mod stub {
@@ -759,12 +751,10 @@ mod tests {
     /// so the comparison is against the header this host would actually link against.
     const HEADER: &str = "/usr/include/libkrun.h";
 
-    /// The declared subset, paired with the argument count the header gives it. A signature is the
-    /// one thing in this crate a compiler cannot check: a wrong arity is undefined behaviour at
-    /// call time, not a build error, so it is checked against the header instead.
+    /// The declared subset with the argument count the header gives it: a wrong arity is
+    /// undefined behaviour at call time, not a build error.
     ///
-    /// Arity only. Types would need a C parser to compare honestly, and a half-parser that silently
-    /// matched the wrong thing would be worse than not claiming to check them.
+    /// Arity only. Comparing types honestly would need a C parser.
     const DECLARED: &[(&str, usize)] = &[
         ("krun_create_ctx", 0),
         ("krun_free_ctx", 1),
@@ -810,14 +800,9 @@ mod tests {
 
     /// The argument list of `fn` in the header text, or `None` if it declares no such function.
     ///
-    /// Anchored on the return type, not on the bare name: the header mentions functions inside
-    /// comments (`/* Feature constants for krun_has_feature() */`), and a search for the name
-    /// alone reads that comment's empty parens as a zero-argument declaration. `int32_t` is the
-    /// header's usual spelling and `int` is the input calls'; a return type this header stops
-    /// using would surface as "not declared", which is loud, rather than as a match against prose.
-    ///
-    /// Declarations wrap across lines, so this joins from the opening paren to the matching close
-    /// rather than reading one line.
+    /// Anchored on the return type, not the bare name: the header names functions inside comments,
+    /// whose empty parens read as a zero-argument declaration. Joined to the matching close paren,
+    /// because declarations wrap.
     fn header_arity(header: &str, name: &str) -> Option<usize> {
         let at = header
             .find(&format!("int32_t {name}("))
@@ -857,13 +842,8 @@ mod tests {
         );
     }
 
-    /// The parser has to be able to fail, or the test above passes on anything. Both directions:
-    /// a function the header does not have, and one whose arity was transcribed wrong.
-    ///
-    /// The comment case is the one that actually bit: reading the first textual occurrence of the
-    /// name found `krun_has_feature()` in prose and called it zero arguments, which reported a
-    /// correct declaration as wrong. A parser that mistakes prose for a declaration is equally able
-    /// to wave a wrong one through.
+    /// The parser has to be able to fail, or the test above passes on anything: a function the
+    /// header lacks, one transcribed with the wrong arity, and a name that appears only in prose.
     #[test]
     fn the_header_check_rejects_a_wrong_arity_and_a_missing_symbol() {
         let header = "/* See krun_two() for details */\n\
@@ -1025,10 +1005,8 @@ mod tests {
 
     /// Every `sys::krun_*` the wrapper calls has a stub twin, and every stub has a caller.
     ///
-    /// A host with libkrun never compiles the stubs, so a wrapped symbol without one builds and
-    /// links here and fails on the first runner without the library: 3.6's two vsock calls did
-    /// exactly that, three commits and a CI run after they were wrapped. Reads both sources back
-    /// so the check runs wherever the tests do, which is the point.
+    /// A host with libkrun never compiles the stubs, so a missing one fails only on a runner
+    /// without the library. Both sources are read back, so this runs wherever the tests do.
     #[test]
     fn every_wrapped_symbol_has_a_stub_twin_and_every_stub_a_caller() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -1043,9 +1021,7 @@ mod tests {
                 name[end..].starts_with('(').then_some(&name[..end])
             })
             .collect();
-        // The module body only, up to its closing brace at column zero: this test's own source
-        // sits later in the file and carries the needle it searches for (watched: it reported
-        // itself as a dead stub).
+        // The module body only: this test's own source carries the needle it searches for.
         let stubs = sys
             .split_once("mod stub {")
             .and_then(|(_, rest)| rest.split_once("\n}\n"))

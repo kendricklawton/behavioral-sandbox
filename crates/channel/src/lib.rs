@@ -31,11 +31,8 @@ pub const MAX_PAYLOAD: usize = 1 << 20;
 /// Maximum length of guest error messages to prevent terminal/log flooding (4 KiB).
 const ERROR_MSG_CAP: usize = 4 << 10;
 
-/// The 12 Unicode `Bidi_Control` code points, which reorder how the text around them renders.
-/// [`char::is_control`] is category `Cc` only and returns `false` for every one of them, so a guest
-/// error string carrying an override reorders the operator's line around it (the Trojan-Source
-/// class). Spelled out rather than taken from a Unicode table crate, because this crate carries one
-/// dependency on purpose and the property is 12 stable code points.
+/// The 12 Unicode `Bidi_Control` code points, which reorder the text around them (Trojan Source).
+/// [`char::is_control`] is category `Cc` only and returns `false` for every one.
 fn is_bidi_control(c: char) -> bool {
     matches!(c,
         '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
@@ -70,13 +67,9 @@ pub const VSOCK_PORT: u32 = 1024;
 /// dialer live in different crates and a drifted copy boots a machine that runs nothing.
 pub const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
 
-/// The guest `PATH` a sandbox runs with, shared by the host that sets it and the agent that falls
-/// back to it, so a bare program name resolves the same either way.
-///
-/// libkrun's init resolves a *workload's* bare program name against `/sbin:/usr/sbin:/bin:/usr/bin`
-/// (measured, `scratch/ROADMAP.md` 3.1) and exports nothing, so a guest process resolving one for
-/// itself starts with no `PATH` at all. `/usr/local` leads, because that is where the image
-/// installs the agent ([`GUEST_AGENT_PATH`]).
+/// The guest `PATH` a sandbox runs with, set by the host and the agent's fallback: libkrun's init
+/// exports none, so a guest resolving a bare name starts with nothing. `/usr/local` leads because
+/// the image installs the agent there ([`GUEST_AGENT_PATH`]).
 pub const GUEST_DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin";
 
 /// Scheme prefix for the vsock listener spec (`vsock`).
@@ -216,9 +209,7 @@ impl std::fmt::Debug for Request {
 
 /// Guest-to-host response message stream.
 ///
-/// The derived `Debug` renders payload bytes in full, up to [`MAX_PAYLOAD`] a frame, so a caller that
-/// logs one abbreviates it rather than handing `{:?}` a whole response. [`Request`] redacts instead,
-/// because its payloads are the host's secrets where these are the guest's own output.
+/// The derived `Debug` renders payload bytes in full; abbreviate before logging one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Response {
@@ -283,10 +274,8 @@ impl From<std::io::Error> for ChannelError {
 }
 
 impl ChannelError {
-    /// Returns `true` only for a clean read-side EOF (`UnexpectedEof`): the peer closed between
-    /// frames. A send-path close (`BrokenPipe`/`ConnectionReset`, a peer gone mid-write) is
-    /// deliberately not one, so a caller that needs the wider "peer is gone" set classifies the
-    /// `io::ErrorKind` itself rather than reaching for this. Pinned by `is_disconnect_flags_eof_only`.
+    /// Returns `true` only for a clean read-side EOF: the peer closed between frames. A send-path
+    /// close is deliberately not one. Pinned by `is_disconnect_flags_eof_only`.
     #[must_use]
     pub fn is_disconnect(&self) -> bool {
         matches!(self, ChannelError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof)
@@ -481,19 +470,14 @@ pub(crate) fn write_put_file(
     data: &[u8],
 ) -> Result<(), ChannelError> {
     let cap = path_blob_len(Tag::PutFile, path, data)?;
-    // `Zeroizing`, not a wipe after the send: a caller-supplied `Write` that unwinds would skip an
-    // explicit call and drop the staged bytes un-wiped. It scrubs only the buffer it drops, so the
-    // exact `cap` above stays load-bearing (`secret_payload_is_exactly_sized_so_one_buffer_holds_it`).
+    // `Zeroizing` wipes on unwind too, and only the buffer it drops, so `cap` must be exact.
     let mut payload = Zeroizing::new(Vec::with_capacity(cap));
     put_path_blob(&mut payload, path, data);
     write_frame(w, Tag::PutFile.as_u8(), &payload)
 }
 
-/// The exact size of an `Exec` frame body: the counts, the argv blobs, stdin, the artifact blobs,
-/// the timeout, and the env pairs. A function rather than an expression inside
-/// [`write_exec`] so the buffer it sizes and the test asserting that size read the *same*
-/// arithmetic; a test with its own copy holds only against itself
-/// (`the_exec_buffer_is_sized_by_what_the_encoder_writes`).
+/// The exact size of an `Exec` frame body. A function, not an expression in [`write_exec`], so the
+/// buffer and `the_exec_buffer_is_sized_by_what_the_encoder_writes` read the same arithmetic.
 fn exec_payload_len<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
     argv: &[A],
     stdin: &[u8],
@@ -687,11 +671,8 @@ fn handshake<S: Read + Write>(stream: &mut S) -> Result<(), ChannelError> {
 
 /// Host-side connection handle for issuing requests and consuming response streams.
 ///
-/// **A send error retires the connection.** A frame is a header followed by its payload, so a write
-/// that fails between them leaves the peer mid-frame: the next frame sent on the same stream is
-/// read as the unfinished one's payload, and the send that spliced it still reports `Ok`
-/// (`a_send_error_leaves_the_stream_mid_frame`). [`ChannelError::PayloadTooLarge`] is the one
-/// exception, raised before a byte is written.
+/// **A send error retires the connection**: a write failing mid-frame leaves the peer reading the
+/// next one as its payload (`a_send_error_leaves_the_stream_mid_frame`).
 #[derive(Debug)]
 pub struct ClientConnection<S> {
     stream: S,
@@ -736,10 +717,8 @@ impl<S: Read + Write> ClientConnection<S> {
         read_response(&mut self.stream)
     }
 
-    /// Wraps a stream **without a handshake**, for the second half of a duplicated connection: an
-    /// interactive session sends input and reads output concurrently, which takes one handle per
-    /// direction over one already-handshaken stream. On a fresh stream this skips the version
-    /// check that [`connect`](Self::connect) exists to make.
+    /// Wraps a stream **without a handshake**, for the second half of a duplicated connection.
+    /// On a fresh stream this skips the version check [`connect`](Self::connect) exists to make.
     pub fn resume(stream: S) -> Self {
         Self { stream }
     }
@@ -747,8 +726,7 @@ impl<S: Read + Write> ClientConnection<S> {
 
 /// Guest-side connection handle for serving requests and emitting responses.
 ///
-/// Retire it on a send error, for [`ClientConnection`]'s reason: the framing tears the same way in
-/// this direction.
+/// Retire it on a send error, for [`ClientConnection`]'s reason.
 #[derive(Debug)]
 pub struct ServerConnection<S> {
     stream: S,
@@ -838,12 +816,9 @@ impl<'a> Body<'a> {
     }
 }
 
-/// The internal decoders, exposed to the `cargo fuzz` targets in `fuzz/` behind the off-by-default
-/// `fuzzing` feature so a target drives the shipped parser rather than a copy of it. Each entry
-/// discards its result: the property under test is that the decoder returns at all.
-///
-/// The `_wellformed` pair wraps its input in a valid `tag · len · payload` header, so a target
-/// spends its budget inside the body parsers instead of bouncing off the length check.
+/// The internal decoders, exposed to `fuzz/` behind the off-by-default `fuzzing` feature so a
+/// target drives the shipped parser. The property is that the decoder returns at all; the
+/// `_wellformed` pair pre-wraps a valid header so a target spends its budget in the body.
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
     use super::{MAGIC, read_frame, read_handshake, read_request, read_response};
@@ -1238,9 +1213,7 @@ mod tests {
             sanitized.contains("boom") && sanitized.contains("split"),
             "text kept: {sanitized:?}"
         );
-        // A bidi override is escaped too, and it is what sets the overshoot bound below: the loop
-        // tests the cap *before* each push, so the worst case is a full buffer one byte under the cap
-        // plus one escape plus the ellipsis. `\u{202e}` is 8 bytes where a C0 escape is 6.
+        // A bidi escape is 8 bytes to a C0 escape's 6, which sets the overshoot bound below.
         let bidi = sanitize_error_msg("safe\u{202E}txet_desrever");
         assert!(
             !bidi.contains('\u{202E}') && bidi.contains("\\u{202e}"),
@@ -1369,14 +1342,8 @@ mod tests {
         }
     }
 
-    /// The `Zeroizing` buffer wipes only the allocation it drops, so a payload that outgrows its
-    /// preallocation leaves the reallocated-away copy of a secret un-wiped. The property is
-    /// therefore "the encoder writes exactly what it reserved", and it has to be read off the
-    /// **encoder**: a test that reserves and writes with its own arithmetic proves that its own two
-    /// copies agree, which stays true no matter what `write_exec` does.
-    ///
-    /// Frame layout is `tag(1) · len(4) · payload`, so the bytes the real encoder emitted, less the
-    /// 5-byte header, are what it actually wrote.
+    /// `Zeroizing` wipes only the allocation it drops, so the encoder must write exactly what it
+    /// reserved. Read off the encoder: a test with its own arithmetic proves only itself.
     #[test]
     fn the_exec_buffer_is_sized_by_what_the_encoder_writes() {
         const HEADER: usize = 5;
@@ -1432,10 +1399,8 @@ mod tests {
         );
     }
 
-    /// A write that fails between a frame's header and its payload leaves the peer mid-frame, and
-    /// the *next* send reports `Ok` while its bytes are read as the unfinished frame's payload.
-    /// This is what the connection types' retire-on-send-error contract rests on: nothing in the
-    /// type refuses the reuse, so the caller has to drop the connection.
+    /// A write failing between header and payload leaves the peer mid-frame, and the next send
+    /// reports `Ok`. Nothing in the type refuses the reuse, so the caller must drop it.
     #[test]
     fn a_send_error_leaves_the_stream_mid_frame() {
         /// Accepts every write but the second, which is the one carrying a frame's payload.
@@ -1498,12 +1463,8 @@ mod tests {
 
     #[test]
     fn an_over_cap_encode_refuses_before_any_byte_reaches_the_stream() {
-        // The write-side cap is checked before a byte is written; the engine's send-recovery relies
-        // on it (`send_was_disconnect` reads a `PayloadTooLarge` as "wrote nothing to the socket" and
-        // skips the recovery `recv_response` that would otherwise park for the read timeout). Pin it
-        // at every over-cap-capable site. Stdout/Stderr/Error carry no pre-build check, so
-        // `write_frame`'s cap is their only one and a reordered check bites here; File/PutFile/Exec
-        // are additionally pre-checked before their (secret-bearing) payload is even built.
+        // Pinned at every over-cap-capable site: Stdout/Stderr/Error have only `write_frame`'s
+        // check, so a reordered one bites here.
         fn refuse_untouched(label: &str, sent: Result<(), ChannelError>, touched: bool) {
             assert!(
                 matches!(sent, Err(ChannelError::PayloadTooLarge { .. })),

@@ -186,10 +186,8 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     let mut vm = Vm::spawn(name.clone(), &cfg).map_err(|e| e.to_string())?;
     record.pid = Some(vm.pid());
     store.save(&record).map_err(|e| e.to_string())?;
-    // Held only until the agent answers. Until this returns, the `Vm` still owns the helper, so a
-    // guest that never comes up is torn down by the `?` below rather than left running.
-    // The dial says what it saw; what the VM did wrong is in the VM's own account of itself,
-    // which is why that file exists and why this names it instead of guessing.
+    // The `Vm` still owns the helper until this returns, so a guest that never comes up is torn
+    // down below rather than left running.
     let dialed = match crate::agent::dial(&channel, &mut vm) {
         Ok(dialed) => dialed,
         Err(e) => {

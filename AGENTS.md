@@ -152,25 +152,29 @@ cargo xtask build-rootfs --desktop   # the desktop image (+ cage, foot, seatd, u
   the macOS path is a second untested branch. A capability probe is bounded, but a platform list is
   not. Host variance lives in the preflight, never in the boot path, because a conditional there
   makes N boot paths and leaves N-1 untested.
-- **A comment must earn its lines. `crates/channel` is the reference.** Read it
-  before you comment another crate. The rustdoc of an item starts with **one line** in
-  the third-person indicative, for example "Writes a single length-prefixed protocol frame." or
-  "Returns `true` if the failure was caused by clean EOF or disconnect." Put any constraint in that
-  line or in a trailing clause, for example "...to prevent unbounded allocations." Keep the
-  constraint, but cut the essay. Do not write a separate
-  rationale paragraph on an item. The reader needs the sentence that names the threat, and git
-  already holds the argument for it. Write a **body** comment only where it states something that the
-  code cannot show: an order, a kernel constraint, or the reason that the obvious form is wrong.
-  Remove a body comment that only narrates what the next lines show. State the threat-model framing
-  one time for each module, in the `//!` header, as a short bullet list with bold labels. Do not
-  state it at each call site. A prose *promise*, for example "can't drift" or "never logged", belongs
-  in a type or a test, not in prose that asserts it. A drift claim that lists what it covers, for
-  example "shared by A, B and C", makes one more copy: the list. This list drifts like every copy.
-  Name a mechanism that a reader can grep instead, and let the mechanism define the set. A comment
-  states its constraint in the **present tense**. It never tells the story of how you found it.
-  Past-tense narration of earlier code ("the earlier design", "used to", "no longer", "this
-  replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them.
-  Git keeps them attached to the diff there.
+- **The code documents itself; a comment must earn its lines against a budget.** `crates/input` is
+  the reference (52 items, no doc over four lines, no body comment over one). Read it first.
+  - **An item's rustdoc is one line**, third-person indicative: "Writes a single length-prefixed
+    protocol frame." A second sentence must name a constraint the signature cannot carry
+    ("...to prevent unbounded allocations."). **Three lines of prose is the ceiling**, not counting
+    the blank `///` separator; past it the prose is doing the job of a name, a type, or a test.
+  - **A body comment is one line, two at most**, and only where a reader fluent in Rust would
+    misread the code without it: an ordering, a kernel or library constraint, or why the obvious
+    form is wrong. Delete any that narrates what the next lines say.
+  - **Name it rather than narrate it.** A comment explaining what a block *does* marks a block that
+    wants to be a named function or constant. Move the sentence into the identifier. First move,
+    not last resort.
+  - **The module `//!` header is the only place for framing**: a short bullet list with bold
+    labels, once, never restated at a call site.
+- **Not a comment. Where each goes instead**, in the present tense, stating what is:
+  - Why this over the alternative you rejected: **the commit message**.
+  - A promise ("can't drift", "never logged"): **a type, or a test that fails when it breaks**.
+  - A number, a date, a host, a benchmark: **`scratch/findings/<crate>.md`**.
+  - How you found it, what it used to be, what it replaced: **the commit that fixed it**.
+  - A list of what a rule covers: **name a mechanism a reader can grep**; the list is one more copy
+    and drifts like every copy.
+- **Write the code, then read it back as a stranger, then comment what you misread.** A diff whose
+  comment lines approach a quarter of its code lines is explaining code instead of fixing it.
 - `tracing` logs to stderr. A run writes its structured result to stdout, so a `bsx … 2>/dev/null`
   stays pipe-clean. Config is layered: flags, then env (`BSX_*`), then the nearest `.bsx.toml` above
   the cwd, then `~/.bsx.toml`, then defaults. The project file carries the house defaults and the

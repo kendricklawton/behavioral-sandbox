@@ -37,17 +37,10 @@ const IDLE_GUEST: &str = "sleep 3600";
 
 /// `cargo xtask bench-boot [--runs N]`: what one sandbox costs to start.
 ///
-/// Two series per run, from one spawn:
-/// - **to vCPU**: spawn to the helper having a running `fc_vcpu` thread. Host-side process spawn,
-///   libkrun's own setup, and the virtiofs root going up. Polled, so it carries the poll interval
-///   as noise and is a floor rather than a precise figure.
-/// - **to exit**: spawn to the process ending, for a guest whose workload is `/bin/true`. The whole
-///   cost of a sandbox that does nothing, which is the number a caller waits for before anything of
-///   theirs runs.
+/// - **to vCPU**: spawn to a running `fc_vcpu` thread. Polled, so it is a floor.
+/// - **to exit**: spawn to the process ending, for a `/bin/true` workload.
 ///
-/// The difference between them is the guest's own boot plus teardown. It is not reported as a third
-/// series because it is a subtraction of two differently-noisy measurements, and presenting it as a
-/// measured quantity would overstate it.
+/// Their difference is not reported: subtracting two differently-noisy series would overstate it.
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
@@ -67,9 +60,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
         let mut child = ctx.spawn_guest(&format!("bench-boot-{i}"), "true")?;
         let pid = child.id();
 
-        // Whether a vCPU was ever *seen*, not merely waited for: the wait also ends when the
-        // process dies, and a sample taken then would record the guest's whole life as its
-        // "to vCPU" time rather than being dropped as the failed observation it is.
+        // Seen, not merely waited for: the wait also ends when the process dies.
         let mut saw_vcpu = false;
         let ended = wait_until(BOOT_GRACE, || {
             if vm_is_running(pid) {
@@ -114,16 +105,10 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
 
 /// `cargo xtask bench-footprint [--count N] [--settle-secs S]`: what a sandbox costs to keep.
 ///
-/// Brings up `count` idle VMs, waits `settle` so the youngest has finished booting rather than
-/// merely reaching a vCPU, then samples two things that answer different questions:
-/// - **Pss per VMM**, which splits each shared page across its sharers, so summing it over the
-///   cohort is the true resident cost rather than a double count of whatever they share.
-/// - **The whole-host `MemAvailable` drop**, divided by the cohort. This catches what a VMM's own
-///   `smaps` cannot see, and it is the honest meter for anything living outside the VMM's address
-///   space.
+/// - **Pss per VMM**, which splits shared pages, so summing it is the true resident cost.
+/// - **The whole-host `MemAvailable` drop**, which catches what a VMM's `smaps` cannot see.
 ///
-/// Rss is reported beside Pss because the *gap* between them is the sharing, and a single number
-/// cannot show that.
+/// Rss sits beside Pss because the gap between them is the sharing.
 pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
     if count == 0 {
         bail!("--count must be >= 1");
@@ -190,10 +175,8 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
         );
     }
 
-    // A vCPU is running, which is not the same as a guest that has finished booting: the last VM
-    // up is seconds younger than the first, and sampling here would read a half-booted guest as
-    // its idle cost and understate the whole cohort. Wait for the youngest to reach the same idle
-    // state as the oldest, then sample them together.
+    // A running vCPU is not a booted guest: the youngest VM is seconds behind the oldest, and
+    // sampling now reads a half-booted one as its idle cost.
     std::thread::sleep(settle);
 
     let (mut rss_mib, mut pss_mib) = (Vec::new(), Vec::new());
@@ -225,18 +208,13 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Kills and reaps a cohort. Both results are discarded: a VM that already died is not a failure of
-/// teardown, and a bench that panicked on cleanup would leave the rest of the cohort running, which
-/// is the exact leak this project refuses.
-/// The guest drawer `bench-frames` stages into the guest, staged from the CLI's own test
-/// fixture so the bench and the end-to-end tests draw through one program.
+/// The guest drawer `bench-frames` stages, from the CLI's own fixture, so the bench and the
+/// end-to-end tests draw through one program.
 const FLIPPER: &str = include_str!("../../crates/cli/tests/drm_flip.py");
 
 /// `cargo xtask bench-frames --display WxH[@HZ] --frames N [--app]`: one run per path (`dirty`,
-/// unpaced; `flip`, paced by the refresh rate), each reporting the intervals between frames as the
-/// helper saw them arrive, the frames the guest presented against the frames the host got to see,
-/// and the guest's own timing of its loop. Then the process boundary, and with `--app` the frames
-/// through `bsx-app`'s window.
+/// unpaced; `flip`, paced by the refresh rate), reporting frame intervals as the helper saw them
+/// against the guest's own timing, then the process boundary and, with `--app`, the window.
 pub(crate) fn bench_frames(display: &str, frames: usize, app: bool) -> Result<()> {
     if frames == 0 {
         bail!("--frames must be >= 1");
@@ -478,9 +456,7 @@ fn run_through_reader(
             .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
             .output();
     };
-    // No frame count for the reader: it ends when the lease does, which is the VM stopping below;
-    // a count could be missed, since a lease taken after the scanout's first frames never sees
-    // them.
+    // No frame count: the reader ends with the lease, and a late lease misses the first frames.
     let reader = reader
         .env("XDG_RUNTIME_DIR", &ctx.runtime)
         .env("BSX_RUNS_DIR", ctx.runtime.join("runs"))
@@ -605,6 +581,8 @@ fn report_arrivals(arrivals: &[(u64, u64)], asked: usize) {
     report_percentiles("arrival interval", &mut intervals, "us");
 }
 
+/// Kills and reaps a cohort. Both results are discarded: a VM that already died is no failure,
+/// and a panic in cleanup would leave the rest running.
 fn teardown(cohort: &mut Vec<Child>) {
     for mut child in cohort.drain(..) {
         let _ = child.kill();
@@ -628,9 +606,7 @@ struct BenchContext {
 impl BenchContext {
     /// Resolves the inputs, refusing with the command that produces each missing one.
     fn resolve() -> Result<Self> {
-        // Opened, not tested for existence: for a user outside the `kvm` group the device is
-        // there, every boot dies, and an existence check turns that into "no vCPU thread within
-        // 10s" instead of a refusal naming the fix.
+        // Opened, not tested: outside the `kvm` group the device exists and every boot dies.
         if let Some(why) = bsx_test_support::kvm_unusable() {
             bail!("{why}: these benchmarks boot real VMs");
         }
@@ -742,11 +718,8 @@ fn today() -> String {
         .unwrap_or_else(|| "date unknown".into())
 }
 
-/// Whether `pid` has a running vCPU thread, which is the boundary between a helper that has started
-/// and a VM that is actually executing guest code.
-///
-/// libkrun keeps Firecracker's thread naming, so the vCPU is `fc_vcpu 0`. Matched by name rather
-/// than by counting threads, since a count is a number that moves with a libkrun release.
+/// Whether `pid` has a running vCPU thread, the boundary between a started helper and a VM
+/// executing guest code. Matched by libkrun's `fc_vcpu 0` name, since a thread count moves.
 fn vm_is_running(pid: u32) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
         return false;
@@ -816,9 +789,7 @@ fn loadavg_1m() -> f64 {
 
 /// Prints min/p50/p90/p99/max of `samples`, sorting in place. Nearest-rank, no interpolation.
 ///
-/// A percentile whose rank lands on the last sample has no observation above it: it is `max`
-/// relabelled, which is dishonest at small `n`. Those print `—`, so a short run cannot pass its
-/// slowest sample off as a tail percentile.
+/// A percentile whose rank lands on the last sample is `max` relabelled, so it prints `—`.
 fn report_percentiles(label: &str, samples: &mut [u64], unit: &str) {
     samples.sort_unstable();
     let n = samples.len();

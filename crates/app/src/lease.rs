@@ -75,23 +75,16 @@ impl Drop for Feed {
     }
 }
 
-/// What one lease is for: whose display, where its presents are logged, and how often a present
-/// is worth waking the window for.
-///
-/// **This is the subscription's identity**, so a change to any field is a new lease and the old
-/// one is dropped. That is what moves a run between the grid's rate and the open run's.
+/// What one lease is for, and the subscription's identity: any change is a new lease.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Watch {
     pub(crate) name: String,
     pub(crate) log: Option<PathBuf>,
-    /// The shortest gap between two forwarded presents. Zero forwards every one, which is what
-    /// the run on screen wants; the grid asks for a slower rate, because a thumbnail redrawn at
-    /// the guest's pace costs a whole window rebuild per frame per sandbox.
+    /// The shortest gap between two forwarded presents; zero forwards every one.
     pub(crate) every: Duration,
 }
 
-/// Starts the lease thread for `watch` and returns the messages it sends, as the subscription's
-/// stream. Every message carries the run's name, so a window holding several tells them apart.
+/// Starts the lease thread for `watch`; every message it sends carries the run's name.
 pub(crate) fn stream(watch: &Watch) -> Feed {
     let (sender, receiver) = mpsc::unbounded();
     let watch = watch.clone();
@@ -226,9 +219,7 @@ fn run_one_lease(
                 if let Some(log) = log.as_mut() {
                     let _ = writeln!(log, "{frame_id}\t{}", monotonic_ns());
                 }
-                // A skipped present's damage is not lost, it is folded into the next one that
-                // goes: the window builds its upload from the damage it was told about, so a
-                // dropped rectangle would leave that part of the thumbnail stale.
+                // Skipped damage folds forward: the window uploads only what it was told changed.
                 pending = Some(match pending.take() {
                     Some((_, _, held)) => (frame_id, slot, crate::frame::union(held, damage)),
                     None => (frame_id, slot, damage),
@@ -264,10 +255,7 @@ fn run_one_lease(
 
 /// Gives `session` a thread of its own and returns the lines to feed it.
 ///
-/// **The window must not write to the guest.** `InputSession::send` is a socket write under a
-/// two-second timeout, so a guest that stops reading would stall whatever thread called it; doing
-/// it here keeps that stall off the one thread iced draws on. Dropping the sender ends the thread,
-/// which closes the session with it.
+/// `InputSession::send` blocks for up to two seconds, so it must not run where iced draws.
 fn spawn_input_writer(mut session: control::InputSession) -> mpsc::UnboundedSender<String> {
     let (lines, mut rx) = mpsc::unbounded::<String>();
     std::thread::spawn(move || {

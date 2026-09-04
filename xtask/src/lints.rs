@@ -11,14 +11,10 @@ mod tests {
 
     use crate::workspace_root;
 
-    /// Workflows name repo files as bare shell text: a parser's target, or an error message telling a
-    /// human which file to edit. The prose-drift lint reads `.rs` and `.md` only, and even there it wants
-    /// a backticked span, so without this a rename lands green and the weekly job fails days later on a
-    /// path that no longer exists.
+    /// Workflows name repo files as bare shell text, which the prose-drift lint does not read, so
+    /// a rename lands green and the weekly job fails days later.
     ///
-    /// Scoped to the `crates/` and `xtask/` prefixes, which are ours. A workflow also fetches
-    /// a script by URL, and `dist/` is build output; neither is a file this tree can be asked to
-    /// hold.
+    /// Scoped to the `crates/` and `xtask/` prefixes; a fetched URL and `dist/` are not ours.
     #[test]
     fn workflow_repo_paths_exist() {
         let repo = workspace_root();
@@ -43,9 +39,7 @@ mod tests {
                 }
             }
         }
-        // Without this, a workflow rename (or a move to composite actions) leaves the scan
-        // matching nothing and passing green, which is the failure mode this whole test exists
-        // to prevent.
+        // A workflow rename would otherwise leave the scan matching nothing and passing green.
         assert!(
             checked > 0,
             "no crates/ or xtask/ path reference matched in .github/workflows: the workflows no \
@@ -58,11 +52,8 @@ mod tests {
         );
     }
 
-    /// Every workflow file with its text, in name order: discovered by reading the directory
-    /// rather than a hardcoded list, because a list silently exempts whatever it omits. Both
-    /// GitHub spellings, since a `.yaml` file GitHub runs but a scan skipped would be a silent
-    /// hole in exactly the coverage the callers claim; an empty directory fails here rather than
-    /// leaving every caller's scan vacuously green.
+    /// Every workflow file with its text, in name order, read from the directory rather than a
+    /// list that would exempt what it omits. Both GitHub spellings; an empty directory fails.
     fn workflow_texts(repo: &Path) -> Vec<(String, String)> {
         let dir = repo.join(".github/workflows");
         let mut paths: Vec<_> = std::fs::read_dir(&dir)
@@ -86,12 +77,8 @@ mod tests {
             .collect()
     }
 
-    /// The supervisor writes the helper's argv and the CLI parses it. Neither depends on the other,
-    /// so a flag renamed on one side spawns a VM the other rejects at runtime, and only a boot
-    /// would notice.
-    ///
-    /// Compares the flag *spellings*, which is the part that has to agree. Their meanings are each
-    /// side's own business and are covered by each side's own tests.
+    /// The supervisor writes the helper's argv and the CLI parses it, with no dependency between
+    /// them, so only a boot would notice a rename. Compares spellings, which is what must agree.
     #[test]
     fn the_helper_flags_match_the_parser() {
         let repo = workspace_root();
@@ -106,9 +93,7 @@ mod tests {
             written.len() >= 8,
             "expected the helper's flag set, found {written:?}"
         );
-        // What the parser accepts: clap's own `long` spellings, plus the ones it derives from the
-        // field name, which the parser writes as plain `#[arg(long, ...)]`. clap spells a field
-        // `frame_log` as `--frame-log`, so the derived check reads the flag back the same way.
+        // clap's explicit `long` spellings plus the ones it derives: `frame_log` is `--frame-log`.
         let mut missing = Vec::new();
         for flag in &written {
             let bare = flag.trim_start_matches('-');

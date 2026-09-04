@@ -26,10 +26,8 @@ fn can_make_a_cgroup() -> bool {
     }
 }
 
-/// Runs `n` trivial execs, one per agent, all logging into one sink.
-///
-/// `serve` is one connection one command, so `n` execs means `n` agents. They share this test
-/// binary's process, which is the scope the report is latched over.
+/// Runs `n` trivial execs, one per agent, all logging into one sink: `serve` is one connection one
+/// command, and this process is the scope the report latches over.
 fn log_of_execs(n: usize) -> String {
     let sink = LogSink::default();
     for _ in 0..n {
@@ -46,11 +44,7 @@ fn log_of_execs(n: usize) -> String {
     sink.contents()
 }
 
-/// Losing the per-exec cgroup is reported, and reported once.
-///
-/// What is lost is whole-tree reaping: a command that double-forks a daemon holding the output pipes
-/// keeps them open, so the pumps never see EOF and the session thread parks until that daemon exits.
-/// The engine reports the same degradation of its own lifetime cgroup (`lifetime.rs`'s `adopt`).
+/// Losing the per-exec cgroup is reported, and reported once. What is lost is whole-tree reaping.
 #[test]
 fn a_lost_per_exec_cgroup_is_reported_once() {
     // Two execs, so one run of the test covers both halves: that it is said at all, and that it is

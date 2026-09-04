@@ -110,10 +110,8 @@ fn session(args: &ShellArgs) -> Result<u8, String> {
 
     let mut cfg = VmConfig::new(root, GUEST_AGENT_PATH);
     cfg.args = vec![format!("vsock:{VSOCK_PORT}").into()];
-    // The agent's stderr is the guest console; at `info` it narrates every session into the
-    // operator's terminal.
-    // A `PATH` for the agent and for everything it runs: libkrun exports none, so
-    // without this a bare program name resolves nowhere inside the guest.
+    // `warn`, because the agent's stderr is the guest console. A `PATH` because libkrun exports
+    // none, so a bare program name resolves nowhere in the guest.
     cfg.env = vec![
         "BSX_LOG=warn".into(),
         format!("PATH={GUEST_DEFAULT_PATH}").into(),

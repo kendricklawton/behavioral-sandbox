@@ -30,11 +30,8 @@ const LONG_LIVED: &str = "sleep 30";
 /// magnitude of headroom rather than a tuned value.
 const BOOT_GRACE: Duration = Duration::from_secs(5);
 
-/// Why this host cannot run these, or `None` when it can.
-///
-/// The KVM check opens the device rather than testing for its file: for a user outside the `kvm`
-/// group the device exists, every boot dies, and an existence check would let these run into an
-/// assertion saying the VM never started instead of a skip naming the fix.
+/// Why this host cannot run these, or `None` when it can. The KVM check opens the device, since
+/// for a user outside the `kvm` group it exists and every boot still dies.
 fn skip_reason() -> Option<String> {
     if let Some(why) = bsx_test_support::kvm_unusable() {
         return Some(why);
@@ -89,12 +86,8 @@ fn bsx_binary() -> PathBuf {
     workspace_root().join("target/debug/bsx")
 }
 
-/// Spawns a helper directly, with its runtime directory pointed at `runtime` so the test sees only
-/// its own sockets.
-///
-/// Deliberately **not** through `Vm::spawn`: that re-executes `current_exe()`, which under a test
-/// harness is the test binary, and this needs the real `bsx`. What is under test is what survives a
-/// dead supervisor, not the spawn helper itself.
+/// Spawns a helper directly, with its runtime directory at `runtime`. Not through `Vm::spawn`,
+/// which re-executes `current_exe()` and would be the test binary.
 fn spawn_guest(name: &str, runtime: &Path) -> std::process::Child {
     Command::new(bsx_binary())
         .args(["__vmm", "--name", name])
@@ -108,15 +101,11 @@ fn spawn_guest(name: &str, runtime: &Path) -> std::process::Child {
         .expect("spawn the VM helper")
 }
 
-/// Whether `pid` has a **vCPU thread**, which is the difference between a helper that has started
-/// and a VM that is actually running.
+/// Whether `pid` has a **vCPU thread**, the difference between a helper that started and a VM
+/// that is running.
 ///
-/// Measured, because the obvious signal is wrong: a helper binds its control socket in 11 ms with
-/// two threads, long before libkrun is up, and a test that waited on the socket would kill a
-/// process that had not booted anything while claiming to test a running VM. A booted single-vCPU
-/// guest carries eleven threads, one of which libkrun names `fc_vcpu 0` after the Firecracker
-/// lineage it comes from. The name is what this looks for, since a thread count is a number that
-/// drifts with a libkrun release.
+/// The socket is not the signal: a helper binds it long before libkrun is up. Matches libkrun's
+/// `fc_vcpu 0` thread name, since a thread count drifts with a release.
 fn vm_is_running(pid: u32) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
         return false;
@@ -162,10 +151,7 @@ fn runtime_dir(tag: &str) -> bsx_test_support::ScratchDir {
 }
 
 /// **The test this file exists for.** A supervisor that dies mid-boot must not leave the VM it was
-/// starting behind, because nothing is left that knows the VM is there.
-///
-/// Kills the helper while the guest is still coming up, then asserts the process is gone and its
-/// control socket answers nobody.
+/// starting behind: kills the helper while the guest is still coming up.
 #[test]
 #[ignore = "boots a real guest: needs /dev/kvm, the guest tree and a built bsx"]
 fn a_supervisor_killed_mid_boot_leaves_no_vm() {
@@ -177,18 +163,14 @@ fn a_supervisor_killed_mid_boot_leaves_no_vm() {
 
     let mut child = spawn_guest("midboot", runtime.path());
     let pid = child.id();
-    // Mid-boot on purpose: wait until libkrun has a vCPU running, then kill before the guest has
-    // reached its workload. That window is where a half-built VM could be stranded, and it is not
-    // the same as "the socket exists", which happens in ~11 ms with libkrun not yet started.
+    // Mid-boot on purpose: a vCPU running, but before the workload, is where a VM strands.
     assert!(
         eventually(|| vm_is_running(pid)),
         "the VM never started a vCPU"
     );
     assert!(pid_is_live(pid), "the helper should still be running");
-    // The positive first, against the directory this test's helpers were actually pointed at: a
-    // scan that never sees the running VM would make the absence asserted below vacuous. (An
-    // earlier version scanned the test process's own runtime directory, where "midboot" could
-    // never appear, and passed while asserting nothing.)
+    // The positive first, against the directory the helpers were pointed at: a scan that never
+    // sees the running VM makes the absence below vacuous.
     let scan_dir = runtime.path().join("bsx");
     assert!(
         bsx_supervisor::discover::live_in(&scan_dir)

@@ -49,9 +49,7 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
         download_one(&retarget(a, &dir))?;
     }
 
-    // The `.apk` closure + index, an online `apk add` into a throwaway root, caching every package.
-    // This was the one fetched-not-pinned input left in the reproducible-rootfs build; the
-    // manifest below pins it.
+    // An online `apk add` into a throwaway root, caching the closure the manifest below pins.
     println!("\n↓ resolving + caching the guest package closure ...");
     populate_apk_cache(&dir.join(APK_CACHE_SUBDIR), &alpine_tar, &apk_tools_tar)?;
 
@@ -95,9 +93,8 @@ pub(crate) fn verify(dir: &Path) -> Result<()> {
             bail!("vendored {rel} sha256 mismatch: manifest {sha}, got {got}");
         }
     }
-    // Drift the other direction: a file present in the mirror but absent from the manifest (a stray
-    // `.apk`, a hand-dropped file) is unaudited, and an unwitting re-`vendor` would legitimize it by
-    // hashing it into the next manifest. Flag it now so the mirror stays exactly the pinned set.
+    // The other direction: a file in the mirror but not the manifest is unaudited, and a
+    // re-`vendor` would hash it in.
     let recorded_rels: std::collections::BTreeSet<&str> =
         recorded.iter().map(|(_, rel)| rel.as_str()).collect();
     let mut actual = Vec::new();

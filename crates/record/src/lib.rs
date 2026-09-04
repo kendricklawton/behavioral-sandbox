@@ -405,11 +405,7 @@ const MAX_ID: usize = 128;
 
 /// Whether `id` may become a directory under the runs directory.
 ///
-/// **A run id reaches the filesystem**, and [`Store::remove`] hands its directory to
-/// `remove_dir_all`, so `../../x` or an absolute path would delete outside the store. Restricted
-/// to an explicit alphabet rather than filtered for known-bad sequences, the same choice
-/// `bsx_supervisor::socket::valid_name` makes for the same reason: a deny-list is a guess about
-/// what is dangerous, and an allow-list is a statement about what is permitted.
+/// [`Store::remove`] hands the joined path to `remove_dir_all`, so this is an allow-list.
 #[must_use]
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -567,8 +563,7 @@ impl Store {
 
     /// The directory of the run with `id`, joined and not checked.
     ///
-    /// Every method here that touches the filesystem refuses an id [`valid_id`] rejects, and so
-    /// does [`Record::parse`], so an id that arrived in a `Record` is already one component.
+    /// Every method here that touches the filesystem refuses an id [`valid_id`] rejects.
     #[must_use]
     pub fn dir_of(&self, id: &str) -> RunDir {
         RunDir {

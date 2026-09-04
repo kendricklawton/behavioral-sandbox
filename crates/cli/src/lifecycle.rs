@@ -429,21 +429,11 @@ fn run_in(args: &ExecArgs) -> Result<u8, String> {
     }
 }
 
-/// This process's stdin, read to end of input, for a caller that asked for it with `--stdin`.
+/// This process's stdin, read to end of input, for a caller that asked with `--stdin`.
 ///
-/// **Only when asked.** The agent's exec request carries stdin as one payload rather than a
-/// stream, so it has to be read to EOF before the command starts, and plenty of things hand a
-/// program an stdin that never reaches one: a job runner's idle pipe, a CI harness, an
-/// interactive terminal. Reading whenever stdin was not a terminal made `bsx exec vm -- echo hi`
-/// hang forever with no output under exactly such a pipe (watched, twice). So the flag, which is
-/// also the spelling every comparable tool uses.
-///
-/// **An inherited stdin can be non-blocking, and that is not an error.** `O_NONBLOCK` belongs to
-/// the open file description, which a caller shares with whoever handed it over, so a read can
-/// return `EAGAIN` meaning "nothing yet" where this wants "nothing ever". Reported as a failure,
-/// that made `bsx exec` refuse to run anything at all under a harness whose stdin was
-/// non-blocking (watched happen). Waiting for readability and retrying is what a blocking read
-/// would have done, without setting a flag back on a description this process does not own.
+/// **Only when asked**, since the request carries stdin as one payload and an idle pipe has no
+/// end. **`EAGAIN` is not an error** on an inherited non-blocking description: waited for, not
+/// reported.
 fn read_stdin() -> Result<Vec<u8>, String> {
     let mut reader = std::io::stdin()
         .lock()
