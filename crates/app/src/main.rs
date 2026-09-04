@@ -18,6 +18,7 @@ mod cli;
 mod frame;
 mod lease;
 mod screens;
+mod theme;
 mod timer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +78,11 @@ struct Cli {
     /// notebook open.
     #[arg(long)]
     exit_with_lease: bool,
+    /// The palette to draw in, by the name the toolkit prints it under (`Nord`, `Tokyo Night
+    /// Storm`, `Catppuccin Mocha`). Case and spacing are ignored. Falls back to `$BSX_THEME`, then
+    /// to Tokyo Night Storm. An unknown name is refused with the full list.
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
     /// Open on the form for a new run.
     #[arg(long, conflicts_with = "name")]
     new: bool,
@@ -84,6 +90,17 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Before the adapter probe and before any file is opened: a name this cannot resolve is a
+    // typo in an argument, and answering it should not cost a GPU handle first.
+    let theme = match theme::resolve(
+        theme::asked_for(cli.theme.as_deref(), theme::from_env()).as_deref(),
+    ) {
+        Ok(theme) => theme,
+        Err(why) => {
+            eprintln!("bsx-app: {why}");
+            return ExitCode::from(EXIT_OPERATIONAL);
+        }
+    };
     frame::report_adapter();
     let sinks = match frame::Sinks::open(cli.drawn_log.as_deref(), cli.input_log.as_deref()) {
         Ok(sinks) => Arc::new(sinks),
@@ -119,7 +136,7 @@ fn main() -> ExitCode {
     let ran = iced::application(boot, App::update, App::view)
         .subscription(App::subscription)
         .title(|app: &App| app.title())
-        .theme(|_: &App| iced::Theme::TokyoNightStorm)
+        .theme(move |_: &App| theme.clone())
         .window_size(Size::new(1100.0, 720.0))
         .run();
     match ran {
