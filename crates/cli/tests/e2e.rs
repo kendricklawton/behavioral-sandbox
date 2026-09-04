@@ -333,6 +333,86 @@ fn a_mounted_directory_is_read_write_and_edits_land_on_the_host() {
     );
 }
 
+/// The 0.8 contract: a host directory reaches the guest under a **second virtiofs tag**, the one
+/// the caller named, and a file written there appears on the host. `--share` hands the guest a
+/// device and nothing else, so the guest mounts it itself: this is the path for an image that
+/// knows its own tags, where `--mount` is the path for one that does not.
+///
+/// Both tags are exercised in one boot, because the tag is what the guest mounts by and two
+/// devices sharing one would leave the kernel matching whichever it saw first (the finding behind
+/// `RESERVED_TAG_PREFIX`, until now pinned only by the refusal `--share bsx-…` gets). Here the
+/// helper's own `bsx-mnt-0` and the caller's `work` each land on their own directory, and each
+/// carries writes back to its own host directory.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_second_virtiofs_tag_carries_a_directory_the_guest_mounts_itself() {
+    if skipped("a_second_virtiofs_tag_carries_a_directory_the_guest_mounts_itself") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-share");
+    let mounted = dir.path().join("mounted");
+    let shared = dir.path().join("shared");
+    std::fs::create_dir(&mounted).expect("a directory for the helper's tag");
+    std::fs::create_dir(&shared).expect("a directory for the caller's tag");
+    std::fs::write(mounted.join("f"), "in-mount\n").expect("stage the mount's file");
+    std::fs::write(shared.join("f"), "in-share\n").expect("stage the share's file");
+
+    let image_top = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(guest_root())
+            .expect("the image tree")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = image_top();
+    // `/opt` because the image has it and nothing else uses it: under the default read-only root
+    // the guest cannot create a mount point, which is the same constraint `--mount` has.
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--mount", &format!("/mnt={}", mounted.display())])
+        .args(["--share", &format!("work={}", shared.display())])
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "mount -t virtiofs work /opt && cat /mnt/f /opt/f &&              echo from-the-mount > /mnt/g && echo from-the-share > /opt/g",
+        ])
+        .output()
+        .expect("run bsx");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "in-mount\nin-share\n",
+        "each tag carried its own host directory into the guest"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shared.join("g")).expect("the guest's write reached the host"),
+        "from-the-share\n",
+        "a file written under the caller's tag is on the host"
+    );
+    assert_eq!(
+        std::fs::read_to_string(mounted.join("g")).expect("the mount still carries writes"),
+        "from-the-mount\n",
+        "the helper's own tag is unaffected by the caller's"
+    );
+    assert!(
+        !shared.join("f").metadata().expect("still there").is_dir(),
+        "the staged file is still a file"
+    );
+    assert_eq!(
+        image_top(),
+        before,
+        "mounting over an image directory does not write the shared image tree"
+    );
+}
+
 /// The 3.7 contract, and the finding behind it: the image tree is shared by every sandbox this
 /// host boots, so by default a guest cannot write it. Asserted by *writing*, because the posture
 /// lives on the virtiofs device and the guest cannot see it: `/proc/mounts` still reports the
