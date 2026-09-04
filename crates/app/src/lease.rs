@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use iced::futures::Stream;
 use iced::futures::channel::mpsc;
+use iced::futures::{Stream, StreamExt};
 
 use bsx_supervisor::control::{self, Event, LeaseStop};
 
@@ -177,12 +177,18 @@ fn run_one_lease(
     }
     match control::input(socket) {
         Ok(session) => {
-            let session = Arc::new(Mutex::new(Some(session)));
-            if sender.unbounded_send(Message::Input(session)).is_err() {
+            let lines = spawn_input_writer(session);
+            if sender.unbounded_send(Message::Input(lines)).is_err() {
                 return Ok(Some("the window closed".to_string()));
             }
         }
-        Err(e) => eprintln!("bsx-app: no input session: {e}"),
+        // The window stays useful without one, but a keyboard that does nothing has to say so
+        // somewhere the operator is looking.
+        Err(e) => {
+            let _ = sender.unbounded_send(Message::Note(format!(
+                "no input session: {e}; the keyboard and pointer will not reach this guest"
+            )));
+        }
     }
     loop {
         match lease.next_event() {
@@ -212,6 +218,24 @@ fn run_one_lease(
             Err(e) => return Err(e.to_string()),
         }
     }
+}
+
+/// Gives `session` a thread of its own and returns the lines to feed it.
+///
+/// **The window must not write to the guest.** `InputSession::send` is a socket write under a
+/// two-second timeout, so a guest that stops reading would stall whatever thread called it; doing
+/// it here keeps that stall off the one thread iced draws on. Dropping the sender ends the thread,
+/// which closes the session with it.
+fn spawn_input_writer(mut session: control::InputSession) -> mpsc::UnboundedSender<String> {
+    let (lines, mut rx) = mpsc::unbounded::<String>();
+    std::thread::spawn(move || {
+        while let Some(line) = iced::futures::executor::block_on(rx.next()) {
+            if session.send(&line).is_err() {
+                break;
+            }
+        }
+    });
+    lines
 }
 
 /// The host's monotonic clock in nanoseconds: the one timestamp two processes on this host can

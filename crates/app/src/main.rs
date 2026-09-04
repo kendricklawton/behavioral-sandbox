@@ -23,14 +23,14 @@ mod timer;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::Parser;
 use iced::{Element, Size, Subscription, Task};
 
 use bsx_krun::SharedFrames;
 use bsx_record::{Record, Store};
-use bsx_supervisor::control::{Damage, InputSession};
+use bsx_supervisor::control::Damage;
 
 /// Exit code for an operational failure, the CLI's convention.
 const EXIT_OPERATIONAL: u8 = 2;
@@ -293,8 +293,10 @@ pub(crate) enum Message {
         slot: u32,
         damage: Damage,
     },
-    /// The input session is open: the window's keyboard and pointer reach the guest.
-    Input(Arc<Mutex<Option<InputSession>>>),
+    /// The input session is open: these are the lines the window's keyboard and pointer become.
+    Input(iced::futures::channel::mpsc::UnboundedSender<String>),
+    /// Something the operator should see in the window rather than on a stderr they may not have.
+    Note(String),
     /// The lease ended, with why; the sandbox stopping is the ordinary case.
     Ended(String),
 }
@@ -319,7 +321,7 @@ pub(crate) struct App {
     /// The display path of the run being viewed, when it is live and has one.
     frames: Option<Arc<SharedFrames>>,
     history: Arc<std::collections::VecDeque<frame::Present>>,
-    input: Arc<Mutex<Option<InputSession>>>,
+    input: Option<iced::futures::channel::mpsc::UnboundedSender<String>>,
     read: u64,
     exit_with_lease: bool,
 }
@@ -345,7 +347,7 @@ impl App {
             sinks,
             frames: None,
             history: Arc::new(std::collections::VecDeque::with_capacity(HISTORY)),
-            input: Arc::new(Mutex::new(None)),
+            input: None,
             read: 0,
             exit_with_lease,
         };
@@ -449,10 +451,8 @@ impl App {
         self.results = Vec::new();
         self.frames = None;
         self.history = Arc::new(std::collections::VecDeque::with_capacity(HISTORY));
-        *self
-            .input
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        // Dropping the sender ends the writer thread, which closes the session with it.
+        self.input = None;
         self.read = 0;
     }
 
@@ -473,6 +473,7 @@ impl App {
             }
             Message::Open(id) => {
                 self.open(id);
+                self.status = None;
                 Task::none()
             }
             Message::Back => {
@@ -609,9 +610,13 @@ impl App {
                 });
                 Task::none()
             }
-            Message::Input(session) => {
-                self.input = session;
+            Message::Input(lines) => {
+                self.input = Some(lines);
                 eprintln!("bsx-app: the keyboard and pointer reach the guest");
+                Task::none()
+            }
+            Message::Note(what) => {
+                self.status = Some(what);
                 Task::none()
             }
             Message::Ended(why) => {
@@ -673,7 +678,7 @@ pub(crate) fn frame_program(app: &App) -> Option<frame::Program> {
         frames: Arc::clone(frames),
         history: Arc::clone(&app.history),
         sinks: Arc::clone(&app.sinks),
-        input: Arc::clone(&app.input),
+        input: app.input.clone(),
     })
 }
 

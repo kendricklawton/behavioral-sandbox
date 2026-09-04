@@ -24,7 +24,7 @@ use iced::{Event, Rectangle, keyboard, mouse, window};
 
 use bsx_input::{Area, Button, Held, InputEvent, Target, format_line};
 use bsx_krun::{PixelFormat, SharedFrames, SharedLayout};
-use bsx_supervisor::control::{Damage, InputSession};
+use bsx_supervisor::control::Damage;
 
 /// One present as the lease reported it.
 #[derive(Debug, Clone, Copy)]
@@ -93,7 +93,9 @@ pub(crate) struct Program {
     pub(crate) frames: Arc<SharedFrames>,
     pub(crate) history: Arc<VecDeque<Present>>,
     pub(crate) sinks: Arc<Sinks>,
-    pub(crate) input: Arc<Mutex<Option<InputSession>>>,
+    /// Where a report's lines go: the writer thread's end, never the socket itself, so a guest
+    /// that stops reading cannot stall the thread iced draws on.
+    pub(crate) input: Option<iced::futures::channel::mpsc::UnboundedSender<String>>,
 }
 
 impl<Message> shader::Program<Message> for Program {
@@ -108,16 +110,14 @@ impl<Message> shader::Program<Message> for Program {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Option<shader::Action<Message>> {
-        let mut session = self
-            .input
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let session = session.as_mut()?;
+        let lines = self.input.as_ref()?;
+        let mut sent_any = false;
         let mut send = |target: Target, events: &[InputEvent]| {
             for event in events {
                 let line = format_line(target, event);
                 self.sinks.sent(&line);
-                let _ = session.send(&line);
+                let _ = lines.unbounded_send(line);
+                sent_any = true;
             }
         };
         match event {
@@ -192,7 +192,9 @@ impl<Message> shader::Program<Message> for Program {
             }
             _ => {}
         }
-        None
+        // What went to the guest is the guest's: capturing stops the same key or click also
+        // driving a widget behind the frame.
+        sent_any.then(shader::Action::capture)
     }
 
     fn draw(&self, _state: &Held, _cursor: mouse::Cursor, _bounds: Rectangle) -> Primitive {
