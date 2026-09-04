@@ -344,8 +344,7 @@ fn cargo_fuzz_available() -> bool {
     Command::new("cargo")
         .args(["fuzz", "--version"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
@@ -782,14 +781,12 @@ fn nightly_ready() -> bool {
     {
         cmd.env("RUSTUP_HOME", home.join(".rustup"));
     }
-    cmd.output()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .any(|l| l.trim().starts_with("rust-src"))
-        })
-        .unwrap_or(false)
+    cmd.output().is_ok_and(|o| {
+        o.status.success()
+            && String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.trim().starts_with("rust-src"))
+    })
 }
 
 /// The workspace root (not the cwd), so the commands work from anywhere.

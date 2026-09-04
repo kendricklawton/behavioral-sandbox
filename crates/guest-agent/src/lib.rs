@@ -493,9 +493,7 @@ fn resolve_program(
 ) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt as _;
     let executable = |p: &Path| {
-        std::fs::metadata(p)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
     let found = if program.contains('/') {
         executable(&workdir.join(program))

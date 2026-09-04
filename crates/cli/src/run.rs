@@ -325,7 +325,7 @@ fn resolve_root_from(
     home: Option<OsString>,
 ) -> Result<PathBuf, String> {
     let root = flag
-        .or(env_root.map(PathBuf::from))
+        .or_else(|| env_root.map(PathBuf::from))
         .or_else(|| data_dir(xdg_data, home).map(|d| d.join("bsx/rootfs")));
     let Some(root) = root else {
         return Err(
@@ -381,7 +381,7 @@ fn resolve_limit_from<T: std::str::FromStr>(
 fn data_dir(xdg_data: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     xdg_data
         .map(PathBuf::from)
-        .or(home.map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".local/share")))
 }
 
 /// Puts a `--display`, `--screenshot` and `--frame-log` on `cfg`, refusing the spellings the

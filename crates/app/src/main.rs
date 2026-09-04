@@ -661,7 +661,7 @@ fn tail_of(path: &std::path::Path, max: u64) -> (String, u64) {
     let Ok(mut file) = std::fs::File::open(path) else {
         return (String::new(), 0);
     };
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let size = file.metadata().map_or(0, |m| m.len());
     let start = size.saturating_sub(max);
     if file.seek(SeekFrom::Start(start)).is_err() {
         return (String::new(), size);
