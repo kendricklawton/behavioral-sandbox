@@ -6,21 +6,29 @@ The reporting mechanism also lives in
 [`SECURITY.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/SECURITY.md) at the
 repo root (GitHub surfaces it in the Security tab).
 
-## Nothing here runs a guest today
+## The tree runs guests, and has never been audited
 
-The Firecracker engine that enforced everything below was deleted when the project moved to libkrun,
-and its replacement is not written yet. **There is no sandbox in this tree to attack.** This page
-states the posture the replacement is being built to; it is not a description of running code, and
-it is not an audit.
+The libkrun supervisor boots sandboxes: `bsx run`, `shell`, `up`, `exec` and `stop` work on a host
+with `/dev/kvm` and a guest image. So there is something here to attack, which was not true while
+the Firecracker engine was being replaced.
 
-Until the first supported release (`v0.1.0`), every version is a development snapshot: no version
-receives backported fixes, and nothing here should be treated as production-ready.
+What has not happened: any external review, any audit, any release. There is one maintainer. Until
+the first supported release (`v0.1.0`), every version is a development snapshot: no version receives
+backported fixes, and nothing here should be treated as production-ready. This page states the
+posture the code is written to; it is not evidence that the code achieves it.
 
 ## What is trusted, and what is not
 
 The trust boundary is the CPU, not any software inside the guest. KVM (or Hypervisor.framework), the
 host kernel, and the host-side process acting as the virtual machine monitor are trusted; everything
 inside the guest, including the in-guest agent, is not.
+
+The monitor process is one trusted component with a large surface, and `--display` widens it: a VM
+given a display loads virglrenderer and Mesa into the monitor and opens the host GPU's render node,
+so guest-controlled data reaches a renderer running with the operator's privileges. That is measured
+in [Architecture](./architecture.md) under "What crosses the GPU boundary". A headless VM does not
+open it. Nothing in the guest gets GPU acceleration today, so this is surface the display feature
+costs, not a capability the sandbox grants.
 
 The posture that follows from it: a sandbox with no explicit configuration shares no host directory
 and reaches no network, and what is shared **is** the policy, settled before the VM starts.

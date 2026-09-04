@@ -24,9 +24,11 @@
 //! libkrun, and what stops a running VM is a signal to the helper process (`bsx-supervisor`'s
 //! `Vm::stop`), so there is nothing of libkrun's to wrap.
 //!
-//! No accelerated GPU. [`Machine::gpu_device`] enables virtio-gpu with the one virglrenderer flag
-//! set measured to carry a frame, because a display needs the device; a posture that lets the
-//! guest use the host GPU for its own rendering is phase 5's, behind `krun_has_feature`.
+//! No accelerated GPU **for the guest**. [`Machine::gpu_device`] enables virtio-gpu with the one
+//! virglrenderer flag set measured to carry a frame, because a display needs the device; a posture
+//! that lets the guest use the host GPU for its own rendering is phase 5's, behind
+//! `krun_has_feature`. The host side is not GPU-free: virglrenderer opens the host render node for
+//! every `--display` VM, measured in `docs/architecture.md` under "What crosses the GPU boundary".
 //!
 //! # Strings
 //!

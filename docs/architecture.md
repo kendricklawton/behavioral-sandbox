@@ -23,7 +23,8 @@ What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest a
 (`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
 (`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
 the VM's own process opens, with that window's keyboard and pointer going back as two virtio-input
-devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` is the notebook of those runs, with a live run's display and input in the window and a start form that shows the posture before boot. What is not: GPU acceleration, and macOS.
+devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` is the notebook of those runs, with a live run's display and input in the window and a start form that shows the posture before boot. What is not: GPU acceleration for the guest (see
+"What crosses the GPU boundary" below for what does and does not), and macOS.
 
 ### Design rules
 
@@ -72,3 +73,73 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-app` | `crates/app` | The GUI application, on iced: the notebook of runs from `bsx-record`, a run's record with its display (leased over the control socket, uploaded to a wgpu texture) and output, a start form, stop, re-run, delete, and a shell in the operator's terminal through `bsx`. |
 | `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
+
+## What crosses the GPU boundary
+
+Measured 2026-09-04 on one host: Intel Core i5-10310U with UHD Graphics (i915), Linux 7.2.2,
+libkrun 1.19.4, libkrunfw 5.5.0, virglrenderer 1.3.0, Mesa 26.1.6. One host, one date; nothing here
+is claimed for any other.
+
+**Only 2D pixels cross, in one direction.** A guest draws into a DRM dumb buffer, its kernel
+`virtio_gpu` driver sends the transfer and flush, and the frame arrives in host RAM. No guest
+process has ever issued a 3D command, on this host, because no userspace driver in either image can.
+
+### The host uses its GPU; the guest does not
+
+A `--display` VM's monitor process holds seven file descriptors on `/dev/dri/renderD128` (the i915
+render node) and maps Mesa's EGL, GLES and GBM alongside `libvirglrenderer`. A headless VM on the
+same image holds none, and maps neither EGL nor GLES:
+
+```console
+$ bsx up --name gpuprobe --root artifacts/rootfs-guest --display 640x480
+$ ls -l /proc/$(pgrep -f 'bsx __vmm')/fd | grep -c renderD128
+7
+$ awk '{print $6}' /proc/$(pgrep -f 'bsx __vmm')/maps | grep -E 'libEGL|libGLES|virgl' | sort -u
+/usr/lib/libEGL_mesa.so.0.0.0
+/usr/lib/libGLESv2.so.2.1.0
+/usr/lib/libvirglrenderer.so.1.11.0
+```
+
+So `--display` is what brings the host GPU into a sandbox's blast radius. This is a property of the
+host renderer, not a capability granted to the guest, and it is the reason virglrenderer belongs in
+the trusted set on the [Security](./security.md) page.
+
+### What the guest is offered
+
+The guest gets a `virtio_gpu` card and a render node, and the device advertises 3D. Asking the host
+renderer for each capset (rather than decoding the `SUPPORTED_CAPSET_IDs` bitmask) is answered for
+VIRGL, VIRGL2, VENUS, CROSS_DOMAIN and DRM. `crates/cli/tests/gpu_probe.py` reports it, and
+`a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for` pins it:
+
+```
+PROBE card0_driver virtio_gpu 0.1.0 (virtio GPU)
+PROBE card0_param_3D_FEATURES 1
+PROBE card0_capsets_answered VIRGL(1) VIRGL2(2) VENUS(4) CROSS_DOMAIN(5) DRM(6)
+```
+
+That list is not a statement about what the host can serve. Setting `NO_VIRGL`, which makes every
+guest `ResourceCreate2d` fail, leaves the same five capsets answered.
+
+### What did not run, and why
+
+- **OpenGL in the guest.** Alpine's `mesa-dri-gallium` is built with Iris, llvmpipe and radeonsi
+  only; `strings libgallium-26.1.6.so` finds no virgl driver. A guest with Mesa installed prints
+  `virtio_gpu: driver missing` and falls back to `kms_swrast`, reporting
+  `OpenGL core profile renderer: llvmpipe`. Alpine packages no virgl Gallium driver at all, so this
+  is not reachable by adding a package.
+- **Vulkan in the guest.** `mesa-vulkan-virtio` (Venus) installs its ICD, but `vulkaninfo` gets
+  `ERROR_INITIALIZATION_FAILED` with no physical device. The cause is the host: Arch's
+  virglrenderer 1.3.0 exports zero `vkr_` symbols and does not link `libvulkan`, i.e. it is built
+  without Venus. Passing `VIRGL_RENDERER_VENUS` (`1 << 6`) to `krun_set_gpu_options` changes
+  nothing, which is how the host was established as the limit rather than the flag.
+- **Compute of any kind.** Follows from both of the above: no GL, no Vulkan, no guest driver.
+
+Both guest-side results were taken against a throwaway image built by installing Mesa into a copy of
+the guest tree; that image is a spike and is not in the repo.
+
+### What this settles
+
+GPU acceleration for the guest (phase 5) needs two things this host does not have, and neither is a
+BSX code change: a Mesa build carrying the virgl Gallium driver in the guest image, and a
+virglrenderer built with Venus on the host. Until both exist, `--display` is a 2D scanout and the
+guest's own rendering is software.

@@ -50,7 +50,10 @@ rustix = { version = "1", default-features = false, features = ["std"] }
 tracing = "0.1"
 # The window a sandbox's `--display` is shown in, and the CPU-side blit that puts a frame on it.
 # Both open their display server at run time (`*-dlopen`), so a host without one still builds and
-# runs everything but the window. No host-side GPU is involved: the guest's frames arrive in RAM.
+# runs everything but the window. Neither touches the host GPU: the guest's frames arrive in RAM
+# and softbuffer blits them on the CPU. The VMM in the same process does touch it, through
+# virglrenderer (see `docs/architecture.md`, "What crosses the GPU boundary"); the scope of this
+# line is the window, not the display path.
 # `wayland-csd-adwaita-notitle` draws window decorations without pulling in a font stack.
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle", "rwh_06"] }
 softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
