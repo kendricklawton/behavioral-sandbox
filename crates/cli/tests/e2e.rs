@@ -611,6 +611,59 @@ fn a_frame_the_guest_draws_reaches_the_host() {
     assert_eq!(at(160, 120), [0x40, 0x40, 0x40], "the middle is grey");
 }
 
+/// Roadmap 0.11, the guest half: what a `--display` guest is *offered* at the GPU boundary. The
+/// kernel driver is `virtio_gpu` with a render node beside the card, and the device advertises 3D
+/// with the VIRGL, VIRGL2 and VENUS capsets answered. None of that is reachable from guest
+/// userspace today, because neither image carries a Mesa driver, which `gpu_probe.py` reports in
+/// the same breath: the point of pinning both together is that the offer and the absence move
+/// independently, and a change to either is a change to what crosses.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for() {
+    if skipped("a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for") {
+        return;
+    }
+    let dir = bsx_test_support::ScratchDir::created("e2e-gpu");
+    std::fs::write(dir.path().join("probe.py"), include_str!("gpu_probe.py"))
+        .expect("stage the probe");
+    let mount = format!("/mnt={}", dir.path().display());
+    let out = bsx()
+        .arg("run")
+        .arg("--root")
+        .arg(guest_root())
+        .args(["--display", "320x240", "--mount", &mount])
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .args(["--", "python3", "/mnt/probe.py"])
+        .output()
+        .expect("run bsx");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    let report = String::from_utf8_lossy(&out.stdout);
+    let says = |line: &str| {
+        assert!(
+            report.lines().any(|l| l == line),
+            "expected {line:?} in:\n{report}"
+        );
+    };
+    says("PROBE render_node yes");
+    says("PROBE card0_driver virtio_gpu 0.1.0 (virtio GPU)");
+    says("PROBE card0_param_3D_FEATURES 1");
+    says("PROBE card0_param_CONTEXT_INIT 1");
+    // Answered by the host renderer, not decoded from the SUPPORTED_CAPSET_IDs bitmask.
+    let capsets = report
+        .lines()
+        .find_map(|l| l.strip_prefix("PROBE card0_capsets_answered "))
+        .unwrap_or_else(|| panic!("no capset line in:\n{report}"));
+    for want in ["VIRGL(1)", "VIRGL2(2)", "VENUS(4)"] {
+        assert!(capsets.contains(want), "{want} missing from {capsets:?}");
+    }
+    // The other half of the answer: nothing in guest userspace can use any of it.
+    says("PROBE mesa_dri (absent)");
+    says("PROBE libgl (absent)");
+    says("PROBE libvulkan (absent)");
+}
+
 /// A key on the keyboard device and a click on the pointer device arrive in the guest as the
 /// evdev events a process there reads, under the names the devices were given (roadmap 0.10).
 /// The events go in through the replay hook, since a runner has no window to type into; the
