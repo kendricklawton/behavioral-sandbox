@@ -111,7 +111,7 @@ renderer for each capset (rather than decoding the `SUPPORTED_CAPSET_IDs` bitmas
 VIRGL, VIRGL2, VENUS, CROSS_DOMAIN and DRM. `crates/cli/tests/gpu_probe.py` reports it, and
 `a_display_guest_is_offered_a_3d_virtio_gpu_it_has_no_driver_for` pins it:
 
-```
+```text
 PROBE card0_driver virtio_gpu 0.1.0 (virtio GPU)
 PROBE card0_param_3D_FEATURES 1
 PROBE card0_capsets_answered VIRGL(1) VIRGL2(2) VENUS(4) CROSS_DOMAIN(5) DRM(6)

@@ -1,7 +1,8 @@
 //! The cross-file lint the compiler cannot express.
 //!
 //! A workflow names repo paths as bare shell text, and the prose-drift lint reads `.rs` and `.md`
-//! only, so a rename lands green here and fails days later on a scheduled job.
+//! only, so a rename lands green here and fails days later on a scheduled job. An untagged fence in
+//! the book is the same shape of failure: green locally, and the site stops deploying.
 //!
 //! It runs under `cargo xtask ci` like any other test.
 
@@ -10,6 +11,55 @@ mod tests {
     use std::path::Path;
 
     use crate::workspace_root;
+
+    /// Every fenced block in the book carries a language tag.
+    ///
+    /// **rustdoc compiles an untagged fence as Rust**, so one takes `mdbook test` down with it and
+    /// the Docs workflow deploys nothing. Measured: a fence of probe output in `architecture.md`
+    /// left the book undeployed from 7894540 until it was found. Checked here rather than by
+    /// running `mdbook`, because the gate must need no tool the workflow installs for itself.
+    #[test]
+    fn every_book_fence_is_tagged() {
+        let docs = workspace_root().join("docs");
+        let mut untagged: Vec<String> = Vec::new();
+        let mut fences = 0usize;
+        let entries = std::fs::read_dir(&docs).expect("the book directory");
+        let mut pages: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .collect();
+        pages.sort();
+        assert!(!pages.is_empty(), "no book pages found under {docs:?}");
+
+        for page in &pages {
+            let text = std::fs::read_to_string(page).expect("a readable page");
+            let mut open = false;
+            for (idx, line) in text.lines().enumerate() {
+                let Some(rest) = line.strip_prefix("```") else {
+                    continue;
+                };
+                // A closing fence carries no tag, so only an opener is judged.
+                if open {
+                    open = false;
+                    continue;
+                }
+                open = true;
+                fences += 1;
+                if rest.trim().is_empty() {
+                    let name = page.file_name().unwrap_or_default().to_string_lossy();
+                    untagged.push(format!("{name}:{}", idx + 1));
+                }
+            }
+            assert!(!open, "unclosed fence in {page:?}");
+        }
+        assert!(fences > 0, "no fences found, so this lint proves nothing");
+        assert!(
+            untagged.is_empty(),
+            "untagged code fence(s); rustdoc compiles these as Rust and `mdbook test` fails, \
+             which stops the book deploying. Tag them (```text, ```console, ```rust): {untagged:?}"
+        );
+    }
 
     /// Workflows name repo files as bare shell text, which the prose-drift lint does not read, so
     /// a rename lands green and the weekly job fails days later.
