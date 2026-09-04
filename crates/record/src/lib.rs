@@ -7,6 +7,9 @@
 //!
 //! - **Local, and only here.** `$BSX_RUNS_DIR`, else `$XDG_DATA_HOME/bsx/runs`, else
 //!   `~/.local/share/bsx/runs`, created `0700`. Nothing in this crate opens a socket.
+//! - **An id is one directory name, by an allow-list.** [`valid_id`] holds an id to
+//!   `a-z A-Z 0-9 - _`, and every method that reads, writes or removes refuses one it rejects:
+//!   the id is joined to a path and [`Store::remove`] hands the result to `remove_dir_all`.
 //! - **The record is rewritten whole, atomically.** A reader sees the old text or the new, never
 //!   a torn one: the end is written to a temporary file and renamed over the record.
 //! - **Output is capped, and the cap is visible.** A capped file stops at the cap and leaves a
@@ -383,11 +386,53 @@ impl Record {
         if !seen_format {
             return Err(ParseError("no `record` line".to_string()));
         }
-        if record.id.is_empty() || record.name.is_empty() {
-            return Err(ParseError("no id or name".to_string()));
+        if record.name.is_empty() {
+            return Err(ParseError("no name".to_string()));
+        }
+        if !valid_id(&record.id) {
+            return Err(ParseError(format!(
+                "{:?} is not a usable id: {}",
+                record.id,
+                id_rule()
+            )));
         }
         Ok(record)
     }
+}
+
+/// The most characters a run id may have, which bounds the directory name it becomes.
+const MAX_ID: usize = 128;
+
+/// Whether `id` may become a directory under the runs directory.
+///
+/// **A run id reaches the filesystem**, and [`Store::remove`] hands its directory to
+/// `remove_dir_all`, so `../../x` or an absolute path would delete outside the store. Restricted
+/// to an explicit alphabet rather than filtered for known-bad sequences, the same choice
+/// `bsx_supervisor::socket::valid_name` makes for the same reason: a deny-list is a guess about
+/// what is dangerous, and an allow-list is a statement about what is permitted.
+#[must_use]
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The sentence [`valid_id`] enforces, for an error that has to say why.
+fn id_rule() -> String {
+    format!("1 to {MAX_ID} of a-z, A-Z, 0-9, `-` and `_`, since the id becomes a directory name")
+}
+
+/// The id refused before it is joined to a path.
+fn checked_id(id: &str) -> io::Result<&str> {
+    if valid_id(id) {
+        return Ok(id);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{id:?} is not a usable run id: {}", id_rule()),
+    ))
 }
 
 /// A record file this build could not read.
@@ -520,7 +565,10 @@ impl Store {
         &self.dir
     }
 
-    /// The directory of the run with `id`.
+    /// The directory of the run with `id`, joined and not checked.
+    ///
+    /// Every method here that touches the filesystem refuses an id [`valid_id`] rejects, and so
+    /// does [`Record::parse`], so an id that arrived in a `Record` is already one component.
     #[must_use]
     pub fn dir_of(&self, id: &str) -> RunDir {
         RunDir {
@@ -531,7 +579,7 @@ impl Store {
     /// Creates the run's directory and its `results/`, writes the record, and prunes ended runs
     /// beyond [`keep_count`].
     pub fn create(&self, record: &Record) -> io::Result<RunDir> {
-        let run = self.dir_of(&record.id);
+        let run = self.dir_of(checked_id(&record.id)?);
         std::fs::create_dir(&run.path)?;
         std::fs::create_dir(run.results())?;
         self.save(record)?;
@@ -541,7 +589,7 @@ impl Store {
 
     /// Writes the record whole, atomically.
     pub fn save(&self, record: &Record) -> io::Result<()> {
-        let run = self.dir_of(&record.id);
+        let run = self.dir_of(checked_id(&record.id)?);
         let tmp = run.path.join("record.tmp");
         std::fs::write(&tmp, record.to_text())?;
         std::fs::rename(&tmp, run.record_path())
@@ -549,7 +597,7 @@ impl Store {
 
     /// Reads the run with `id`.
     pub fn read(&self, id: &str) -> io::Result<Record> {
-        let text = std::fs::read_to_string(self.dir_of(id).record_path())?;
+        let text = std::fs::read_to_string(self.dir_of(checked_id(id)?).record_path())?;
         Record::parse(&text).map_err(io::Error::other)
     }
 
@@ -589,7 +637,7 @@ impl Store {
 
     /// Removes the run with `id` and everything it captured.
     pub fn remove(&self, id: &str) -> io::Result<()> {
-        std::fs::remove_dir_all(self.dir_of(id).path)
+        std::fs::remove_dir_all(self.dir_of(checked_id(id)?).path)
     }
 
     /// Removes ended runs beyond the newest `keep`, oldest first, and says how many went.
@@ -703,7 +751,7 @@ impl Capped {
             .create(true)
             .mode(0o600)
             .open(path)?;
-        let held = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let held = file.metadata().map_or(0, |m| m.len());
         Ok(Self {
             file,
             path: path.to_path_buf(),
@@ -921,5 +969,61 @@ mod tests {
         );
         let bare = Posture::new(PathBuf::from("/img"), 1, 512).sentence();
         assert!(bare.contains("It will not: read anything else on this machine, reach the network, show a display, play or capture sound."), "{bare}");
+    }
+
+    /// An id is one directory name. A record file naming a traversing id does not parse, and the
+    /// store refuses one directly, so the directory beside the store survives a `remove` that
+    /// points at it.
+    #[test]
+    fn an_id_that_would_leave_the_store_is_refused_by_every_door() {
+        let dir = bsx_test_support::ScratchDir::created("record-id");
+        let neighbour = dir.path().join("neighbour");
+        std::fs::create_dir_all(neighbour.join("keep")).expect("a directory beside the store");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+
+        for bad in [
+            "../neighbour",
+            "..",
+            "/etc",
+            "a/b",
+            "",
+            &"x".repeat(MAX_ID + 1),
+        ] {
+            assert!(!valid_id(bad), "{bad:?} must not be a usable id");
+            for outcome in [
+                store.remove(bad).err(),
+                store.read(bad).err(),
+                store.create(&record_with_id(bad)).err(),
+                store.save(&record_with_id(bad)).err(),
+            ] {
+                assert!(outcome.is_some(), "{bad:?} must be refused");
+                let e = outcome.expect("the refusal");
+                assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}: {e}");
+            }
+        }
+        assert!(
+            neighbour.join("keep").is_dir(),
+            "the neighbour is untouched"
+        );
+
+        // The other door: a record file carrying a traversing id, which `list` and `find` would
+        // otherwise hand back for `remove` to act on.
+        let planted = store.dir().join("1756860007123-planted");
+        std::fs::create_dir_all(&planted).expect("a run directory");
+        let mut record = record_with_id("1756860007123-planted");
+        record.id = "../neighbour".to_string();
+        std::fs::write(planted.join("record"), record.to_text()).expect("the planted record");
+        assert_eq!(store.list().expect("listed"), vec![], "it does not parse");
+        assert_eq!(store.find("../neighbour").expect("no error"), None);
+        assert!(
+            neighbour.join("keep").is_dir(),
+            "the neighbour is still there"
+        );
+    }
+
+    fn record_with_id(id: &str) -> Record {
+        let mut record = Record::begin("named", Verb::Run, vec!["true".into()], posture());
+        record.id = id.to_string();
+        record
     }
 }
