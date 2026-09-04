@@ -12,6 +12,7 @@ mod drift;
 mod guest_bins;
 mod lints;
 mod rootfs;
+mod sign;
 mod vendor;
 
 use std::ffi::OsStr;
@@ -40,6 +41,14 @@ enum Cmd {
     Ci,
     /// Check the host can do KVM; report what's missing.
     Setup,
+    /// Sign the built `bsx` for Hypervisor.framework so it can start a VM (macOS). A later cargo
+    /// build or test replaces the binary and the signature with it, so this runs after a build
+    /// rather than once. Elsewhere it says there is nothing to sign and exits.
+    Sign {
+        /// Sign the release build rather than the debug one.
+        #[arg(long)]
+        release: bool,
+    },
     /// Snapshot every sha-pinned upstream input (the Alpine base, the static `apk`, the `.apk`
     /// closure) into a local mirror, so a fresh host builds offline without the Alpine CDN.
     /// Writes a sha manifest; re-verify it offline with `--verify`.
@@ -140,6 +149,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Ci => ci(),
         Cmd::Setup => setup(),
+        Cmd::Sign { release } => sign::sign_for_hypervisor(release),
         Cmd::Vendor { dir, verify } => {
             if verify {
                 vendor::verify(&dir.unwrap_or_else(vendor::default_vendor_dir))
@@ -356,6 +366,11 @@ fn ci() -> Result<()> {
     cargo(&["deny", "check"])?;
     deny_detached_workspaces(workspace_root())?;
     lint_detached_workspaces(workspace_root())?;
+    // Last, because a signature does not reliably outlive a later cargo command: `codesign` writes
+    // a new inode, breaking the hardlink `target/debug/bsx` is uplifted from, and cargo sometimes
+    // re-links the unsigned artifact over it. Signing earlier signs something a later step may
+    // replace.
+    sign::sign_for_hypervisor(false)?;
     announce_compiled_out();
     println!("\n✓ all checks passed");
     Ok(())
@@ -727,6 +742,13 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| Path::new("."))
+}
+
+/// Where cargo actually places a build: `CARGO_TARGET_DIR` when set, else `target/` under the
+/// workspace root.
+fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| workspace_root().join("target"), PathBuf::from)
 }
 
 /// `artifacts/` under the workspace root.

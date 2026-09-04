@@ -128,9 +128,22 @@ cargo install cargo-deny                      # run by the gate
 `/dev/kvm` must be readable and writable by your user, which usually means membership of the `kvm`
 group. No part of the build or the run needs root.
 
+**On macOS the build has one more step, and it is a build step.** Hypervisor.framework refuses a
+process that does not carry `com.apple.security.hypervisor`. `cargo xtask sign` applies it (ad-hoc,
+so no Apple Developer identity), reads the granted **value** back off the binary, and is a no-op
+that says so on other platforms.
+
+**A signature does not reliably outlive a later cargo command.** `codesign` writes a new inode,
+which breaks the hardlink cargo uplifts `target/debug/bsx` from, and cargo then sometimes re-links
+the unsigned artifact out of `deps/` over it: observed both ways on this host for the same commands,
+with the binary's mtime going *backwards*, and the trigger not pinned down. So treat a signature as
+lost after any build. `cargo xtask sign` is idempotent and cheap, `cargo xtask ci` runs it last, and
+anything that needs a signed `bsx` should sign rather than assume.
+
 ```console
 cargo xtask setup            # what this host can and cannot do
-cargo xtask ci               # the gate
+cargo xtask ci               # the gate (and signs what it built, on macOS)
+cargo xtask sign             # macOS only: re-entitle the built `bsx` after any other build
 cargo xtask build-rootfs     # the guest image (Alpine + the GUEST_PACKAGES runtimes + static agent)
 cargo xtask build-rootfs --desktop   # the desktop image (+ cage, foot, seatd, udev, and bsx-session)
 ```

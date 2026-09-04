@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::{cargo_reproducible, workspace_root};
+use crate::cargo_reproducible;
 
 /// The musl target the guest agent is built for: a fully static binary that runs in the guest with
 /// no dynamic loader or libc to bake into the rootfs.
@@ -47,17 +47,10 @@ fn build_guest_musl() -> Result<PathBuf> {
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
     cargo_reproducible(&args)?;
-    let bin = guest_target_dir().join(GUEST_TARGET).join(subpath);
+    let bin = crate::target_dir().join(GUEST_TARGET).join(subpath);
     verify_static(&bin, label)?;
     println!("\n✓ {label} built (static): {}", bin.display());
     Ok(bin)
-}
-
-/// Where cargo actually placed the build: `CARGO_TARGET_DIR` when set, else `target/`. The built
-/// binary must be resolved from the directory cargo wrote it to, or a stale one is staged.
-fn guest_target_dir() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| workspace_root().join("target"), PathBuf::from)
 }
 
 /// Fail with a clear fix if the guest musl target isn't installed, cargo would otherwise error more
