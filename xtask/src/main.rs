@@ -96,6 +96,10 @@ enum Cmd {
         /// How many idle VMs to bring up (stops earlier at the memory floor). Default 8.
         #[arg(long, default_value_t = 8)]
         count: usize,
+        /// Seconds to wait after the last vCPU before sampling, so the youngest guest has
+        /// finished booting and is as idle as the oldest. Default 10.
+        #[arg(long, default_value_t = 10)]
+        settle_secs: u64,
     },
     /// Measure the guest-to-host frame path: a guest draws frames as fast as its chosen path
     /// allows, the helper logs each frame's arrival, and the intervals are reported as
@@ -165,7 +169,9 @@ fn main() -> Result<()> {
             update_lock,
         ),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
-        Cmd::BenchFootprint { count } => bench::bench_footprint(count),
+        Cmd::BenchFootprint { count, settle_secs } => {
+            bench::bench_footprint(count, std::time::Duration::from_secs(settle_secs))
+        }
         Cmd::BenchFrames {
             display,
             frames,

@@ -112,10 +112,10 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// `cargo xtask bench-footprint [--count N]`: what a sandbox costs to keep.
+/// `cargo xtask bench-footprint [--count N] [--settle-secs S]`: what a sandbox costs to keep.
 ///
-/// Brings up `count` idle VMs, keeps them all alive, and samples two things that answer different
-/// questions:
+/// Brings up `count` idle VMs, waits `settle` so the youngest has finished booting rather than
+/// merely reaching a vCPU, then samples two things that answer different questions:
 /// - **Pss per VMM**, which splits each shared page across its sharers, so summing it over the
 ///   cohort is the true resident cost rather than a double count of whatever they share.
 /// - **The whole-host `MemAvailable` drop**, divided by the cohort. This catches what a VMM's own
@@ -124,7 +124,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
 ///
 /// Rss is reported beside Pss because the *gap* between them is the sharing, and a single number
 /// cannot show that.
-pub(crate) fn bench_footprint(count: usize) -> Result<()> {
+pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
     if count == 0 {
         bail!("--count must be >= 1");
     }
@@ -141,8 +141,12 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
         ctx.mem_mib
     );
     println!(
-        "  keeping >= {} MiB available, so this never swaps the host\n",
+        "  keeping >= {} MiB available, so this never swaps the host",
         floor_kib / 1024
+    );
+    println!(
+        "  settling {} s after the last vCPU before sampling\n",
+        settle.as_secs()
     );
 
     let before = mem_available_kib()?;
@@ -185,6 +189,12 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
             cohort.len()
         );
     }
+
+    // A vCPU is running, which is not the same as a guest that has finished booting: the last VM
+    // up is seconds younger than the first, and sampling here would read a half-booted guest as
+    // its idle cost and understate the whole cohort. Wait for the youngest to reach the same idle
+    // state as the oldest, then sample them together.
+    std::thread::sleep(settle);
 
     let (mut rss_mib, mut pss_mib) = (Vec::new(), Vec::new());
     for child in &cohort {
