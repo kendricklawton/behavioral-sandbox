@@ -6,7 +6,7 @@
 //! in a real (dev-)dependency crate rather than be copy-pasted. Never shipped (`publish = false`)
 //! and pure-std, so it stays a leaf every suite can borrow without coupling.
 //!
-//! One host-capability probe lives here too ([`kvm_unusable`]), because the leak tests and the
+//! One host-capability probe lives here too ([`hypervisor_unusable`]), because the leak tests and the
 //! benches both refuse a host that cannot boot a VM and should refuse it with one message.
 
 #![forbid(unsafe_code)]
@@ -16,22 +16,54 @@
 
 use std::path::{Path, PathBuf};
 
-/// Why `/dev/kvm` cannot back a VM from this process, or `None` when it can.
+/// Why a hypervisor cannot back a VM from this process, or `None` when it can.
 ///
-/// Opened read-write, as a VMM needs: the common failure is a user outside the `kvm` group.
+/// Asks the question **this** host can answer, which is the same capability either way: Linux opens
+/// `/dev/kvm` read-write, as a VMM needs, and the common failure is a user outside the `kvm` group.
+/// macOS asks the kernel whether the machine virtualises at all, because reaching
+/// Hypervisor.framework itself would need the caller to carry `com.apple.security.hypervisor`, and
+/// a test binary is never signed.
 #[must_use]
-pub fn kvm_unusable() -> Option<String> {
-    match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/kvm")
+pub fn hypervisor_unusable() -> Option<String> {
+    #[cfg(target_os = "linux")]
     {
-        Ok(_) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("/dev/kvm is absent".into()),
-        Err(e) => Some(format!(
-            "/dev/kvm cannot be opened read-write ({e}); membership of the kvm group is the \
-             usual fix"
-        )),
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+        {
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("/dev/kvm is absent".into()),
+            Err(e) => Some(format!(
+                "/dev/kvm cannot be opened read-write ({e}); membership of the kvm group is the \
+                 usual fix"
+            )),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let answers = std::process::Command::new("sysctl")
+            .args(["-n", "kern.hv_support"])
+            .output()
+            .is_ok_and(|out| out.status.success() && out.stdout.starts_with(b"1"));
+        if !answers {
+            return Some("this machine reports no Hypervisor.framework support".to_string());
+        }
+        // The machine can, and a test still cannot. Hypervisor.framework refuses a process that
+        // does not carry `com.apple.security.hypervisor`, and cargo rewrites `target/debug/bsx`
+        // (and so drops any signature) as part of the very run that would use it, so a suite has
+        // no signed binary to spawn. Booting a VM from the test harness on macOS therefore needs
+        // the signing question answered first; a *manual* run after `cargo xtask sign` works, which
+        // is how the benches are run.
+        Some(
+            "a VM booted from a test needs an entitled `bsx`, and cargo drops the signature \
+             during the same run that would spawn it (`cargo xtask sign` covers a manual run)"
+                .to_string(),
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Some("no hypervisor this project knows how to reach".to_string())
     }
 }
 

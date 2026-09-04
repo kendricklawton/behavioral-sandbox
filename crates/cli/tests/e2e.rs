@@ -13,7 +13,7 @@ use std::process::Command;
 
 /// Why this host cannot run these, or `None` when it can.
 fn skip_reason() -> Option<String> {
-    if let Some(why) = bsx_test_support::kvm_unusable() {
+    if let Some(why) = bsx_test_support::hypervisor_unusable() {
         return Some(why);
     }
     if !guest_root().is_dir() {

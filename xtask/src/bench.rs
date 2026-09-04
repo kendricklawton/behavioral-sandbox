@@ -58,28 +58,32 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
         let mut child = ctx.spawn_guest(&format!("bench-boot-{i}"), "true")?;
         let pid = child.id();
 
-        // Seen, not merely waited for: the wait also ends when the process dies.
-        let mut saw_vcpu = false;
-        let ended = wait_until(BOOT_GRACE, || {
-            if vm_is_running(pid) {
-                saw_vcpu = true;
-                return true;
+        // Seen, not merely waited for: the wait also ends when the process dies. Where a vCPU
+        // cannot be seen at all (`VCPU_IS_OBSERVABLE`), there is nothing to wait for and nothing
+        // to record, and the run below still times the boot a user actually waits through.
+        if VCPU_IS_OBSERVABLE {
+            let mut saw_vcpu = false;
+            let ended = wait_until(BOOT_GRACE, || {
+                if vm_is_running(pid) {
+                    saw_vcpu = true;
+                    return true;
+                }
+                !pid_is_live(pid)
+            });
+            if !ended {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("boot {i}: no vCPU thread within {BOOT_GRACE:?}");
             }
-            !pid_is_live(pid)
-        });
-        if !ended {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("boot {i}: no vCPU thread within {BOOT_GRACE:?}");
+            if !saw_vcpu {
+                let status = child.wait().context("reap the early-exiting helper")?;
+                bail!(
+                    "boot {i}: the helper ended ({status}) before a vCPU was observed; run \
+                     `bsx __vmm` by hand to see why"
+                );
+            }
+            to_vcpu.push(started.elapsed().as_millis() as u64);
         }
-        if !saw_vcpu {
-            let status = child.wait().context("reap the early-exiting helper")?;
-            bail!(
-                "boot {i}: the helper ended ({status}) before a vCPU was observed; run \
-                 `bsx __vmm` by hand to see why"
-            );
-        }
-        to_vcpu.push(started.elapsed().as_millis() as u64);
 
         let status = child.wait().context("wait for the guest to exit")?;
         to_exit.push(started.elapsed().as_millis() as u64);
@@ -90,7 +94,17 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     }
     progress.clear();
 
-    report_percentiles("to vCPU running", &mut to_vcpu, "ms");
+    if VCPU_IS_OBSERVABLE {
+        report_percentiles("to vCPU running", &mut to_vcpu, "ms");
+    } else {
+        // Named, not omitted: a report that quietly drops a row reads as a host that was slower at
+        // nothing in particular.
+        println!(
+            "  to vCPU running            not measurable on {}: it publishes no thread names,\n\
+             \x20                          so libkrun's `fc_vcpu` cannot be seen from outside",
+            host_os()
+        );
+    }
     report_percentiles("to guest exit", &mut to_exit, "ms");
     println!(
         "\n\"to vCPU\" is polled at {POLL_MS} ms, so it is a floor carrying that interval as noise.\n\
@@ -114,8 +128,7 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
 
     // A floor the bench refuses to cross, so a large `--count` cannot drive the host into swap:
     // keep at least max(1 GiB, 5% of RAM) available.
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("read /proc/meminfo")?;
-    let mem_total = proc_kib(&meminfo, "MemTotal").context("no MemTotal in /proc/meminfo")?;
+    let mem_total = mem_total_kib().context("the host's total RAM")?;
     let floor_kib = (mem_total / 20).max(1024 * 1024);
     println!(
         "  cohort of {count} idle VMs, kept alive together, {} MiB guest RAM each",
@@ -139,14 +152,17 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
         }
         let mut child = ctx.spawn_guest(&format!("bench-fp-{i}"), IDLE_GUEST)?;
         let pid = child.id();
-        let mut saw_vcpu = false;
+        let mut saw_vcpu = !VCPU_IS_OBSERVABLE;
         let ended = wait_until(BOOT_GRACE, || {
-            if vm_is_running(pid) {
+            if VCPU_IS_OBSERVABLE && vm_is_running(pid) {
                 saw_vcpu = true;
                 return true;
             }
+            // With no vCPU to watch for, a helper that is still alive at the grace period is as
+            // much as this host can assert; `--settle-secs` is what covers the rest of the boot.
             !pid_is_live(pid)
         });
+        let ended = ended || !VCPU_IS_OBSERVABLE;
         if !ended || !saw_vcpu {
             let _ = child.kill();
             let _ = child.wait();
@@ -187,7 +203,7 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
     let n = cohort.len() as i64;
     teardown(&mut cohort);
 
-    report_percentiles("Pss per VMM", &mut pss_mib, "MiB");
+    report_percentiles(SHARED_AWARE_LABEL, &mut pss_mib, "MiB");
     report_percentiles("Rss per VMM", &mut rss_mib, "MiB");
     println!(
         "  {:<26} whole-host {} MiB across {n} VMs = {} KiB/VM",
@@ -195,12 +211,25 @@ pub(crate) fn bench_footprint(count: usize, settle: Duration) -> Result<()> {
         host_drop_kib / 1024,
         host_drop_kib / n
     );
-    println!(
-        "\nPss splits each shared page across its sharers, so summing it is the true resident cost;\n\
-         Rss counts every page in full, and the gap between the two is what the VMs share. The\n\
-         whole-host figure catches what a VMM's own smaps cannot see, and is the one to trust when\n\
-         they disagree."
-    );
+    if cfg!(target_os = "linux") {
+        println!(
+            "\nPss splits each shared page across its sharers, so summing it is the true resident\n\
+             cost; Rss counts every page in full, and the gap between the two is what the VMs\n\
+             share. The whole-host figure catches what a VMM's own smaps cannot see, and is the\n\
+             one to trust when they disagree."
+        );
+    } else {
+        println!(
+            "\nmacOS has no Pss. `phys_footprint` is Apple's own accounting of what a process\n\
+             costs, compressed pages included, and it is not a proportional share, so summing it\n\
+             over a cohort is not the host's bill.\n\n\
+             The whole-host figure is the fall in (total - active - wired - compressor), and on\n\
+             this platform it is **not steady enough to quote**: three runs of the same cohort\n\
+             gave 7, 16 and 27 MiB per VM (2026-09-04, macOS 25.6.0) while the per-VMM figures\n\
+             moved by 1 MiB. macOS compresses and reclaims under the measurement. Quote the\n\
+             per-VMM numbers here, and say which one you mean."
+        );
+    }
     Ok(())
 }
 
@@ -602,7 +631,10 @@ impl BenchContext {
     /// Resolves the inputs, refusing with the command that produces each missing one.
     fn resolve() -> Result<Self> {
         // Opened, not tested: outside the `kvm` group the device exists and every boot dies.
-        if let Some(why) = bsx_test_support::kvm_unusable() {
+        // Not `bsx_test_support::hypervisor_unusable`, which additionally refuses a *test* on
+        // macOS for want of a signed binary. A bench is run by hand after `cargo xtask sign`, so
+        // what it needs to know is only whether the machine virtualises.
+        if let Some(why) = hypervisor_unusable_for_a_bench() {
             bail!("{why}: these benchmarks boot real VMs");
         }
         // The **release** binary, deliberately: a debug build measures the wrong thing, and the old
@@ -652,18 +684,16 @@ impl BenchContext {
 
     /// Prints the host, the date and the conditions, so a number pasted elsewhere carries them.
     fn print_header(&self, what: &str) {
-        let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "unknown".into());
+        let kernel = kernel_release().unwrap_or_else(|| "unknown".into());
         let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
-        let mem_gib = std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|s| proc_kib(&s, "MemTotal"))
-            .map_or(0, |kib| kib / 1024 / 1024);
+        let mem_gib = mem_total_kib().unwrap_or(0) / 1024 / 1024;
         let load = loadavg_1m();
 
         println!("{what}: libkrun {}", libkrun_version());
-        println!("  host:   Linux {kernel}, {cpus} CPUs, {mem_gib} GiB RAM, load {load:.2}");
+        println!(
+            "  host:   {} {kernel}, {cpus} CPUs, {mem_gib} GiB RAM, load {load:.2}",
+            host_os()
+        );
         println!("  date:   {}", today());
         println!("  guest:  {}", self.guest_root.display());
         println!(
@@ -716,23 +746,59 @@ fn today() -> String {
 /// Whether `pid` has a running vCPU thread, the boundary between a started helper and a VM
 /// executing guest code. Matched by libkrun's `fc_vcpu 0` name, since a thread count moves.
 fn vm_is_running(pid: u32) -> bool {
-    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-        return false;
-    };
-    tasks.filter_map(Result::ok).any(|t| {
-        std::fs::read_to_string(t.path().join("comm"))
-            .is_ok_and(|c| c.trim().starts_with("fc_vcpu"))
-    })
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return false;
+        };
+        tasks.filter_map(Result::ok).any(|t| {
+            std::fs::read_to_string(t.path().join("comm"))
+                .is_ok_and(|c| c.trim().starts_with("fc_vcpu"))
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Whether a running vCPU can be *seen* on this host at all.
+///
+/// libkrun names its vCPU thread `fc_vcpu 0`, and Linux publishes thread names under
+/// `/proc/<pid>/task/*/comm`. macOS publishes none to another process (`ps -M` lists a process's
+/// threads with no `COMMAND` at all), so the "to vCPU" floor is **absent here rather than
+/// approximated**: a thread count would move with any libkrun release and measure nothing.
+const VCPU_IS_OBSERVABLE: bool = cfg!(target_os = "linux");
+
+/// One trimmed line of a tool's stdout, or `None` if it could not be run. The host answers the
+/// questions `/proc` answers on Linux through `sysctl`, `vm_stat`, `ps` and `footprint`.
+#[cfg(not(target_os = "linux"))]
+fn tool(program: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(program).args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Whether `pid` is a live, non-zombie process.
 fn pid_is_live(pid: u32) -> bool {
-    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-        return false;
-    };
-    !status
-        .lines()
-        .any(|l| l.starts_with("State:") && l.contains('Z'))
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        !status
+            .lines()
+            .any(|l| l.starts_with("State:") && l.contains('Z'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Some(state) = tool("ps", &["-o", "state=", "-p", &pid.to_string()]) else {
+            return false;
+        };
+        !state.is_empty() && !state.starts_with('Z')
+    }
 }
 
 /// Polls `cond` every [`POLL_MS`] until it holds or `limit` runs out.
@@ -749,6 +815,7 @@ fn wait_until(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
 
 /// A single `Key:  N kB` field from a /proc file's contents, in KiB. Exact match on the pre-colon
 /// token, so a query for `Rss`/`Pss` never picks up `RssAnon` or `Pss_Anon`.
+#[cfg(any(target_os = "linux", test))]
 fn proc_kib(contents: &str, key: &str) -> Option<u64> {
     contents
         .lines()
@@ -759,27 +826,178 @@ fn proc_kib(contents: &str, key: &str) -> Option<u64> {
 
 /// `MemAvailable` (KiB): the kernel's own estimate of what can be allocated without swapping.
 fn mem_available_kib() -> Result<u64> {
-    let s = std::fs::read_to_string("/proc/meminfo").context("read /proc/meminfo")?;
-    proc_kib(&s, "MemAvailable").context("no MemAvailable in /proc/meminfo")
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/meminfo").context("read /proc/meminfo")?;
+        proc_kib(&s, "MemAvailable").context("no MemAvailable in /proc/meminfo")
+    }
+    // macOS publishes no single `MemAvailable`, so this sums the page classes the kernel can hand
+    // over without paging out. **An estimate of the same shape, not the same number**; the
+    // footprint bench reads a *drop* across a cohort, where a constant bias cancels.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let stat = tool("vm_stat", &[]).context("vm_stat")?;
+        let page: u64 = tool("sysctl", &["-n", "hw.pagesize"])
+            .context("sysctl hw.pagesize")?
+            .parse()
+            .context("hw.pagesize is not a number")?;
+        let pages = |label: &str| -> u64 {
+            stat.lines()
+                .find_map(|l| l.strip_prefix(label))
+                .and_then(|rest| {
+                    rest.trim()
+                        .trim_start_matches(':')
+                        .trim()
+                        .trim_end_matches('.')
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(0)
+        };
+        // Total minus what is *in use*, rather than a sum of the classes that look reclaimable.
+        // Measured: summing free + inactive + speculative + purgeable does not track a cohort at
+        // all (20 VMs of 66 MiB each moved it by 15 MiB), because macOS keeps reclaimable pages
+        // inactive and absorbs the allocation there. Used is active + wired + whatever the
+        // compressor holds, which is what Activity Monitor calls Memory Used.
+        let used = pages("Pages active")
+            + pages("Pages wired down")
+            + pages("Pages occupied by compressor");
+        if used == 0 {
+            bail!("vm_stat reported no pages in use, which cannot be right");
+        }
+        let total_kib = mem_total_kib().context("the host's total RAM")?;
+        Ok(total_kib.saturating_sub(used * page / 1024))
+    }
 }
 
 /// `(Rss, Pss)` for a process (KiB), from its `smaps_rollup`. **Rss** counts every resident page in
 /// full; **Pss** splits each shared page across its sharers, so a sum of Pss over a cohort is the
 /// true host footprint while a sum of Rss double-counts everything they share.
 fn rss_pss_kib(pid: u32) -> Result<(u64, u64)> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
-        .with_context(|| format!("read smaps_rollup for pid {pid} (needs Linux >= 4.14)"))?;
-    let rss = proc_kib(&s, "Rss").context("no Rss in smaps_rollup")?;
-    let pss = proc_kib(&s, "Pss").context("no Pss in smaps_rollup")?;
-    Ok((rss, pss))
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+            .with_context(|| format!("read smaps_rollup for pid {pid} (needs Linux >= 4.14)"))?;
+        let rss = proc_kib(&s, "Rss").context("no Rss in smaps_rollup")?;
+        let pss = proc_kib(&s, "Pss").context("no Pss in smaps_rollup")?;
+        Ok((rss, pss))
+    }
+    // macOS has no proportional set size. `phys_footprint` is Apple's own accounting of what a
+    // process costs, compressed pages included; it is **not** Pss, which is why the report names
+    // it differently rather than summing it as if it were.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let rss: u64 = tool("ps", &["-o", "rss=", "-p", &pid.to_string()])
+            .context("ps -o rss=")?
+            .parse()
+            .context("ps reported a non-numeric rss")?;
+        let out = tool("footprint", &["-p", &pid.to_string()]).context("footprint -p")?;
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("phys_footprint:"))
+            .context("no phys_footprint line from footprint(1)")?;
+        let mut parts = line.split_whitespace().skip(1);
+        let value: f64 = parts
+            .next()
+            .context("no phys_footprint value")?
+            .parse()
+            .context("phys_footprint is not a number")?;
+        let kib = match parts.next().unwrap_or("KB") {
+            "KB" => value,
+            "MB" => value * 1024.0,
+            "GB" => value * 1024.0 * 1024.0,
+            other => bail!("phys_footprint in an unhandled unit: {other}"),
+        };
+        Ok((rss, kib as u64))
+    }
+}
+
+/// What the second number [`rss_pss_kib`] returns is called, since the platforms measure different
+/// things and a shared label would make one of them a lie.
+const SHARED_AWARE_LABEL: &str = if cfg!(target_os = "linux") {
+    "Pss per VMM"
+} else {
+    "phys_footprint per VMM"
+};
+
+/// Why this machine cannot back a VM, or `None` when it can.
+///
+/// The benches ask only about the machine: the operator signs a release `bsx` before running one,
+/// which is the step a test cannot take for itself.
+fn hypervisor_unusable_for_a_bench() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        bsx_test_support::hypervisor_unusable()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let answers = Command::new("sysctl")
+            .args(["-n", "kern.hv_support"])
+            .output()
+            .is_ok_and(|out| out.status.success() && out.stdout.starts_with(b"1"));
+        (!answers).then(|| "this machine reports no hardware virtualization".to_string())
+    }
+}
+
+/// This host's OS, as a person would name it in a measurement note.
+fn host_os() -> &'static str {
+    match std::env::consts::OS {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        other => other,
+    }
+}
+
+/// The running kernel's release string.
+fn kernel_release() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tool("sysctl", &["-n", "kern.osrelease"])
+    }
+}
+
+/// Total host RAM, KiB.
+fn mem_total_kib() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| proc_kib(&s, "MemTotal"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tool("sysctl", &["-n", "hw.memsize"])
+            .and_then(|b| b.parse::<u64>().ok())
+            .map(|bytes| bytes / 1024)
+    }
 }
 
 /// The host's 1-minute load average, or `0.0` when `/proc/loadavg` cannot be read.
 fn loadavg_1m() -> f64 {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()))
-        .unwrap_or(0.0)
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()))
+            .unwrap_or(0.0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `sysctl -n vm.loadavg` prints `{ 1.83 2.05 2.11 }`.
+        tool("sysctl", &["-n", "vm.loadavg"])
+            .and_then(|s| {
+                s.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<f64>().ok())
+            })
+            .unwrap_or(0.0)
+    }
 }
 
 /// Prints min/p50/p90/p99/max of `samples`, sorting in place. Nearest-rank, no interpolation.

@@ -289,7 +289,7 @@ mod tests {
             .to_path_buf();
         let bsx = root.join("target/debug/bsx");
         let guest = root.join("artifacts/rootfs-guest");
-        if let Some(why) = bsx_test_support::kvm_unusable() {
+        if let Some(why) = bsx_test_support::hypervisor_unusable() {
             println!("SKIPPED the_bridge_starts_and_stops_a_run_the_record_shows: {why}");
             return;
         }

@@ -33,7 +33,7 @@ const BOOT_GRACE: Duration = Duration::from_secs(5);
 /// Why this host cannot run these, or `None` when it can. The KVM check opens the device, since
 /// for a user outside the `kvm` group it exists and every boot still dies.
 fn skip_reason() -> Option<String> {
-    if let Some(why) = bsx_test_support::kvm_unusable() {
+    if let Some(why) = bsx_test_support::hypervisor_unusable() {
         return Some(why);
     }
     if !guest_root().is_dir() {
