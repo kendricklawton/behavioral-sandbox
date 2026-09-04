@@ -12,6 +12,9 @@ description = "Spawn, track, stop and reap the helper processes that are VMs."
 [dependencies]
 # The fd handover a display lease rides on (`sendmsg`/`recvmsg` with `SCM_RIGHTS`).
 rustix = { workspace = true, features = ["net", "process"] }
+# For `KRUNFW_DIR` alone: the helper this crate spawns *is* a libkrun VMM, and it has to be told
+# where libkrun's kernel payload is (see `helper_command`). No libkrun call is made from here.
+bsx-krun = { path = "../krun" }
 
 [dev-dependencies]
 bsx-test-support = { path = "../test-support" }

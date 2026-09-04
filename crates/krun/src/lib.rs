@@ -675,6 +675,17 @@ impl fmt::Debug for Storage {
     }
 }
 
+/// The directory holding libkrunfw, found at build time, or `None` where nothing needs it.
+///
+/// libkrun loads its kernel payload with `dlopen("libkrunfw.5.dylib")`, a bare name, which the
+/// dynamic loader resolves against its own search paths and never the linker's. On macOS those
+/// paths do not include a Homebrew prefix, so the process that calls [`Machine::enter`] has to be
+/// given the directory through `DYLD_FALLBACK_LIBRARY_PATH`, and `DYLD_*` is read at `exec`, so it
+/// can only come from whatever spawned it. `bsx-supervisor` puts it on the helper it spawns.
+///
+/// `None` on Linux, whose loader finds `libkrunfw.so` beside libkrun without help.
+pub const KRUNFW_DIR: Option<&str> = option_env!("BSX_KRUNFW_DIR");
+
 /// A memfd of one fixed size, sealed against growing or shrinking, mapped shared. The sealing is
 /// what lets a second process map it without either side being able to shrink it under the
 /// other's mapping, which would turn a read into a `SIGBUS`.

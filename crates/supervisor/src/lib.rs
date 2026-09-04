@@ -561,6 +561,10 @@ fn helper_command_unless_helper(
         (Console::Detached, None) => Stdio::null(),
     };
     let mut cmd = Command::new(helper_path()?);
+    #[cfg(target_os = "macos")]
+    if let Some(value) = kernel_payload_path() {
+        cmd.env("DYLD_FALLBACK_LIBRARY_PATH", value);
+    }
     cmd.args(cfg.helper_argv(name))
         .env(HELPER_MARKER, "1")
         .stdin(match cfg.console {
@@ -574,6 +578,26 @@ fn helper_command_unless_helper(
             (_, None) => Stdio::inherit(),
         });
     Ok(cmd)
+}
+
+/// What the helper needs on `DYLD_FALLBACK_LIBRARY_PATH` to load libkrun's kernel payload.
+///
+/// libkrun loads it with `dlopen("libkrunfw.5.dylib")`, a bare name the loader resolves against its
+/// own paths, which on macOS do not include the prefix a package manager installs to. `DYLD_*` is
+/// read at `exec`, so the helper cannot set this for itself and it has to arrive on the spawn.
+///
+/// The operator's own value keeps precedence, and dyld's default list is put back after it, since
+/// setting the variable at all replaces it.
+#[cfg(target_os = "macos")]
+fn kernel_payload_path() -> Option<OsString> {
+    let dir = bsx_krun::KRUNFW_DIR?;
+    let mut value = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH").unwrap_or_default();
+    if !value.is_empty() {
+        value.push(":");
+    }
+    value.push(dir);
+    value.push(":/usr/local/lib:/usr/lib");
+    Some(value)
 }
 
 /// Reads an `ExitStatus` into [`Exit`]. Split out so the signal path is testable without arranging
@@ -1771,6 +1795,42 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args.first().map(String::as_str), Some(HELPER_SUBCOMMAND));
+    }
+
+    /// The helper is told where libkrun's kernel payload is, or a boot dies on `dlopen` of a bare
+    /// name with libkrun's own "Couldn't find or load libkrunfw" and no VM.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_helper_is_told_where_the_kernel_payload_is() {
+        let Some(dir) = bsx_krun::KRUNFW_DIR else {
+            eprintln!(
+                "skipped: no libkrunfw was found when bsx-krun was built, so there is no \
+                 directory to hand the helper"
+            );
+            return;
+        };
+        let cmd = helper_command("vm", &cfg()).expect("build the helper command");
+        let (_, value) = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "DYLD_FALLBACK_LIBRARY_PATH")
+            .expect("the helper carries DYLD_FALLBACK_LIBRARY_PATH");
+        let value = value.expect("with a value").to_string_lossy().into_owned();
+        let entries: Vec<&str> = value.split(':').collect();
+        assert!(entries.contains(&dir), "{value:?} must name {dir}");
+        // The *tail*, not mere presence: cargo sets this variable for its own test binaries and
+        // its value already holds `/usr/lib`, so `contains` here would pass without this code
+        // having run. What is pinned is that dyld's default is put back and stays the last resort,
+        // since setting the variable at all replaces it.
+        assert!(
+            value.ends_with(":/usr/local/lib:/usr/lib"),
+            "dyld's default must be restored, and last: {value:?}"
+        );
+        let dir_at = entries.iter().position(|e| *e == dir).expect("named above");
+        let usr_at = entries.len() - 1;
+        assert!(
+            dir_at < usr_at,
+            "libkrunfw must be searched before the default: {value:?}"
+        );
     }
 
     /// A helper's exit code reaches the caller through `wait`, which is how a guest's status gets

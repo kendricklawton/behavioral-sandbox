@@ -286,6 +286,7 @@ dependencies = [
 name = "bsx-supervisor"
 version = "0.0.4"
 dependencies = [
+ "bsx-krun",
  "bsx-test-support",
  "rustix 1.1.4",
 ]
