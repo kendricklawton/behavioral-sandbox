@@ -121,7 +121,7 @@ fn main() -> ExitCode {
     let ran = iced::application(boot, App::update, App::view)
         .subscription(App::subscription)
         .title(|app: &App| app.title())
-        .theme(|_: &App| iced::Theme::Dark)
+        .theme(|_: &App| iced::Theme::TokyoNightStorm)
         .window_size(Size::new(1100.0, 720.0))
         .run();
     match ran {

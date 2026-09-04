@@ -16,60 +16,132 @@ use bsx_record::{Record, Verb};
 
 use crate::{App, Field, Form, Message, Stream, Switch};
 
+/// Identifiers, and only identifiers: a name, a command, a path, an id. Prose is the system's
+/// own sans, so a row reads as a sentence rather than a terminal dump.
 const MONO: Font = Font::MONOSPACE;
 
-/// The notebook: every run, newest first, live ones above the rule.
+/// The name of a run: the one thing a reader is scanning for down a column.
+const NAME: Font = Font {
+    weight: iced::font::Weight::Semibold,
+    ..Font::MONOSPACE
+};
+
+/// The type scale. Three sizes, so a card has a first, second and third thing to read.
+const TITLE: f32 = 15.0;
+const BODY: f32 = 13.0;
+const SMALL: f32 = 12.0;
+
+/// How a run ended, as a colour: running, ended cleanly, or ended badly. The dot and the state
+/// share it, so the two cannot disagree.
+fn status_colour(theme: &iced::Theme, record: &Record, live: bool) -> iced::Color {
+    let palette = theme.extended_palette();
+    if live {
+        return palette.success.base.color;
+    }
+    match record.end {
+        Some(bsx_record::End::Exit(0)) => palette.background.strong.text,
+        Some(bsx_record::End::Exit(_) | bsx_record::End::Signal(_) | bsx_record::End::Failed) => {
+            palette.danger.base.color
+        }
+        _ => palette.background.strong.text,
+    }
+}
+
+/// Muted text: everything that is not the name or the command.
+fn muted(theme: &iced::Theme) -> iced::Color {
+    theme.extended_palette().background.strong.text
+}
+
+/// The notebook: what is running, then what has run.
 pub(crate) fn list(app: &App) -> Element<'_, Message> {
     let live: Vec<&Record> = app.runs.iter().filter(|r| app.is_live(r)).collect();
     let past: Vec<&Record> = app.runs.iter().filter(|r| !app.is_live(r)).collect();
     let header = row![
-        button(text("New run")).on_press(Message::NewRun),
+        text("Sandboxes").size(18),
         space().width(Fill),
-        text(format!("runs: {} live, {} past", live.len(), past.len())).size(14),
+        button(text("New run")).on_press(Message::NewRun),
     ]
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center);
-    // Clear of the scrollbar, so the posture tags at the right of a row are not drawn under it.
-    let mut rows = column![].spacing(4).padding(iced::Padding::ZERO.right(12));
-    for record in &live {
-        rows = rows.push(run_row(app, record));
+
+    let mut rows = column![].spacing(8);
+    if !live.is_empty() {
+        rows = rows.push(section("RUNNING", live.len()));
+        for record in &live {
+            rows = rows.push(run_row(app, record));
+        }
     }
-    if !live.is_empty() && !past.is_empty() {
-        rows = rows.push(rule::horizontal(1));
-    }
-    for record in &past {
-        rows = rows.push(run_row(app, record));
+    if !past.is_empty() {
+        rows = rows.push(section("HISTORY", past.len()));
+        for record in &past {
+            rows = rows.push(run_row(app, record));
+        }
     }
     if app.runs.is_empty() {
         rows = rows.push(
             text("No runs yet. Start one here, or with `bsx run`, `bsx shell` or `bsx up`.")
-                .size(14),
+                .size(BODY)
+                .style(|t| text::Style {
+                    color: Some(muted(t)),
+                }),
         );
     }
-    let mut page = column![header, rule::horizontal(1), scrollable(rows).height(Fill)]
-        .spacing(10)
-        .padding(14);
+    let mut page = column![header, scrollable(rows).height(Fill)]
+        .spacing(14)
+        .padding(18);
     if let Some(status) = &app.status {
-        page = page.push(text(status).size(13));
+        page = page.push(text(status).size(BODY));
     }
-    page.into()
+    // A card is read left to right, so it stops where reading does: a row stretched across a wide
+    // window puts its two halves too far apart to take in at once.
+    container(page.max_width(PAGE))
+        .width(Fill)
+        .center_x(Fill)
+        .into()
 }
 
-/// One row of the list: the bullet, the name, the command, the posture, and the state.
+/// The width a page of cards stops at, in logical pixels.
+const PAGE: f32 = 1000.0;
+
+/// The one heading style: small, muted and set apart, on a pane and on a section alike.
+fn heading(title: &str) -> Element<'_, Message> {
+    text(title)
+        .size(SMALL)
+        .font(NAME)
+        .style(|t| text::Style {
+            color: Some(muted(t)),
+        })
+        .into()
+}
+
+/// A section heading with how many are under it.
+fn section(title: &'static str, count: usize) -> Element<'static, Message> {
+    row![
+        heading(title),
+        text(format!("{count}")).size(SMALL).style(|t| text::Style {
+            color: Some(muted(t))
+        }),
+        space().width(Fill),
+    ]
+    .spacing(8)
+    .padding([10, 2])
+    .into()
+}
+
+/// One card: the name and how it went on the first line, the command on the second, what it
+/// could touch on the third, and a live frame beside them when there is one.
 fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
     let live = app.is_live(record);
-    let bullet = if live { "●" } else { "○" };
     let command = if record.command.is_empty() {
         match record.verb {
-            Verb::Up => "(sandbox, exec into it)".to_string(),
+            Verb::Up => "a sandbox to exec into".to_string(),
             _ => String::new(),
         }
     } else {
         record.command.join(" ")
     };
-    // How it went and how long, and no clock: a row has room for one of the two, and the wall
-    // time is on the run's own screen. `Wrapping::None` draws past its box rather than clipping
-    // to it, so what is here has to fit rather than be trimmed by the layout.
+    // How it went and how long. No wall clock: that is on the run's own screen, and a row has
+    // room for one of the two.
     let state = if live {
         format!(
             "running {}",
@@ -79,41 +151,46 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
         let end = record.end.map(|e| e.to_string()).unwrap_or_default();
         match record.ended_ms {
             Some(ended) => format!(
-                "{end} in {}",
+                "{end} · {}",
                 bsx_record::format_duration(ended.saturating_sub(record.started_ms))
             ),
             None => end,
         }
     };
-    // The command is one line and clipped, never wrapped: a row is a glance down a column of
-    // names, and a long command reflowing it pushes every row below out of place. The whole of it
-    // is on the run's own screen.
-    let first = row![
-        text(bullet).width(Length::Fixed(18.0)),
-        text(&record.name).font(MONO).width(Length::Fixed(140.0)),
-        text(command)
-            .font(MONO)
-            .wrapping(text::Wrapping::None)
-            .width(Fill),
-    ]
-    .spacing(8);
-    // The posture sits under the command with the state, where it has the width to finish; on the
-    // first line it was the element that ran off the edge.
-    // The posture keeps its natural width and the state is the half that gives: a row that runs
-    // out of width should lose the end of a timestamp, not which directories the sandbox can
-    // reach. `Fill` on the state is what makes it the one squeezed.
-    let second = row![
-        space().width(Length::Fixed(18.0)),
+    let dot = record.clone();
+    let title = row![
+        text("●").size(SMALL).style(move |t| text::Style {
+            color: Some(status_colour(t, &dot, live))
+        }),
+        text(&record.name).font(NAME).size(TITLE),
+        space().width(Fill),
         text(state)
-            .size(13)
+            .size(SMALL)
             .wrapping(text::Wrapping::None)
-            .width(Fill),
-        text(posture_tags(record))
-            .size(13)
-            .wrapping(text::Wrapping::None),
+            .style(move |t| text::Style {
+                color: Some(muted(t))
+            }),
     ]
-    .spacing(8);
-    let text_side = column![first, second].spacing(2).padding([6, 8]);
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    // The command is one line and clipped, never wrapped: a long one reflowing a card pushes
+    // every card below it out of place. The whole of it is on the run's own screen.
+    let command = text(command)
+        .font(MONO)
+        .size(BODY)
+        .wrapping(text::Wrapping::None)
+        .style(|t| text::Style {
+            color: Some(muted(t)),
+        });
+    // What it could touch, spelled rather than abbreviated: this is the line that says whether a
+    // sandbox could reach the network or a directory, and it is worth the words.
+    let posture = text(posture_tags(record))
+        .size(SMALL)
+        .wrapping(text::Wrapping::None)
+        .style(|t| text::Style {
+            color: Some(muted(t)),
+        });
+    let text_side = column![title, command, posture].spacing(4);
     // A running sandbox with a display shows it, so the list says what each one is doing rather
     // than only what it was asked to do.
     let body: Element<'_, Message> = match crate::frame_program(app, &record.name) {
@@ -124,37 +201,65 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
                 .style(container::dark),
             text_side.width(Fill),
         ]
-        .spacing(10)
+        .spacing(14)
         .align_y(iced::alignment::Vertical::Center)
         .into(),
         _ => text_side.width(Fill).into(),
     };
-    mouse_area(container(body).width(Fill).style(container::rounded_box))
-        .on_press(Message::Open(record.id.clone()))
-        .into()
+    mouse_area(
+        container(body)
+            .width(Fill)
+            .padding(12)
+            .style(container::rounded_box),
+    )
+    .on_press(Message::Open(record.id.clone()))
+    .into()
 }
 
 /// How big a live sandbox's frame is in the list, in logical pixels. Wide enough to tell two
 /// desktops apart at a glance, small enough that a screen of them is still a list.
 const THUMBNAIL: (f32, f32) = (160.0, 120.0);
 
-/// The posture in a glance: network, mounts, display, sound.
+/// The posture in a glance, in words: the display, the network, and what of the host it can
+/// reach. Abbreviations save a few characters and cost the reader the sentence, and this is the
+/// line that says whether a sandbox could touch the network or a directory.
 fn posture_tags(record: &Record) -> String {
     let p = &record.posture;
-    let mut tags = vec![format!("net:{}", p.network)];
-    if !p.mounts.is_empty() {
-        tags.push(format!("mnt:{}", p.mounts.len()));
+    let mut parts = Vec::new();
+    if let Some(display) = &p.display {
+        parts.push(display.replace('x', "\u{d7}"));
     }
+    parts.push(
+        if p.network == "tsi" {
+            "network via host"
+        } else {
+            "no network"
+        }
+        .to_string(),
+    );
     if p.rootfs == "writable" {
-        tags.push("root:rw".to_string());
+        parts.push("writable root".to_string());
     }
-    if p.display.is_some() {
-        tags.push("display".to_string());
+    // One share is worth naming; several are worth counting, or the line outgrows the card.
+    match (p.mounts.len(), p.shares.len()) {
+        (0, 0) => parts.push("no host directories".to_string()),
+        (1, 0) => {
+            let (guest, host) = &p.mounts[0];
+            parts.push(format!("{} \u{2190} {}", guest.display(), host.display()));
+        }
+        (0, 1) => {
+            let (tag, host) = &p.shares[0];
+            parts.push(format!("{tag} \u{2190} {}", host.display()));
+        }
+        (m, sh) => parts.push(format!("{} host directories", m + sh)),
+    }
+    if p.results {
+        parts.push(bsx_record::RESULTS_GUEST_PATH.to_string());
     }
     if p.sound {
-        tags.push("sound".to_string());
+        parts.push("sound".to_string());
     }
-    tags.join("  ")
+    parts.join(" \u{b7} ")
 }
 
 /// One run: its record on the left, its display and output on the right.
@@ -247,7 +352,7 @@ const LABEL: f32 = 74.0;
 /// wraps under itself and stays in its column. Padding a monospace line only lines up while
 /// nothing wraps, and a guest root is a path with no length limit.
 fn pane<'a>(title: &'a str, rows: Vec<(String, String)>) -> Element<'a, Message> {
-    let mut body = column![text(title).size(13)].spacing(3);
+    let mut body = column![heading(title)].spacing(3);
     for (label, value) in rows {
         body = body.push(
             row![
@@ -360,7 +465,7 @@ fn results_lines(app: &App, record: &Record) -> Vec<(String, String)> {
 
 /// The captured output: one button per stream, and the tail of the chosen one.
 fn output_pane<'a>(app: &'a App, record: &'a Record) -> iced::widget::Container<'a, Message> {
-    let mut head = row![text("OUTPUT").size(13), space().width(Fill)].spacing(8);
+    let mut head = row![heading("OUTPUT"), space().width(Fill)].spacing(8);
     for stream in Stream::of(record.verb) {
         let label = if app.output.stream == Some(*stream) {
             format!("[{}]", stream.label())
