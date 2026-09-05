@@ -45,6 +45,15 @@ directory, so a sandbox started by the CLI is visible to the app and the other w
 | `--vcpus N`, `--mem MIB` | Sizing; also `$BSX_VCPUS` and `$BSX_MEM_MIB`. | 1 vCPU, 512 MiB |
 | `--no-results` | Drops the default `/results` mount. | mounted |
 
+## Configuration layering
+
+Configuration is resolved in precedence order:
+1. Command line flags.
+2. Environment variables (`$BSX_VCPUS`, `$BSX_MEM_MIB`, `$BSX_GUEST_ROOT`, `$BSX_RUNS_DIR`, `$BSX_RUNS_KEEP`, `$BSX_OUTPUT_CAP_KIB`, `$BSX_LOG`, `$BSX_CLI`, `$BSX_THEME`).
+3. The nearest `.bsx.toml` in or above the current working directory.
+4. User defaults in `~/.bsx.toml`.
+5. Built-in defaults.
+
 ## What a run leaves
 
 Every run leaves one directory under `$BSX_RUNS_DIR`, else `$XDG_DATA_HOME/bsx/runs`, else

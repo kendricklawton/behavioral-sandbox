@@ -32,12 +32,11 @@ crates that are actually in the tree, and how a sandbox is run.
 
 ## Reading this book
 
-- **[Running a sandbox](./running.md)**, the verbs, the posture flags, what a run leaves behind,
-  and the notebook.
-- **[Architecture](./architecture.md)**, the six design rules with the mechanism serving each, and
-  what is in the tree.
-- **[Security](./security.md)**, what is trusted, what counts as a security bug, and how to report
-  one.
+- **[Running a sandbox](./running.md)**, the verbs, posture flags, configuration layering, what a run leaves behind, and the notebook.
+- **[Architecture](./architecture.md)**, the six design rules with the mechanism serving each, and what is in the tree.
+- **[Control socket & IPC](./control-ipc.md)**, local process discovery, display leasing, zero-copy memfd sharing, and host↔guest wire framing.
+- **[Building guest images](./building-images.md)**, unprivileged rootfs assembly with `apk.static` and `fakeroot`, desktop closures, and lockfile verification.
+- **[Security](./security.md)**, what is trusted, what counts as a security bug, and how to report one.
 
 The repository's own operating manual is [`AGENTS.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/AGENTS.md)
 at the root: the design rules, the repo layout, the build, and the commit conventions. It is written
