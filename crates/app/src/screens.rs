@@ -57,17 +57,22 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
     let running = app.runs.iter().filter(|r| app.is_live(r)).count();
     let past = app.runs.len() - running;
     let actions = column![
-        button(text("New run").size(TITLE))
+        button(text("New run").size(TITLE).width(Fill).center())
             .style(primary)
             .width(Fill)
             .padding([10, 14])
             .on_press(Message::NewRun),
-        button(text(format!("Sandboxes · {running} running · {past} past")).size(TITLE))
-            .style(secondary)
-            .width(Fill)
-            .padding([10, 14])
-            .on_press(Message::List),
-        button(text("Settings").size(TITLE))
+        button(
+            text(format!("Sandboxes · {running} running · {past} past"))
+                .size(TITLE)
+                .width(Fill)
+                .center(),
+        )
+        .style(secondary)
+        .width(Fill)
+        .padding([10, 14])
+        .on_press(Message::List),
+        button(text("Settings").size(TITLE).width(Fill).center())
             .style(secondary)
             .width(Fill)
             .padding([10, 14])
@@ -76,12 +81,12 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
     .spacing(10)
     .width(Length::Fixed(300.0));
     let mut page = column![
-        text("BSX").font(NAME).size(28),
+        text("BSX").font(NAME).size(32),
         muted_line("sandboxes on this machine".to_string(), BODY),
         muted_line(format!("version {}", env!("CARGO_PKG_VERSION")), SMALL),
-        space().height(16),
+        space().height(22),
         actions,
-        space().height(16),
+        space().height(22),
         muted_line(bsx_line(app), SMALL),
         muted_line(root_line(app), SMALL),
     ]
@@ -106,18 +111,33 @@ fn muted_line<'a>(line: String, size: f32) -> Element<'a, Message> {
 
 /// Where the `bsx` this window would spawn is, or what to set when it is nowhere.
 fn bsx_line(app: &App) -> String {
+    let home = std::env::var("HOME").ok();
     match &app.platform.bsx {
-        Some(path) => format!("bsx: {}", path.display()),
+        Some(path) => format!("bsx: {}", tilde(home.as_deref(), path)),
         None => "bsx: not found (set $BSX_CLI, or put bsx beside bsx-app or on PATH)".to_string(),
     }
 }
 
 /// Where the default guest root is, and whether anything is there yet.
 fn root_line(app: &App) -> String {
+    let home = std::env::var("HOME").ok();
     match &app.platform.root {
-        cli::GuestRoot::Present(path) => format!("guest root: {}", path.display()),
-        cli::GuestRoot::Absent(path) => format!("guest root: {} (absent)", path.display()),
+        cli::GuestRoot::Present(path) => format!("guest root: {}", tilde(home.as_deref(), path)),
+        cli::GuestRoot::Absent(path) => {
+            format!("guest root: {} (absent)", tilde(home.as_deref(), path))
+        }
         cli::GuestRoot::Unset => "guest root: none (set $BSX_GUEST_ROOT)".to_string(),
+    }
+}
+
+/// A path spelled the way a person says it: `home` contracted to `~`.
+fn tilde(home: Option<&str>, path: &std::path::Path) -> String {
+    let spelled = path.display().to_string();
+    match home {
+        Some(home) if !home.is_empty() && spelled.starts_with(home) => {
+            format!("~{}", &spelled[home.len()..])
+        }
+        _ => spelled,
     }
 }
 
@@ -680,9 +700,10 @@ fn run_lines(record: &Record, live: bool) -> Vec<(String, String)> {
 fn results_lines(app: &App, record: &Record) -> Vec<(String, String)> {
     if app.results.is_empty() {
         let dir = app.store.dir_of(&record.id);
+        let home = std::env::var("HOME").ok();
         return vec![(
             "(none)".to_string(),
-            format!("in {}", dir.results().display()),
+            format!("in {}", tilde(home.as_deref(), &dir.results())),
         )];
     }
     // The file is the value here, not the label: a result's path is the long half, so it gets the
@@ -728,6 +749,17 @@ fn output_pane<'a>(app: &'a App, record: &'a Record) -> iced::widget::Container<
     .spacing(6)
     .padding(10);
     container(body).width(Fill).style(card)
+}
+
+/// A field's aside, indented into the value column so the left edge stays the labels'.
+fn caption(line: &'static str) -> Element<'static, Message> {
+    row![
+        space().width(Length::Fixed(98.0)),
+        text(line).size(SMALL).style(|t| text::Style {
+            color: Some(muted(t)),
+        }),
+    ]
+    .into()
 }
 
 /// The form for a new run, with the posture sentence above the buttons.
@@ -792,9 +824,9 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
             Switch::WritableRoot
         ),
         field("command", &form.command, Field::Command),
-        text("words split on spaces; empty starts a sandbox to exec into").size(12),
+        caption("words split on spaces; empty starts a sandbox to exec into"),
         field("mounts", &form.mounts, Field::Mounts),
-        text("GUESTDIR=HOSTDIR, space-separated, read-write").size(12),
+        caption("GUESTDIR=HOSTDIR, space-separated, read-write"),
         field("shares", &form.shares, Field::Shares),
         switch(
             "network through the host (tsi)",
@@ -851,5 +883,20 @@ fn bytes(n: u64) -> String {
         format!("{:.1} KiB", n as f64 / 1024.0)
     } else {
         format!("{n} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path under home is spelled with `~`; anything else is left whole.
+    #[test]
+    fn a_path_under_home_is_spelled_with_a_tilde() {
+        let path = std::path::Path::new("/Users/x/Desktop/tree");
+        assert_eq!(tilde(Some("/Users/x"), path), "~/Desktop/tree");
+        assert_eq!(tilde(Some("/Users/y"), path), "/Users/x/Desktop/tree");
+        assert_eq!(tilde(None, path), "/Users/x/Desktop/tree");
+        assert_eq!(tilde(Some(""), path), "/Users/x/Desktop/tree");
     }
 }
