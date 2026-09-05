@@ -74,7 +74,8 @@ From there:
   kept across launches in a file beside the runs directory. `--theme` and `$BSX_THEME` outrank the
   saved pick for one launch.
 
-`bsx-app NAME` opens straight onto a run; `--new` opens the form. Starting and stopping go through
+`bsx-app NAME` opens straight onto a run; `--open list|new|settings` opens a screen. Starting
+and stopping go through
 the `bsx` binary beside the app (`$BSX_CLI` overrides which one).
 
 ## Platform notes

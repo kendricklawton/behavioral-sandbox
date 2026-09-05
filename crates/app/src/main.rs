@@ -89,9 +89,30 @@ struct Cli {
     /// refused with the full list.
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
-    /// Open on the form for a new run.
-    #[arg(long, conflicts_with = "name")]
-    new: bool,
+    /// Open on this screen instead of the menu.
+    #[arg(long, value_name = "SCREEN", conflicts_with = "name")]
+    open: Option<OpenScreen>,
+}
+
+/// The screens the command line can open on: every one that needs no run to name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OpenScreen {
+    Menu,
+    List,
+    New,
+    Settings,
+}
+
+impl OpenScreen {
+    /// The [`Screen`] this asks for: the one place the two enums meet.
+    fn screen(self) -> Screen {
+        match self {
+            Self::Menu => Screen::Menu,
+            Self::List => Screen::List,
+            Self::New => Screen::New,
+            Self::Settings => Screen::Settings,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -125,7 +146,7 @@ fn main() -> ExitCode {
     let opening = cli.name.clone();
     let log = cli.log.clone();
     let exit_with_lease = cli.exit_with_lease;
-    let new = cli.new;
+    let open = cli.open;
     let boot = move || {
         let mut app = App::new(
             store.clone(),
@@ -139,8 +160,8 @@ fn main() -> ExitCode {
         if app.status.is_none() {
             app.status = theme_note.clone();
         }
-        if new {
-            app.screen = Screen::New;
+        if let Some(open) = open {
+            app.set_screen(open.screen());
         }
         app
     };
@@ -1156,6 +1177,15 @@ mod tests {
         assert_eq!(app.screen, Screen::Menu, "nothing asked, so the menu");
         let app = App::new(store, Some("opened".to_string()), None, sinks, false);
         assert_eq!(app.screen, Screen::Run(RunId::of(&record)));
+    }
+
+    /// Every screen the flag can name maps to itself, so `--open list` is the list.
+    #[test]
+    fn the_open_flag_maps_to_its_screens() {
+        assert_eq!(OpenScreen::Menu.screen(), Screen::Menu);
+        assert_eq!(OpenScreen::List.screen(), Screen::List);
+        assert_eq!(OpenScreen::New.screen(), Screen::New);
+        assert_eq!(OpenScreen::Settings.screen(), Screen::Settings);
     }
 
     /// The menu leases nothing: no thumbnail spins up before a screen asks for one.
