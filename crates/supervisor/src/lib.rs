@@ -184,6 +184,10 @@ pub struct VmConfig {
     /// Whether the guest gets a virtio-snd card, backed by the host's audio server. `false` by
     /// default (rule 3): a two-way hole is opened by an explicit `--sound`, never ambient.
     pub sound: bool,
+    /// Whether the guest's virtio-gpu carries the 3D path (virgl + Venus) into the host
+    /// renderer, created even without a display. `false` by default (rule 3): the guest driving
+    /// the host GPU is opened by an explicit `--gpu`, never ambient.
+    pub gpu: bool,
     /// A file to take everything this VM says, instead of the caller's stderr.
     ///
     /// **A VM outliving its caller must not hold the caller's stderr**, which a pipe would leave
@@ -240,6 +244,7 @@ impl VmConfig {
             screenshot: None,
             frame_log: None,
             sound: false,
+            gpu: false,
         }
     }
 
@@ -313,6 +318,9 @@ impl VmConfig {
         }
         if self.sound {
             argv.push("--sound".into());
+        }
+        if self.gpu {
+            argv.push("--gpu".into());
         }
         argv
     }
@@ -1661,6 +1669,7 @@ mod tests {
         c.screenshot = Some(PathBuf::from("/tmp/frame.ppm"));
         c.frame_log = Some(PathBuf::from("/tmp/frames.tsv"));
         c.sound = true;
+        c.gpu = true;
 
         let argv: Vec<String> = c
             .helper_argv("vm-under-test")
@@ -1708,6 +1717,7 @@ mod tests {
             "--frame-log",
             "/tmp/frames.tsv",
             "--sound",
+            "--gpu",
         ] {
             assert!(
                 argv.contains(&expected.to_string()),
@@ -1771,6 +1781,7 @@ mod tests {
             "--screenshot",
             "--frame-log",
             "--sound",
+            "--gpu",
         ] {
             assert!(
                 !flat.contains(&absent.to_string()),

@@ -116,6 +116,11 @@ pub(crate) struct VmmArgs {
     /// so it is opened only when asked. Refused before boot if this libkrun has no snd feature.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Give the guest's virtio-gpu the 3D path (virgl + Venus) into the host renderer, with or
+    /// without --display. Off by default: guest-issued GPU commands are a wider hole than a
+    /// display's pixel path. Refused before boot if this libkrun has no gpu feature.
+    #[arg(long)]
+    pub(crate) gpu: bool,
 }
 
 /// What the guest may do to its root filesystem, [`ReadOnly`](RootFsPosture::ReadOnly) by default
@@ -403,6 +408,8 @@ enum HelperError {
     Window(std::io::Error),
     /// The input replay thread could not be started.
     Input(std::io::Error),
+    /// `--gpu` on a libkrun built without the gpu feature.
+    GpuUnsupported,
     /// `--sound` on a libkrun built without the snd feature.
     SoundUnsupported,
     /// The control socket could not be placed or bound.
@@ -478,6 +485,10 @@ impl std::fmt::Display for HelperError {
             }
             Self::Window(e) => write!(f, "the display window: {e}"),
             Self::Input(e) => write!(f, "the input replay: {e}"),
+            Self::GpuUnsupported => write!(
+                f,
+                "--gpu needs a libkrun built with the gpu feature, which this one lacks"
+            ),
             Self::SoundUnsupported => write!(
                 f,
                 "--sound needs a libkrun built with the snd feature, which this one lacks"
@@ -592,9 +603,19 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         machine = machine.vsock_port(port, path, bsx_krun::VsockInitiator::Host)?;
         restrict_when_bound(path);
     }
+    // Rule 3: the guest issuing GPU commands is a named hole. Probed like sound, because a
+    // build without gpu exports the symbol and adds no device.
+    if args.gpu && !bsx_krun::has_feature(bsx_krun::KRUN_FEATURE_GPU)? {
+        return Err(HelperError::GpuUnsupported);
+    }
+    // libkrun takes one gpu-options call per context, so --gpu and --display merge into it here.
+    if args.gpu {
+        machine = machine.gpu_device(bsx_krun::GpuMode::Accelerated)?;
+    } else if display.is_some() {
+        machine = machine.gpu_device(bsx_krun::GpuMode::Display)?;
+    }
     // The window runs on its own thread from here, this one being about to become the guest.
     if let Some((width, height, refresh)) = display {
-        machine = machine.gpu_device(bsx_krun::GpuMode::Display)?;
         let (mut with_display, display_id) = machine.add_display(width.get(), height.get())?;
         // The rate the guest paces its flips to; libkrun's own default otherwise. Host-side
         // nothing changes: frames arrive when the guest flushes them, at whatever rate that is.
@@ -1215,6 +1236,7 @@ mod tests {
             "--frame-log",
             "/tmp/frames.tsv",
             "--sound",
+            "--gpu",
         ];
         let parsed = Cli::parse_from(argv);
         let Cmd::Vmm(got) = parsed.cmd else {
@@ -1237,6 +1259,7 @@ mod tests {
         assert_eq!(got.display.as_deref(), Some("800x600"));
         assert_eq!(got.screenshot.as_deref(), Some(Path::new("/tmp/frame.ppm")));
         assert!(got.sound, "--sound parses as the sound flag");
+        assert!(got.gpu, "--gpu parses as the gpu flag");
         assert_eq!(got.frame_log.as_deref(), Some(Path::new("/tmp/frames.tsv")));
     }
 
