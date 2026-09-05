@@ -35,6 +35,31 @@ pub(crate) fn resolve(asked: Option<&str>) -> Result<iced::Theme, String> {
         .ok_or_else(|| refusal(asked))
 }
 
+/// The theme to open in, and a note when a saved name had to be let go.
+///
+/// An explicit ask (flag or env) is refused when unknown, as [`resolve`] refuses it; a stale
+/// *saved* name only degrades to [`DEFAULT`], because a launch should not be blocked by a file.
+pub(crate) fn startup(
+    asked: Option<&str>,
+    saved: Option<&str>,
+) -> Result<(iced::Theme, Option<String>), String> {
+    if asked.is_some() {
+        return resolve(asked).map(|theme| (theme, None));
+    }
+    let Some(saved) = saved else {
+        return Ok((DEFAULT, None));
+    };
+    match resolve(Some(saved)) {
+        Ok(theme) => Ok((theme, None)),
+        Err(_) => Ok((
+            DEFAULT,
+            Some(format!(
+                "the saved theme {saved:?} is not in this build; drawing in {DEFAULT}"
+            )),
+        )),
+    }
+}
+
 /// The theme named on the command line, else in the environment, else none.
 ///
 /// Takes the environment's value rather than reading it, so the precedence is a pure function and
@@ -130,5 +155,25 @@ mod tests {
         assert_eq!(asked_for(None, env()).as_deref(), Some("Nord"));
         assert_eq!(asked_for(None, None), None);
         assert_eq!(asked_for(None, Some("   ".to_string())), None);
+    }
+
+    /// A saved theme is used; a stale one degrades to the default with a note; an explicit
+    /// flag or env ask is still refused when unknown, and outranks whatever was saved.
+    #[test]
+    fn a_saved_theme_is_used_and_a_stale_one_degrades_with_a_note() {
+        assert_eq!(
+            startup(None, Some("Nord")).expect("a saved theme"),
+            (iced::Theme::Nord, None)
+        );
+        let (theme, note) = startup(None, Some("dracola")).expect("a stale name still opens");
+        assert_eq!(theme, DEFAULT);
+        let note = note.expect("with a note");
+        assert!(note.contains("dracola"), "{note}");
+        startup(Some("dracola"), Some("Nord")).expect_err("an explicit ask is refused");
+        assert_eq!(
+            startup(Some("Nord"), Some("Dracula")).expect("the ask outranks the saved"),
+            (iced::Theme::Nord, None)
+        );
+        assert_eq!(startup(None, None).expect("nothing asked"), (DEFAULT, None));
     }
 }

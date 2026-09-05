@@ -7,8 +7,8 @@
 //!   the same thing with the same words.
 
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, row, rule, scrollable, shader, space, text,
-    text_input,
+    button, checkbox, column, container, mouse_area, pick_list, row, rule, scrollable, shader,
+    space, text, text_input,
 };
 use iced::{Element, Fill, Font, Length};
 
@@ -64,6 +64,9 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
         button(text(format!("Sandboxes · {running} running · {past} past")).size(TITLE))
             .width(Fill)
             .on_press(Message::List),
+        button(text("Settings").size(TITLE))
+            .width(Fill)
+            .on_press(Message::Settings),
     ]
     .spacing(10)
     .width(Length::Fixed(300.0));
@@ -110,6 +113,51 @@ fn root_line(app: &App) -> String {
         (Some(path), false) => format!("guest root: {} (absent)", path.display()),
         (None, _) => "guest root: none (set $BSX_GUEST_ROOT)".to_string(),
     }
+}
+
+/// The notebook's own knobs. One section today; a later knob is a later heading block.
+pub(crate) fn settings(app: &App) -> Element<'_, Message> {
+    let bar = row![
+        button(text("← menu")).on_press(Message::Menu),
+        text("Settings").size(18),
+    ]
+    .spacing(12)
+    .align_y(iced::alignment::Vertical::Center);
+    let mut appearance = column![
+        heading("APPEARANCE"),
+        row![
+            text("theme").size(BODY).width(LABEL),
+            pick_list(iced::Theme::ALL, Some(app.theme.clone()), Message::SetTheme)
+                .text_size(BODY)
+                .width(Length::Fixed(240.0)),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center),
+    ]
+    .spacing(8);
+    if app.theme_overridden {
+        appearance = appearance.push(muted_line(
+            "started with --theme or $BSX_THEME, which outranks this choice at the next launch"
+                .to_string(),
+            SMALL,
+        ));
+    }
+    let mut page = column![
+        bar,
+        container(appearance)
+            .style(container::rounded_box)
+            .padding(14)
+            .width(Fill),
+    ]
+    .spacing(14)
+    .padding(18);
+    if let Some(status) = &app.status {
+        page = page.push(text(status).size(BODY));
+    }
+    container(page.max_width(PAGE))
+        .width(Fill)
+        .center_x(Fill)
+        .into()
 }
 
 /// The notebook: what is running, then what has run.

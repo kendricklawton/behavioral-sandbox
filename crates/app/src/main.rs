@@ -18,6 +18,7 @@ mod cli;
 mod frame;
 mod lease;
 mod screens;
+mod state;
 mod theme;
 mod timer;
 
@@ -83,8 +84,9 @@ struct Cli {
     #[arg(long)]
     exit_with_lease: bool,
     /// The palette to draw in, by the name the toolkit prints it under (`Nord`, `Tokyo Night
-    /// Storm`, `Catppuccin Mocha`). Case and spacing are ignored. Falls back to `$BSX_THEME`, then
-    /// to Tokyo Night Storm. An unknown name is refused with the full list.
+    /// Storm`, `Catppuccin Mocha`). Case and spacing are ignored. Falls back to `$BSX_THEME`,
+    /// then to the theme picked in Settings, then to Tokyo Night Storm. An unknown name is
+    /// refused with the full list.
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
     /// Open on the form for a new run.
@@ -94,12 +96,12 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // Before the adapter probe and before any file is opened: a name this cannot resolve is a
-    // typo in an argument, and answering it should not cost a GPU handle first.
-    let theme = match theme::resolve(
-        theme::asked_for(cli.theme.as_deref(), theme::from_env()).as_deref(),
-    ) {
-        Ok(theme) => theme,
+    // Before the adapter probe: a name this cannot resolve is a typo in an argument, and
+    // answering it should not cost a GPU handle first.
+    let asked = theme::asked_for(cli.theme.as_deref(), theme::from_env());
+    let theme_overridden = asked.is_some();
+    let (theme, theme_note) = match theme::startup(asked.as_deref(), state::load().as_deref()) {
+        Ok(pair) => pair,
         Err(why) => {
             eprintln!("bsx-app: {why}");
             return ExitCode::from(EXIT_OPERATIONAL);
@@ -132,6 +134,11 @@ fn main() -> ExitCode {
             Arc::clone(&sinks),
             exit_with_lease,
         );
+        app.theme = theme.clone();
+        app.theme_overridden = theme_overridden;
+        if app.status.is_none() {
+            app.status = theme_note.clone();
+        }
         if new {
             app.screen = Screen::New;
         }
@@ -140,7 +147,7 @@ fn main() -> ExitCode {
     let ran = iced::application(boot, App::update, App::view)
         .subscription(App::subscription)
         .title(|app: &App| app.title())
-        .theme(move |_: &App| theme.clone())
+        .theme(|app: &App| app.theme.clone())
         .window_size(Size::new(1100.0, 720.0))
         .run();
     match ran {
@@ -214,6 +221,8 @@ enum Screen {
     Run(RunId),
     /// The form for a new run.
     New,
+    /// The notebook's own knobs.
+    Settings,
 }
 
 /// Which captured file the output pane shows.
@@ -364,6 +373,9 @@ pub(crate) enum Message {
     Back,
     Menu,
     List,
+    Settings,
+    /// Draw in this palette from now on, and remember it.
+    SetTheme(iced::Theme),
     NewRun,
     Field(Field, String),
     Switch(Switch, bool),
@@ -420,6 +432,10 @@ pub(crate) struct App {
     /// live run with a display when the list is showing its grid.
     displays: BTreeMap<RunName, Display>,
     exit_with_lease: bool,
+    /// The palette every view draws in; Settings changes it live.
+    theme: iced::Theme,
+    /// Whether --theme or $BSX_THEME set it, which outranks a pick at the next launch.
+    theme_overridden: bool,
 }
 
 /// One leased display: what was mapped for it, the presents it has reported, and where its input
@@ -453,6 +469,8 @@ impl App {
             sinks,
             displays: BTreeMap::new(),
             exit_with_lease,
+            theme: theme::DEFAULT,
+            theme_overridden: false,
         };
         app.refresh();
         if let Some(key) = opening {
@@ -473,6 +491,7 @@ impl App {
     fn title(&self) -> String {
         match &self.screen {
             Screen::Menu => "bsx".to_string(),
+            Screen::Settings => "bsx › settings".to_string(),
             Screen::List => "bsx › sandboxes".to_string(),
             Screen::New => "bsx › new run".to_string(),
             Screen::Run(id) => format!(
@@ -575,7 +594,7 @@ impl App {
     fn watches(&self) -> Vec<lease::Watch> {
         let open = match &self.screen {
             Screen::Run(id) => self.record(id).map(RunName::of),
-            Screen::Menu => return Vec::new(),
+            Screen::Menu | Screen::Settings => return Vec::new(),
             Screen::List | Screen::New => None,
         };
         let mut watches = Vec::new();
@@ -641,6 +660,23 @@ impl App {
                 self.leave();
                 self.set_screen(Screen::Menu);
                 self.status = None;
+                Task::none()
+            }
+            Message::Settings => {
+                self.leave();
+                self.set_screen(Screen::Settings);
+                self.status = None;
+                Task::none()
+            }
+            Message::SetTheme(theme) => {
+                self.theme = theme;
+                self.status = match state::save(&self.theme) {
+                    Ok(()) => Some(format!("drawing in {}", self.theme)),
+                    Err(e) => Some(format!(
+                        "drawing in {} for this window; not saved: {e}",
+                        self.theme
+                    )),
+                };
                 Task::none()
             }
             Message::NewRun => {
@@ -826,6 +862,7 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         match &self.screen {
             Screen::Menu => screens::menu(self),
+            Screen::Settings => screens::settings(self),
             Screen::List => screens::list(self),
             Screen::New => screens::new_run(self, &self.form),
             Screen::Run(id) => screens::run(self, id),
@@ -1051,6 +1088,8 @@ mod tests {
         let mut app = app_with(vec![displayed("alpha", true)], &["alpha"]);
         app.screen = Screen::Menu;
         assert!(app.watches().is_empty(), "the menu asks for no leases");
+        app.screen = Screen::Settings;
+        assert!(app.watches().is_empty(), "settings asks for no leases");
     }
 
     /// A re-run's form is the record's command and posture again.
