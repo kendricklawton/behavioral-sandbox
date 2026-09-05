@@ -1,8 +1,7 @@
 # CI: the host-safe gate, one definition. Every job runs `cargo xtask ci`, the same command a dev
 # box runs, so this workflow cannot drift from the local gate: hand-mirroring the steps here is
-# what lets a gate step go missing. x86_64 only, since the supported platform is x86_64 and
-# aarch64 support (with its matrix leg here) needs hardware to test on. Scheduled companions:
-# audit.yml (advisories vs the pinned lock, daily) and fuzz.yml (the deep libFuzzer tier, nightly).
+# what lets a gate step go missing. Matrix targets: Linux x86_64 (ubuntu-24.04) and macOS aarch64
+# (macos-14 Apple Silicon). Scheduled companions: audit.yml (daily) and fuzz.yml (nightly).
 name: CI
 
 on:
@@ -23,13 +22,28 @@ env:
 
 jobs:
   gate:
-    name: gate (x86_64)
-    runs-on: ubuntu-24.04
+    name: gate (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+          - name: macos-aarch64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # Install libkrun on macOS so the libkrun wrapper and supervisor compile and test against it.
+      - name: Install libkrun dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew tap slp/krun
+          brew install libkrun libkrunfw
 
       # Everything `cargo xtask ci` needs, so none of its layers soft-skip here. The gate lints
       # the detached `fuzz` workspace too, which builds on this same toolchain.

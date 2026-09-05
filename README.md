@@ -124,10 +124,10 @@ types. `cargo … -p` takes the package, a path takes the directory.
 ## Verified on
 
 The gate (`cargo xtask ci`: build, tests, lints, docs, dependency audit) runs in CI on Ubuntu 24.04
-`x86_64` on every change and needs no privilege, and a smoke lane runs the wire-protocol fuzz
-targets from their committed seeds. **No CI lane boots a VM.** The suites that boot one run where a
-hypervisor answers, and skip saying so where none does. Development happens on Arch Linux `x86_64`
-and a MacBook Air M1 (macOS ARM64).
+`x86_64` and macOS ARM64 (`macos-14`) on every change and needs no privilege, and a smoke lane runs
+the wire-protocol fuzz targets from their committed seeds. **No CI lane boots a VM.** The suites
+that boot one run where a hypervisor answers, and skip saying so where none does. Development
+happens on Arch Linux `x86_64` and macOS ARM64.
 
 ## Releases and scope
 
