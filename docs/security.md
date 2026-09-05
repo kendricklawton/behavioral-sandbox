@@ -10,9 +10,9 @@ repo root (GitHub surfaces it in the Security tab).
 
 The libkrun supervisor boots sandboxes: `bsx run`, `shell`, `up`, `exec` and `stop` work on a host
 whose hypervisor answers (`/dev/kvm` on Linux, Hypervisor.framework on macOS ARM64) and a guest
-image. So there is something here to attack, which was not true while the Firecracker engine was
-being replaced. The host-side decoders of the guest's wire protocol are fuzzed: cargo-fuzz targets
-seeded from a committed corpus the encoders generate, with a smoke lane in CI.
+image. So there is something here to attack. The host-side decoders of the guest's wire protocol
+are fuzzed: cargo-fuzz targets seeded from a committed corpus the encoders generate, with a smoke
+lane in CI.
 
 What has not happened: any external review, any audit, any release. There is one maintainer. Until
 the first supported release (`v0.1.0`), every version is a development snapshot: no version receives

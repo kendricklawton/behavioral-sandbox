@@ -25,10 +25,7 @@
 
 ## Where this is
 
-**Sandboxes run; nothing is released.** BSX was built on Firecracker with a host-side eBPF
-observer. That design was abandoned in favour of a local-first desktop application on **libkrun**,
-and the engine implementing the old one was **deleted** rather than carried alongside a replacement
-that did not exist yet.
+**Sandboxes run; nothing is released.**
 
 What is here, on a host whose hypervisor answers (`/dev/kvm` on Linux, Hypervisor.framework on
 macOS ARM64) and a guest image the tree builds: `bsx run` runs one command in a sandbox and exits
@@ -46,8 +43,7 @@ confirm, and keeps a theme pick across launches.
 On macOS ARM64 the same tree builds, signs (`cargo xtask sign`) and boots the same sandboxes under
 Hypervisor.framework. Its libkrun build carries no `--sound` and no guest keyboard or pointer
 backend, and the display helper's own window is compiled out there, so a guest's display on macOS
-is viewed in `bsx-app`. What is not here on any platform: GPU acceleration for the guest. If you
-want the Firecracker engine, it is in git history.
+is viewed in `bsx-app`. What is not here on any platform: GPU acceleration for the guest.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
 depend on this yet.

@@ -12,9 +12,7 @@ Hypervisor.framework on macOS. It is a GUI application with a CLI beside it, bot
 
 ### Where this is, right now
 
-**The tree boots sandboxes, and nothing is released.** BSX was built on Firecracker with a
-host-side eBPF observer; that design was abandoned, and the engine implementing it was deleted
-rather than carried alongside its replacement. The replacement runs on
+**The tree boots sandboxes, and nothing is released.** BSX runs on
 [libkrun](https://github.com/containers/libkrun), a library that makes the calling process the
 virtual machine monitor.
 
