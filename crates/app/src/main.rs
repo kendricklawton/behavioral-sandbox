@@ -386,6 +386,9 @@ pub(crate) enum Message {
     Shell(RunName),
     Rerun(RunId),
     Delete(RunId),
+    ClearHistory,
+    ClearConfirmed,
+    ClearCancelled,
     /// Write the run's directory as a tar file where a person can pick it up.
     Export(RunId),
     Show(Stream),
@@ -436,6 +439,8 @@ pub(crate) struct App {
     theme: iced::Theme,
     /// Whether --theme or $BSX_THEME set it, which outranks a pick at the next launch.
     theme_overridden: bool,
+    /// Whether the list is asking "really clear the history?". Leaving the list disarms it.
+    confirm_clear: bool,
 }
 
 /// One leased display: what was mapped for it, the presents it has reported, and where its input
@@ -471,6 +476,7 @@ impl App {
             exit_with_lease,
             theme: theme::DEFAULT,
             theme_overridden: false,
+            confirm_clear: false,
         };
         app.refresh();
         if let Some(key) = opening {
@@ -623,6 +629,7 @@ impl App {
 
     /// Moves to `screen` and settles what is leased for it.
     fn set_screen(&mut self, screen: Screen) {
+        self.confirm_clear = false;
         self.screen = screen;
         self.forget_unwatched();
     }
@@ -764,6 +771,26 @@ impl App {
                     Err(e) => Some(format!("removing {id}: {e}")),
                 };
                 self.set_screen(Screen::List);
+                self.refresh();
+                Task::none()
+            }
+            Message::ClearHistory => {
+                self.confirm_clear = true;
+                Task::none()
+            }
+            Message::ClearCancelled => {
+                self.confirm_clear = false;
+                Task::none()
+            }
+            Message::ClearConfirmed => {
+                self.confirm_clear = false;
+                self.status = match self.store.prune(0) {
+                    Ok(n) => Some(format!(
+                        "removed {n} ended {}",
+                        if n == 1 { "run" } else { "runs" }
+                    )),
+                    Err(e) => Some(format!("clearing the history: {e}")),
+                };
                 self.refresh();
                 Task::none()
             }
@@ -1090,6 +1117,62 @@ mod tests {
         assert!(app.watches().is_empty(), "the menu asks for no leases");
         app.screen = Screen::Settings;
         assert!(app.watches().is_empty(), "settings asks for no leases");
+    }
+
+    /// Clearing removes every ended run, only behind the confirm, and leaves the live one;
+    /// leaving the list disarms an armed confirm.
+    #[test]
+    fn clearing_removes_every_ended_run_and_only_behind_the_confirm() {
+        let dir = bsx_test_support::ScratchDir::created("app-clear");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let name = format!("clear-live-{}", std::process::id());
+        let sock = bsx_supervisor::socket::path_for(&name).expect("a socket path");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("a live socket");
+
+        let mut gone = displayed("gone", false);
+        gone.finish(bsx_record::End::Exit(0));
+        let mut failed = displayed("failed", false);
+        failed.finish(bsx_record::End::Failed);
+        let live = displayed(&name, false);
+        for r in [&gone, &failed, &live] {
+            store.create(r).expect("created");
+        }
+
+        let sinks = Arc::new(frame::Sinks::open(None, None).expect("sinks"));
+        let mut app = App::new(store.clone(), None, None, sinks, false);
+        let _ = app.update(Message::ClearHistory);
+        assert!(app.confirm_clear);
+        assert_eq!(
+            store.list().expect("listed").len(),
+            3,
+            "arming removes nothing"
+        );
+        let _ = app.update(Message::ClearCancelled);
+        assert!(!app.confirm_clear);
+        assert_eq!(
+            store.list().expect("listed").len(),
+            3,
+            "neither does cancelling"
+        );
+
+        let _ = app.update(Message::ClearHistory);
+        let _ = app.update(Message::ClearConfirmed);
+        assert!(!app.confirm_clear);
+        let left: Vec<String> = store
+            .list()
+            .expect("listed")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(left, std::slice::from_ref(&name), "only the live run stays");
+        assert_eq!(app.status.as_deref(), Some("removed 2 ended runs"));
+
+        let _ = app.update(Message::ClearHistory);
+        app.set_screen(Screen::Menu);
+        assert!(!app.confirm_clear, "leaving the list disarms");
+        drop(listener);
+        let _ = std::fs::remove_file(&sock);
     }
 
     /// A re-run's form is the record's command and posture again.

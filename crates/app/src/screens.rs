@@ -164,12 +164,30 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
 pub(crate) fn list(app: &App) -> Element<'_, Message> {
     let live: Vec<&Record> = app.runs.iter().filter(|r| app.is_live(r)).collect();
     let past: Vec<&Record> = app.runs.iter().filter(|r| !app.is_live(r)).collect();
-    let header = row![
+    let start = row![
         button(text("← menu")).on_press(Message::Menu),
         text("Sandboxes").size(18),
         space().width(Fill),
-        button(text("New run")).on_press(Message::NewRun),
-    ]
+    ];
+    let header = if app.confirm_clear {
+        start.push(
+            row![
+                text(format!("remove {} ended runs?", past.len())).size(BODY),
+                button(text("Remove"))
+                    .style(button::danger)
+                    .on_press(Message::ClearConfirmed),
+                button(text("Keep")).on_press(Message::ClearCancelled),
+            ]
+            .spacing(12)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+    } else {
+        let mut ordinary = start;
+        if !past.is_empty() {
+            ordinary = ordinary.push(button(text("Clear history")).on_press(Message::ClearHistory));
+        }
+        ordinary.push(button(text("New run")).on_press(Message::NewRun))
+    }
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center);
 
