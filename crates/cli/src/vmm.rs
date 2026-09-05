@@ -594,7 +594,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     }
     // The window runs on its own thread from here, this one being about to become the guest.
     if let Some((width, height, refresh)) = display {
-        machine = machine.gpu_device()?;
+        machine = machine.gpu_device(bsx_krun::GpuMode::Display)?;
         let (mut with_display, display_id) = machine.add_display(width.get(), height.get())?;
         // The rate the guest paces its flips to; libkrun's own default otherwise. Host-side
         // nothing changes: frames arrive when the guest flushes them, at whatever rate that is.

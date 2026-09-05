@@ -101,6 +101,8 @@ pub const VIRGLRENDERER_USE_SURFACELESS: u32 = 1 << 3;
 /// See [`VIRGLRENDERER_USE_EGL`].
 pub const VIRGLRENDERER_USE_GLES: u32 = 1 << 4;
 /// See [`VIRGLRENDERER_USE_EGL`].
+pub const VIRGLRENDERER_VENUS: u32 = 1 << 6;
+/// See [`VIRGLRENDERER_USE_EGL`].
 pub const VIRGLRENDERER_NO_VIRGL: u32 = 1 << 7;
 
 // --- display backend constants and vtable types (libkrun_display.h) --------------------------
@@ -555,6 +557,8 @@ unsafe extern "C" {
     // --- display -----------------------------------------------------------------------------
     /// Enables the virtio-gpu device with virglrenderer `flags` (`VIRGLRENDERER_*`).
     pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
+    /// [`krun_set_gpu_options`] plus an SHM host window for the blob resources Venus maps.
+    pub fn krun_set_gpu_options2(ctx_id: u32, virgl_flags: u32, shm_size: u64) -> i32;
     /// Enables or disables a virtio-snd device, backed by the host audio server libkrun links.
     pub fn krun_set_snd_device(ctx_id: u32, enable: bool) -> i32;
     /// Configures a display output for the microVM.
@@ -679,6 +683,9 @@ mod stub {
     pub unsafe fn krun_set_gpu_options(_ctx_id: u32, _virgl_flags: u32) -> i32 {
         NOT_LINKED
     }
+    pub unsafe fn krun_set_gpu_options2(_ctx_id: u32, _virgl_flags: u32, _shm_size: u64) -> i32 {
+        NOT_LINKED
+    }
     pub unsafe fn krun_set_snd_device(_ctx_id: u32, _enable: bool) -> i32 {
         NOT_LINKED
     }
@@ -746,9 +753,9 @@ pub use stub::*;
 
 #[cfg(test)]
 mod tests {
-    /// Where the declarations above were transcribed from. Read at test time rather than vendored,
-    /// so the comparison is against the header this host would actually link against.
-    const HEADER: &str = "/usr/include/libkrun.h";
+    /// Where the declarations above were transcribed from, first found wins: the system path,
+    /// then Homebrew's, so the comparison is against the header this host would actually link.
+    const HEADERS: &[&str] = &["/usr/include/libkrun.h", "/opt/homebrew/include/libkrun.h"];
 
     /// The declared subset with the argument count the header gives it: a wrong arity is
     /// undefined behaviour at call time, not a build error.
@@ -782,6 +789,7 @@ mod tests {
         ("krun_set_port_map", 2),
         ("krun_add_net_unixstream", 6),
         ("krun_set_gpu_options", 2),
+        ("krun_set_gpu_options2", 3),
         ("krun_set_snd_device", 2),
         ("krun_add_display", 3),
         ("krun_display_set_edid", 4),
@@ -816,11 +824,14 @@ mod tests {
 
     #[test]
     fn the_declared_arity_matches_the_installed_header() {
-        let Ok(header) = std::fs::read_to_string(HEADER) else {
+        let Some((path, header)) = HEADERS
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok().map(|text| (*path, text)))
+        else {
             // A skipped test is a pass to cargo, so say what was not checked and why.
             println!(
-                "SKIPPED the_declared_arity_matches_the_installed_header: {HEADER} is absent, so \
-                 the declarations were compared against nothing. Install libkrun to run it."
+                "SKIPPED the_declared_arity_matches_the_installed_header: none of {HEADERS:?} \
+                 exists, so the declarations were compared against nothing. Install libkrun."
             );
             return;
         };
@@ -829,12 +840,12 @@ mod tests {
             match header_arity(&header, name) {
                 Some(actual) if actual == *declared => {}
                 Some(actual) => wrong.push(format!("{name}: declared {declared}, header {actual}")),
-                None => wrong.push(format!("{name}: not declared in {HEADER}")),
+                None => wrong.push(format!("{name}: not declared in {path}")),
             }
         }
         assert!(
             wrong.is_empty(),
-            "these declarations disagree with {HEADER}, which is undefined behaviour at call \
+            "these declarations disagree with {path}, which is undefined behaviour at call \
              time rather than a build error:\n  {}",
             wrong.join("\n  ")
         );

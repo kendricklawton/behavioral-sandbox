@@ -24,11 +24,11 @@
 //! libkrun, and what stops a running VM is a signal to the helper process (`bsx-supervisor`'s
 //! `Vm::stop`), so there is nothing of libkrun's to wrap.
 //!
-//! No accelerated GPU **for the guest**. [`Machine::gpu_device`] enables virtio-gpu with the one
-//! virglrenderer flag set measured to carry a frame, because a display needs the device; a posture
-//! that lets the guest use the host GPU for its own rendering is phase 5's, behind
-//! `krun_has_feature`. The host side is not GPU-free: virglrenderer opens the host render node for
-//! every `--display` VM, measured in `docs/architecture.md` under "What crosses the GPU boundary".
+//! Guest 3D is a posture, not a default. [`Machine::gpu_device`] takes a [`GpuMode`]: `Display`
+//! is the one flag set measured to carry a frame, `Accelerated` adds Venus over
+//! `krun_set_gpu_options2`, gated by callers on `krun_has_feature`. Offered is not achieved: no
+//! guest workload has been measured using it. The host side is not GPU-free: virglrenderer opens
+//! the host render node for every VM with a gpu device ("What crosses the GPU boundary").
 //!
 //! # Strings
 //!
@@ -652,6 +652,31 @@ impl ScanoutConfig {
 /// the one combination measured carrying a frame (see that method for the two that do not).
 const DISPLAY_GPU_FLAGS: u32 =
     sys::VIRGLRENDERER_USE_EGL | sys::VIRGLRENDERER_USE_SURFACELESS | sys::VIRGLRENDERER_USE_GLES;
+
+/// What the virtio-gpu device is for: a display's scanout path, or that plus the guest's own 3D.
+/// One `krun_set_gpu_options*` call configures a context, so the two asks merge into one mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GpuMode {
+    /// The flags a display was measured to need: virgl on a surfaceless EGL/GLES context.
+    Display,
+    /// [`Display`](Self::Display)'s flags plus Venus, with an SHM window for blob resources.
+    Accelerated,
+}
+
+/// The virglrenderer flags for `mode`. Venus is additive: the display floor stays, since `0`
+/// segfaults `virgl_renderer_init` and `NO_VIRGL` fails every `ResourceCreate2d`.
+const fn gpu_flags(mode: GpuMode) -> u32 {
+    match mode {
+        GpuMode::Display => DISPLAY_GPU_FLAGS,
+        GpuMode::Accelerated => DISPLAY_GPU_FLAGS | sys::VIRGLRENDERER_VENUS,
+    }
+}
+
+/// The SHM host window `krun_set_gpu_options2` reserves for blob resources: an address-space
+/// reservation, not an allocation, sized to never bound a workload. No Venus workload has
+/// exercised it yet; re-measure when a Venus-built host renderer exists.
+const GPU_SHM_WINDOW_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Buffers a scanout can have handed out at once. Two is a guest that renders the next frame
 /// while the last is presented; a third is slack for one that runs ahead of that.
@@ -2066,14 +2091,19 @@ impl Machine {
         Ok(self)
     }
 
-    /// Adds the virtio-gpu device a display needs, with the one flag set measured to carry frames.
+    /// Adds the virtio-gpu device, configured for `mode`: the display floor, or that plus Venus.
     ///
-    /// `0` segfaults `virgl_renderer_init` and `NO_VIRGL` fails every `ResourceCreate2d`, so only
-    /// virgl on a surfaceless EGL/GLES context is offered (roadmap 0.9).
-    pub fn gpu_device(self) -> Result<Self, Error> {
-        check("krun_set_gpu_options", unsafe {
-            sys::krun_set_gpu_options(self.ctx.id, DISPLAY_GPU_FLAGS)
-        })?;
+    /// `Display` stays on `krun_set_gpu_options`, the call the display path was measured on;
+    /// `Accelerated` goes through `krun_set_gpu_options2` for the SHM window Venus requires.
+    pub fn gpu_device(self, mode: GpuMode) -> Result<Self, Error> {
+        match mode {
+            GpuMode::Display => check("krun_set_gpu_options", unsafe {
+                sys::krun_set_gpu_options(self.ctx.id, gpu_flags(mode))
+            })?,
+            GpuMode::Accelerated => check("krun_set_gpu_options2", unsafe {
+                sys::krun_set_gpu_options2(self.ctx.id, gpu_flags(mode), GPU_SHM_WINDOW_BYTES)
+            })?,
+        };
         Ok(self)
     }
 
@@ -3388,6 +3418,21 @@ mod tests {
         assert_eq!(
             (Arc::strong_count(&device), Arc::strong_count(&queue)),
             (1, 1)
+        );
+    }
+
+    /// Venus is what `Accelerated` adds and all it adds: the display floor is shared, so a
+    /// display and an accelerated guest merge instead of fighting over one options call.
+    #[test]
+    fn venus_is_offered_only_by_the_accelerated_mode() {
+        let display = gpu_flags(GpuMode::Display);
+        let accel = gpu_flags(GpuMode::Accelerated);
+        assert_eq!(display & sys::VIRGLRENDERER_VENUS, 0);
+        assert_eq!(accel, display | sys::VIRGLRENDERER_VENUS);
+        assert_eq!(
+            accel & DISPLAY_GPU_FLAGS,
+            DISPLAY_GPU_FLAGS,
+            "the floor is shared"
         );
     }
 }
