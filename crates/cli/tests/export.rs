@@ -2,7 +2,7 @@
 //! with `bsx-record` and runs the built binary against a scratch `$BSX_RUNS_DIR`.
 
 // A test binary: `expect` is the idiomatic assertion in helpers outside `#[test]`.
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used)]
 
 use std::path::Path;
 use std::process::Command;
