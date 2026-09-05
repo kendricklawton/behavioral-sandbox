@@ -135,6 +135,11 @@ pub(crate) struct RunArgs {
     /// microphone is opened only when asked.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Let the guest use the host GPU for its own rendering: a 3D-capable virtio-gpu (virgl +
+    /// Venus) into the host renderer, with or without --display. Off by default: what the guest
+    /// submits, the host renderer executes. The default image ships no driver to use it.
+    #[arg(long)]
+    pub(crate) gpu: bool,
     /// Do not mount the run's results directory at `/results` in the guest. Every run gets one
     /// by default: the record's own empty directory, where the guest's results land.
     #[arg(long)]
@@ -281,6 +286,7 @@ pub(crate) fn posture_of(cfg: &VmConfig, results: bool) -> Posture {
     p.network = record_network(cfg.net);
     p.display = cfg.display.map(record_display);
     p.sound = cfg.sound;
+    p.gpu = cfg.gpu;
     p.results = results;
     p
 }
@@ -335,6 +341,12 @@ pub(crate) fn print_posture(
         writeln!(
             out,
             "sound    a virtio-snd card to the host audio server (play and capture)"
+        )?;
+    }
+    if cfg.gpu {
+        writeln!(
+            out,
+            "gpu      a 3D virtio-gpu into the host renderer (virgl + Venus offered)"
         )?;
     }
     writeln!(out, "network  {}", cfg.net.as_flag())?;
@@ -460,6 +472,7 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
     cfg.sound = args.sound;
+    cfg.gpu = args.gpu;
     apply_display(
         &mut cfg,
         args.display,
@@ -709,6 +722,7 @@ mod tests {
             "data=/srv/data",
             "--net",
             "tsi",
+            "--gpu",
             "--",
             "true",
         ]);
@@ -725,6 +739,7 @@ mod tests {
             "mount    /mnt <- /srv/code writable",
             "share    data <- /srv/data writable",
             "network  tsi",
+            "gpu      a 3D virtio-gpu into the host renderer (virgl + Venus offered)",
             "limits   1 vcpu, 512 MiB",
             "exec     true",
         ] {

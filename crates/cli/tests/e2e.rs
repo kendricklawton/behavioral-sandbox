@@ -899,6 +899,43 @@ fn the_desktop_image_boots_to_a_session_the_keyboard_reaches() {
     );
 }
 
+/// `--gpu` gives the guest a DRM device and nothing else does (roadmap 5.1): the render node is
+/// present exactly when the flag is. Busybox-level on purpose: the default image carries no GPU
+/// userspace, so presence or absence of the offer is the whole testable claim here.
+#[test]
+#[ignore = "boots a real guest: needs /dev/kvm and the guest tree"]
+fn gpu_gives_the_guest_a_drm_device_and_nothing_else_does() {
+    if skipped("gpu_gives_the_guest_a_drm_device_and_nothing_else_does") {
+        return;
+    }
+    let dri = |flags: &[&str]| -> String {
+        let out = bsx()
+            .arg("run")
+            .arg("--root")
+            .arg(guest_root())
+            .args(flags)
+            .args(["--", "sh", "-c", "ls /dev/dri 2>/dev/null || echo none"])
+            .output()
+            .expect("run bsx");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let without = dri(&[]);
+    assert!(
+        without.contains("none"),
+        "no --gpu, no DRM device: {without:?}"
+    );
+    let with = dri(&["--gpu"]);
+    assert!(
+        with.contains("card0") && with.contains("renderD128"),
+        "--gpu offers the device: {with:?}"
+    );
+}
+
 /// `--sound` gives the guest a virtio-snd card and nothing else does (roadmap 4.7), the card
 /// being present exactly when the flag is. Two-way (`playback 1 : capture 1`), which is why it is
 /// opt-in. Read from `/proc/asound`, so a runner with no sound server still decides it.

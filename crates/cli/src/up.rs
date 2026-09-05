@@ -69,6 +69,11 @@ pub(crate) struct UpArgs {
     /// microphone is opened only when asked.
     #[arg(long)]
     pub(crate) sound: bool,
+    /// Let the guest use the host GPU for its own rendering: a 3D-capable virtio-gpu (virgl +
+    /// Venus) into the host renderer, with or without --display. Off by default: what the guest
+    /// submits, the host renderer executes. The default image ships no driver to use it.
+    #[arg(long)]
+    pub(crate) gpu: bool,
     /// Do not mount the sandbox's results directory at `/results` in the guest.
     #[arg(long)]
     pub(crate) no_results: bool,
@@ -136,6 +141,7 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     cfg.net = args.net.into_net();
     cfg.rootfs = args.rootfs.into_rootfs();
     cfg.sound = args.sound;
+    cfg.gpu = args.gpu;
     crate::run::apply_display(
         &mut cfg,
         args.display,

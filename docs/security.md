@@ -29,8 +29,13 @@ The monitor process is one trusted component with a large surface, and `--displa
 given a display loads virglrenderer and Mesa into the monitor and opens the host GPU's render node,
 so guest-controlled data reaches a renderer running with the operator's privileges. That is measured
 in [Architecture](./architecture.md) under "What crosses the GPU boundary". A headless VM does not
-open it. Nothing in the guest gets GPU acceleration today, so this is surface the display feature
-costs, not a capability the sandbox grants.
+open it. `--gpu` widens the surface differently and further: a display's guest data reaches
+virglrenderer as pixels to decode, while a `--gpu` guest is handed the 3D submission path, so
+untrusted code composes virgl (and, where the host renderer carries Venus, Vulkan) commands that a
+renderer executes with the operator's privileges. That is why it is a toggle: off by default,
+printed in the posture, refused where libkrun lacks the feature. Without `--gpu`, nothing in the
+guest gets GPU acceleration, so a display is surface the feature costs, not a capability the
+sandbox grants; `--gpu` is the named grant of the wider path.
 
 The posture that follows from it: a sandbox with no explicit configuration shares no host directory
 and reaches no network, and what is shared **is** the policy, settled before the VM starts.

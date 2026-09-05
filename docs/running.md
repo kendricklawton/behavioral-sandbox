@@ -41,6 +41,7 @@ directory, so a sandbox started by the CLI is visible to the app and the other w
 | `--share TAG=HOSTPATH` | An extra virtiofs device for a guest that mounts by tag. Repeatable. | nothing |
 | `--display WIDTHxHEIGHT[@HZ]` | A virtio-gpu display in a window; closing the window stops the sandbox. | none |
 | `--sound` | A virtio-snd card on the host's audio server: playback **and** capture. | off |
+| `--gpu` | A 3D virtio-gpu into the host renderer (virgl + Venus offered); the guest brings its own driver. | off |
 | `--env KEY=VALUE` | One guest environment entry. Repeatable. | nothing |
 | `--vcpus N`, `--mem MIB` | Sizing; also `$BSX_VCPUS` and `$BSX_MEM_MIB`. | 1 vCPU, 512 MiB |
 | `--no-results` | Drops the default `/results` mount. | mounted |
