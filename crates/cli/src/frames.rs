@@ -78,9 +78,11 @@ fn read_one_lease(
     let mut lease = loop {
         match control::display(socket) {
             Ok(lease) => break lease,
-            Err(control::Error::Refused(why)) if why.contains("ask again") => {
+            Err(control::Error::NotReady) => {
                 if Instant::now() > deadline {
-                    return Err(format!("{why} (gave up after {CONFIGURE_WAIT:?})"));
+                    return Err(format!(
+                        "the guest configured no scanout (gave up after {CONFIGURE_WAIT:?})"
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }

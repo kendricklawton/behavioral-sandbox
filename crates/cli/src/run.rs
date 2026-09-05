@@ -226,15 +226,44 @@ fn tee(
     })
 }
 
+/// The record's spelling of a config's root posture.
+///
+/// The two enums are separate because `bsx-record` is dependency-free and cannot name a type from
+/// the crate that links libkrun; `the_record_and_the_config_spell_the_posture_alike` holds them in
+/// step, and the wildcard is what `#[non_exhaustive]` requires of a match from another crate.
+fn record_rootfs(rootfs: bsx_supervisor::RootFs) -> bsx_record::Rootfs {
+    match rootfs {
+        bsx_supervisor::RootFs::Writable => bsx_record::Rootfs::Writable,
+        _ => bsx_record::Rootfs::ReadOnly,
+    }
+}
+
+/// The record's spelling of a config's network posture.
+fn record_network(net: bsx_supervisor::Net) -> bsx_record::Network {
+    match net {
+        bsx_supervisor::Net::Tsi => bsx_record::Network::Tsi,
+        _ => bsx_record::Network::None,
+    }
+}
+
+/// The record's spelling of a config's display.
+fn record_display(display: bsx_supervisor::Display) -> bsx_record::DisplayMode {
+    let mode = bsx_record::DisplayMode::new(display.width, display.height);
+    match display.refresh {
+        Some(hz) => mode.with_refresh(hz),
+        None => mode,
+    }
+}
+
 /// The record's posture for `cfg`: the same facts [`print_posture`] prints, in the record's
 /// shape.
 pub(crate) fn posture_of(cfg: &VmConfig, results: bool) -> Posture {
     let mut p = Posture::new(cfg.root.clone(), cfg.vcpus.get(), cfg.mem_mib.get());
-    p.rootfs = cfg.rootfs.as_flag().to_string();
+    p.rootfs = record_rootfs(cfg.rootfs);
     p.mounts = cfg.mounts.clone();
     p.shares = cfg.shares.clone();
-    p.network = cfg.net.as_flag().to_string();
-    p.display = cfg.display.map(|d| d.as_spec());
+    p.network = record_network(cfg.net);
+    p.display = cfg.display.map(record_display);
     p.sound = cfg.sound;
     p.results = results;
     p
@@ -480,11 +509,45 @@ pub(crate) fn guest_code(code: i32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
     // `panic!` is the assertion in the let-else arms below; the tree-wide deny is for the host
     // path, and this module is not on it.
     #![allow(clippy::panic)]
 
     use std::path::Path;
+
+    /// The record's posture words are the config's flag words. Two crates spell this vocabulary
+    /// because `bsx-record` is dependency-free, so the pairing is asserted rather than assumed:
+    /// a record saying `read-only` for a writable root would misreport what a sandbox could do.
+    #[test]
+    fn the_record_and_the_config_spell_the_posture_alike() {
+        for rootfs in [
+            bsx_supervisor::RootFs::ReadOnly,
+            bsx_supervisor::RootFs::Writable,
+        ] {
+            assert_eq!(
+                rootfs.as_flag(),
+                record_rootfs(rootfs).as_word(),
+                "{rootfs:?}"
+            );
+        }
+        for net in [bsx_supervisor::Net::None, bsx_supervisor::Net::Tsi] {
+            assert_eq!(net.as_flag(), record_network(net).as_word(), "{net:?}");
+        }
+        let hd = std::num::NonZeroU32::new(1920).expect("non-zero");
+        let vd = std::num::NonZeroU32::new(1080).expect("non-zero");
+        let hz = std::num::NonZeroU32::new(60).expect("non-zero");
+        for display in [
+            bsx_supervisor::Display::new(hd, vd),
+            bsx_supervisor::Display::new(hd, vd).with_refresh(hz),
+        ] {
+            assert_eq!(
+                display.as_spec(),
+                record_display(display).as_spec(),
+                "{display:?}"
+            );
+        }
+    }
 
     use clap::Parser;
 

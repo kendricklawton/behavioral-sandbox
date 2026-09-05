@@ -221,9 +221,11 @@ impl FrameLog {
 
 /// The host's monotonic clock in nanoseconds: the one timestamp two processes on this host can
 /// compare.
-pub(crate) fn monotonic_ns() -> u128 {
+pub(crate) fn monotonic_ns() -> u64 {
     let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    u128::try_from(t.tv_sec).unwrap_or(0) * 1_000_000_000 + u128::try_from(t.tv_nsec).unwrap_or(0)
+    let secs = u64::try_from(t.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(t.tv_nsec).unwrap_or(0);
+    secs.saturating_mul(1_000_000_000).saturating_add(nanos)
 }
 
 /// Where the frame sits in the window, in window pixels: what the pointer is measured against.
@@ -753,6 +755,6 @@ mod tests {
         );
         let (id, ns) = lines[0].split_once('\t').expect("id, tab, ns");
         assert_eq!(id, "1", "the latest frame's id");
-        assert!(ns.parse::<u128>().is_ok(), "nanoseconds: {ns:?}");
+        assert!(ns.parse::<u64>().is_ok(), "nanoseconds: {ns:?}");
     }
 }

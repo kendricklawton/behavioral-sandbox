@@ -40,6 +40,10 @@ const EXIT_OPERATIONAL: u8 = 2;
 /// exactly what changed since the frame it last uploaded.
 const HISTORY: usize = 64;
 
+/// The display a form offers before anyone changes it, and what a record without one falls back
+/// to when it is re-run.
+const DEFAULT_DISPLAY: &str = "640x480";
+
 /// Bytes of an output file the pane shows, from its end.
 const OUTPUT_TAIL: u64 = 256 * 1024;
 
@@ -148,13 +152,64 @@ fn main() -> ExitCode {
     }
 }
 
+/// A run's id: `<started_ms>-<name>`, which is also its directory under the runs directory.
+///
+/// Distinct from [`RunName`] by type because the id *contains* the name, so the two are freely
+/// confusable as `String` and a mix-up is a silent lookup miss: a dead button, or a display that
+/// never arrives. The record is the only place either is minted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RunId(String);
+
+impl RunId {
+    /// The id of `record`.
+    pub(crate) fn of(record: &Record) -> Self {
+        Self(record.id.clone())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A run's name: what its VM answers to on the control socket, and what a lease asks for.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RunName(String);
+
+impl RunName {
+    /// The name of `record`.
+    pub(crate) fn of(record: &Record) -> Self {
+        Self(record.name.clone())
+    }
+
+    /// The name a started run reported, which is the only name minted outside a record.
+    pub(crate) fn started(name: String) -> Self {
+        Self(name)
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RunName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
     /// The notebook: every run, newest first.
     List,
     /// One run's record, by id.
-    Run(String),
+    Run(RunId),
     /// The form for a new run.
     New,
 }
@@ -234,7 +289,7 @@ impl Form {
             root: cli::default_root()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
-            display_size: "640x480".to_string(),
+            display_size: DEFAULT_DISPLAY.to_string(),
             results: true,
             vcpus: "1".to_string(),
             mem_mib: "512".to_string(),
@@ -248,7 +303,7 @@ impl Form {
         Self {
             name: String::new(),
             root: p.root.display().to_string(),
-            writable_root: p.rootfs == "writable",
+            writable_root: p.rootfs == bsx_record::Rootfs::Writable,
             command: record.command.join(" "),
             mounts: p
                 .mounts
@@ -262,9 +317,11 @@ impl Form {
                 .map(|(t, h)| format!("{t}={}", h.display()))
                 .collect::<Vec<_>>()
                 .join(" "),
-            network: p.network == "tsi",
+            network: p.network == bsx_record::Network::Tsi,
             display: p.display.is_some(),
-            display_size: p.display.clone().unwrap_or_else(|| "640x480".to_string()),
+            display_size: p
+                .display
+                .map_or_else(|| DEFAULT_DISPLAY.to_string(), |d| d.as_spec()),
             sound: p.sound,
             results: p.results,
             vcpus: p.vcpus.to_string(),
@@ -301,37 +358,37 @@ pub(crate) enum Switch {
 pub(crate) enum Message {
     /// A second passed: reread the notebook and the open run's output.
     Tick,
-    Open(String),
+    Open(RunId),
     Back,
     NewRun,
     Field(Field, String),
     Switch(Switch, bool),
     Start,
-    Started(Result<String, String>),
-    Stop(String),
+    Started(Result<RunName, String>),
+    Stop(RunName),
     Acted(Result<String, String>),
-    Shell(String),
-    Rerun(String),
-    Delete(String),
+    Shell(RunName),
+    Rerun(RunId),
+    Delete(RunId),
     Show(Stream),
     /// A run's lease landed and its memfd is mapped.
-    Mapped(String, Arc<SharedFrames>),
+    Mapped(RunName, Arc<SharedFrames>),
     /// A run presented a frame into `slot`.
     Presented {
-        name: String,
+        name: RunName,
         frame_id: u32,
         slot: u32,
         damage: Damage,
     },
     /// A run's input session is open: these are the lines its keyboard and pointer become.
     Input(
-        String,
+        RunName,
         iced::futures::channel::mpsc::UnboundedSender<String>,
     ),
     /// Something the operator should see in the window rather than on a stderr they may not have.
     Note(String),
     /// A run's lease ended, with why; the sandbox stopping is the ordinary case.
-    Ended(String, String),
+    Ended(RunName, String),
 }
 
 pub(crate) struct App {
@@ -340,7 +397,7 @@ pub(crate) struct App {
     /// Every run, newest first, as of the last tick.
     runs: Vec<Record>,
     /// The names answering on their control sockets as of the last tick.
-    live: BTreeSet<String>,
+    live: BTreeSet<RunName>,
     form: Form,
     /// The last thing worth telling the operator: an error, or what just happened.
     status: Option<String>,
@@ -353,7 +410,7 @@ pub(crate) struct App {
     sinks: Arc<frame::Sinks>,
     /// The display of every run this window is leasing, by name: the one on screen, and every
     /// live run with a display when the list is showing its grid.
-    displays: BTreeMap<String, Display>,
+    displays: BTreeMap<RunName, Display>,
     exit_with_lease: bool,
 }
 
@@ -395,7 +452,7 @@ impl App {
                 .iter()
                 .find(|r| r.id == key)
                 .or_else(|| app.runs.iter().find(|r| r.name == key))
-                .map(|r| r.id.clone());
+                .map(RunId::of);
             match found {
                 Some(id) => app.open(id),
                 None => app.status = Some(format!("no run named or numbered {key:?}")),
@@ -416,24 +473,29 @@ impl App {
     }
 
     /// The record with `id`, from the last tick.
-    pub(crate) fn record(&self, id: &str) -> Option<&Record> {
-        self.runs.iter().find(|r| r.id == id)
+    pub(crate) fn record(&self, id: &RunId) -> Option<&Record> {
+        self.runs.iter().find(|r| r.id == id.as_str())
     }
 
     /// Whether the run with `id` is answering now.
     pub(crate) fn is_live(&self, record: &Record) -> bool {
-        record.is_open() && self.live.contains(&record.name)
+        record.is_open() && self.live.contains(&RunName::of(record))
     }
 
     /// Rereads the notebook: the records, which names answer, and marks the open records whose
     /// VM does not answer as gone (the one bookkeeping a listing does, as `bsx ls --all`).
     fn refresh(&mut self) {
         self.live = bsx_supervisor::discover::live()
-            .map(|found| found.into_iter().map(|f| f.name).collect())
+            .map(|found| {
+                found
+                    .into_iter()
+                    .map(|f| RunName::started(f.name))
+                    .collect()
+            })
             .unwrap_or_default();
         let mut runs = self.store.list().unwrap_or_default();
         for record in &mut runs {
-            if record.is_open() && !self.live.contains(&record.name) {
+            if record.is_open() && !self.live.contains(&RunName::started(record.name.clone())) {
                 record.finish(bsx_record::End::Gone);
                 let _ = self.store.save(record);
             }
@@ -447,7 +509,7 @@ impl App {
     }
 
     /// Rereads the tail of the shown stream of run `id`, and the results the guest has written.
-    fn reload_output(&mut self, id: &str) {
+    fn reload_output(&mut self, id: &RunId) {
         let Some(record) = self.record(id) else {
             self.output = Output::default();
             self.results = Vec::new();
@@ -458,7 +520,7 @@ impl App {
             Some(s) if streams.contains(&s) => Some(s),
             _ => streams.first().copied(),
         };
-        let dir = self.store.dir_of(id);
+        let dir = self.store.dir_of(id.as_str());
         self.results = dir.result_files().unwrap_or_default();
         self.output = match stream {
             Some(stream) => {
@@ -476,7 +538,7 @@ impl App {
     }
 
     /// Opens run `id`: the record, its output, and its display if it is live and has one.
-    fn open(&mut self, id: String) {
+    fn open(&mut self, id: RunId) {
         self.leave();
         self.set_screen(Screen::Run(id.clone()));
         self.output.stream = None;
@@ -501,7 +563,7 @@ impl App {
     /// every other live display at [`THUMBNAIL_EVERY`].
     fn watches(&self) -> Vec<lease::Watch> {
         let open = match &self.screen {
-            Screen::Run(id) => self.record(id).map(|r| r.name.clone()),
+            Screen::Run(id) => self.record(id).map(RunName::of),
             _ => None,
         };
         let mut watches = Vec::new();
@@ -520,7 +582,7 @@ impl App {
         }
         for record in self.showing_displays().into_iter().take(MAX_THUMBNAILS) {
             watches.push(lease::Watch {
-                name: record.name.clone(),
+                name: RunName::of(record),
                 log: None,
                 every: THUMBNAIL_EVERY,
             });
@@ -537,13 +599,13 @@ impl App {
     /// Drops what was mapped for a run this window no longer leases, so a display left behind
     /// does not keep its memfd, its input session or its history alive.
     fn forget_unwatched(&mut self) {
-        let wanted: BTreeSet<String> = self.watches().into_iter().map(|w| w.name).collect();
+        let wanted: BTreeSet<RunName> = self.watches().into_iter().map(|w| w.name).collect();
         self.displays.retain(|name, _| wanted.contains(name));
     }
 
     /// The record with `name`, from the last tick.
-    fn record_by_name(&self, name: &str) -> Option<&Record> {
-        self.runs.iter().find(|r| r.name == name)
+    fn record_by_name(&self, name: &RunName) -> Option<&Record> {
+        self.runs.iter().find(|r| r.name == name.as_str())
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -603,9 +665,9 @@ impl App {
             Message::Started(Ok(name)) => {
                 self.status = Some(format!("started {name}"));
                 self.refresh();
-                match self.runs.iter().find(|r| r.name == name) {
+                match self.runs.iter().find(|r| r.name == name.as_str()) {
                     Some(record) => {
-                        let id = record.id.clone();
+                        let id = RunId::of(record);
                         self.open(id);
                     }
                     None => self.set_screen(Screen::List),
@@ -622,11 +684,11 @@ impl App {
                 Task::none()
             }
             Message::Stop(name) => Task::perform(
-                async move { cli::stop(&cli::bsx_path(), &name) },
+                async move { cli::stop(&cli::bsx_path(), name.as_str()) },
                 Message::Acted,
             ),
             Message::Shell(name) => Task::perform(
-                async move { cli::open_shell(&cli::bsx_path(), &name) },
+                async move { cli::open_shell(&cli::bsx_path(), name.as_str()) },
                 Message::Acted,
             ),
             Message::Rerun(id) => {
@@ -643,7 +705,7 @@ impl App {
                     return Task::none();
                 }
                 self.leave();
-                self.status = match self.store.remove(&id) {
+                self.status = match self.store.remove(id.as_str()) {
                     Ok(()) => Some(format!("removed {id}")),
                     Err(e) => Some(format!("removing {id}: {e}")),
                 };
@@ -767,10 +829,10 @@ fn tail_of(path: &std::path::Path, max: u64) -> (String, u64) {
 
 /// Where a run's frames, history, sinks and input go: the shader widget's program, or `None`
 /// when this window holds no display for it yet.
-pub(crate) fn frame_program(app: &App, name: &str) -> Option<frame::Program> {
+pub(crate) fn frame_program(app: &App, name: &RunName) -> Option<frame::Program> {
     let display = app.displays.get(name)?;
     Some(frame::Program {
-        run: Arc::from(name),
+        run: Arc::from(name.as_str()),
         frames: Arc::clone(&display.frames),
         history: Arc::clone(&display.history),
         sinks: Arc::clone(&app.sinks),
@@ -798,7 +860,9 @@ mod tests {
     /// A run with a display, live or not, for the watch-set tests.
     fn displayed(name: &str, with_display: bool) -> Record {
         let mut p = bsx_record::Posture::new(PathBuf::from("/img"), 1, 512);
-        p.display = with_display.then(|| "640x480".to_string());
+        p.display = with_display
+            .then(|| bsx_record::DisplayMode::parse("640x480"))
+            .flatten();
         Record::begin(name, bsx_record::Verb::Run, vec!["true".into()], p)
     }
 
@@ -808,7 +872,10 @@ mod tests {
         let sinks = Arc::new(frame::Sinks::open(None, None).expect("sinks"));
         let mut app = App::new(store, None, None, sinks, false);
         app.runs = runs;
-        app.live = live.iter().map(|n| (*n).to_string()).collect();
+        app.live = live
+            .iter()
+            .map(|n| RunName::started((*n).to_string()))
+            .collect();
         // The scratch dir is dropped at the end of the test; nothing here touches it again.
         std::mem::forget(dir);
         app
@@ -825,10 +892,10 @@ mod tests {
             displayed("nodisplay", false),
             displayed("ended", true),
         ];
-        let open_id = runs[0].id.clone();
+        let open_id = RunId::of(&runs[0]);
         let mut app = app_with(runs, &["alpha", "beta", "nodisplay"]);
 
-        let mut watched: Vec<(String, std::time::Duration)> = app
+        let mut watched: Vec<(RunName, std::time::Duration)> = app
             .watches()
             .into_iter()
             .map(|w| (w.name, w.every))
@@ -837,21 +904,24 @@ mod tests {
         assert_eq!(
             watched,
             [
-                ("alpha".to_string(), THUMBNAIL_EVERY),
-                ("beta".to_string(), THUMBNAIL_EVERY),
+                (RunName::started("alpha".to_string()), THUMBNAIL_EVERY),
+                (RunName::started("beta".to_string()), THUMBNAIL_EVERY),
             ],
             "the list watches both live displays, and only those, at the thumbnail rate"
         );
 
         app.screen = Screen::Run(open_id);
-        let watched: Vec<(String, std::time::Duration)> = app
+        let watched: Vec<(RunName, std::time::Duration)> = app
             .watches()
             .into_iter()
             .map(|w| (w.name, w.every))
             .collect();
         assert_eq!(
             watched,
-            [("alpha".to_string(), std::time::Duration::ZERO)],
+            [(
+                RunName::started("alpha".to_string()),
+                std::time::Duration::ZERO
+            )],
             "an open run is the only lease, and it takes every present"
         );
     }
@@ -873,7 +943,7 @@ mod tests {
         };
         for name in ["alpha", "beta"] {
             app.displays.insert(
-                name.to_string(),
+                RunName::started(name.to_string()),
                 Display {
                     frames: Arc::clone(&frames),
                     history: Arc::new(std::collections::VecDeque::new()),
@@ -882,11 +952,11 @@ mod tests {
                 },
             );
         }
-        app.live.remove("beta");
+        app.live.remove(&RunName::started("beta".to_string()));
         app.forget_unwatched();
         assert_eq!(
             app.displays.keys().collect::<Vec<_>>(),
-            ["alpha"],
+            [&RunName::started("alpha".to_string())],
             "the run that stopped answering is no longer held"
         );
     }
@@ -895,11 +965,11 @@ mod tests {
     #[test]
     fn a_rerun_form_is_the_records_posture_again() {
         let mut p = bsx_record::Posture::new(PathBuf::from("/img"), 2, 768);
-        p.rootfs = "writable".to_string();
+        p.rootfs = bsx_record::Rootfs::Writable;
         p.mounts
             .push((PathBuf::from("/mnt"), PathBuf::from("/home/x/out")));
-        p.network = "tsi".to_string();
-        p.display = Some("800x600".to_string());
+        p.network = bsx_record::Network::Tsi;
+        p.display = bsx_record::DisplayMode::parse("800x600");
         p.results = false;
         let record = bsx_record::Record::begin(
             "r",

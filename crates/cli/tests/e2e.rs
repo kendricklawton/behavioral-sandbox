@@ -1327,7 +1327,7 @@ fn a_run_leaves_its_record_output_and_results() {
     assert_eq!(record.verb, bsx_record::Verb::Run);
     assert_eq!(record.end, Some(bsx_record::End::Exit(3)));
     assert!(record.posture.results, "results on by default");
-    assert_eq!(record.posture.network, "none");
+    assert_eq!(record.posture.network, bsx_record::Network::None);
     assert!(record.ended_ms >= Some(record.started_ms));
     let dir = store.dir_of(&record.id);
     assert_eq!(

@@ -1130,6 +1130,22 @@ pub mod control {
         Protocol(String),
         /// The VM refused the request and said why.
         Refused(String),
+        /// The VM has no scanout configured yet, so a display lease is worth asking for again.
+        /// Separate from [`Error::Refused`] because it is a wait, not a failure.
+        NotReady,
+    }
+
+    /// The refusal a VM sends while its guest has not configured a scanout, named by both ends so
+    /// the retry is a variant rather than a reader matching on the words.
+    pub const NOT_READY: &str = "no scanout is configured yet; ask again";
+
+    /// The error a non-`ok` status line means: `err <why>`, with [`NOT_READY`] as its own variant.
+    fn refusal(status: &str) -> Error {
+        match status.strip_prefix("err ") {
+            Some(NOT_READY) => Error::NotReady,
+            Some(why) => Error::Refused(why.to_string()),
+            None => Error::Protocol(format!("{status:?} is neither ok nor err")),
+        }
     }
 
     impl std::fmt::Display for Error {
@@ -1138,6 +1154,7 @@ pub mod control {
                 Self::Io(e) => write!(f, "the control socket: {e}"),
                 Self::Protocol(m) => write!(f, "the VM answered something unreadable: {m}"),
                 Self::Refused(m) => write!(f, "the VM refused: {m}"),
+                Self::NotReady => write!(f, "the VM has no scanout configured yet"),
             }
         }
     }
@@ -1440,10 +1457,7 @@ pub mod control {
         match status {
             "ok" => {}
             other => {
-                return Err(match other.strip_prefix("err ") {
-                    Some(why) => Error::Refused(why.to_string()),
-                    None => Error::Protocol(format!("{other:?} is neither ok nor err")),
-                });
+                return Err(refusal(other));
             }
         }
         let scanout = Scanout::parse_body(body)?;
@@ -1511,10 +1525,7 @@ pub mod control {
         BufReader::new((&stream).take(MAX_REPLY)).read_line(&mut status)?;
         match status.trim_end() {
             "ok" => Ok(InputSession { stream }),
-            other => Err(match other.strip_prefix("err ") {
-                Some(why) => Error::Refused(why.to_string()),
-                None => Error::Protocol(format!("{other:?} is neither ok nor err")),
-            }),
+            other => Err(refusal(other)),
         }
     }
 
@@ -1531,10 +1542,7 @@ pub mod control {
         let (status, body) = reply.split_once('\n').unwrap_or((reply.trim_end(), ""));
         match status {
             "ok" => Ok(body.to_string()),
-            other => Err(match other.strip_prefix("err ") {
-                Some(why) => Error::Refused(why.to_string()),
-                None => Error::Protocol(format!("{other:?} is neither ok nor err")),
-            }),
+            other => Err(refusal(other)),
         }
     }
 }
@@ -2400,15 +2408,11 @@ mod control_tests {
             std::io::BufReader::new(&server)
                 .read_line(&mut request)
                 .expect("the request");
-            control::write_refusal(&mut server, "no scanout is configured yet; ask again")
-                .expect("refused");
+            control::write_refusal(&mut server, control::NOT_READY).expect("refused");
         });
         let err = control::lease_on(client).expect_err("refused");
         refused.join().expect("the server thread");
-        assert!(
-            matches!(&err, control::Error::Refused(why) if why.contains("ask again")),
-            "{err}"
-        );
+        assert!(matches!(&err, control::Error::NotReady), "{err}");
     }
 
     /// The layout body round-trips, and a body from another protocol version is refused.

@@ -193,7 +193,7 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
     let text_side = column![title, command, posture].spacing(4);
     // A running sandbox with a display shows it, so the list says what each one is doing rather
     // than only what it was asked to do.
-    let body: Element<'_, Message> = match crate::frame_program(app, &record.name) {
+    let body: Element<'_, Message> = match crate::frame_program(app, &crate::RunName::of(record)) {
         Some(program) if live => row![
             container(shader(program).width(Fill).height(Fill))
                 .width(Length::Fixed(THUMBNAIL.0))
@@ -212,7 +212,7 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
             .padding(12)
             .style(container::rounded_box),
     )
-    .on_press(Message::Open(record.id.clone()))
+    .on_press(Message::Open(crate::RunId::of(record)))
     .into()
 }
 
@@ -226,18 +226,18 @@ const THUMBNAIL: (f32, f32) = (160.0, 120.0);
 fn posture_tags(record: &Record) -> String {
     let p = &record.posture;
     let mut parts = Vec::new();
-    if let Some(display) = &p.display {
-        parts.push(display.replace('x', "\u{d7}"));
+    if let Some(display) = p.display {
+        parts.push(display.as_spec().replace('x', "\u{d7}"));
     }
     parts.push(
-        if p.network == "tsi" {
+        if p.network == bsx_record::Network::Tsi {
             "network via host"
         } else {
             "no network"
         }
         .to_string(),
     );
-    if p.rootfs == "writable" {
+    if p.rootfs == bsx_record::Rootfs::Writable {
         parts.push("writable root".to_string());
     }
     // One share is worth naming; several are worth counting, or the line outgrows the card.
@@ -263,7 +263,7 @@ fn posture_tags(record: &Record) -> String {
 }
 
 /// One run: its record on the left, its display and output on the right.
-pub(crate) fn run<'a>(app: &'a App, id: &str) -> Element<'a, Message> {
+pub(crate) fn run<'a>(app: &'a App, id: &crate::RunId) -> Element<'a, Message> {
     let Some(record) = app.record(id) else {
         return column![
             button(text("← runs")).on_press(Message::Back),
@@ -283,19 +283,20 @@ pub(crate) fn run<'a>(app: &'a App, id: &str) -> Element<'a, Message> {
     .align_y(iced::alignment::Vertical::Center);
     if live {
         if record.verb == Verb::Up {
-            bar = bar.push(button(text("Shell")).on_press(Message::Shell(record.name.clone())));
+            bar = bar
+                .push(button(text("Shell")).on_press(Message::Shell(crate::RunName::of(record))));
         }
         bar = bar.push(
             button(text("Stop"))
                 .style(button::danger)
-                .on_press(Message::Stop(record.name.clone())),
+                .on_press(Message::Stop(crate::RunName::of(record))),
         );
     } else {
-        bar = bar.push(button(text("Re-run")).on_press(Message::Rerun(record.id.clone())));
+        bar = bar.push(button(text("Re-run")).on_press(Message::Rerun(crate::RunId::of(record))));
         bar = bar.push(
             button(text("Delete"))
                 .style(button::danger)
-                .on_press(Message::Delete(record.id.clone())),
+                .on_press(Message::Delete(crate::RunId::of(record))),
         );
     }
 
@@ -313,12 +314,13 @@ pub(crate) fn run<'a>(app: &'a App, id: &str) -> Element<'a, Message> {
 
     let mut right = column![].spacing(10);
     if live && record.posture.display.is_some() {
-        let display: Element<'_, Message> = match crate::frame_program(app, &record.name) {
-            Some(program) => shader(program).width(Fill).height(Fill).into(),
-            None => container(text("leasing the display…").size(14))
-                .center(Fill)
-                .into(),
-        };
+        let display: Element<'_, Message> =
+            match crate::frame_program(app, &crate::RunName::of(record)) {
+                Some(program) => shader(program).width(Fill).height(Fill).into(),
+                None => container(text("leasing the display…").size(14))
+                    .center(Fill)
+                    .into(),
+            };
         right = right.push(
             container(display)
                 .width(Fill)
@@ -368,7 +370,7 @@ fn posture_lines(record: &Record) -> Vec<(String, String)> {
     let p = &record.posture;
     let mut lines = vec![(
         "root".to_string(),
-        format!("{}, {}", p.root.display(), p.rootfs),
+        format!("{}, {}", p.root.display(), p.rootfs.as_word()),
     )];
     for (guest, host) in &p.mounts {
         lines.push((
@@ -382,10 +384,11 @@ fn posture_lines(record: &Record) -> Vec<(String, String)> {
     if p.mounts.is_empty() && p.shares.is_empty() {
         lines.push(("share".to_string(), "none".to_string()));
     }
-    lines.push(("network".to_string(), p.network.clone()));
+    lines.push(("network".to_string(), p.network.as_word().to_string()));
     lines.push((
         "display".to_string(),
-        p.display.clone().unwrap_or_else(|| "none".to_string()),
+        p.display
+            .map_or_else(|| "none".to_string(), |d| d.as_spec()),
     ));
     lines.push((
         "sound".to_string(),
@@ -520,12 +523,15 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
         form.mem_mib.trim().parse().unwrap_or(512),
     );
     posture.rootfs = if form.writable_root {
-        "writable"
+        bsx_record::Rootfs::Writable
     } else {
-        "read-only"
-    }
-    .to_string();
-    posture.network = if form.network { "tsi" } else { "none" }.to_string();
+        bsx_record::Rootfs::ReadOnly
+    };
+    posture.network = if form.network {
+        bsx_record::Network::Tsi
+    } else {
+        bsx_record::Network::None
+    };
     posture.mounts = form
         .mounts
         .split_whitespace()
@@ -538,7 +544,10 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
         .filter_map(|m| m.split_once('='))
         .map(|(t, h)| (t.to_string(), h.into()))
         .collect();
-    posture.display = form.display.then(|| form.display_size.trim().to_string());
+    posture.display = form
+        .display
+        .then(|| bsx_record::DisplayMode::parse(form.display_size.trim()))
+        .flatten();
     posture.sound = form.sound;
     posture.results = form.results;
 

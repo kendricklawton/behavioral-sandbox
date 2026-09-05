@@ -197,12 +197,8 @@ pub(crate) fn split_vsock(spec: &str) -> Option<(u32, &Path)> {
 /// A `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ` display spec as `(width, height, refresh)`, or `None`
 /// for anything whose numbers are not all non-zero.
 pub(crate) fn split_display(spec: &str) -> Option<(NonZeroU32, NonZeroU32, Option<NonZeroU32>)> {
-    let (size, refresh) = match spec.split_once('@') {
-        Some((size, hz)) => (size, Some(hz.parse().ok()?)),
-        None => (spec, None),
-    };
-    let (w, h) = size.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?, refresh))
+    let mode = bsx_record::DisplayMode::parse(spec)?;
+    Some((mode.width, mode.height, mode.refresh))
 }
 
 /// A `GUESTDIR=HOSTDIR` mount spec split at its **first** `=`, so a host path containing `=`
@@ -765,7 +761,7 @@ fn lease_display(
     let shared = match guard.share(SCANOUT) {
         Ok(Some(shared)) => shared,
         Ok(None) => {
-            let _ = write_refusal(&mut stream, "no scanout is configured yet; ask again");
+            let _ = write_refusal(&mut stream, bsx_supervisor::control::NOT_READY);
             return;
         }
         Err(e) => {

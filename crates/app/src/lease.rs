@@ -78,7 +78,7 @@ impl Drop for Feed {
 /// What one lease is for, and the subscription's identity: any change is a new lease.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Watch {
-    pub(crate) name: String,
+    pub(crate) name: crate::RunName,
     pub(crate) log: Option<PathBuf>,
     /// The shortest gap between two forwarded presents; zero forwards every one.
     pub(crate) every: Duration,
@@ -108,7 +108,8 @@ fn run(
     sender: &mpsc::UnboundedSender<Message>,
     stop: &Stop,
 ) -> Result<String, String> {
-    let socket = bsx_supervisor::socket::path_for(&watch.name).map_err(|e| e.to_string())?;
+    let socket =
+        bsx_supervisor::socket::path_for(watch.name.as_str()).map_err(|e| e.to_string())?;
     let mut log = watch
         .log
         .as_deref()
@@ -142,9 +143,11 @@ fn run_one_lease(
         }
         match control::display(socket) {
             Ok(lease) => break lease,
-            Err(control::Error::Refused(why)) if why.contains("ask again") => {
+            Err(control::Error::NotReady) => {
                 if Instant::now() > deadline {
-                    return Err(format!("{why} (gave up after {CONFIGURE_WAIT:?})"));
+                    return Err(format!(
+                        "the guest configured no scanout (gave up after {CONFIGURE_WAIT:?})"
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -206,7 +209,7 @@ fn run_one_lease(
     // What the window has already been told about, so a rate-limited watch can forward the
     // newest present rather than the oldest of the batch it skipped.
     let mut last_sent: Option<Instant> = None;
-    let mut pending: Option<(u32, u32, control::Damage)> = None;
+    let mut pending: Option<crate::frame::Present> = None;
     loop {
         match lease.next_event() {
             Ok(Event::Presented {
@@ -220,23 +223,27 @@ fn run_one_lease(
                     let _ = writeln!(log, "{frame_id}\t{}", monotonic_ns());
                 }
                 // Skipped damage folds forward: the window uploads only what it was told changed.
-                pending = Some(match pending.take() {
-                    Some((_, _, held)) => (frame_id, slot, crate::frame::union(held, damage)),
-                    None => (frame_id, slot, damage),
+                pending = Some(crate::frame::Present {
+                    frame_id,
+                    slot,
+                    damage: match pending.take() {
+                        Some(held) => crate::frame::union(held.damage, damage),
+                        None => damage,
+                    },
                 });
                 let due = last_sent.is_none_or(|at| at.elapsed() >= watch.every);
                 if !due {
                     continue;
                 }
-                let Some((frame_id, slot, damage)) = pending.take() else {
+                let Some(present) = pending.take() else {
                     continue;
                 };
                 last_sent = Some(Instant::now());
                 let sent = sender.unbounded_send(Message::Presented {
                     name: watch.name.clone(),
-                    frame_id,
-                    slot,
-                    damage,
+                    frame_id: present.frame_id,
+                    slot: present.slot,
+                    damage: present.damage,
                 });
                 if sent.is_err() {
                     return Ok(Some("the window closed".to_string()));
@@ -270,9 +277,11 @@ fn spawn_input_writer(mut session: control::InputSession) -> mpsc::UnboundedSend
 
 /// The host's monotonic clock in nanoseconds: the one timestamp two processes on this host can
 /// compare.
-pub(crate) fn monotonic_ns() -> u128 {
+pub(crate) fn monotonic_ns() -> u64 {
     let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    u128::try_from(t.tv_sec).unwrap_or(0) * 1_000_000_000 + u128::try_from(t.tv_nsec).unwrap_or(0)
+    let secs = u64::try_from(t.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(t.tv_nsec).unwrap_or(0);
+    secs.saturating_mul(1_000_000_000).saturating_add(nanos)
 }
 
 #[cfg(test)]
@@ -299,7 +308,7 @@ mod tests {
         use iced::futures::StreamExt;
         let before = threads();
         let feed = stream(&Watch {
-            name: "no-such-vm-for-this-test".to_string(),
+            name: crate::RunName::started("no-such-vm-for-this-test".to_string()),
             log: None,
             every: Duration::ZERO,
         });
@@ -309,7 +318,7 @@ mod tests {
             iced::futures::executor::block_on(async { feed.take(1).collect::<Vec<_>>().await });
         assert!(
             matches!(ended.as_slice(), [Message::Ended(name, why)]
-                if name == "no-such-vm-for-this-test" && why.contains("control socket")),
+                if name.as_str() == "no-such-vm-for-this-test" && why.contains("control socket")),
             "{ended:?}"
         );
         let Some(before) = before else {
@@ -342,7 +351,7 @@ mod tests {
         assert!(stop.cancelled());
         let (sender, _receiver) = mpsc::unbounded();
         let watch = Watch {
-            name: "no-such-vm-either".to_string(),
+            name: crate::RunName::started("no-such-vm-either".to_string()),
             log: None,
             every: Duration::ZERO,
         };

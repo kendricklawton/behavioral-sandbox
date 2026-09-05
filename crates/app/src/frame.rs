@@ -71,7 +71,7 @@ impl Sinks {
 
     /// Records an upload of `frame_id` that took `took_ns` in `write_texture`: the log line is
     /// the frame id, the clock at the upload, and that duration.
-    fn record(&self, frame_id: u32, took_ns: u128) {
+    fn record(&self, frame_id: u32, took_ns: u64) {
         self.uploaded.fetch_add(1, Ordering::Relaxed);
         let mut log = self
             .log

@@ -23,6 +23,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +35,129 @@ pub const RESULTS_GUEST_PATH: &str = "/results";
 const DEFAULT_KEEP: usize = 200;
 /// Bytes an output file holds when nothing says otherwise: 4 MiB.
 const DEFAULT_CAP: u64 = 4 * 1024 * 1024;
+
+/// What the guest could do to its root.
+///
+/// The record's own spelling of `bsx_supervisor::RootFs`, which this crate cannot name without
+/// depending on the crate that links libkrun; `the_record_and_the_config_spell_the_posture_alike`
+/// in `bsx` holds the two in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Rootfs {
+    /// Writes to the root failed.
+    #[default]
+    ReadOnly,
+    /// Writes to the root went through to the image tree.
+    Writable,
+}
+
+impl Rootfs {
+    /// The word the record spells this as, which is also the `--rootfs` value.
+    #[must_use]
+    pub fn as_word(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Writable => "writable",
+        }
+    }
+
+    /// The posture a word names, or `None` for one this build does not know.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "read-only" => Some(Self::ReadOnly),
+            "writable" => Some(Self::Writable),
+            _ => None,
+        }
+    }
+}
+
+/// What the guest could reach off the machine. The record's spelling of `bsx_supervisor::Net`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Network {
+    /// Loopback and nothing else.
+    #[default]
+    None,
+    /// libkrun's transparent socket impersonation: the guest reached what the host could.
+    Tsi,
+}
+
+impl Network {
+    /// The word the record spells this as, which is also the `--net` value.
+    #[must_use]
+    pub fn as_word(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Tsi => "tsi",
+        }
+    }
+
+    /// The posture a word names, or `None` for one this build does not know.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "none" => Some(Self::None),
+            "tsi" => Some(Self::Tsi),
+            _ => None,
+        }
+    }
+}
+
+/// The display a run had: non-zero by type, as `bsx_supervisor::Display` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DisplayMode {
+    /// Width in pixels.
+    pub width: NonZeroU32,
+    /// Height in pixels.
+    pub height: NonZeroU32,
+    /// The refresh rate the guest was told, in Hz, or `None` for the library's default.
+    pub refresh: Option<NonZeroU32>,
+}
+
+impl DisplayMode {
+    /// A display `width` by `height` pixels.
+    #[must_use]
+    pub fn new(width: NonZeroU32, height: NonZeroU32) -> Self {
+        Self {
+            width,
+            height,
+            refresh: None,
+        }
+    }
+
+    /// The same display, with the guest told `hz`.
+    #[must_use]
+    pub fn with_refresh(mut self, hz: NonZeroU32) -> Self {
+        self.refresh = Some(hz);
+        self
+    }
+
+    /// The `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ` spelling, which is the `--display` value.
+    #[must_use]
+    pub fn as_spec(self) -> String {
+        match self.refresh {
+            Some(hz) => format!("{}x{}@{hz}", self.width, self.height),
+            None => format!("{}x{}", self.width, self.height),
+        }
+    }
+
+    /// The display a spec names, or `None` for one that is not `WIDTHxHEIGHT[@HZ]`, all non-zero.
+    #[must_use]
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (size, refresh) = match spec.split_once('@') {
+            Some((size, hz)) => (size, Some(hz.parse().ok()?)),
+            None => (spec, None),
+        };
+        let (width, height) = size.split_once('x')?;
+        Some(Self {
+            width: width.parse().ok()?,
+            height: height.parse().ok()?,
+            refresh,
+        })
+    }
+}
 
 /// Which verb started the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,16 +241,16 @@ impl End {
 pub struct Posture {
     /// The guest root directory.
     pub root: PathBuf,
-    /// What the guest may do to its root, as the CLI spells it (`read-only`, `writable`).
-    pub rootfs: String,
+    /// What the guest may do to its root.
+    pub rootfs: Rootfs,
     /// Host directories mounted read-write, as `(guest path, host path)`.
     pub mounts: Vec<(PathBuf, PathBuf)>,
     /// Extra virtiofs shares, as `(tag, host path)`.
     pub shares: Vec<(String, PathBuf)>,
-    /// The network posture, as the CLI spells it (`none`, `tsi`).
-    pub network: String,
-    /// The display, as `WIDTHxHEIGHT[@HZ]`, or `None` for a headless sandbox.
-    pub display: Option<String>,
+    /// The network posture.
+    pub network: Network,
+    /// The display, or `None` for a headless sandbox.
+    pub display: Option<DisplayMode>,
     /// Whether the guest got a sound card.
     pub sound: bool,
     /// Whether the run's results directory was mounted at [`RESULTS_GUEST_PATH`].
@@ -156,7 +280,7 @@ impl Posture {
         let mut can = vec![format!(
             "read {}{}",
             self.root.display(),
-            if self.rootfs == "writable" {
+            if self.rootfs == Rootfs::Writable {
                 " and write it"
             } else {
                 ""
@@ -171,17 +295,17 @@ impl Posture {
         if self.results {
             can.push(format!("write its results to {RESULTS_GUEST_PATH}"));
         }
-        if self.network == "tsi" {
+        if self.network == Network::Tsi {
             can.push("reach the network through the host".to_string());
         }
-        if let Some(display) = &self.display {
-            can.push(format!("show a {display} display"));
+        if let Some(display) = self.display {
+            can.push(format!("show a {} display", display.as_spec()));
         }
         if self.sound {
             can.push("play and capture sound".to_string());
         }
         let mut cannot = vec!["read anything else on this machine".to_string()];
-        if self.network != "tsi" {
+        if self.network != Network::Tsi {
             cannot.push("reach the network".to_string());
         }
         if self.display.is_none() {
@@ -272,15 +396,7 @@ impl Record {
         let p = &self.posture;
         line(
             "root",
-            &format!(
-                "{} {}",
-                p.root.display(),
-                if p.rootfs.is_empty() {
-                    "read-only"
-                } else {
-                    &p.rootfs
-                }
-            ),
+            &format!("{} {}", p.root.display(), p.rootfs.as_word()),
         );
         for (guest, host) in &p.mounts {
             line(
@@ -291,9 +407,9 @@ impl Record {
         for (tag, host) in &p.shares {
             line("share", &format!("{tag} <- {}", host.display()));
         }
-        line("network", &p.network);
-        if let Some(display) = &p.display {
-            line("display", display);
+        line("network", &p.network.as_word());
+        if let Some(display) = p.display {
+            line("display", &display.as_spec());
         }
         line("sound", &if p.sound { "on" } else { "off" });
         line("results", &if p.results { "on" } else { "off" });
@@ -349,7 +465,7 @@ impl Record {
                 "root" => {
                     let (root, rootfs) = value.rsplit_once(' ').ok_or_else(bad)?;
                     record.posture.root = PathBuf::from(root);
-                    record.posture.rootfs = rootfs.to_string();
+                    record.posture.rootfs = Rootfs::from_word(rootfs).ok_or_else(bad)?;
                 }
                 "mount" => {
                     let (guest, host) = value.split_once(" <- ").ok_or_else(bad)?;
@@ -365,8 +481,10 @@ impl Record {
                         .shares
                         .push((tag.to_string(), PathBuf::from(host)));
                 }
-                "network" => record.posture.network = value.to_string(),
-                "display" => record.posture.display = Some(value.to_string()),
+                "network" => record.posture.network = Network::from_word(value).ok_or_else(bad)?,
+                "display" => {
+                    record.posture.display = Some(DisplayMode::parse(value).ok_or_else(bad)?)
+                }
                 "sound" => record.posture.sound = value == "on",
                 "results" => record.posture.results = value == "on",
                 "limits" => {
@@ -791,13 +909,13 @@ mod tests {
 
     fn posture() -> Posture {
         let mut p = Posture::new(PathBuf::from("/img/rootfs"), 2, 768);
-        p.rootfs = "read-only".to_string();
+        p.rootfs = Rootfs::ReadOnly;
         p.mounts
             .push((PathBuf::from("/mnt"), PathBuf::from("/home/x/out dir")));
         p.shares
             .push(("src".to_string(), PathBuf::from("/home/x/src")));
-        p.network = "none".to_string();
-        p.display = Some("640x480@60".to_string());
+        p.network = Network::None;
+        p.display = DisplayMode::parse("640x480@60");
         p.sound = true;
         p.results = true;
         p

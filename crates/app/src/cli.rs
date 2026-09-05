@@ -100,7 +100,7 @@ pub(crate) fn posture_args(form: &Form, name: &str) -> Result<Vec<String>, Strin
 
 /// Starts the run the form describes and returns its name: `bsx run` for a command, detached,
 /// or `bsx up` for a sandbox with none.
-pub(crate) fn start(bsx: &Path, form: &Form) -> Result<String, String> {
+pub(crate) fn start(bsx: &Path, form: &Form) -> Result<crate::RunName, String> {
     let name = if form.name.trim().is_empty() {
         format!("app-{}", bsx_record::now_ms())
     } else {
@@ -118,7 +118,7 @@ pub(crate) fn start(bsx: &Path, form: &Form) -> Result<String, String> {
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
-        return Ok(name);
+        return Ok(crate::RunName::started(name));
     }
     let child = Command::new(bsx)
         .arg("run")
@@ -133,7 +133,7 @@ pub(crate) fn start(bsx: &Path, form: &Form) -> Result<String, String> {
     reap(child);
     // The record is written before the VM boots, so a short wait is all the list needs.
     std::thread::sleep(std::time::Duration::from_millis(300));
-    Ok(name)
+    Ok(crate::RunName::started(name))
 }
 
 /// Stops the run named `name`.
@@ -542,7 +542,7 @@ mod tests {
             ..Form::default()
         };
         let name = start(&wrapper, &form).expect("started");
-        assert_eq!(name, "bridged");
+        assert_eq!(name.as_str(), "bridged");
         let store = bsx_record::Store::at(runs.clone()).expect("the store");
         let open = store
             .open_run("bridged")
