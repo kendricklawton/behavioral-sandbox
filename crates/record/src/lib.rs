@@ -27,6 +27,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The record format's version, the first line of every record.
@@ -768,8 +769,8 @@ impl Store {
     }
 
     /// Writes the run as `bsx-<id>.tar` into `dest` when `dest` is a directory, or exactly at
-    /// `dest` otherwise, whole (a temporary file, renamed over any earlier export), and returns
-    /// the path written.
+    /// `dest` otherwise, and returns the path written. Each caller writes its own temporary and
+    /// renames it whole, so concurrent exports replace one another rather than tear.
     pub fn export(&self, id: &str, dest: &Path) -> io::Result<PathBuf> {
         let run = self.dir_of(checked_id(id)?);
         if !run.path().is_dir() {
@@ -783,7 +784,12 @@ impl Store {
         } else {
             dest.to_path_buf()
         };
-        let tmp = target.with_extension("tar.tmp");
+        static EXPORT_SEQ: AtomicU64 = AtomicU64::new(0);
+        let tmp = target.with_extension(format!(
+            "tar.{}.{}.tmp",
+            std::process::id(),
+            EXPORT_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let written = std::fs::File::create(&tmp).and_then(|file| {
             let mut out = io::BufWriter::new(file);
             run.export_tar(&mut out)?;
@@ -899,10 +905,14 @@ impl RunDir {
             let meta = std::fs::symlink_metadata(&dir)?;
             let mut dirname = at.clone();
             dirname.push(b'/');
-            out.write_all(&tar_header(&dirname, b'5', 0, 0o755, mtime_of(&meta), b"")?)?;
+            out.write_all(&tar_header(
+                &dirname,
+                &TarEntry::Directory,
+                mtime_of(&meta),
+            )?)?;
             let mut children: Vec<std::fs::DirEntry> =
                 std::fs::read_dir(&dir)?.collect::<Result<_, _>>()?;
-            children.sort_by_key(std::fs::DirEntry::file_name);
+            children.sort_by_cached_key(std::fs::DirEntry::file_name);
             let mut subdirs = Vec::new();
             for child in children {
                 let path = child.path();
@@ -912,30 +922,23 @@ impl RunDir {
                 name.extend_from_slice(child.file_name().as_bytes());
                 if meta.file_type().is_symlink() {
                     let target = std::fs::read_link(&path)?;
-                    let target = target.as_os_str().as_bytes();
-                    if target.len() > 100 {
-                        return Err(io::Error::other(format!(
-                            "{}: the link target does not fit a ustar header",
-                            path.display()
-                        )));
-                    }
-                    out.write_all(&tar_header(&name, b'2', 0, 0o777, mtime_of(&meta), target)?)?;
+                    let entry = TarEntry::Symlink {
+                        target: target.as_os_str().as_bytes(),
+                    };
+                    out.write_all(&tar_header(&name, &entry, mtime_of(&meta))?)?;
                 } else if meta.is_dir() {
                     subdirs.push((path, name));
                 } else if meta.is_file() {
-                    let size = meta.len();
-                    if size > MAX_ENTRY {
-                        return Err(io::Error::other(format!(
-                            "{}: {size} bytes is more than one ustar entry carries",
-                            path.display()
-                        )));
-                    }
                     let mode = if meta.permissions().mode() & 0o100 == 0 {
                         0o644
                     } else {
                         0o755
                     };
-                    out.write_all(&tar_header(&name, b'0', size, mode, mtime_of(&meta), b"")?)?;
+                    let entry = TarEntry::File {
+                        size: meta.len(),
+                        mode,
+                    };
+                    out.write_all(&tar_header(&name, &entry, mtime_of(&meta))?)?;
                     copy_pinned(&path, &meta, out)?;
                 }
                 // A fifo, socket or device node is left behind: opening one is not a read.
@@ -955,25 +958,71 @@ const BLOCK: usize = 512;
 /// The largest entry ustar's eleven octal digits carry: 8 GiB - 1.
 const MAX_ENTRY: u64 = 0o77_777_777_777;
 
-/// One ustar header block, checksummed last, refused when no name split fits its fields.
-fn tar_header(
-    path: &[u8],
-    typeflag: u8,
-    size: u64,
-    mode: u32,
-    mtime: u64,
-    link: &[u8],
-) -> io::Result<[u8; BLOCK]> {
-    let mut block = [0u8; BLOCK];
+/// What one archive entry is, carrying only what its kind writes into the header.
+enum TarEntry<'a> {
+    Directory,
+    File { size: u64, mode: u32 },
+    Symlink { target: &'a [u8] },
+}
+
+impl TarEntry<'_> {
+    fn typeflag(&self) -> u8 {
+        match self {
+            Self::Directory => b'5',
+            Self::File { .. } => b'0',
+            Self::Symlink { .. } => b'2',
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Self::File { size, .. } => *size,
+            Self::Directory | Self::Symlink { .. } => 0,
+        }
+    }
+
+    fn mode(&self) -> u32 {
+        match self {
+            Self::Directory => 0o755,
+            Self::File { mode, .. } => *mode,
+            Self::Symlink { .. } => 0o777,
+        }
+    }
+
+    fn link(&self) -> &[u8] {
+        match self {
+            Self::Symlink { target } => target,
+            Self::Directory | Self::File { .. } => b"",
+        }
+    }
+}
+
+/// One ustar header block, checksummed last, refused when any field cannot hold its value.
+fn tar_header(path: &[u8], entry: &TarEntry<'_>, mtime: u64) -> io::Result<[u8; BLOCK]> {
     let (prefix, name) = split_name(path)?;
+    let link = entry.link();
+    if link.len() > 100 {
+        return Err(io::Error::other(format!(
+            "{}: the link target does not fit a ustar header",
+            String::from_utf8_lossy(path)
+        )));
+    }
+    let size = entry.size();
+    if size > MAX_ENTRY {
+        return Err(io::Error::other(format!(
+            "{}: {size} bytes is more than one ustar entry carries",
+            String::from_utf8_lossy(path)
+        )));
+    }
+    let mut block = [0u8; BLOCK];
     block[..name.len()].copy_from_slice(name);
     block[345..345 + prefix.len()].copy_from_slice(prefix);
-    octal(&mut block[100..108], u64::from(mode));
+    octal(&mut block[100..108], u64::from(entry.mode()));
     octal(&mut block[108..116], 0);
     octal(&mut block[116..124], 0);
     octal(&mut block[124..136], size);
     octal(&mut block[136..148], mtime);
-    block[156] = typeflag;
+    block[156] = entry.typeflag();
     block[157..157 + link.len()].copy_from_slice(link);
     block[257..263].copy_from_slice(b"ustar\0");
     block[263..265].copy_from_slice(b"00");
@@ -1005,6 +1054,7 @@ fn split_name(path: &[u8]) -> io::Result<(&[u8], &[u8])> {
 }
 
 /// Writes `value` as zero-padded octal digits with a trailing NUL, the ustar numeric shape.
+/// The caller bounds `value` to the field: digits past it are dropped.
 fn octal(field: &mut [u8], value: u64) {
     let digits = field.len() - 1;
     for (i, byte) in field[..digits].iter_mut().enumerate() {
@@ -1614,7 +1664,11 @@ mod tests {
     /// The checksum is the header's bytes with its own field as spaces, written last.
     #[test]
     fn every_header_checksum_adds_up() {
-        let block = tar_header(b"x/y", b'0', 5, 0o644, 1_756_860_007, b"").expect("a header");
+        let entry = TarEntry::File {
+            size: 5,
+            mode: 0o644,
+        };
+        let block = tar_header(b"x/y", &entry, 1_756_860_007).expect("a header");
         let sum: u64 = block
             .iter()
             .enumerate()
