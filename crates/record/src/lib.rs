@@ -790,14 +790,20 @@ impl Store {
             std::process::id(),
             EXPORT_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        let written = std::fs::File::create(&tmp).and_then(|file| {
-            let mut out = io::BufWriter::new(file);
-            run.export_tar(&mut out)?;
-            out.flush()
-        });
+        // A create or rename failure names the destination: the OS error alone carries no path,
+        // and a refused `--to` is the way this fails for a person.
+        let at_target =
+            |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", target.display()));
+        let written = std::fs::File::create(&tmp)
+            .map_err(at_target)
+            .and_then(|file| {
+                let mut out = io::BufWriter::new(file);
+                run.export_tar(&mut out)?;
+                out.flush()
+            });
         match written {
             Ok(()) => {
-                std::fs::rename(&tmp, &target)?;
+                std::fs::rename(&tmp, &target).map_err(at_target)?;
                 Ok(target)
             }
             Err(e) => {
@@ -1747,6 +1753,14 @@ mod tests {
         assert!(
             matches!(missing, Err(e) if e.kind() == io::ErrorKind::NotFound),
             "an unknown id is not found"
+        );
+        let nowhere = dir.path().join("no/such/dir");
+        let refused = store
+            .export(&record.id, &nowhere)
+            .expect_err("an unwritable destination is refused");
+        assert!(
+            refused.to_string().contains("no/such/dir"),
+            "the refusal names where: {refused}"
         );
         let leftovers: Vec<_> = std::fs::read_dir(&dest)
             .expect("listed")
