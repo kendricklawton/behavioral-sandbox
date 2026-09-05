@@ -785,10 +785,7 @@ impl App {
             Message::ClearConfirmed => {
                 self.confirm_clear = false;
                 self.status = match self.store.prune(0) {
-                    Ok(n) => Some(format!(
-                        "removed {n} ended {}",
-                        if n == 1 { "run" } else { "runs" }
-                    )),
+                    Ok(n) => Some(format!("removed {}", ended_runs(n))),
                     Err(e) => Some(format!("clearing the history: {e}")),
                 };
                 self.refresh();
@@ -926,6 +923,11 @@ fn export_destination(home: Option<PathBuf>, store: &Store) -> PathBuf {
         .map_or_else(|| store.dir().to_path_buf(), Path::to_path_buf)
 }
 
+/// `n` ended runs, spelled with its plural: the confirm and the status line share it.
+pub(crate) fn ended_runs(n: usize) -> String {
+    format!("{n} ended run{}", if n == 1 { "" } else { "s" })
+}
+
 /// The last `max` bytes of `path` as text, and the file's whole size.
 fn tail_of(path: &std::path::Path, max: u64) -> (String, u64) {
     use std::io::{Read, Seek, SeekFrom};
@@ -958,6 +960,13 @@ pub(crate) fn frame_program(app: &App, name: &RunName) -> Option<frame::Program>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One run is not "1 runs": both places that count them spell it through one helper.
+    #[test]
+    fn a_count_of_ended_runs_is_spelled_with_its_plural() {
+        assert_eq!(ended_runs(1), "1 ended run");
+        assert_eq!(ended_runs(2), "2 ended runs");
+    }
 
     /// The archive goes where a person looks first: Downloads, else home, else beside
     /// the store.

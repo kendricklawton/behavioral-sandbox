@@ -43,18 +43,29 @@ pub(crate) fn default_root() -> Option<PathBuf> {
 #[derive(Debug, Default)]
 pub(crate) struct Platform {
     pub(crate) bsx: Option<PathBuf>,
-    pub(crate) root: Option<PathBuf>,
-    pub(crate) root_present: bool,
+    pub(crate) root: GuestRoot,
+}
+
+/// The default guest root as the menu judges it, so "a path with nothing there yet" cannot be
+/// confused with "nothing to point at".
+#[derive(Debug, Default)]
+pub(crate) enum GuestRoot {
+    Present(PathBuf),
+    Absent(PathBuf),
+    #[default]
+    Unset,
 }
 
 /// Stats what the two chains name; nothing here spawns, so a tick cannot hang on it.
 pub(crate) fn probe() -> Platform {
-    let root = default_root();
-    let root_present = root.as_deref().is_some_and(Path::is_dir);
+    let root = match default_root() {
+        Some(path) if path.is_dir() => GuestRoot::Present(path),
+        Some(path) => GuestRoot::Absent(path),
+        None => GuestRoot::Unset,
+    };
     Platform {
         bsx: find_bsx(),
         root,
-        root_present,
     }
 }
 

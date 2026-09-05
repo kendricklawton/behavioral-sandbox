@@ -14,7 +14,7 @@ use iced::{Element, Fill, Font, Length};
 
 use bsx_record::{Record, Verb};
 
-use crate::{App, Field, Form, Message, Stream, Switch};
+use crate::{App, Field, Form, Message, Stream, Switch, cli};
 
 /// Identifiers, and only identifiers: a name, a command, a path, an id. Prose is the system's
 /// own sans, so a row reads as a sentence rather than a terminal dump.
@@ -108,10 +108,10 @@ fn bsx_line(app: &App) -> String {
 
 /// Where the default guest root is, and whether anything is there yet.
 fn root_line(app: &App) -> String {
-    match (&app.platform.root, app.platform.root_present) {
-        (Some(path), true) => format!("guest root: {}", path.display()),
-        (Some(path), false) => format!("guest root: {} (absent)", path.display()),
-        (None, _) => "guest root: none (set $BSX_GUEST_ROOT)".to_string(),
+    match &app.platform.root {
+        cli::GuestRoot::Present(path) => format!("guest root: {}", path.display()),
+        cli::GuestRoot::Absent(path) => format!("guest root: {} (absent)", path.display()),
+        cli::GuestRoot::Unset => "guest root: none (set $BSX_GUEST_ROOT)".to_string(),
     }
 }
 
@@ -172,7 +172,7 @@ pub(crate) fn list(app: &App) -> Element<'_, Message> {
     let header = if app.confirm_clear {
         start.push(
             row![
-                text(format!("remove {} ended runs?", past.len())).size(BODY),
+                text(format!("remove {}?", crate::ended_runs(past.len()))).size(BODY),
                 button(text("Remove"))
                     .style(button::danger)
                     .on_press(Message::ClearConfirmed),

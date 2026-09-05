@@ -32,7 +32,9 @@ pub(crate) fn save(theme: &iced::Theme) -> io::Result<()> {
 fn save_at(path: &Path, theme: &iced::Theme) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, render(theme))?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn render(theme: &iced::Theme) -> String {
@@ -95,5 +97,12 @@ mod tests {
             "state 1\ntheme Dracula\n"
         );
         assert!(!path.with_extension("tmp").exists(), "no temporary stays");
+        let blocked = dir.path().join("a-directory");
+        std::fs::create_dir(&blocked).expect("a directory in the way");
+        save_at(&blocked, &iced::Theme::Nord).expect_err("cannot rename over a directory");
+        assert!(
+            !blocked.with_extension("tmp").exists(),
+            "a failed rename does not leave its temporary"
+        );
     }
 }
