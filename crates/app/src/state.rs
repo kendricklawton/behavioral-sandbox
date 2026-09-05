@@ -30,11 +30,17 @@ pub(crate) fn save(theme: &iced::Theme) -> io::Result<()> {
 }
 
 fn save_at(path: &Path, theme: &iced::Theme) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = tmp_of(path);
     std::fs::write(&tmp, render(theme))?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// This process's temporary: picks in one window serialize through `update`, so the pid alone
+/// keeps two windows from interleaving one file.
+fn tmp_of(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", std::process::id()))
 }
 
 fn render(theme: &iced::Theme) -> String {
@@ -96,12 +102,12 @@ mod tests {
             std::fs::read_to_string(&path).expect("read"),
             "state 1\ntheme Dracula\n"
         );
-        assert!(!path.with_extension("tmp").exists(), "no temporary stays");
+        assert!(!tmp_of(&path).exists(), "no temporary stays");
         let blocked = dir.path().join("a-directory");
         std::fs::create_dir(&blocked).expect("a directory in the way");
         save_at(&blocked, &iced::Theme::Nord).expect_err("cannot rename over a directory");
         assert!(
-            !blocked.with_extension("tmp").exists(),
+            !tmp_of(&blocked).exists(),
             "a failed rename does not leave its temporary"
         );
     }

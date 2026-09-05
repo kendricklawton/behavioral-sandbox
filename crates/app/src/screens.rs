@@ -85,7 +85,7 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
         page = page.push(space().height(10));
         page = page.push(text(status).size(BODY));
     }
-    container(page).center(Fill).into()
+    container(page.max_width(PAGE)).center(Fill).into()
 }
 
 /// One muted line of prose, the menu's quiet register.
