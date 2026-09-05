@@ -256,6 +256,8 @@ pub struct Posture {
     pub display: Option<DisplayMode>,
     /// Whether the guest got a sound card.
     pub sound: bool,
+    /// Whether the guest was offered the host GPU's 3D path.
+    pub gpu: bool,
     /// Whether the run's results directory was mounted at [`RESULTS_GUEST_PATH`].
     pub results: bool,
     /// vCPUs.
@@ -307,6 +309,9 @@ impl Posture {
         if self.sound {
             can.push("play and capture sound".to_string());
         }
+        if self.gpu {
+            can.push("use the host GPU for its own rendering".to_string());
+        }
         let mut cannot = vec!["read anything else on this machine".to_string()];
         if self.network != Network::Tsi {
             cannot.push("reach the network".to_string());
@@ -316,6 +321,9 @@ impl Posture {
         }
         if !self.sound {
             cannot.push("play or capture sound".to_string());
+        }
+        if !self.gpu {
+            cannot.push("use the host GPU for its own rendering".to_string());
         }
         format!(
             "This sandbox will: {}. It will not: {}.",
@@ -415,6 +423,7 @@ impl Record {
             line("display", &display.as_spec());
         }
         line("sound", &if p.sound { "on" } else { "off" });
+        line("gpu", &if p.gpu { "on" } else { "off" });
         line("results", &if p.results { "on" } else { "off" });
         line("limits", &format!("{} {}", p.vcpus, p.mem_mib));
         line("started", &self.started_ms);
@@ -489,6 +498,7 @@ impl Record {
                     record.posture.display = Some(DisplayMode::parse(value).ok_or_else(bad)?)
                 }
                 "sound" => record.posture.sound = value == "on",
+                "gpu" => record.posture.gpu = value == "on",
                 "results" => record.posture.results = value == "on",
                 "limits" => {
                     let (vcpus, mem) = value.split_once(' ').ok_or_else(bad)?;
@@ -1180,6 +1190,7 @@ mod tests {
         p.network = Network::None;
         p.display = DisplayMode::parse("640x480@60");
         p.sound = true;
+        p.gpu = true;
         p.results = true;
         p
     }
@@ -1339,12 +1350,13 @@ mod tests {
         assert!(s.contains("write /home/x/out dir as /mnt"), "{s}");
         assert!(s.contains("write its results to /results"), "{s}");
         assert!(s.contains("show a 640x480@60 display"), "{s}");
+        assert!(s.contains("use the host GPU for its own rendering"), "{s}");
         assert!(
             s.contains("It will not: read anything else on this machine, reach the network."),
             "{s}"
         );
         let bare = Posture::new(PathBuf::from("/img"), 1, 512).sentence();
-        assert!(bare.contains("It will not: read anything else on this machine, reach the network, show a display, play or capture sound."), "{bare}");
+        assert!(bare.contains("It will not: read anything else on this machine, reach the network, show a display, play or capture sound, use the host GPU for its own rendering."), "{bare}");
     }
 
     /// An id is one directory name. A record file naming a traversing id does not parse, and the
