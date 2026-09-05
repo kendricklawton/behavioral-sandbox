@@ -44,6 +44,7 @@ jobs:
         run: |
           brew tap slp/krun
           brew install libkrun libkrunfw
+          echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       # Everything `cargo xtask ci` needs, so none of its layers soft-skip here. The gate lints
       # the detached `fuzz` workspace too, which builds on this same toolchain.
