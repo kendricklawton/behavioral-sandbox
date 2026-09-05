@@ -374,6 +374,8 @@ pub(crate) enum Message {
     Menu,
     List,
     Settings,
+    /// A keyboard event every widget ignored: what the window's own chords read.
+    Keyboard(iced::keyboard::Event),
     /// Draw in this palette from now on, and remember it.
     SetTheme(iced::Theme),
     NewRun,
@@ -496,12 +498,12 @@ impl App {
 
     fn title(&self) -> String {
         match &self.screen {
-            Screen::Menu => "bsx".to_string(),
-            Screen::Settings => "bsx › settings".to_string(),
-            Screen::List => "bsx › sandboxes".to_string(),
-            Screen::New => "bsx › new run".to_string(),
+            Screen::Menu => "BSX".to_string(),
+            Screen::Settings => "BSX › settings".to_string(),
+            Screen::List => "BSX › sandboxes".to_string(),
+            Screen::New => "BSX › new run".to_string(),
             Screen::Run(id) => format!(
-                "bsx › {}",
+                "BSX › {}",
                 self.record(id).map_or(id.as_str(), |r| r.name.as_str())
             ),
         }
@@ -673,6 +675,14 @@ impl App {
                 self.leave();
                 self.set_screen(Screen::Settings);
                 self.status = None;
+                Task::none()
+            }
+            Message::Keyboard(event) => {
+                if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event
+                    && let Some(chord) = hotkey(&key, modifiers)
+                {
+                    return self.update(chord);
+                }
                 Task::none()
             }
             Message::SetTheme(theme) => {
@@ -895,6 +905,7 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![timer::every_second()];
+        subs.push(iced::keyboard::listen().map(Message::Keyboard));
         // Dropping a run's subscription cancels its lease and ends its thread.
         subs.extend(
             self.watches()
@@ -921,6 +932,16 @@ fn export_destination(home: Option<PathBuf>, store: &Store) -> PathBuf {
         .dir()
         .parent()
         .map_or_else(|| store.dir().to_path_buf(), Path::to_path_buf)
+}
+
+/// The chords the window answers anywhere: the platform's command with `,` opens Settings.
+fn hotkey(key: &iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
+    match key {
+        iced::keyboard::Key::Character(c) if c == "," && modifiers.command() => {
+            Some(Message::Settings)
+        }
+        _ => None,
+    }
 }
 
 /// `n` ended runs, spelled with its plural: the confirm and the status line share it.
@@ -960,6 +981,25 @@ pub(crate) fn frame_program(app: &App, name: &RunName) -> Option<frame::Program>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The platform's command with `,` opens Settings; the pieces alone open nothing.
+    #[test]
+    fn the_platforms_command_and_comma_open_settings() {
+        use iced::keyboard::{Key, Modifiers};
+        let comma = Key::Character(",".into());
+        assert!(matches!(
+            hotkey(&comma, Modifiers::COMMAND),
+            Some(Message::Settings)
+        ));
+        assert!(
+            hotkey(&comma, Modifiers::empty()).is_none(),
+            "bare comma types"
+        );
+        assert!(
+            hotkey(&Key::Character("q".into()), Modifiers::COMMAND).is_none(),
+            "no other chord is taken"
+        );
+    }
 
     /// One run is not "1 runs": both places that count them spell it through one helper.
     #[test]

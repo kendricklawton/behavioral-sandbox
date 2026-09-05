@@ -70,8 +70,9 @@ From there:
   to the guest), with Stop and Shell while it runs, Re-run and Delete after, and Export always.
 - **The start form**: every posture flag as a field, summarised in the record's own posture
   sentence ("This sandbox will: ..."), confirmed before anything boots.
-- **Settings**: the palette, applied live and kept across launches in a file beside the runs
-  directory. `--theme` and `$BSX_THEME` outrank the saved pick for one launch.
+- **Settings** (the platform's command with `,`, from any screen): the palette, applied live and
+  kept across launches in a file beside the runs directory. `--theme` and `$BSX_THEME` outrank the
+  saved pick for one launch.
 
 `bsx-app NAME` opens straight onto a run; `--new` opens the form. Starting and stopping go through
 the `bsx` binary beside the app (`$BSX_CLI` overrides which one).

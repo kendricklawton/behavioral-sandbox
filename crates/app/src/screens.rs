@@ -71,8 +71,9 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
     .spacing(10)
     .width(Length::Fixed(300.0));
     let mut page = column![
-        text("bsx").font(NAME).size(28),
+        text("BSX").font(NAME).size(28),
         muted_line("sandboxes on this machine".to_string(), BODY),
+        muted_line(format!("version {}", env!("CARGO_PKG_VERSION")), SMALL),
         space().height(16),
         actions,
         space().height(16),
