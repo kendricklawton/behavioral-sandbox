@@ -132,6 +132,9 @@ pub(crate) fn posture_args(form: &Form, name: &str) -> Result<Vec<String>, Strin
     if form.sound {
         args.push("--sound".to_string());
     }
+    if form.gpu {
+        args.push("--gpu".to_string());
+    }
     if !form.results {
         args.push("--no-results".to_string());
     }
@@ -523,6 +526,7 @@ mod tests {
         form.display = true;
         form.display_size = "800x600".to_string();
         form.sound = true;
+        form.gpu = true;
         form.results = false;
         form.mounts = "/mnt=/home/x/out".to_string();
         form.shares = "src=/home/x/src".to_string();
@@ -536,6 +540,7 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--share", "src=/home/x/src"]));
         assert!(args.windows(2).any(|w| w == ["--display", "800x600"]));
         assert!(args.contains(&"--sound".to_string()));
+        assert!(args.contains(&"--gpu".to_string()));
         assert!(args.contains(&"--no-results".to_string()));
         form.mounts = "nonsense".to_string();
         assert!(

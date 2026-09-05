@@ -310,6 +310,7 @@ pub(crate) struct Form {
     pub(crate) display: bool,
     pub(crate) display_size: String,
     pub(crate) sound: bool,
+    pub(crate) gpu: bool,
     pub(crate) results: bool,
     pub(crate) vcpus: String,
     pub(crate) mem_mib: String,
@@ -355,6 +356,7 @@ impl Form {
                 .display
                 .map_or_else(|| DEFAULT_DISPLAY.to_string(), |d| d.as_spec()),
             sound: p.sound,
+            gpu: p.gpu,
             results: p.results,
             vcpus: p.vcpus.to_string(),
             mem_mib: p.mem_mib.to_string(),
@@ -382,6 +384,7 @@ pub(crate) enum Switch {
     Network,
     Display,
     Sound,
+    Gpu,
     Results,
 }
 
@@ -743,6 +746,7 @@ impl App {
                     Switch::Network => self.form.network = on,
                     Switch::Display => self.form.display = on,
                     Switch::Sound => self.form.sound = on,
+                    Switch::Gpu => self.form.gpu = on,
                     Switch::Results => self.form.results = on,
                 }
                 Task::none()

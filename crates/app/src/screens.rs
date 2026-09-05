@@ -501,6 +501,9 @@ fn posture_tags(record: &Record) -> String {
     if p.sound {
         parts.push("sound".to_string());
     }
+    if p.gpu {
+        parts.push("gpu".to_string());
+    }
     parts.join(" \u{b7} ")
 }
 
@@ -644,6 +647,10 @@ fn posture_lines(record: &Record) -> Vec<(String, String)> {
     lines.push((
         "sound".to_string(),
         if p.sound { "on" } else { "off" }.to_string(),
+    ));
+    lines.push((
+        "gpu".to_string(),
+        if p.gpu { "on" } else { "off" }.to_string(),
     ));
     lines.push((
         "results".to_string(),
@@ -812,6 +819,7 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
         .then(|| bsx_record::DisplayMode::parse(form.display_size.trim()))
         .flatten();
     posture.sound = form.sound;
+    posture.gpu = form.gpu;
     posture.results = form.results;
 
     let mut page = column![
@@ -840,6 +848,7 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
                 .font(MONO)
                 .width(Length::Fixed(140.0)),
             switch("sound", form.sound, Switch::Sound),
+            switch("gpu", form.gpu, Switch::Gpu),
         ]
         .spacing(16)
         .align_y(iced::alignment::Vertical::Center),
