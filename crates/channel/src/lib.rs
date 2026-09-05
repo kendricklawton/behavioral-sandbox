@@ -242,6 +242,9 @@ pub enum ChannelError {
     Protocol(String),
     /// Payload header exceeded [`MAX_PAYLOAD`].
     PayloadTooLarge { tag: u8, len: usize },
+    /// The peer speaks a different [`PROTOCOL_VERSION`]. Separate from [`ChannelError::Protocol`]
+    /// because it is the one handshake failure with an answer: the two ends were built apart.
+    Version { theirs: u16, ours: u16 },
 }
 
 impl std::fmt::Display for ChannelError {
@@ -259,6 +262,10 @@ impl std::fmt::Display for ChannelError {
                     "channel frame (tag {tag}) length {len} exceeds {MAX_PAYLOAD}"
                 ),
             },
+            ChannelError::Version { theirs, ours } => write!(
+                f,
+                "the peer speaks channel protocol {theirs}; this build speaks {ours}"
+            ),
         }
     }
 }
@@ -306,11 +313,12 @@ pub(crate) fn read_handshake(r: &mut impl Read) -> Result<(), ChannelError> {
             "bad magic (not an agent channel)".into(),
         ));
     }
-    let version = u16::from_le_bytes([buf[4], buf[5]]);
-    if version != PROTOCOL_VERSION {
-        return Err(ChannelError::Protocol(format!(
-            "unsupported protocol version {version} (this build speaks {PROTOCOL_VERSION})"
-        )));
+    let theirs = u16::from_le_bytes([buf[4], buf[5]]);
+    if theirs != PROTOCOL_VERSION {
+        return Err(ChannelError::Version {
+            theirs,
+            ours: PROTOCOL_VERSION,
+        });
     }
     Ok(())
 }
@@ -633,7 +641,15 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             body.finish()?;
             Ok(Request::Resize { cols, rows })
         }
-        _ => Ok(Request::Unknown { tag }),
+        // A tag this build knows, on the wrong stream: a response arriving where a request should
+        // be is a broken or hostile peer, not a newer one, so it is not laundered as `Unknown`.
+        Some(Tag::Stdout | Tag::Stderr | Tag::Exit | Tag::Error | Tag::File | Tag::TimedOut) => {
+            Err(ChannelError::Protocol(format!(
+                "response tag {tag} on the request stream"
+            )))
+        }
+        // A number no tag names: a host newer than this guest, which the agent degrades on.
+        None => Ok(Request::Unknown { tag }),
     }
 }
 
@@ -990,11 +1006,43 @@ mod tests {
             read_handshake(&mut &bad_magic[..]),
             Err(ChannelError::Protocol(_))
         ));
-        let bad_version = [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], 0xFF, 0xFF];
-        assert!(matches!(
-            read_handshake(&mut &bad_version[..]),
-            Err(ChannelError::Protocol(_))
-        ));
+        // A version mismatch carries both numbers, so a caller can say which side is behind
+        // rather than reprinting a sentence.
+        let bad_version = [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], 0x02, 0x00];
+        assert!(
+            matches!(
+                read_handshake(&mut &bad_version[..]),
+                Err(ChannelError::Version {
+                    theirs: 2,
+                    ours: PROTOCOL_VERSION
+                })
+            ),
+            "a version mismatch is its own variant"
+        );
+    }
+
+    /// A response tag on the request stream is a broken peer, not a newer one: decoding it as
+    /// [`Request::Unknown`] would tell a guest agent to carry on with a frame it cannot answer.
+    #[test]
+    fn a_response_tag_on_the_request_stream_is_refused() {
+        for tag in [
+            Tag::Stdout,
+            Tag::Stderr,
+            Tag::Exit,
+            Tag::Error,
+            Tag::File,
+            Tag::TimedOut,
+        ] {
+            let mut framed = vec![tag.as_u8()];
+            framed.extend_from_slice(&0u32.to_le_bytes());
+            assert!(
+                matches!(
+                    read_request(&mut framed.as_slice()),
+                    Err(ChannelError::Protocol(_))
+                ),
+                "{tag:?} decoded as a request"
+            );
+        }
     }
 
     /// The interactive frames: an `ExecPty` with everything set, an empty-env one, keystrokes
