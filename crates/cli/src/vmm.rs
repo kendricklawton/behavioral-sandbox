@@ -589,7 +589,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     if let Some((port, path)) = vsock {
         // `listen = true` per the header: the guest listens on the port and connections are
         // initiated from the host side, which is the agent-channel direction.
-        machine = machine.vsock_port(port, path, true)?;
+        machine = machine.vsock_port(port, path, bsx_krun::VsockInitiator::Host)?;
         restrict_when_bound(path);
     }
     // The window runs on its own thread from here, this one being about to become the guest.

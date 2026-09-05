@@ -192,6 +192,25 @@ fn c_bytes(what: &'static str, s: &OsStr) -> Result<CString, Error> {
     CString::new(s.as_bytes()).map_err(|_: NulError| Error::InteriorNul { what })
 }
 
+/// Who initiates connections on a [`Machine::vsock_port`] mapping: the header's `listen` flag,
+/// with the direction in its name rather than at the call site's mercy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VsockInitiator {
+    /// The host dials the unix socket; libkrun listens on it and forwards into the guest port.
+    Host,
+    /// The guest dials the port; libkrun connects out to the unix socket.
+    Guest,
+}
+
+impl VsockInitiator {
+    /// The `listen` argument for this direction. Private-facing, as [`FsAccess::is_read_only`] is:
+    /// the boolean exists at the FFI boundary and nowhere above it.
+    fn listens(self) -> bool {
+        matches!(self, Self::Host)
+    }
+}
+
 /// The DAX SHM window size passed with every virtiofs device here: none. Sizing one is a
 /// performance question with its own measurement.
 const NO_DAX_WINDOW: u64 = 0;
@@ -645,23 +664,34 @@ const SLOTS: usize = RING + 1;
 const MAX_FRAME_ID: u32 = i32::MAX as u32;
 
 /// A scanout's buffers: one allocation of `SLOTS` equal regions, on the heap or in a memfd.
+///
+/// A slot is reached through a pointer captured when the allocation was made, never through a
+/// borrow of the whole region: libkrun holds live pointers into the slots it was handed
+/// ([`DisplayBackend`]'s contract), and a whole-region `&`/`&mut` would assert over bytes it is
+/// entitled to be writing.
 enum Storage {
-    Heap(Vec<u8>),
+    Heap(HeapRegion),
     Shared(SharedRegion),
 }
 
 impl Storage {
-    fn as_mut_slice(&mut self) -> &mut [u8] {
+    fn heap_zeroed(len: usize) -> Self {
+        Self::Heap(HeapRegion::zeroed(len))
+    }
+
+    /// The `len` bytes at `at`, or `None` out of bounds.
+    fn slot(&self, at: usize, len: usize) -> Option<&[u8]> {
         match self {
-            Self::Heap(v) => v.as_mut_slice(),
-            Self::Shared(r) => r.as_mut_slice(),
+            Self::Heap(r) => r.range(at, len),
+            Self::Shared(r) => r.range(at, len),
         }
     }
 
-    fn as_slice(&self) -> &[u8] {
+    /// The writable twin of [`slot`](Self::slot).
+    fn slot_mut(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
         match self {
-            Self::Heap(v) => v.as_slice(),
-            Self::Shared(r) => r.as_slice(),
+            Self::Heap(r) => r.range_mut(at, len),
+            Self::Shared(r) => r.range_mut(at, len),
         }
     }
 }
@@ -669,9 +699,50 @@ impl Storage {
 impl fmt::Debug for Storage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Heap(v) => write!(f, "Heap({} bytes)", v.len()),
+            Self::Heap(r) => write!(f, "Heap({} bytes)", r.buf.len()),
             Self::Shared(r) => write!(f, "Shared({} bytes, fd {:?})", r.len, r.fd),
         }
+    }
+}
+
+/// A heap allocation reached as [`SharedRegion`] is: through `base`, captured once. `buf` owns the
+/// bytes and is never borrowed again, so `base` stays the one live path to them.
+struct HeapRegion {
+    buf: Vec<u8>,
+    base: std::ptr::NonNull<u8>,
+}
+
+// SAFETY: the buffer has no thread affinity; it is only ever reached through `&self`/`&mut self`,
+// which is what serialises access from this process.
+unsafe impl Send for HeapRegion {}
+
+impl HeapRegion {
+    fn zeroed(len: usize) -> Self {
+        let mut buf = vec![0u8; len];
+        // A non-empty `Vec`'s buffer pointer is never null, and an empty one's is dangling but
+        // non-null; a zero-length range through it is legal and reads nothing.
+        let base =
+            std::ptr::NonNull::new(buf.as_mut_ptr()).unwrap_or(std::ptr::NonNull::dangling());
+        Self { buf, base }
+    }
+
+    fn range(&self, at: usize, len: usize) -> Option<&[u8]> {
+        let end = at.checked_add(len)?;
+        if end > self.buf.len() {
+            return None;
+        }
+        // SAFETY: in bounds of the allocation `buf` keeps alive, through the pointer captured at
+        // allocation; the borrow is tied to `&self`, and `buf` is never re-borrowed to retag it.
+        Some(unsafe { std::slice::from_raw_parts(self.base.as_ptr().add(at), len) })
+    }
+
+    fn range_mut(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        let end = at.checked_add(len)?;
+        if end > self.buf.len() {
+            return None;
+        }
+        // SAFETY: as `range`, writable because `&mut self` holds this process's only path here.
+        Some(unsafe { std::slice::from_raw_parts_mut(self.base.as_ptr().add(at), len) })
     }
 }
 
@@ -736,15 +807,26 @@ impl SharedRegion {
             .ok_or_else(|| std::io::Error::other("mmap returned a null mapping"))
     }
 
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: `base` is a live mapping of `len` bytes held for as long as `self` is, and
-        // `&mut self` is the only way to reach it in this process.
-        unsafe { std::slice::from_raw_parts_mut(self.base.as_ptr(), self.len) }
+    /// The `len` bytes at `at`, or `None` out of bounds. A range, never the whole mapping: other
+    /// slots may be under a writer this process handed the memory to.
+    fn range(&self, at: usize, len: usize) -> Option<&[u8]> {
+        let end = at.checked_add(len)?;
+        if end > self.len {
+            return None;
+        }
+        // SAFETY: in bounds of the live mapping, through the pointer `mmap` returned; the borrow
+        // is tied to `&self`, which keeps the mapping alive.
+        Some(unsafe { std::slice::from_raw_parts(self.base.as_ptr().add(at), len) })
     }
 
-    fn as_slice(&self) -> &[u8] {
-        // SAFETY: as `as_mut_slice`, for reading.
-        unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) }
+    /// The writable twin of [`range`](Self::range).
+    fn range_mut(&mut self, at: usize, len: usize) -> Option<&mut [u8]> {
+        let end = at.checked_add(len)?;
+        if end > self.len {
+            return None;
+        }
+        // SAFETY: as `range`, writable because `&mut self` holds this process's only path here.
+        Some(unsafe { std::slice::from_raw_parts_mut(self.base.as_ptr().add(at), len) })
     }
 }
 
@@ -791,9 +873,7 @@ struct Scanout {
 impl Scanout {
     fn region(&self, slot: usize) -> Option<&[u8]> {
         let at = slot.checked_mul(self.slot_bytes)?;
-        self.storage
-            .as_slice()
-            .get(at..at.checked_add(self.slot_bytes)?)
+        self.storage.slot(at, self.slot_bytes)
     }
 }
 
@@ -992,11 +1072,14 @@ impl MemoryFramebuffer {
                 "this framebuffer's slots are on the heap, not in a memfd",
             ));
         };
-        let bpp = scanout
-            .config
-            .format
-            .bytes_per_pixel()
-            .map_or(4, NonZeroUsize::get);
+        // Configure refused any format it cannot size, so a scanout without one does not exist;
+        // answering with an invented stride would hand a reader a layout nothing wrote.
+        let Some(bpp) = scanout.config.format.bytes_per_pixel() else {
+            return Err(std::io::Error::other(
+                "the scanout's format has no known pixel size",
+            ));
+        };
+        let bpp = bpp.get();
         Ok(Some((
             region.fd.try_clone()?,
             SharedLayout {
@@ -1065,7 +1148,7 @@ impl SharedFrames {
     pub fn frame(&self, frame_id: u32, slot: u32) -> Option<FrameView<'_>> {
         let bytes = usize::try_from(self.layout.slot_bytes).ok()?;
         let at = usize::try_from(slot).ok()?.checked_mul(bytes)?;
-        let pixels = self.region.as_slice().get(at..at.checked_add(bytes)?)?;
+        let pixels = self.region.range(at, bytes)?;
         Some(FrameView {
             frame_id,
             width: self.layout.width,
@@ -1118,7 +1201,7 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
                     .map(Storage::Shared)
                     .map_err(|_| DisplayError::Internal)
             } else {
-                Ok(Storage::Heap(vec![0; total]))
+                Ok(Storage::heap_zeroed(total))
             }
         };
         // Unique for the framebuffer's life, not per scanout: a reader holding an old mapping
@@ -1195,10 +1278,9 @@ unsafe impl DisplayBackend for MemoryFramebuffer {
         };
         scanout.states[slot] = SlotState::HandedOut(frame_id);
         let bytes = scanout.slot_bytes;
-        let region = scanout
-            .storage
-            .as_mut_slice()
-            .get_mut(slot * bytes..(slot + 1) * bytes)
+        let region = slot
+            .checked_mul(bytes)
+            .and_then(|at| scanout.storage.slot_mut(at, bytes))
             .ok_or(DisplayError::Internal)?;
         Ok(FrameAllocation::new(frame_id, region))
     }
@@ -1313,7 +1395,8 @@ impl InputEvent {
     }
 }
 
-/// The range of an absolute axis, as `struct input_absinfo` has it.
+/// The range of an absolute axis, as libkrun's `krun_input_absinfo` has it (unsigned, where
+/// the kernel's `input_absinfo` is signed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct AbsInfo {
@@ -1718,7 +1801,7 @@ unsafe extern "C" fn c_next_event(instance: *mut c_void, out: *mut sys::krun_inp
                     *out = sys::krun_input_event {
                         type_: e.type_,
                         code: e.code,
-                        value: u32::from_ne_bytes(e.value.to_ne_bytes()),
+                        value: e.value.cast_unsigned(),
                     };
                 }
                 1
@@ -1875,11 +1958,16 @@ impl Machine {
         Ok(self)
     }
 
-    /// Maps a guest vsock port onto a host unix socket. `listen` chooses which side binds.
-    pub fn vsock_port(mut self, port: u32, socket: &Path, listen: bool) -> Result<Self, Error> {
+    /// Maps a guest vsock port onto a host unix socket, connections flowing as `initiator` says.
+    pub fn vsock_port(
+        mut self,
+        port: u32,
+        socket: &Path,
+        initiator: VsockInitiator,
+    ) -> Result<Self, Error> {
         let c = c_path("a vsock socket path", socket)?;
         check("krun_add_vsock_port2", unsafe {
-            sys::krun_add_vsock_port2(self.ctx.id, port, c.as_ptr(), listen)
+            sys::krun_add_vsock_port2(self.ctx.id, port, c.as_ptr(), initiator.listens())
         })?;
         self.retained.push(c);
         Ok(self)
@@ -2007,13 +2095,15 @@ impl Machine {
         backend: B,
     ) -> Result<(Self, Arc<Mutex<B>>), Error> {
         let shared: Arc<Backend<B>> = Arc::new(Mutex::new(backend));
-        // Built before the call, so the `?` on a refused call drops it and takes the count back.
+        let userdata = Arc::into_raw(Arc::clone(&shared)).cast::<c_void>();
+        // Built whole before the call, as `input_device` builds its handles: the `?` on a refused
+        // call drops it, which takes the count back.
         let handle = DisplayHandle {
-            userdata: Arc::into_raw(Arc::clone(&shared)).cast::<c_void>(),
+            userdata,
             release: release_backend::<B>,
             _table: Box::new(sys::krun_display_backend {
                 features: sys::KRUN_DISPLAY_FEATURE_BASIC_FRAMEBUFFER,
-                create_userdata: std::ptr::null(),
+                create_userdata: userdata,
                 create: Some(c_create::<B>),
                 vtable: sys::krun_display_vtable {
                     basic_framebuffer: sys::krun_display_basic_framebuffer_vtable {
@@ -2026,21 +2116,14 @@ impl Machine {
                 },
             }),
         };
-        let mut table = handle._table.clone();
-        table.create_userdata = handle.userdata;
         check("krun_set_display_backend", unsafe {
             sys::krun_set_display_backend(
                 self.ctx.id,
-                std::ptr::from_ref(&*table).cast::<c_void>(),
+                std::ptr::from_ref(&*handle._table).cast::<c_void>(),
                 std::mem::size_of::<sys::krun_display_backend>(),
             )
         })?;
-        self.retained_display = Some(DisplayHandle {
-            userdata: handle.userdata,
-            release: handle.release,
-            _table: table,
-        });
-        std::mem::forget(handle);
+        self.retained_display = Some(handle);
         Ok((self, shared))
     }
 
@@ -2153,6 +2236,76 @@ pub fn nested_virt_supported() -> Result<bool, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The byte-range checks under every slot read: an exact fit against the end is the last
+    /// slot, and one byte past it is the overrun `from_raw_parts` must never see.
+    #[test]
+    fn a_region_range_ends_exactly_at_the_allocation() {
+        let mut heap = HeapRegion::zeroed(10);
+        assert_eq!(heap.range(2, 8).map(<[u8]>::len), Some(8), "an exact fit");
+        assert_eq!(heap.range(3, 8), None, "one byte past the end");
+        assert_eq!(
+            heap.range(10, 0),
+            Some(&[][..]),
+            "empty at the end is legal"
+        );
+        assert_eq!(
+            heap.range(usize::MAX, 2),
+            None,
+            "an offset whose end overflows"
+        );
+        assert!(heap.range_mut(2, 8).is_some() && heap.range_mut(3, 8).is_none());
+
+        let mut shared = SharedRegion::create(10).expect("a 10-byte mapping");
+        assert_eq!(shared.range(2, 8).map(<[u8]>::len), Some(8));
+        assert_eq!(shared.range(3, 8), None);
+        assert_eq!(shared.range(usize::MAX, 2), None);
+        assert!(shared.range_mut(2, 8).is_some() && shared.range_mut(3, 8).is_none());
+    }
+
+    /// Every slot can be handed out, and the last is an exact fit against the allocation's end:
+    /// the range a bounds check gets wrong first, exercised on both storages and on the second
+    /// process's mapping.
+    #[test]
+    fn the_last_slot_is_an_exact_fit_on_both_storages() {
+        for make in [MemoryFramebuffer::new, MemoryFramebuffer::shared] {
+            let mut fb = make();
+            fb.configure_scanout(0, 4, 2, 4, 2, PixelFormat::B8G8R8X8Unorm)
+                .expect("a shape this can size");
+            let bytes = 4 * 2 * 4;
+            let mut last_id = None;
+            for _ in 0..SLOTS {
+                let alloc = fb.alloc_frame(0).expect("a free slot");
+                assert_eq!(alloc.buffer.len(), bytes, "every slot is whole");
+                last_id = Some(alloc.frame_id);
+            }
+            assert!(
+                matches!(fb.alloc_frame(0), Err(DisplayError::OutOfBuffers)),
+                "no fifth slot exists"
+            );
+            let last_id = last_id.expect("SLOTS allocations happened");
+            fb.present_frame(0, last_id, None).expect("presented");
+            let view = fb.latest_frame(0).expect("the last slot reads back");
+            assert_eq!(view.slot as usize, SLOTS - 1, "slots hand out in order");
+            assert_eq!(view.pixels.len(), bytes);
+        }
+
+        let mut fb = MemoryFramebuffer::shared();
+        fb.configure_scanout(0, 4, 2, 4, 2, PixelFormat::B8G8R8X8Unorm)
+            .expect("a shape this can size");
+        let (fd, layout) = fb.share(0).expect("shareable").expect("configured");
+        let mapped = SharedFrames::map(fd, layout).expect("mapped");
+        let last = layout.slots - 1;
+        assert_eq!(
+            mapped.frame(0, last).map(|v| v.pixels.len()),
+            Some(4 * 2 * 4),
+            "the reader sees the last slot whole"
+        );
+        assert!(
+            mapped.frame(0, layout.slots).is_none(),
+            "a slot the layout has not got is refused"
+        );
+    }
 
     /// The sign convention is the part easy to get backwards: libkrun returns a *negated* errno,
     /// so `-2` is `ENOENT`. Only meaningful against a real library; the stub build reports
