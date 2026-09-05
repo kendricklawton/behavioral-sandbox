@@ -63,6 +63,22 @@ impl RootFsArg {
     }
 }
 
+/// The `--display` value parser, so a geometry the helper would refuse is refused by the parser
+/// instead, the way `--vcpus 0` already is by [`NonZeroU8`].
+///
+/// Shared by every verb that boots, so the refusal is one message.
+pub(crate) fn parse_display(spec: &str) -> Result<Display, String> {
+    let Some((width, height, refresh)) = crate::vmm::split_display(spec) else {
+        // clap prints the flag and the offending value around this, so neither is repeated here.
+        return Err("not WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, all non-zero".to_string());
+    };
+    let display = Display::new(width, height);
+    Ok(match refresh {
+        Some(hz) => display.with_refresh(hz),
+        None => display,
+    })
+}
+
 /// Run one command in a fresh sandbox.
 #[derive(Args, Debug)]
 pub(crate) struct RunArgs {
@@ -105,8 +121,8 @@ pub(crate) struct RunArgs {
     /// Give the guest a display of `WIDTHxHEIGHT`, shown in a window for as long as the sandbox
     /// runs; `WIDTHxHEIGHT@HZ` also tells the guest its refresh rate. Closing the window stops
     /// the sandbox.
-    #[arg(long, value_name = "WIDTHxHEIGHT[@HZ]")]
-    pub(crate) display: Option<String>,
+    #[arg(long, value_name = "WIDTHxHEIGHT[@HZ]", value_parser = crate::run::parse_display)]
+    pub(crate) display: Option<Display>,
     /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<PathBuf>,
@@ -416,22 +432,11 @@ fn data_dir(xdg_data: Option<OsString>, home: Option<OsString>) -> Option<PathBu
 /// helper would. Shared by every verb that boots, so the refusal is one message.
 pub(crate) fn apply_display(
     cfg: &mut VmConfig,
-    display: Option<&str>,
+    display: Option<Display>,
     screenshot: Option<&Path>,
     frame_log: Option<&Path>,
 ) -> Result<(), String> {
-    if let Some(spec) = display {
-        let Some((width, height, refresh)) = crate::vmm::split_display(spec) else {
-            return Err(format!(
-                "--display {spec:?} is not WIDTHxHEIGHT or WIDTHxHEIGHT@HZ, all non-zero"
-            ));
-        };
-        let mut d = Display::new(width, height);
-        if let Some(hz) = refresh {
-            d = d.with_refresh(hz);
-        }
-        cfg.display = Some(d);
-    }
+    cfg.display = display;
     if cfg.display.is_none() {
         if screenshot.is_some() {
             return Err("--screenshot needs a --display to take a frame from".to_string());
@@ -457,7 +462,7 @@ fn to_config(args: &RunArgs, root: PathBuf) -> Result<VmConfig, String> {
     cfg.sound = args.sound;
     apply_display(
         &mut cfg,
-        args.display.as_deref(),
+        args.display,
         args.screenshot.as_deref(),
         args.frame_log.as_deref(),
     )?;
@@ -735,12 +740,17 @@ mod tests {
         let err = apply_display(&mut cfg, None, Some(Path::new("/tmp/f.ppm")), None)
             .expect_err("a screenshot with no display");
         assert!(err.contains("--display"), "{err}");
-        let err =
-            apply_display(&mut cfg, Some("0x600"), None, None).expect_err("zero is not a display");
-        assert!(err.contains("0x600"), "{err}");
+        // The geometry is the parser's job now, so a zero side never reaches `apply_display`.
+        let err = parse_display("0x600").expect_err("zero is not a display");
+        assert!(
+            err.contains("WIDTHxHEIGHT") && err.contains("non-zero"),
+            "{err}"
+        );
+        assert!(parse_display("800").is_err(), "a width is not a display");
+        assert!(parse_display("800x600@0").is_err(), "zero Hz is not a rate");
         apply_display(
             &mut cfg,
-            Some("800x600"),
+            Some(parse_display("800x600").expect("a display")),
             Some(Path::new("/tmp/f.ppm")),
             None,
         )
@@ -761,7 +771,7 @@ mod tests {
         let mut rated = VmConfig::new("/r", "true");
         apply_display(
             &mut rated,
-            Some("800x600@120"),
+            Some(parse_display("800x600@120").expect("a rated display")),
             None,
             Some(Path::new("/tmp/frames.tsv")),
         )

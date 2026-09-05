@@ -301,6 +301,42 @@ pub(crate) fn run(args: &VmmArgs) -> ExitCode {
     }
 }
 
+/// Which input a refusal is about, so a message names it and a caller cannot misspell it.
+///
+/// The words are the message's, not an identifier's: they land mid-sentence in [`HelperError`]'s
+/// `Display`, which is why they carry their own article.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Subject {
+    Root,
+    Share,
+    Mount,
+    ExecPath,
+    GuestArgument,
+    GuestEnv,
+    MountPreamble,
+}
+
+impl Subject {
+    /// How a message names this input.
+    fn as_words(self) -> &'static str {
+        match self {
+            Self::Root => "the root",
+            Self::Share => "a share",
+            Self::Mount => "a mount",
+            Self::ExecPath => "the exec path",
+            Self::GuestArgument => "a guest argument",
+            Self::GuestEnv => "a guest environment entry",
+            Self::MountPreamble => "the mount preamble",
+        }
+    }
+}
+
+impl std::fmt::Display for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_words())
+    }
+}
+
 /// The failure this helper can report: a bad argument it refuses, or libkrun declining to start.
 #[derive(Debug)]
 enum HelperError {
@@ -308,7 +344,7 @@ enum HelperError {
     /// an empty machine that exits 0, which a supervisor reads as success.
     NotADirectory {
         /// Which argument named it, so the message says whether it was the root or a share.
-        what: &'static str,
+        what: Subject,
         /// The path as given.
         path: PathBuf,
     },
@@ -327,7 +363,7 @@ enum HelperError {
     /// carry. Refused here because libkrun aborts the VMM on it instead of erroring.
     CmdlineByte {
         /// Which input carried it.
-        what: &'static str,
+        what: Subject,
         /// The offending input, lossily rendered.
         input: String,
     },
@@ -344,7 +380,7 @@ enum HelperError {
     /// corrupting silently. Refused because a corrupted argv runs a command nobody wrote.
     CmdlineQuote {
         /// Which input carried it.
-        what: &'static str,
+        what: Subject,
         /// The offending input, lossily rendered.
         input: String,
     },
@@ -462,14 +498,14 @@ impl From<bsx_krun::Error> for HelperError {
 /// never comes back here. The type says so, so nobody writes code after it.
 fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperError> {
     // Checked before the socket is bound, so a refusal leaves no file for a VM that never was.
-    require_dir("the root", &args.root)?;
+    require_dir(Subject::Root, &args.root)?;
     let mut shares = Vec::with_capacity(args.shares.len());
     for spec in &args.shares {
         let (tag, path) = split_share(spec).ok_or_else(|| HelperError::Share(spec.clone()))?;
         if tag.starts_with(RESERVED_TAG_PREFIX) {
             return Err(HelperError::ReservedTag(tag.to_string()));
         }
-        require_dir("a share", path)?;
+        require_dir(Subject::Share, path)?;
         shares.push((tag, path));
     }
     for entry in &args.env {
@@ -504,7 +540,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     let mut mounts = Vec::with_capacity(args.mounts.len());
     for spec in &args.mounts {
         let (guest, host) = split_mount(spec).ok_or_else(|| HelperError::Mount(spec.clone()))?;
-        require_dir("a mount", host)?;
+        require_dir(Subject::Mount, host)?;
         // `mkdir -p` cannot create a mount point through a read-only root, and a failed mount in
         // the guest is an exit 2 on a console nobody reads.
         if args.rootfs == RootFsPosture::ReadOnly {
@@ -602,12 +638,12 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
     }
 
     let env: Vec<&OsStr> = args.env.iter().map(OsStr::new).collect();
-    require_cmdline_safe("the exec path", args.exec.as_os_str())?;
+    require_cmdline_safe(Subject::ExecPath, args.exec.as_os_str())?;
     for arg in &args.args {
-        require_cmdline_safe("a guest argument", OsStr::new(arg))?;
+        require_cmdline_safe(Subject::GuestArgument, OsStr::new(arg))?;
     }
     for entry in &env {
-        require_cmdline_safe("a guest environment entry", entry)?;
+        require_cmdline_safe(Subject::GuestEnv, entry)?;
     }
     machine = if mounts.is_empty() {
         let argv: Vec<&OsStr> = args.args.iter().map(OsStr::new).collect();
@@ -617,7 +653,7 @@ fn build_and_enter(args: &VmmArgs) -> Result<std::convert::Infallible, HelperErr
         // PATH resolution.
         let script = mount_preamble(&mounts, &args.exec, &args.args);
         // Covers the guest mount paths, which are spliced into the script.
-        require_cmdline_safe("the mount preamble", OsStr::new(&script))?;
+        require_cmdline_safe(Subject::MountPreamble, OsStr::new(&script))?;
         let argv: Vec<&OsStr> = vec![OsStr::new("-c"), OsStr::new(&script)];
         machine.exec(Path::new("/bin/sh"), &argv, &env)?
     };
@@ -884,7 +920,7 @@ fn require_backable_mem(asked_mib: u32) -> Result<(), HelperError> {
 
 /// Refuses an input the kernel command line cannot carry. See [`cmdline_safe`] for why this is a
 /// crash guard rather than a style rule.
-fn require_cmdline_safe(what: &'static str, s: &OsStr) -> Result<(), HelperError> {
+fn require_cmdline_safe(what: Subject, s: &OsStr) -> Result<(), HelperError> {
     if !cmdline_safe(s) {
         return Err(HelperError::CmdlineByte {
             what,
@@ -903,7 +939,7 @@ fn require_cmdline_safe(what: &'static str, s: &OsStr) -> Result<(), HelperError
 /// Refuses a host path that is not a directory, before it can become a machine that boots into
 /// nothing. Follows symlinks (`is_dir`, not `symlink_metadata`) because a link to a real directory
 /// is a perfectly good root and libkrun would resolve it the same way.
-fn require_dir(what: &'static str, path: &Path) -> Result<(), HelperError> {
+fn require_dir(what: Subject, path: &Path) -> Result<(), HelperError> {
     if path.is_dir() {
         return Ok(());
     }
@@ -926,19 +962,26 @@ mod tests {
     #[test]
     fn a_root_that_is_not_a_directory_is_refused_before_boot() {
         let missing = Path::new("/nonexistent-bsx-root");
-        let err = require_dir("the root", missing).expect_err("a missing root cannot boot");
+        let err = require_dir(Subject::Root, missing).expect_err("a missing root cannot boot");
         assert!(
             matches!(&err, HelperError::NotADirectory { what, path }
-                if *what == "the root" && path == missing),
+                if *what == Subject::Root && path == missing),
             "got {err:?}"
         );
         assert!(
             err.to_string().contains("exit 0"),
             "the message says why it matters: {err}"
         );
+        // `what` is a `Subject` now, so the words it renders as are pinned here rather than by
+        // the match above: they are what tells a reader which argument was wrong.
+        assert!(
+            err.to_string()
+                .starts_with("the root /nonexistent-bsx-root"),
+            "the message names which argument: {err}"
+        );
         // A file is not a directory either, and is the likelier mistake of the two.
-        assert!(require_dir("the root", Path::new("/etc/hostname")).is_err());
-        require_dir("the root", Path::new("/tmp")).expect("a real directory passes");
+        assert!(require_dir(Subject::Root, Path::new("/etc/hostname")).is_err());
+        require_dir(Subject::Root, Path::new("/tmp")).expect("a real directory passes");
     }
 
     /// A host path may contain `=`, so the split is at the first separator and not the last. A
@@ -1095,7 +1138,7 @@ mod tests {
         for bad in ["\u{e9}", "a\nb", "tab\the", "nul\0"] {
             assert!(!cmdline_safe(OsStr::new(bad)), "{bad:?} must be refused");
         }
-        let err = require_cmdline_safe("a guest argument", OsStr::new("\u{e9}"))
+        let err = require_cmdline_safe(Subject::GuestArgument, OsStr::new("\u{e9}"))
             .expect_err("must refuse");
         let msg = err.to_string();
         assert!(msg.contains("kernel command line"), "says why: {msg}");
@@ -1117,7 +1160,7 @@ mod tests {
             !codec_safe(OsStr::new("a \"b c\" d")),
             "the measured corruption"
         );
-        let err = require_cmdline_safe("a guest argument", OsStr::new("echo \"x y\""))
+        let err = require_cmdline_safe(Subject::GuestArgument, OsStr::new("echo \"x y\""))
             .expect_err("must refuse");
         assert!(err.to_string().contains("single quotes"), "{err}");
     }

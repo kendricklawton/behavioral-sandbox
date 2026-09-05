@@ -53,9 +53,10 @@ pub(crate) struct UpArgs {
     #[arg(long)]
     pub(crate) dry_run: bool,
     /// Give the guest a display of `WIDTHxHEIGHT`, shown in a window for as long as the sandbox
-    /// runs. Closing the window stops the sandbox.
-    #[arg(long, value_name = "WIDTHxHEIGHT")]
-    pub(crate) display: Option<String>,
+    /// runs; `WIDTHxHEIGHT@HZ` also tells the guest its refresh rate. Closing the window stops
+    /// the sandbox.
+    #[arg(long, value_name = "WIDTHxHEIGHT[@HZ]", value_parser = crate::run::parse_display)]
+    pub(crate) display: Option<bsx_supervisor::Display>,
     /// Keep PATH holding the display's latest frame as a binary PPM. Needs `--display`.
     #[arg(long, value_name = "PATH")]
     pub(crate) screenshot: Option<std::path::PathBuf>,
@@ -137,7 +138,7 @@ fn start(args: &UpArgs) -> Result<Outcome, String> {
     cfg.sound = args.sound;
     crate::run::apply_display(
         &mut cfg,
-        args.display.as_deref(),
+        args.display,
         args.screenshot.as_deref(),
         args.frame_log.as_deref(),
     )?;
