@@ -58,14 +58,19 @@ pub(crate) fn menu(app: &App) -> Element<'_, Message> {
     let past = app.runs.len() - running;
     let actions = column![
         button(text("New run").size(TITLE))
-            .style(button::primary)
+            .style(primary)
             .width(Fill)
+            .padding([10, 14])
             .on_press(Message::NewRun),
         button(text(format!("Sandboxes · {running} running · {past} past")).size(TITLE))
+            .style(secondary)
             .width(Fill)
+            .padding([10, 14])
             .on_press(Message::List),
         button(text("Settings").size(TITLE))
+            .style(secondary)
             .width(Fill)
+            .padding([10, 14])
             .on_press(Message::Settings),
     ]
     .spacing(10)
@@ -119,7 +124,7 @@ fn root_line(app: &App) -> String {
 /// The notebook's own knobs. One section today; a later knob is a later heading block.
 pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     let bar = row![
-        button(text("← menu")).on_press(Message::Menu),
+        button(text("← menu")).style(ghost).on_press(Message::Menu),
         text("Settings").size(18),
     ]
     .spacing(12)
@@ -128,9 +133,13 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         heading("APPEARANCE"),
         row![
             text("theme").size(BODY).width(LABEL),
-            pick_list(iced::Theme::ALL, Some(app.theme.clone()), Message::SetTheme)
-                .text_size(BODY)
-                .width(Length::Fixed(240.0)),
+            pick_list(
+                crate::theme::all(),
+                Some(app.theme.clone()),
+                Message::SetTheme
+            )
+            .text_size(BODY)
+            .width(Length::Fixed(240.0)),
         ]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center),
@@ -145,10 +154,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     }
     let mut page = column![
         bar,
-        container(appearance)
-            .style(container::rounded_box)
-            .padding(14)
-            .width(Fill),
+        container(appearance).style(card).padding(14).width(Fill),
     ]
     .spacing(14)
     .padding(18);
@@ -161,12 +167,95 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// The corner an action takes; a surface takes [`CARD_RADIUS`].
+const RADIUS: f32 = 6.0;
+const CARD_RADIUS: f32 = 8.0;
+
+/// The one call to action on a screen: solid in the palette's primary, dimmed under the pointer.
+fn primary(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let pair = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.primary.strong,
+        button::Status::Active | button::Status::Disabled => palette.primary.base,
+    };
+    role(pair.color, pair.text, palette.primary.strong.color, status)
+}
+
+/// The workhorse: a bordered surface one step off the page, a step brighter under the pointer.
+fn secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let surface = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.weak,
+        button::Status::Active | button::Status::Disabled => palette.background.weakest,
+    };
+    role(
+        surface.color,
+        palette.background.base.text,
+        palette.background.weak.color,
+        status,
+    )
+}
+
+/// Navigation that stays quiet until the pointer finds it.
+fn ghost(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let surface = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.weak.color,
+        button::Status::Active | button::Status::Disabled => iced::Color::TRANSPARENT,
+    };
+    role(surface, palette.background.base.text, surface, status)
+}
+
+/// The destructive act: solid in the palette's danger, never the default anything.
+fn destructive(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let pair = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.danger.strong,
+        button::Status::Active | button::Status::Disabled => palette.danger.base,
+    };
+    role(pair.color, pair.text, pair.color, status)
+}
+
+/// One shape for every role: the radius, the hairline border, and the disabled fade.
+fn role(
+    surface: iced::Color,
+    text: iced::Color,
+    edge: iced::Color,
+    status: button::Status,
+) -> button::Style {
+    let faded = matches!(status, button::Status::Disabled);
+    button::Style {
+        background: Some(iced::Background::Color(surface)),
+        text_color: if faded { text.scale_alpha(0.5) } else { text },
+        border: iced::Border {
+            color: edge,
+            width: 1.0,
+            radius: RADIUS.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// A card: the page's own surface a shade lifted, held by a hairline border.
+fn card(theme: &iced::Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(iced::Background::Color(palette.background.weakest.color)),
+        border: iced::Border {
+            color: palette.background.weak.color,
+            width: 1.0,
+            radius: CARD_RADIUS.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// The notebook: what is running, then what has run.
 pub(crate) fn list(app: &App) -> Element<'_, Message> {
     let live: Vec<&Record> = app.runs.iter().filter(|r| app.is_live(r)).collect();
     let past: Vec<&Record> = app.runs.iter().filter(|r| !app.is_live(r)).collect();
     let start = row![
-        button(text("← menu")).on_press(Message::Menu),
+        button(text("← menu")).style(ghost).on_press(Message::Menu),
         text("Sandboxes").size(18),
         space().width(Fill),
     ];
@@ -175,9 +264,11 @@ pub(crate) fn list(app: &App) -> Element<'_, Message> {
             row![
                 text(format!("remove {}?", crate::ended_runs(past.len()))).size(BODY),
                 button(text("Remove"))
-                    .style(button::danger)
+                    .style(destructive)
                     .on_press(Message::ClearConfirmed),
-                button(text("Keep")).on_press(Message::ClearCancelled),
+                button(text("Keep"))
+                    .style(secondary)
+                    .on_press(Message::ClearCancelled),
             ]
             .spacing(12)
             .align_y(iced::alignment::Vertical::Center),
@@ -185,9 +276,17 @@ pub(crate) fn list(app: &App) -> Element<'_, Message> {
     } else {
         let mut ordinary = start;
         if !past.is_empty() {
-            ordinary = ordinary.push(button(text("Clear history")).on_press(Message::ClearHistory));
+            ordinary = ordinary.push(
+                button(text("Clear history"))
+                    .style(secondary)
+                    .on_press(Message::ClearHistory),
+            );
         }
-        ordinary.push(button(text("New run")).on_press(Message::NewRun))
+        ordinary.push(
+            button(text("New run"))
+                .style(primary)
+                .on_press(Message::NewRun),
+        )
     }
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center);
@@ -334,14 +433,9 @@ fn run_row<'a>(app: &'a App, record: &'a Record) -> Element<'a, Message> {
         .into(),
         _ => text_side.width(Fill).into(),
     };
-    mouse_area(
-        container(body)
-            .width(Fill)
-            .padding(12)
-            .style(container::rounded_box),
-    )
-    .on_press(Message::Open(crate::RunId::of(record)))
-    .into()
+    mouse_area(container(body).width(Fill).padding(12).style(card))
+        .on_press(Message::Open(crate::RunId::of(record)))
+        .into()
 }
 
 /// How big a live sandbox's frame is in the list, in logical pixels. Wide enough to tell two
@@ -394,7 +488,7 @@ fn posture_tags(record: &Record) -> String {
 pub(crate) fn run<'a>(app: &'a App, id: &crate::RunId) -> Element<'a, Message> {
     let Some(record) = app.record(id) else {
         return column![
-            button(text("← runs")).on_press(Message::Back),
+            button(text("← runs")).style(ghost).on_press(Message::Back),
             text(format!("the run {id} is no longer in the notebook")),
         ]
         .spacing(10)
@@ -403,28 +497,39 @@ pub(crate) fn run<'a>(app: &'a App, id: &crate::RunId) -> Element<'a, Message> {
     };
     let live = app.is_live(record);
     let mut bar = row![
-        button(text("← runs")).on_press(Message::Back),
+        button(text("← runs")).style(ghost).on_press(Message::Back),
         text(&record.name).font(MONO).size(18),
         space().width(Fill),
     ]
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center);
-    bar = bar.push(button(text("Export")).on_press(Message::Export(crate::RunId::of(record))));
+    bar = bar.push(
+        button(text("Export"))
+            .style(secondary)
+            .on_press(Message::Export(crate::RunId::of(record))),
+    );
     if live {
         if record.verb == Verb::Up {
-            bar = bar
-                .push(button(text("Shell")).on_press(Message::Shell(crate::RunName::of(record))));
+            bar = bar.push(
+                button(text("Shell"))
+                    .style(secondary)
+                    .on_press(Message::Shell(crate::RunName::of(record))),
+            );
         }
         bar = bar.push(
             button(text("Stop"))
-                .style(button::danger)
+                .style(destructive)
                 .on_press(Message::Stop(crate::RunName::of(record))),
         );
     } else {
-        bar = bar.push(button(text("Re-run")).on_press(Message::Rerun(crate::RunId::of(record))));
+        bar = bar.push(
+            button(text("Re-run"))
+                .style(secondary)
+                .on_press(Message::Rerun(crate::RunId::of(record))),
+        );
         bar = bar.push(
             button(text("Delete"))
-                .style(button::danger)
+                .style(destructive)
                 .on_press(Message::Delete(crate::RunId::of(record))),
         );
     }
@@ -489,10 +594,7 @@ fn pane<'a>(title: &'a str, rows: Vec<(String, String)>) -> Element<'a, Message>
             .spacing(4),
         );
     }
-    container(body.padding(10))
-        .width(Fill)
-        .style(container::rounded_box)
-        .into()
+    container(body.padding(10)).width(Fill).style(card).into()
 }
 
 fn posture_lines(record: &Record) -> Vec<(String, String)> {
@@ -625,7 +727,7 @@ fn output_pane<'a>(app: &'a App, record: &'a Record) -> iced::widget::Container<
     ]
     .spacing(6)
     .padding(10);
-    container(body).width(Fill).style(container::rounded_box)
+    container(body).width(Fill).style(card)
 }
 
 /// The form for a new run, with the posture sentence above the buttons.
@@ -723,9 +825,11 @@ pub(crate) fn new_run<'a>(app: &'a App, form: &'a Form) -> Element<'a, Message> 
         text(posture.sentence()).size(14),
         row![
             space().width(Fill),
-            button(text("Cancel")).on_press(Message::Back),
+            button(text("Cancel"))
+                .style(secondary)
+                .on_press(Message::Back),
             button(text("Start sandbox"))
-                .style(button::primary)
+                .style(primary)
                 .on_press(Message::Start),
         ]
         .spacing(12),

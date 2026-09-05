@@ -85,7 +85,7 @@ struct Cli {
     exit_with_lease: bool,
     /// The palette to draw in, by the name the toolkit prints it under (`Nord`, `Tokyo Night
     /// Storm`, `Catppuccin Mocha`). Case and spacing are ignored. Falls back to `$BSX_THEME`,
-    /// then to the theme picked in Settings, then to Tokyo Night Storm. An unknown name is
+    /// then to the theme picked in Settings, then to the app's own New York. An unknown name is
     /// refused with the full list.
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
@@ -476,7 +476,7 @@ impl App {
             sinks,
             displays: BTreeMap::new(),
             exit_with_lease,
-            theme: theme::DEFAULT,
+            theme: theme::default_theme(),
             theme_overridden: false,
             confirm_clear: false,
         };
