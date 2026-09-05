@@ -127,16 +127,17 @@ impl<Message> shader::Program<Message> for Program {
                 repeat,
                 ..
             }) => {
+                let action = bsx_input::KeyAction::of(true, *repeat);
                 if let Some(report) =
-                    scancode(physical_key).and_then(|code| bsx_input::key(code, true, *repeat))
+                    scancode(physical_key).and_then(|code| bsx_input::key(code, action))
                 {
-                    held.key(report[0].code, true);
+                    held.key(report[0].code, action.is_down());
                     send(Target::Keyboard, &report);
                 }
             }
             Event::Keyboard(keyboard::Event::KeyReleased { physical_key, .. }) => {
-                if let Some(report) =
-                    scancode(physical_key).and_then(|code| bsx_input::key(code, false, false))
+                if let Some(report) = scancode(physical_key)
+                    .and_then(|code| bsx_input::key(code, bsx_input::KeyAction::Release))
                 {
                     held.key(report[0].code, false);
                     send(Target::Keyboard, &report);
@@ -170,11 +171,11 @@ impl<Message> shader::Program<Message> for Program {
             }
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let (dx, dy) = match *delta {
-                    mouse::ScrollDelta::Lines { x, y } => (x, y),
-                    // The window's pixel count as a line; clamped so the cast is exact.
+                    mouse::ScrollDelta::Lines { x, y } => (f64::from(x), f64::from(y)),
+                    // The window's pixel count as a line; `wheel` rounds and clamps it.
                     mouse::ScrollDelta::Pixels { x, y } => (
-                        (f64::from(x) / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
-                        (f64::from(y) / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        f64::from(x) / bsx_input::WHEEL_LINE_PIXELS,
+                        f64::from(y) / bsx_input::WHEEL_LINE_PIXELS,
                     ),
                 };
                 let report = bsx_input::wheel(dx, dy);

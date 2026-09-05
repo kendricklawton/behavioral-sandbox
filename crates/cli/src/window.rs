@@ -376,11 +376,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => self.release_all(),
             WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state.is_pressed();
+                let action = bsx_input::KeyAction::of(event.state.is_pressed(), event.repeat);
                 if let Some(code) = event.physical_key.to_scancode()
-                    && let Some(report) = bsx_input::key(code, pressed, event.repeat)
+                    && let Some(report) = bsx_input::key(code, action)
                 {
-                    self.held.key(report[0].code, pressed);
+                    self.held.key(report[0].code, action.is_down());
                     let _ = self.inputs.keyboard.send(&report);
                 }
             }
@@ -397,11 +397,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x, y),
-                    // The window's pixel count as a line; clamped so the cast is exact.
+                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x), f64::from(y)),
+                    // The window's pixel count as a line; `wheel` rounds and clamps it.
                     MouseScrollDelta::PixelDelta(p) => (
-                        (p.x / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
-                        (p.y / bsx_input::WHEEL_LINE_PIXELS).clamp(-1000.0, 1000.0) as f32,
+                        p.x / bsx_input::WHEEL_LINE_PIXELS,
+                        p.y / bsx_input::WHEEL_LINE_PIXELS,
                     ),
                 };
                 let report = bsx_input::wheel(dx, dy);

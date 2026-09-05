@@ -101,17 +101,48 @@ pub fn button_code(button: Button) -> u16 {
     }
 }
 
-/// A key report: press, release, or repeat of the key at evdev `scancode`, or `None` for a code
-/// the keyboard does not emit.
+/// What a key report says happened. The three the evdev value has, so "released and repeating"
+/// cannot be asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KeyAction {
+    /// The key went down.
+    Press,
+    /// The key is down and the toolkit is repeating it.
+    Repeat,
+    /// The key came up.
+    Release,
+}
+
+impl KeyAction {
+    /// Press or repeat when `pressed`, release when not: what a toolkit reporting a state and a
+    /// repeat flag has, in the one place that pairing is read.
+    #[must_use]
+    pub fn of(pressed: bool, repeat: bool) -> Self {
+        match (pressed, repeat) {
+            (false, _) => Self::Release,
+            (true, false) => Self::Press,
+            (true, true) => Self::Repeat,
+        }
+    }
+
+    /// Whether the key is down after this, which is what [`Held`] records.
+    #[must_use]
+    pub fn is_down(self) -> bool {
+        !matches!(self, Self::Release)
+    }
+}
+
+/// A key report for the key at evdev `scancode`, or `None` for a code the keyboard does not emit.
 #[must_use]
-pub fn key(scancode: u32, pressed: bool, repeat: bool) -> Option<[InputEvent; 2]> {
+pub fn key(scancode: u32, action: KeyAction) -> Option<[InputEvent; 2]> {
     let code = u16::try_from(scancode)
         .ok()
         .filter(|c| (1..=KEY_LAST).contains(c))?;
-    let value = match (pressed, repeat) {
-        (false, _) => 0,
-        (true, false) => 1,
-        (true, true) => 2,
+    let value = match action {
+        KeyAction::Release => 0,
+        KeyAction::Press => 1,
+        KeyAction::Repeat => 2,
     };
     Some([
         InputEvent::new(EV_KEY, code, value),
@@ -175,12 +206,14 @@ pub fn position(x: f64, y: f64, area: Area) -> [InputEvent; 3] {
     ]
 }
 
-/// A wheel report for `dx` and `dy` lines, or nothing when both round to zero.
+/// A wheel report for `dx` and `dy` lines, or nothing when both round to zero. In `f64` like
+/// [`position`], so a caller dividing pixels by [`WHEEL_LINE_PIXELS`] hands the quotient over
+/// rather than narrowing it first.
 #[must_use]
-pub fn wheel(dx: f32, dy: f32) -> Vec<InputEvent> {
+pub fn wheel(dx: f64, dy: f64) -> Vec<InputEvent> {
     let mut report = Vec::with_capacity(3);
     // Clamped first, so the cast has nothing to truncate.
-    let lines = |v: f32| v.round().clamp(-1000.0, 1000.0) as i32;
+    let lines = |v: f64| v.round().clamp(-1000.0, 1000.0) as i32;
     if lines(dy) != 0 {
         report.push(InputEvent::new(EV_REL, REL_WHEEL, lines(dy)));
     }
@@ -266,17 +299,21 @@ impl Target {
             Self::Pointer => "ptr",
         }
     }
+
+    /// The device a word names, the inverse of [`as_word`](Self::as_word) and the only reader of
+    /// those words, so the grammar cannot be written one way and parsed another.
+    fn from_word(word: &str) -> Option<Self> {
+        [Self::Keyboard, Self::Pointer]
+            .into_iter()
+            .find(|target| target.as_word() == word)
+    }
 }
 
 /// A line, `kbd|ptr TYPE CODE VALUE` in decimal, or `None` for anything else.
 #[must_use]
 pub fn parse_line(line: &str) -> Option<(Target, InputEvent)> {
     let mut words = line.split_whitespace();
-    let target = match words.next()? {
-        "kbd" => Target::Keyboard,
-        "ptr" => Target::Pointer,
-        _ => return None,
-    };
+    let target = Target::from_word(words.next()?)?;
     let type_ = words.next()?.parse().ok()?;
     let code = words.next()?.parse().ok()?;
     let value = words.next()?.parse().ok()?;
@@ -480,14 +517,33 @@ mod tests {
     /// and ends with a `SYN_REPORT`; a code outside the keyboard's block makes no report.
     #[test]
     fn a_key_report_is_the_scancode_and_a_syn() {
-        let [k, syn] = key(30, true, false).expect("KEY_A");
+        let [k, syn] = key(30, KeyAction::Press).expect("KEY_A");
         assert_eq!((k.type_, k.code, k.value), (EV_KEY, 30, 1));
         assert_eq!((syn.type_, syn.code, syn.value), (EV_SYN, 0, 0));
-        assert_eq!(key(30, true, true).expect("repeat")[0].value, 2);
-        assert_eq!(key(30, false, true).expect("release")[0].value, 0);
-        assert_eq!(key(0, true, false), None, "KEY_RESERVED");
-        assert_eq!(key(0x100, true, false), None, "a button code");
-        assert_eq!(key(u32::MAX, true, false), None);
+        assert_eq!(key(30, KeyAction::Repeat).expect("repeat")[0].value, 2);
+        assert_eq!(key(30, KeyAction::Release).expect("release")[0].value, 0);
+        assert_eq!(key(0, KeyAction::Press), None, "KEY_RESERVED");
+        assert_eq!(key(0x100, KeyAction::Press), None, "a button code");
+        assert_eq!(key(u32::MAX, KeyAction::Press), None);
+    }
+
+    /// The action a toolkit's `(pressed, repeat)` pair means. A release repeating is the pair a
+    /// toolkit can hand over and the enum cannot hold, so it reads as the release it is.
+    #[test]
+    fn a_pressed_and_repeat_pair_becomes_one_action() {
+        assert_eq!(KeyAction::of(true, false), KeyAction::Press);
+        assert_eq!(KeyAction::of(true, true), KeyAction::Repeat);
+        assert_eq!(KeyAction::of(false, false), KeyAction::Release);
+        assert_eq!(KeyAction::of(false, true), KeyAction::Release);
+        assert!(KeyAction::Press.is_down() && KeyAction::Repeat.is_down());
+        assert!(
+            !KeyAction::Release.is_down(),
+            "a repeat leaves the key down"
+        );
+        // A repeat is a key still down, so a feeder that ends after one still releases it.
+        let mut held = Held::default();
+        held.key(30, KeyAction::Repeat.is_down());
+        assert_eq!(held.release_all().0.len(), 2, "the key and its syn");
     }
 
     /// The pointer maps the frame's corners to the axis ends, the middle to the middle, and a
