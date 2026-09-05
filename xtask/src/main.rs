@@ -1249,6 +1249,21 @@ exclude = ["fuzz"]
     /// The three copies of [`FUZZ_TARGETS`] no constant can reach, each drifting silently: a
     /// target missing from the workflow never runs, so a boundary reads as fuzzed while nothing
     /// fuzzes it. Compared as sorted sets, since only the constant is ordered.
+    /// A run is passed its seeds. The directory existing is not the same as libFuzzer being told
+    /// about it, and `cargo_fuzz_run_argv` appends one only when it is there, silently otherwise.
+    #[test]
+    fn a_fuzz_run_is_passed_the_seeds_it_claims() {
+        let root = workspace_root();
+        for target in FUZZ_TARGETS {
+            let argv = cargo_fuzz_run_argv(target, root).unwrap();
+            let seeds = format!("fuzz/seeds/{target}");
+            assert!(
+                argv.iter().any(|arg| arg.ends_with(&seeds)),
+                "{target} would run unseeded: {argv:?}"
+            );
+        }
+    }
+
     #[test]
     fn fuzz_targets_are_single_sourced() {
         let root = workspace_root();
@@ -1294,6 +1309,25 @@ exclude = ["fuzz"]
             sorted(files),
             expected,
             "fuzz/fuzz_targets/*.rs drifted from FUZZ_TARGETS"
+        );
+
+        // The seed corpus. A target with no directory here is passed no seeds at all, silently,
+        // since `cargo_fuzz_run_argv` only appends one that exists. `bsx-channel`'s
+        // `the_committed_seeds_are_what_the_encoders_produce` owns their bytes; this owns the set.
+        let mut seeded = Vec::new();
+        for entry in std::fs::read_dir(root.join("fuzz/seeds")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir()
+                && std::fs::read_dir(&path).map_or(0, Iterator::count) > 0
+                && let Some(name) = path.file_name().and_then(|s| s.to_str())
+            {
+                seeded.push(name.to_string());
+            }
+        }
+        assert_eq!(
+            sorted(seeded),
+            expected,
+            "fuzz/seeds/ drifted from FUZZ_TARGETS: a target with no seeds runs from an empty corpus"
         );
 
         // The nightly matrix: a single-line YAML flow sequence, `target: [a, b, c]`.

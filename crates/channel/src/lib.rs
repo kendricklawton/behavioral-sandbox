@@ -310,6 +310,9 @@ pub(crate) fn read_handshake(r: &mut impl Read) -> Result<(), ChannelError> {
     Ok(())
 }
 
+/// The `tag(u8) · len(u32-le)` header every frame carries, written and read as one buffer.
+pub(crate) const FRAME_HEADER: usize = 5;
+
 /// Writes a single length-prefixed protocol frame.
 fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> Result<(), ChannelError> {
     if payload.len() > MAX_PAYLOAD {
@@ -318,7 +321,7 @@ fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> Result<(), Channe
             len: payload.len(),
         });
     }
-    let mut header = [0u8; 5];
+    let mut header = [0u8; FRAME_HEADER];
     header[0] = tag;
     header[1..].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     w.write_all(&header)?;
@@ -327,9 +330,24 @@ fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> Result<(), Channe
     Ok(())
 }
 
+/// Re-headers a `tag · body` as a whole frame, `None` for a body no `u32` can measure.
+///
+/// Shared by the `_wellformed` fuzz entry points and the seeds that feed them, so a seed cannot
+/// encode one shape while the target re-frames another.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn reframe(data: &[u8]) -> Option<Vec<u8>> {
+    let (&tag, payload) = data.split_first()?;
+    let len = u32::try_from(payload.len()).ok()?;
+    let mut framed = Vec::with_capacity(FRAME_HEADER + payload.len());
+    framed.push(tag);
+    framed.extend_from_slice(&len.to_le_bytes());
+    framed.extend_from_slice(payload);
+    Some(framed)
+}
+
 /// Reads a single frame payload, bounded by [`MAX_PAYLOAD`].
 fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
-    let mut header = [0u8; 5];
+    let mut header = [0u8; FRAME_HEADER];
     r.read_exact(&mut header)?;
     let tag = header[0];
     let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
@@ -858,17 +876,9 @@ pub mod fuzz {
     }
 
     fn frame_and(data: &[u8], f: impl FnOnce(&[u8])) {
-        let Some((&tag, payload)) = data.split_first() else {
-            return;
-        };
-        let Ok(len) = u32::try_from(payload.len()) else {
-            return;
-        };
-        let mut framed = Vec::with_capacity(5 + payload.len());
-        framed.push(tag);
-        framed.extend_from_slice(&len.to_le_bytes());
-        framed.extend_from_slice(payload);
-        f(framed.as_slice());
+        if let Some(framed) = super::reframe(data) {
+            f(framed.as_slice());
+        }
     }
 
     /// Decodes an arbitrary body as a frame, past a valid frame header.
@@ -890,6 +900,9 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod fuzz_tests;
+
+#[cfg(test)]
+mod seed_corpus;
 
 #[cfg(test)]
 mod tests {

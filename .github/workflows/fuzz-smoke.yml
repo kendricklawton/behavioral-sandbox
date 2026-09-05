@@ -8,15 +8,14 @@ name: fuzz-smoke
 
 # Scoped to what a target can actually reach, because this job is a *regression* check. The corpus
 # carries between runs (see the cache step below), so each run extends the last one's search instead
-# of re-deriving it from the seeds, which is what makes a 60s budget worth spending per change. The
-# crates below are the ones the targets drive; `Cargo.lock` is here because a dependency bump can
-# change decode behavior under an unchanged decoder. The gap this accepts: a change elsewhere that
+# of re-deriving it from the seeds, which is what makes a 60s budget worth spending per change.
+# `crates/channel` is the only crate the targets drive; `Cargo.lock` is here because a dependency
+# bump can change decode behavior under an unchanged decoder. The gap this accepts: a change that
 # alters how a fuzzed decoder is *called* goes unsmoked until the nightly run.
 on:
   pull_request:
     paths: &fuzz_inputs
       - 'crates/channel/**'
-      - 'crates/cli/**'
       - 'fuzz/**'
       - 'Cargo.lock'
       - '.github/workflows/fuzz-smoke.yml'
