@@ -44,10 +44,12 @@ backed by the host audio server (4.7). A second process leases a display over th
 as a sealed memfd and a record per present (4.9), and `bsx-app` shows one in an iced window through
 a wgpu texture upload (4.10), and its keyboard and pointer reach the guest as lines down an `input`
 session on that socket (4.11). Every run leaves a record under the local data dir (posture, captured
-output, the guest's `/results`), which `bsx ls --all`, `show` and `rm` read (4.12), and `bsx-app` is
-the notebook of those runs: the list, one run's record with its display and output, a start form
-whose posture sentence is confirmed before anything boots, stop, re-run, delete, and a shell through
-`bsx exec --tty` in the operator's terminal (4.13). Frame pacing through the app on this panel is
+output, the guest's `/results`), which `bsx ls --all`, `show`, `rm` and `export` (one ustar file
+per run) read (4.12), and `bsx-app` is the notebook of those runs: a menu naming the `bsx` and
+guest root it found, the list, one run's record with its display and output, a start form whose
+posture sentence is confirmed before anything boots, stop, re-run, delete, export, clearing the
+ended runs behind an inline confirm, a Settings screen whose theme pick persists beside the runs
+directory, and a shell through `bsx exec --tty` in the operator's terminal (4.13). Frame pacing through the app on this panel is
 measured (4.14). GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt and
 untested.
 
@@ -98,9 +100,9 @@ list of packages. Therefore a stale `-p` fails the gate, not the terminal of a r
 | `crates/krun` | `bsx-krun` | The safe wrapper over libkrun: a builder that puts the library's call-ordering rules in types, and its negative-errno returns into a typed error. The raw declarations sit under it in a **private** module, so this API is the only way to reach libkrun. **The one crate that may use `unsafe`**, because the library is C. |
 | `crates/channel` | `bsx-channel` | Host↔guest framing. It has almost no dependencies. `zeroize` (for the secret wipe) is the one dependency. Both ends share it without change, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO: it binds a socket, accepts a connection, and serves repeated execs from one session directory. It does no init work and is not the security boundary. Static musl, baked into the guest image. Its binary keeps the bare name `guest-agent`, because the image build bakes in that path. |
-| `crates/record` | `bsx-record` | The run record: one directory per run under the local data dir with the posture as settled, the captured output (capped), and `results/`, the directory the guest sees as `/results`. Written by the CLI at start and end, read by both binaries. |
+| `crates/record` | `bsx-record` | The run record: one directory per run under the local data dir with the posture as settled, the captured output (capped), and `results/`, the directory the guest sees as `/results`. Written by the CLI at start and end, read by both binaries; `export` writes one as a ustar file. |
 | `crates/input` | `bsx-input` | The guest's keyboard and pointer: the two device shapes, the reports a window's events become, and the `kbd\|ptr TYPE CODE VALUE` line grammar every feeder speaks (the replay file, the `input` request). Both binaries translate through it. |
-| `crates/cli` | `bsx` | The `bsx` binary. The package, the binary, and the command are all `bsx`. **No verbs today**: the supervisor they call is phase 2. Its library half is the internals of the CLI, not a public API. |
+| `crates/cli` | `bsx` | The `bsx` binary and its verbs. The package, the binary, and the command are all `bsx`. Its library half is the internals of the CLI, not a public API. |
 | `crates/app` | `bsx-app` | The GUI application, on iced: the notebook of runs (live and past, from `bsx-record`), one run's record with its display (leased over the control socket, uploaded to a wgpu texture by its damage rectangle) and its captured output, a start form, stop, re-run, delete, and a shell in the operator's terminal. Starting, stopping and the shell go through the `bsx` binary beside it. |
 | `crates/test-support` | `bsx-test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, artifact builds, benchmarks, and packaging. It is never shipped and never renamed (`cargo xtask` is a `--package xtask` alias). |
