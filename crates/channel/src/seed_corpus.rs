@@ -144,17 +144,18 @@ fn responses() -> Vec<(&'static str, Vec<u8>)> {
 /// Frames chosen for the codec's shape rather than any message's meaning: the length field at its
 /// edges, and a tag no [`Tag`] names, which the frame reader passes through for a caller to reject.
 fn frames() -> Vec<(&'static str, Vec<u8>)> {
-    let stdout = Tag::Stdout.as_u8();
     vec![
-        ("empty", encoded(|w| write_frame(w, stdout, &[]))),
-        ("one_byte", encoded(|w| write_frame(w, stdout, b"x"))),
+        ("empty", encoded(|w| write_frame(w, Tag::Stdout, &[]))),
+        ("one_byte", encoded(|w| write_frame(w, Tag::Stdout, b"x"))),
         (
             "kibibyte",
-            encoded(|w| write_frame(w, stdout, &[b'a'; 1024])),
+            encoded(|w| write_frame(w, Tag::Stdout, &[b'a'; 1024])),
         ),
+        // `write_frame` takes a `Tag`, so this one is re-headered by hand: the frame reader passes
+        // an unknown tag through for its caller to reject, and that path wants a seed too.
         (
             "unknown_tag",
-            encoded(|w| write_frame(w, 0xFF, b"\x00\x01\x02\x03")),
+            reframe(b"\xFF\x00\x01\x02\x03").expect("a tag and four bytes"),
         ),
     ]
 }

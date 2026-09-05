@@ -93,21 +93,26 @@ enum Tag {
 }
 
 impl Tag {
+    /// Every tag, the one list the wire numbers are read from. `tag_discriminants_are_the_wire_numbers`
+    /// holds it complete, so a variant added without an entry here fails the gate.
+    const ALL: [Self; 11] = [
+        Self::Exec,
+        Self::Stdout,
+        Self::Stderr,
+        Self::Exit,
+        Self::Error,
+        Self::PutFile,
+        Self::File,
+        Self::TimedOut,
+        Self::ExecPty,
+        Self::Stdin,
+        Self::Resize,
+    ];
+
+    /// The tag a wire number names, derived from the `#[repr(u8)]` discriminants rather than a
+    /// second table of them.
     fn from_u8(tag: u8) -> Option<Self> {
-        match tag {
-            1 => Some(Self::Exec),
-            2 => Some(Self::Stdout),
-            3 => Some(Self::Stderr),
-            4 => Some(Self::Exit),
-            5 => Some(Self::Error),
-            6 => Some(Self::PutFile),
-            7 => Some(Self::File),
-            8 => Some(Self::TimedOut),
-            9 => Some(Self::ExecPty),
-            10 => Some(Self::Stdin),
-            11 => Some(Self::Resize),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|known| known.as_u8() == tag)
     }
 
     fn as_u8(self) -> u8 {
@@ -314,15 +319,15 @@ pub(crate) fn read_handshake(r: &mut impl Read) -> Result<(), ChannelError> {
 pub(crate) const FRAME_HEADER: usize = 5;
 
 /// Writes a single length-prefixed protocol frame.
-fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> Result<(), ChannelError> {
+fn write_frame(w: &mut impl Write, tag: Tag, payload: &[u8]) -> Result<(), ChannelError> {
     if payload.len() > MAX_PAYLOAD {
         return Err(ChannelError::PayloadTooLarge {
-            tag,
+            tag: tag.as_u8(),
             len: payload.len(),
         });
     }
     let mut header = [0u8; FRAME_HEADER];
-    header[0] = tag;
+    header[0] = tag.as_u8();
     header[1..].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     w.write_all(&header)?;
     w.write_all(payload)?;
@@ -422,12 +427,26 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
             let mut payload = [0u8; 4];
             payload[..2].copy_from_slice(&cols.to_le_bytes());
             payload[2..].copy_from_slice(&rows.to_le_bytes());
-            write_frame(w, Tag::Resize.as_u8(), &payload)
+            write_frame(w, Tag::Resize, &payload)
         }
         Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
             "Request::Unknown (tag {tag}) is read-only and cannot be sent"
         ))),
     }
+}
+
+/// The exact size of an `ExecPty` frame body: the two counts, the blobs, and `cols` with `rows`.
+///
+/// A function for [`exec_payload_len`]'s reason: the buffer and
+/// `the_exec_pty_buffer_is_sized_by_what_the_encoder_writes` read the same arithmetic.
+fn exec_pty_payload_len(argv: &[String], env: &[(String, String)]) -> usize {
+    4 + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
+        + 4
+        + env
+            .iter()
+            .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
+            .sum::<usize>()
+        + 4
 }
 
 /// Serializes and sends an `ExecPty` request. The env values travel in a wiped buffer for
@@ -439,14 +458,7 @@ fn write_exec_pty(
     cols: u16,
     rows: u16,
 ) -> Result<(), ChannelError> {
-    let cap = 4
-        + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
-        + 4
-        + env
-            .iter()
-            .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
-            .sum::<usize>()
-        + 4;
+    let cap = exec_pty_payload_len(argv, env);
     if cap > MAX_PAYLOAD {
         return Err(ChannelError::PayloadTooLarge {
             tag: Tag::ExecPty.as_u8(),
@@ -465,7 +477,7 @@ fn write_exec_pty(
     }
     payload.extend_from_slice(&cols.to_le_bytes());
     payload.extend_from_slice(&rows.to_le_bytes());
-    write_frame(w, Tag::ExecPty.as_u8(), &payload)
+    write_frame(w, Tag::ExecPty, &payload)
 }
 
 /// Serializes and sends a `Stdin` frame from the caller's slice, staged in a wiped buffer:
@@ -478,7 +490,7 @@ fn write_stdin(w: &mut impl Write, bytes: &[u8]) -> Result<(), ChannelError> {
         });
     }
     let payload = Zeroizing::new(bytes.to_vec());
-    write_frame(w, Tag::Stdin.as_u8(), &payload)
+    write_frame(w, Tag::Stdin, &payload)
 }
 
 /// Serializes and sends a `PutFile` request, wiping the secret-bearing payload on every exit.
@@ -491,7 +503,7 @@ pub(crate) fn write_put_file(
     // `Zeroizing` wipes on unwind too, and only the buffer it drops, so `cap` must be exact.
     let mut payload = Zeroizing::new(Vec::with_capacity(cap));
     put_path_blob(&mut payload, path, data);
-    write_frame(w, Tag::PutFile.as_u8(), &payload)
+    write_frame(w, Tag::PutFile, &payload)
 }
 
 /// The exact size of an `Exec` frame body. A function, not an expression in [`write_exec`], so the
@@ -555,7 +567,7 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
         put_blob(&mut payload, key.as_ref().as_bytes());
         put_blob(&mut payload, value.as_ref().as_bytes());
     }
-    write_frame(w, Tag::Exec.as_u8(), &payload)
+    write_frame(w, Tag::Exec, &payload)
 }
 
 pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
@@ -616,7 +628,6 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
         }
         Some(Tag::Stdin) => Ok(Request::Stdin(payload)),
         Some(Tag::Resize) => {
-            let mut body = Body::new(&payload);
             let cols = body.u16()?;
             let rows = body.u16()?;
             body.finish()?;
@@ -628,19 +639,19 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
 
 pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), ChannelError> {
     match resp {
-        Response::Stdout(b) => write_frame(w, Tag::Stdout.as_u8(), b),
-        Response::Stderr(b) => write_frame(w, Tag::Stderr.as_u8(), b),
+        Response::Stdout(b) => write_frame(w, Tag::Stdout, b),
+        Response::Stderr(b) => write_frame(w, Tag::Stderr, b),
         Response::File { path, data } => {
             let cap = path_blob_len(Tag::File, path, data)?;
             let mut payload = Vec::with_capacity(cap);
             put_path_blob(&mut payload, path, data);
-            write_frame(w, Tag::File.as_u8(), &payload)
+            write_frame(w, Tag::File, &payload)
         }
-        Response::Exit { code } => write_frame(w, Tag::Exit.as_u8(), &code.to_le_bytes()),
+        Response::Exit { code } => write_frame(w, Tag::Exit, &code.to_le_bytes()),
         Response::TimedOut { elapsed_ms } => {
-            write_frame(w, Tag::TimedOut.as_u8(), &elapsed_ms.to_le_bytes())
+            write_frame(w, Tag::TimedOut, &elapsed_ms.to_le_bytes())
         }
-        Response::Error(msg) => write_frame(w, Tag::Error.as_u8(), msg.as_bytes()),
+        Response::Error(msg) => write_frame(w, Tag::Error, msg.as_bytes()),
     }
 }
 
@@ -788,13 +799,19 @@ impl<'a> Body<'a> {
     }
 
     fn u32(&mut self) -> Result<u32, ChannelError> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(u32::from_le_bytes(self.fixed()?))
     }
 
     fn u16(&mut self) -> Result<u16, ChannelError> {
-        let bytes = self.take(2)?;
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+        Ok(u16::from_le_bytes(self.fixed()?))
+    }
+
+    /// The next `N` bytes as an array. `take` has already bounded them, so the conversion cannot
+    /// fail; it is written as one rather than indexed so the length is the type's, not a literal.
+    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], ChannelError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| ChannelError::Protocol("frame body ended mid-field (truncated)".into()))
     }
 
     fn blob(&mut self) -> Result<&'a [u8], ChannelError> {
@@ -1093,7 +1110,7 @@ mod tests {
 
     #[test]
     fn tag_discriminants_are_the_wire_numbers() {
-        for (tag, wire) in [
+        let every = [
             (Tag::Exec, 1u8),
             (Tag::Stdout, 2),
             (Tag::Stderr, 3),
@@ -1105,13 +1122,19 @@ mod tests {
             (Tag::ExecPty, 9),
             (Tag::Stdin, 10),
             (Tag::Resize, 11),
-        ] {
+        ];
+        for (tag, wire) in every {
             assert_eq!(tag.as_u8(), wire, "{tag:?} moved on the wire");
             assert_eq!(Tag::from_u8(wire), Some(tag), "{wire} no longer decodes");
         }
         assert_eq!(Tag::from_u8(0), None);
         assert_eq!(Tag::from_u8(12), None);
         assert_eq!(Tag::from_u8(255), None);
+
+        // `from_u8` reads `ALL`, so a tag left out of it decodes as unknown rather than failing to
+        // build. Comparing the two arrays makes their *lengths* part of the comparison, so adding
+        // a tag to either list alone is a compile error here, not a silent hole in the decoder.
+        assert_eq!(every.map(|(tag, _)| tag), Tag::ALL, "ALL is missing a tag");
     }
 
     #[test]
@@ -1359,8 +1382,6 @@ mod tests {
     /// reserved. Read off the encoder: a test with its own arithmetic proves only itself.
     #[test]
     fn the_exec_buffer_is_sized_by_what_the_encoder_writes() {
-        const HEADER: usize = 5;
-
         let argv = [String::from("cat")];
         let stdin = vec![0xCD; 8192];
         let env = [(String::from("K"), "v".repeat(1000))];
@@ -1378,7 +1399,7 @@ mod tests {
         .expect("an in-cap exec encodes");
         assert_eq!(
             exec_payload_len(&argv, &stdin, &env, &artifacts),
-            framed.len() - HEADER,
+            framed.len() - FRAME_HEADER,
             "the reserved capacity must equal the bytes `write_exec` emitted, or the staged \
              secret is reallocated away from the buffer that wipes it"
         );
@@ -1391,7 +1412,38 @@ mod tests {
         write_exec(&mut framed, &none, b"", &no_env, &none, None).expect("an empty exec encodes");
         assert_eq!(
             exec_payload_len(&none, b"", &no_env, &none),
-            framed.len() - HEADER
+            framed.len() - FRAME_HEADER
+        );
+    }
+
+    /// The `ExecPty` twin. Its env values are secrets in a `Zeroizing` buffer for `Exec`'s reason,
+    /// so it needs the same "reserved equals written" property, including the `cols`/`rows` tail
+    /// that the other two encoders have no equivalent of.
+    #[test]
+    fn the_exec_pty_buffer_is_sized_by_what_the_encoder_writes() {
+        let argv = [String::from("/bin/sh"), String::from("-l")];
+        let env = [
+            (String::from("TERM"), String::from("xterm-256color")),
+            (String::from("API_KEY"), "s".repeat(512)),
+        ];
+
+        let mut framed = Vec::new();
+        write_exec_pty(&mut framed, &argv, &env, 120, 40).expect("an in-cap pty exec encodes");
+        assert_eq!(
+            exec_pty_payload_len(&argv, &env),
+            framed.len() - FRAME_HEADER,
+            "the reserved capacity must equal the bytes `write_exec_pty` emitted, or the staged \
+             env values are reallocated away from the buffer that wipes them"
+        );
+
+        // The empty shape: the two counts plus `cols` and `rows` are the floor.
+        let none: [String; 0] = [];
+        let no_env: [(String, String); 0] = [];
+        let mut framed = Vec::new();
+        write_exec_pty(&mut framed, &none, &no_env, 1, 1).expect("an empty pty exec encodes");
+        assert_eq!(
+            exec_pty_payload_len(&none, &no_env),
+            framed.len() - FRAME_HEADER
         );
     }
 
@@ -1399,7 +1451,6 @@ mod tests {
     /// written" property, read off `write_put_file` rather than re-derived.
     #[test]
     fn the_put_file_buffer_is_sized_by_what_the_encoder_writes() {
-        const HEADER: usize = 5;
         let path = "big.bin";
         let data = vec![0xAB; 4096];
 
@@ -1407,7 +1458,7 @@ mod tests {
         write_put_file(&mut framed, path, &data).expect("an in-cap put encodes");
         assert_eq!(
             path_blob_len(Tag::PutFile, path, &data).expect("in cap"),
-            framed.len() - HEADER,
+            framed.len() - FRAME_HEADER,
             "the reserved capacity must equal the bytes `write_put_file` emitted"
         );
     }
