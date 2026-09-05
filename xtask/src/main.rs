@@ -81,6 +81,11 @@ enum Cmd {
         /// program that starts them under `--display`.
         #[arg(long)]
         desktop: bool,
+        /// Build the ML image instead, at `artifacts/rootfs-ml`: the base plus llama.cpp (its
+        /// Vulkan backend), the Venus Vulkan driver, vulkan-tools, and a python3+numpy CPU
+        /// baseline. A scaffold: its package names are unresolved until a Linux build locks them.
+        #[arg(long, conflicts_with = "desktop")]
+        ml: bool,
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
         /// package closure has drifted from the committed lockfile. The reproducibility gate.
         #[arg(long)]
@@ -168,6 +173,7 @@ fn main() -> Result<()> {
         Cmd::SemverCheck { baseline } => semver_check(baseline.as_deref()),
         Cmd::BuildRootfs {
             desktop,
+            ml,
             verify,
             update_lock,
             arch,
@@ -176,16 +182,14 @@ fn main() -> Result<()> {
                 Some(name) => rootfs::GuestArch::parse(name)?,
                 None => rootfs::GuestArch::host()?,
             };
-            rootfs::build_rootfs(
-                if desktop {
-                    &rootfs::DESKTOP
-                } else {
-                    &rootfs::GUEST
-                },
-                verify,
-                update_lock,
-                arch,
-            )
+            let image = if desktop {
+                &rootfs::DESKTOP
+            } else if ml {
+                &rootfs::ML
+            } else {
+                &rootfs::GUEST
+            };
+            rootfs::build_rootfs(image, verify, update_lock, arch)
         }
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchFootprint { count, settle_secs } => {
@@ -1023,6 +1027,25 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// One image per build: `--desktop` and `--ml` refuse each other, and `--ml` alone parses.
+    #[test]
+    fn the_image_flags_refuse_each_other() {
+        use clap::Parser as _;
+        assert!(Cli::try_parse_from(["xtask", "build-rootfs", "--desktop", "--ml"]).is_err());
+        let cli = Cli::try_parse_from(["xtask", "build-rootfs", "--ml"]).expect("parses");
+        assert!(
+            matches!(
+                cli.cmd,
+                Cmd::BuildRootfs {
+                    ml: true,
+                    desktop: false,
+                    ..
+                }
+            ),
+            "--ml alone selects the ML image"
+        );
     }
 
     /// Every workspace the root `cargo deny check` cannot walk still gets an advisory scan.

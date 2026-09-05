@@ -57,6 +57,21 @@ const DESKTOP_PACKAGES: &[&str] = &[
     "font-dejavu",
 ];
 
+/// The ML image's packages: llama.cpp with its Vulkan backend, the Venus Vulkan driver it would
+/// reach the host GPU through, `vulkaninfo`, and a python3+numpy CPU baseline. UNVERIFIED against
+/// Alpine: resolved by the first Linux `--ml --update-lock` build (`llama.cpp` may need `testing`).
+const ML_PACKAGES: &[&str] = &[
+    "python3",
+    "py3-numpy",
+    "mesa-vulkan-virtio",
+    "vulkan-tools",
+    "llama.cpp",
+];
+
+/// The ML image's ceiling: a placeholder above the desktop's measured 291 MiB, replaced by the
+/// first Linux build's real footprint.
+const ML_BUDGET_MIB: u64 = 512;
+
 /// Where the desktop image carries its session program, on the guest's default `PATH`.
 pub(crate) const SESSION_PATH: &str = "/usr/local/bin/bsx-session";
 
@@ -114,7 +129,24 @@ pub(crate) const DESKTOP: ImageSpec = ImageSpec {
     lock_stem: "rootfs-desktop-packages",
 };
 
-/// Every image, for the `vendor` snapshot that has to carry both closures.
+/// The ML image, a scaffold (roadmap 5.3): buildable only on Linux like every image, and its
+/// closure is unresolved, so it stays out of [`IMAGES`] and has no committed lockfile until the
+/// first `cargo xtask build-rootfs --ml --update-lock` on a Linux host pins both.
+pub(crate) const ML: ImageSpec = ImageSpec {
+    name: "rootfs-ml",
+    flags: &["--ml"],
+    repos: &["main", "community"],
+    packages: ML_PACKAGES,
+    programs: &[],
+    // The Venus ICD directory: the json inside is named per-arch and `required` asks
+    // `.exists()`, so the directory is the arch-independent check.
+    required: &["/usr/bin/python3", "/usr/share/vulkan/icd.d"],
+    budget_mib: ML_BUDGET_MIB,
+    lock_stem: "rootfs-ml-packages",
+};
+
+/// Every image with a pinned closure, for the `vendor` snapshot; [`ML`] joins when its lockfile
+/// lands.
 pub(crate) const IMAGES: &[&ImageSpec] = &[&GUEST, &DESKTOP];
 
 /// The architecture of the **guest image**, which is not always the builder's.
@@ -905,6 +937,23 @@ fn set_mode_0755(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The vendor snapshot carries only pinned closures: every [`IMAGES`] member has a committed
+    /// lockfile, which is the one rule keeping the unresolved [`ML`] scaffold out of it.
+    #[test]
+    fn the_vendor_snapshot_carries_only_pinned_closures() {
+        for image in IMAGES {
+            assert!(
+                packages_lock_path(image, GuestArch::X86_64).is_file(),
+                "{} is in IMAGES without a committed x86_64 lockfile",
+                image.name
+            );
+        }
+        assert!(
+            packages_lock_path(&ML, GuestArch::X86_64).ends_with("rootfs-ml-packages.x86_64.lock"),
+            "the ML lock stem spells its own name"
+        );
+    }
 
     /// The guest's arch picks the minirootfs, and each arch gets its own: an image built for one
     /// and seeded from the other's base is a tree that cannot execute its own `/bin/sh`.
