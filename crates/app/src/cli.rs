@@ -39,6 +39,47 @@ pub(crate) fn default_root() -> Option<PathBuf> {
     Some(data.join("bsx/rootfs"))
 }
 
+/// What the menu's status line reports: where `bsx` and the guest root are, if anywhere.
+#[derive(Debug, Default)]
+pub(crate) struct Platform {
+    pub(crate) bsx: Option<PathBuf>,
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) root_present: bool,
+}
+
+/// Stats what the two chains name; nothing here spawns, so a tick cannot hang on it.
+pub(crate) fn probe() -> Platform {
+    let root = default_root();
+    let root_present = root.as_deref().is_some_and(Path::is_dir);
+    Platform {
+        bsx: find_bsx(),
+        root,
+        root_present,
+    }
+}
+
+/// The `bsx` that [`bsx_path`] names, when it would actually spawn: the path itself when it is
+/// an executable file, or the first executable match on `PATH` for a bare name.
+fn find_bsx() -> Option<PathBuf> {
+    let named = bsx_path();
+    if named
+        .parent()
+        .is_some_and(|dir| !dir.as_os_str().is_empty())
+    {
+        return is_executable(&named).then_some(named);
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(&named))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// A file this user could run: regular, with any execute bit set.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file() && std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
 /// The CLI arguments a form's posture becomes, without the verb and the command.
 pub(crate) fn posture_args(form: &Form, name: &str) -> Result<Vec<String>, String> {
     let mut args = vec!["--name".to_string(), name.to_string()];
@@ -329,9 +370,22 @@ fn reap(mut child: std::process::Child) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
+
+    /// Only a regular file with an execute bit counts as a found `bsx`.
+    #[test]
+    fn only_an_executable_file_counts_as_found() {
+        let dir = bsx_test_support::ScratchDir::created("app-probe");
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, b"#!/bin/sh\n").expect("written");
+        std::fs::set_permissions(&plain, PermissionsExt::from_mode(0o644)).expect("chmod");
+        assert!(!is_executable(&plain), "0644 is not runnable");
+        std::fs::set_permissions(&plain, PermissionsExt::from_mode(0o755)).expect("chmod");
+        assert!(is_executable(&plain));
+        assert!(!is_executable(dir.path()), "a directory is not a binary");
+    }
+
+    use std::os::unix::fs::PermissionsExt;
 
     /// A direct terminal is handed the command as arguments, after whatever that terminal needs
     /// first, and the shell is the last word: `wezterm start -- bsx exec --tty NAME -- /bin/sh`.

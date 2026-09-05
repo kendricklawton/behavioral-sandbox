@@ -1,4 +1,4 @@
-//! The three screens: the notebook's list, one run, and the form for a new one.
+//! The screens: the menu at the door, the notebook's list, one run, and the form for a new one.
 //!
 //! - **The posture is the layout.** A row shows what a run could touch before its name is read
 //!   twice; a run's pane spells it out; the form's sentence is the same words the CLI prints,
@@ -52,11 +52,72 @@ fn muted(theme: &iced::Theme) -> iced::Color {
     theme.extended_palette().background.strong.text
 }
 
+/// The door: what to do next, and whether this machine is set up to do it.
+pub(crate) fn menu(app: &App) -> Element<'_, Message> {
+    let running = app.runs.iter().filter(|r| app.is_live(r)).count();
+    let past = app.runs.len() - running;
+    let actions = column![
+        button(text("New run").size(TITLE))
+            .style(button::primary)
+            .width(Fill)
+            .on_press(Message::NewRun),
+        button(text(format!("Sandboxes · {running} running · {past} past")).size(TITLE))
+            .width(Fill)
+            .on_press(Message::List),
+    ]
+    .spacing(10)
+    .width(Length::Fixed(300.0));
+    let mut page = column![
+        text("bsx").font(NAME).size(28),
+        muted_line("sandboxes on this machine".to_string(), BODY),
+        space().height(16),
+        actions,
+        space().height(16),
+        muted_line(bsx_line(app), SMALL),
+        muted_line(root_line(app), SMALL),
+    ]
+    .spacing(6)
+    .align_x(iced::alignment::Horizontal::Center);
+    if let Some(status) = &app.status {
+        page = page.push(space().height(10));
+        page = page.push(text(status).size(BODY));
+    }
+    container(page).center(Fill).into()
+}
+
+/// One muted line of prose, the menu's quiet register.
+fn muted_line<'a>(line: String, size: f32) -> Element<'a, Message> {
+    text(line)
+        .size(size)
+        .style(|t| text::Style {
+            color: Some(muted(t)),
+        })
+        .into()
+}
+
+/// Where the `bsx` this window would spawn is, or what to set when it is nowhere.
+fn bsx_line(app: &App) -> String {
+    match &app.platform.bsx {
+        Some(path) => format!("bsx: {}", path.display()),
+        None => "bsx: not found (set $BSX_CLI, or put bsx beside bsx-app or on PATH)".to_string(),
+    }
+}
+
+/// Where the default guest root is, and whether anything is there yet.
+fn root_line(app: &App) -> String {
+    match (&app.platform.root, app.platform.root_present) {
+        (Some(path), true) => format!("guest root: {}", path.display()),
+        (Some(path), false) => format!("guest root: {} (absent)", path.display()),
+        (None, _) => "guest root: none (set $BSX_GUEST_ROOT)".to_string(),
+    }
+}
+
 /// The notebook: what is running, then what has run.
 pub(crate) fn list(app: &App) -> Element<'_, Message> {
     let live: Vec<&Record> = app.runs.iter().filter(|r| app.is_live(r)).collect();
     let past: Vec<&Record> = app.runs.iter().filter(|r| !app.is_live(r)).collect();
     let header = row![
+        button(text("← menu")).on_press(Message::Menu),
         text("Sandboxes").size(18),
         space().width(Fill),
         button(text("New run")).on_press(Message::NewRun),

@@ -206,6 +206,8 @@ impl std::fmt::Display for RunName {
 /// Which screen the window shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Screen {
+    /// The door: what to do, and whether this machine is set up to do it.
+    Menu,
     /// The notebook: every run, newest first.
     List,
     /// One run's record, by id.
@@ -360,6 +362,8 @@ pub(crate) enum Message {
     Tick,
     Open(RunId),
     Back,
+    Menu,
+    List,
     NewRun,
     Field(Field, String),
     Switch(Switch, bool),
@@ -400,6 +404,8 @@ pub(crate) struct App {
     runs: Vec<Record>,
     /// The names answering on their control sockets as of the last tick.
     live: BTreeSet<RunName>,
+    /// Where `bsx` and the guest root are, as of the last tick: what the menu reports.
+    platform: cli::Platform,
     form: Form,
     /// The last thing worth telling the operator: an error, or what just happened.
     status: Option<String>,
@@ -435,9 +441,10 @@ impl App {
     ) -> Self {
         let mut app = Self {
             store,
-            screen: Screen::List,
+            screen: Screen::Menu,
             runs: Vec::new(),
             live: BTreeSet::new(),
+            platform: cli::Platform::default(),
             form: Form::blank(),
             status: None,
             output: Output::default(),
@@ -465,7 +472,8 @@ impl App {
 
     fn title(&self) -> String {
         match &self.screen {
-            Screen::List => "bsx".to_string(),
+            Screen::Menu => "bsx".to_string(),
+            Screen::List => "bsx › sandboxes".to_string(),
             Screen::New => "bsx › new run".to_string(),
             Screen::Run(id) => format!(
                 "bsx › {}",
@@ -487,6 +495,7 @@ impl App {
     /// Rereads the notebook: the records, which names answer, and marks the open records whose
     /// VM does not answer as gone (the one bookkeeping a listing does, as `bsx ls --all`).
     fn refresh(&mut self) {
+        self.platform = cli::probe();
         self.live = bsx_supervisor::discover::live()
             .map(|found| {
                 found
@@ -566,7 +575,8 @@ impl App {
     fn watches(&self) -> Vec<lease::Watch> {
         let open = match &self.screen {
             Screen::Run(id) => self.record(id).map(RunName::of),
-            _ => None,
+            Screen::Menu => return Vec::new(),
+            Screen::List | Screen::New => None,
         };
         let mut watches = Vec::new();
         if let Some(name) = &open {
@@ -621,9 +631,15 @@ impl App {
                 self.status = None;
                 Task::none()
             }
-            Message::Back => {
+            Message::Back | Message::List => {
                 self.leave();
                 self.set_screen(Screen::List);
+                self.status = None;
+                Task::none()
+            }
+            Message::Menu => {
+                self.leave();
+                self.set_screen(Screen::Menu);
                 self.status = None;
                 Task::none()
             }
@@ -809,6 +825,7 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         match &self.screen {
+            Screen::Menu => screens::menu(self),
             Screen::List => screens::list(self),
             Screen::New => screens::new_run(self, &self.form),
             Screen::Run(id) => screens::run(self, id),
@@ -945,6 +962,7 @@ mod tests {
         ];
         let open_id = RunId::of(&runs[0]);
         let mut app = app_with(runs, &["alpha", "beta", "nodisplay"]);
+        app.screen = Screen::List;
 
         let mut watched: Vec<(RunName, std::time::Duration)> = app
             .watches()
@@ -983,6 +1001,7 @@ mod tests {
     fn a_display_no_longer_watched_is_forgotten() {
         let runs = vec![displayed("alpha", true), displayed("beta", true)];
         let mut app = app_with(runs, &["alpha", "beta"]);
+        app.screen = Screen::List;
         // A real mapping, so what is dropped is the memfd and the region, not a stand-in.
         let frames = {
             use bsx_krun::DisplayBackend as _;
@@ -1010,6 +1029,28 @@ mod tests {
             [&RunName::started("alpha".to_string())],
             "the run that stopped answering is no longer held"
         );
+    }
+
+    /// The window opens on the menu; naming a run on the command line skips straight to it.
+    #[test]
+    fn the_window_opens_on_the_menu_and_a_deep_link_skips_it() {
+        let dir = bsx_test_support::ScratchDir::created("app-boot");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = displayed("opened", false);
+        store.create(&record).expect("created");
+        let sinks = Arc::new(frame::Sinks::open(None, None).expect("sinks"));
+        let app = App::new(store.clone(), None, None, Arc::clone(&sinks), false);
+        assert_eq!(app.screen, Screen::Menu, "nothing asked, so the menu");
+        let app = App::new(store, Some("opened".to_string()), None, sinks, false);
+        assert_eq!(app.screen, Screen::Run(RunId::of(&record)));
+    }
+
+    /// The menu leases nothing: no thumbnail spins up before a screen asks for one.
+    #[test]
+    fn the_menu_leases_no_displays() {
+        let mut app = app_with(vec![displayed("alpha", true)], &["alpha"]);
+        app.screen = Screen::Menu;
+        assert!(app.watches().is_empty(), "the menu asks for no leases");
     }
 
     /// A re-run's form is the record's command and posture again.
