@@ -17,12 +17,14 @@
 //!   a marker line as if the guest wrote it.
 //! - **Retention is a count.** Ended runs beyond `$BSX_RUNS_KEEP` (default 200) are removed,
 //!   oldest first, each time a run is created; a live run is never pruned.
+//! - **An export is one file.** [`RunDir::export_tar`] writes the run directory as a ustar
+//!   archive: a symlink inside is carried as a link entry and never followed.
 
 #![forbid(unsafe_code)]
 
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -764,6 +766,40 @@ impl Store {
         }
         Ok(removed)
     }
+
+    /// Writes the run as `bsx-<id>.tar` into `dest` when `dest` is a directory, or exactly at
+    /// `dest` otherwise, whole (a temporary file, renamed over any earlier export), and returns
+    /// the path written.
+    pub fn export(&self, id: &str, dest: &Path) -> io::Result<PathBuf> {
+        let run = self.dir_of(checked_id(id)?);
+        if !run.path().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no run {id} in the notebook"),
+            ));
+        }
+        let target = if dest.is_dir() {
+            dest.join(format!("bsx-{id}.tar"))
+        } else {
+            dest.to_path_buf()
+        };
+        let tmp = target.with_extension("tar.tmp");
+        let written = std::fs::File::create(&tmp).and_then(|file| {
+            let mut out = io::BufWriter::new(file);
+            run.export_tar(&mut out)?;
+            out.flush()
+        });
+        match written {
+            Ok(()) => {
+                std::fs::rename(&tmp, &target)?;
+                Ok(target)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
 }
 
 /// One run's directory and the files in it.
@@ -844,6 +880,177 @@ impl RunDir {
         files.sort();
         Ok(files)
     }
+
+    /// Writes the run directory as a ustar archive under one `<id>/` top-level entry.
+    ///
+    /// A symlink is carried as a link entry and never opened, a file that changes mid-export
+    /// keeps the size its header pinned, and an entry ustar cannot carry is refused, not bent.
+    pub fn export_tar(&self, out: &mut impl Write) -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let top = self
+            .path
+            .file_name()
+            .ok_or_else(|| io::Error::other("the run directory has no name to archive under"))?
+            .as_bytes()
+            .to_vec();
+        let mut stack = vec![(self.path.clone(), top)];
+        while let Some((dir, at)) = stack.pop() {
+            let meta = std::fs::symlink_metadata(&dir)?;
+            let mut dirname = at.clone();
+            dirname.push(b'/');
+            out.write_all(&tar_header(&dirname, b'5', 0, 0o755, mtime_of(&meta), b"")?)?;
+            let mut children: Vec<std::fs::DirEntry> =
+                std::fs::read_dir(&dir)?.collect::<Result<_, _>>()?;
+            children.sort_by_key(std::fs::DirEntry::file_name);
+            let mut subdirs = Vec::new();
+            for child in children {
+                let path = child.path();
+                let meta = std::fs::symlink_metadata(&path)?;
+                let mut name = at.clone();
+                name.push(b'/');
+                name.extend_from_slice(child.file_name().as_bytes());
+                if meta.file_type().is_symlink() {
+                    let target = std::fs::read_link(&path)?;
+                    let target = target.as_os_str().as_bytes();
+                    if target.len() > 100 {
+                        return Err(io::Error::other(format!(
+                            "{}: the link target does not fit a ustar header",
+                            path.display()
+                        )));
+                    }
+                    out.write_all(&tar_header(&name, b'2', 0, 0o777, mtime_of(&meta), target)?)?;
+                } else if meta.is_dir() {
+                    subdirs.push((path, name));
+                } else if meta.is_file() {
+                    let size = meta.len();
+                    if size > MAX_ENTRY {
+                        return Err(io::Error::other(format!(
+                            "{}: {size} bytes is more than one ustar entry carries",
+                            path.display()
+                        )));
+                    }
+                    let mode = if meta.permissions().mode() & 0o100 == 0 {
+                        0o644
+                    } else {
+                        0o755
+                    };
+                    out.write_all(&tar_header(&name, b'0', size, mode, mtime_of(&meta), b"")?)?;
+                    copy_pinned(&path, &meta, out)?;
+                }
+                // A fifo, socket or device node is left behind: opening one is not a read.
+            }
+            subdirs.reverse();
+            stack.extend(subdirs);
+        }
+        out.write_all(&[0u8; BLOCK])?;
+        out.write_all(&[0u8; BLOCK])?;
+        Ok(())
+    }
+}
+
+/// A ustar header or content block.
+const BLOCK: usize = 512;
+
+/// The largest entry ustar's eleven octal digits carry: 8 GiB - 1.
+const MAX_ENTRY: u64 = 0o77_777_777_777;
+
+/// One ustar header block, checksummed last, refused when no name split fits its fields.
+fn tar_header(
+    path: &[u8],
+    typeflag: u8,
+    size: u64,
+    mode: u32,
+    mtime: u64,
+    link: &[u8],
+) -> io::Result<[u8; BLOCK]> {
+    let mut block = [0u8; BLOCK];
+    let (prefix, name) = split_name(path)?;
+    block[..name.len()].copy_from_slice(name);
+    block[345..345 + prefix.len()].copy_from_slice(prefix);
+    octal(&mut block[100..108], u64::from(mode));
+    octal(&mut block[108..116], 0);
+    octal(&mut block[116..124], 0);
+    octal(&mut block[124..136], size);
+    octal(&mut block[136..148], mtime);
+    block[156] = typeflag;
+    block[157..157 + link.len()].copy_from_slice(link);
+    block[257..263].copy_from_slice(b"ustar\0");
+    block[263..265].copy_from_slice(b"00");
+    octal(&mut block[329..337], 0);
+    octal(&mut block[337..345], 0);
+    block[148..156].fill(b' ');
+    let sum: u32 = block.iter().map(|b| u32::from(*b)).sum();
+    octal(&mut block[148..155], u64::from(sum));
+    block[155] = b' ';
+    Ok(block)
+}
+
+/// The `prefix`/`name` split for `path`: the largest cut both fields hold, or a refusal.
+fn split_name(path: &[u8]) -> io::Result<(&[u8], &[u8])> {
+    if path.len() <= 100 {
+        return Ok((&[], path));
+    }
+    // The last byte of a directory's path is `/`; a cut there would leave an empty name.
+    let splittable = path.len() - usize::from(path.ends_with(b"/"));
+    for i in (0..splittable.min(156)).rev() {
+        if path[i] == b'/' && path.len() - i - 1 <= 100 {
+            return Ok((&path[..i], &path[i + 1..]));
+        }
+    }
+    Err(io::Error::other(format!(
+        "{} does not fit a ustar header's name fields",
+        String::from_utf8_lossy(path)
+    )))
+}
+
+/// Writes `value` as zero-padded octal digits with a trailing NUL, the ustar numeric shape.
+fn octal(field: &mut [u8], value: u64) {
+    let digits = field.len() - 1;
+    for (i, byte) in field[..digits].iter_mut().enumerate() {
+        let shift = 3 * (digits - 1 - i);
+        *byte = b'0' + ((value >> shift) & 0o7) as u8;
+    }
+    field[digits] = 0;
+}
+
+/// The entry's own mtime in whole seconds, or zero when the clock cannot say.
+fn mtime_of(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Copies exactly the size `judged` pinned: growth stays behind, a shrink is zero-filled, and a
+/// path no longer naming the judged inode is refused, never read.
+fn copy_pinned(path: &Path, judged: &std::fs::Metadata, out: &mut impl Write) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if (opened.dev(), opened.ino()) != (judged.dev(), judged.ino()) {
+        return Err(io::Error::other(format!(
+            "{} changed while exporting",
+            path.display()
+        )));
+    }
+    let size = judged.len();
+    let mut pinned = file.take(size);
+    let copied = io::copy(&mut pinned, out)?;
+    write_zeros(out, size - copied)?;
+    write_zeros(out, size.next_multiple_of(BLOCK as u64) - size)?;
+    Ok(())
+}
+
+/// Writes `n` zero bytes.
+fn write_zeros(out: &mut impl Write, mut n: u64) -> io::Result<()> {
+    let zeros = [0u8; BLOCK];
+    while n > 0 {
+        let step = n.min(BLOCK as u64) as usize;
+        out.write_all(&zeros[..step])?;
+        n -= step as u64;
+    }
+    Ok(())
 }
 
 /// A writer that stops at a cap and leaves a `.truncated` sidecar when it did.
@@ -1138,5 +1345,360 @@ mod tests {
         let mut record = Record::begin("named", Verb::Run, vec!["true".into()], posture());
         record.id = id.to_string();
         record
+    }
+
+    /// One archive entry as [`read_tar`] saw it.
+    struct Entry {
+        path: String,
+        kind: u8,
+        size: u64,
+        link: String,
+        content: Vec<u8>,
+    }
+
+    /// Parses ustar: every checksum recomputed, prefix joined, the two-block trailer required.
+    fn read_tar(bytes: &[u8]) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        let mut at = 0;
+        loop {
+            let block = &bytes[at..at + BLOCK];
+            if block.iter().all(|b| *b == 0) {
+                assert!(
+                    bytes[at + BLOCK..at + 2 * BLOCK].iter().all(|b| *b == 0),
+                    "the trailer is two zero blocks"
+                );
+                assert_eq!(bytes.len(), at + 2 * BLOCK, "nothing follows the trailer");
+                return entries;
+            }
+            let sum: u64 = block
+                .iter()
+                .enumerate()
+                .map(|(i, b)| u64::from(if (148..156).contains(&i) { b' ' } else { *b }))
+                .sum();
+            assert_eq!(sum, parse_octal(&block[148..156]), "checksum at {at}");
+            assert_eq!(&block[257..263], b"ustar\0", "magic at {at}");
+            let size = parse_octal(&block[124..136]);
+            let prefix = field_str(&block[345..500]);
+            let name = field_str(&block[..100]);
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let link = field_str(&block[157..257]);
+            let kind = block[156];
+            at += BLOCK;
+            let held = usize::try_from(size).expect("a test-sized entry");
+            let content = bytes[at..at + held].to_vec();
+            at += held.div_ceil(BLOCK) * BLOCK;
+            entries.push(Entry {
+                path,
+                kind,
+                size,
+                link,
+                content,
+            });
+        }
+    }
+
+    fn parse_octal(field: &[u8]) -> u64 {
+        field
+            .iter()
+            .take_while(|b| **b != 0 && **b != b' ')
+            .fold(0, |v, b| v * 8 + u64::from(*b - b'0'))
+    }
+
+    fn field_str(field: &[u8]) -> String {
+        let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+        String::from_utf8_lossy(&field[..end]).into_owned()
+    }
+
+    /// A writer that runs `act` once, on first seeing `needle` in a written block.
+    struct SabotageOnSight<'a> {
+        out: Vec<u8>,
+        needle: &'a [u8],
+        act: Option<Box<dyn FnOnce() + 'a>>,
+    }
+
+    impl Write for SabotageOnSight<'_> {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.windows(self.needle.len()).any(|w| w == self.needle)
+                && let Some(act) = self.act.take()
+            {
+                act();
+            }
+            self.out.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The archive holds the whole run directory under one top entry, depth-first and sorted,
+    /// and an unchanged run exports the same bytes twice.
+    #[test]
+    fn a_run_directory_round_trips_through_its_tar() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-x");
+        let run = store.create(&record).expect("created");
+        std::fs::write(run.stdout(), b"hello\n").expect("stdout");
+        std::fs::create_dir_all(run.results().join("sub")).expect("a results subdir");
+        std::fs::write(run.results().join("sub/out.txt"), b"data").expect("a result");
+        std::fs::create_dir(run.results().join("empty")).expect("an empty dir");
+
+        let mut first = Vec::new();
+        run.export_tar(&mut first).expect("exported");
+        let mut second = Vec::new();
+        run.export_tar(&mut second).expect("exported again");
+        assert_eq!(first, second, "an unchanged run exports the same bytes");
+
+        let entries = read_tar(&first);
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "1756860007123-x/",
+                "1756860007123-x/record",
+                "1756860007123-x/stdout",
+                "1756860007123-x/results/",
+                "1756860007123-x/results/empty/",
+                "1756860007123-x/results/sub/",
+                "1756860007123-x/results/sub/out.txt",
+            ]
+        );
+        let stdout = entries
+            .iter()
+            .find(|e| e.path.ends_with("/stdout"))
+            .expect("stdout");
+        assert_eq!(
+            (stdout.kind, stdout.content.as_slice()),
+            (b'0', b"hello\n".as_slice())
+        );
+        assert_eq!(entries.iter().filter(|e| e.kind == b'5').count(), 4);
+    }
+
+    /// A path longer than the name field is split across prefix and name, and joins back.
+    #[test]
+    fn a_long_path_is_split_across_prefix_and_name() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-long");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-long");
+        let run = store.create(&record).expect("created");
+        let a = "a".repeat(60);
+        let b = "b".repeat(60);
+        std::fs::create_dir_all(run.results().join(&a).join(&b)).expect("deep dirs");
+        std::fs::write(run.results().join(&a).join(&b).join("deep.txt"), b"deep")
+            .expect("a result");
+        let mut tar = Vec::new();
+        run.export_tar(&mut tar).expect("exported");
+        let expected = format!("1756860007123-long/results/{a}/{b}/deep.txt");
+        assert!(expected.len() > 100, "the fixture is long enough to split");
+        let entry = read_tar(&tar)
+            .into_iter()
+            .find(|e| e.path == expected)
+            .expect("the deep entry, joined back");
+        assert_eq!(entry.content, b"deep");
+    }
+
+    /// A symlink is archived as itself: the target string is kept, the target is never opened.
+    #[test]
+    fn a_symlink_is_archived_as_itself_and_never_followed() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-link");
+        std::fs::write(dir.path().join("outside.txt"), b"SENTINEL-DO-NOT-ARCHIVE")
+            .expect("the outside file");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-link");
+        let run = store.create(&record).expect("created");
+        std::os::unix::fs::symlink("../../../outside.txt", run.results().join("leak"))
+            .expect("a symlink");
+        let mut tar = Vec::new();
+        run.export_tar(&mut tar).expect("exported");
+        let entry = read_tar(&tar)
+            .into_iter()
+            .find(|e| e.path.ends_with("/leak"))
+            .expect("the link entry");
+        assert_eq!((entry.kind, entry.size), (b'2', 0));
+        assert_eq!(entry.link, "../../../outside.txt");
+        assert!(
+            !tar.windows(b"SENTINEL".len()).any(|w| w == b"SENTINEL"),
+            "the target's bytes are nowhere in the archive"
+        );
+    }
+
+    /// A file mutated after its header keeps the pinned size, so the next entry still parses.
+    #[test]
+    fn a_file_that_grows_or_shrinks_mid_export_keeps_its_pinned_size() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-pin");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-pin");
+        let run = store.create(&record).expect("created");
+        std::fs::write(run.results().join("grows.txt"), b"12345678").expect("a file");
+        std::fs::write(run.results().join("shrinks.txt"), b"abcdefgh").expect("a file");
+
+        let grows = run.results().join("grows.txt");
+        let mut out = SabotageOnSight {
+            out: Vec::new(),
+            needle: b"grows.txt",
+            act: Some(Box::new(move || {
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&grows)
+                    .expect("append");
+                f.write_all(b"MORE").expect("grown");
+            })),
+        };
+        run.export_tar(&mut out).expect("exported");
+        let entries = read_tar(&out.out);
+        let grown = entries
+            .iter()
+            .find(|e| e.path.ends_with("/grows.txt"))
+            .expect("the grown entry");
+        assert_eq!(
+            (grown.size, grown.content.as_slice()),
+            (8, b"12345678".as_slice()),
+            "what grew past the header stays behind"
+        );
+
+        let shrinks = run.results().join("shrinks.txt");
+        let mut out = SabotageOnSight {
+            out: Vec::new(),
+            needle: b"shrinks.txt",
+            act: Some(Box::new(move || {
+                std::fs::write(&shrinks, b"ab").expect("shrunk");
+            })),
+        };
+        run.export_tar(&mut out).expect("exported");
+        let entries = read_tar(&out.out);
+        let shrunk = entries
+            .iter()
+            .find(|e| e.path.ends_with("/shrinks.txt"))
+            .expect("the shrunk entry");
+        assert_eq!(shrunk.size, 8, "the header's size holds");
+        assert_eq!(&shrunk.content[..2], b"ab");
+        assert_eq!(
+            shrunk.content[2..],
+            [0u8; 6],
+            "the shortfall is zero-filled"
+        );
+    }
+
+    /// A path swapped for a symlink between its header and its read is refused, not followed.
+    #[test]
+    fn an_entry_swapped_mid_export_is_refused() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-swap");
+        let outside = dir.path().join("other.txt");
+        std::fs::write(&outside, b"other").expect("the other file");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-swap");
+        let run = store.create(&record).expect("created");
+        std::fs::write(run.results().join("swap.txt"), b"original").expect("a file");
+        let swap = run.results().join("swap.txt");
+        let mut out = SabotageOnSight {
+            out: Vec::new(),
+            needle: b"swap.txt",
+            act: Some(Box::new(move || {
+                std::fs::remove_file(&swap).expect("removed");
+                std::os::unix::fs::symlink(&outside, &swap).expect("swapped for a symlink");
+            })),
+        };
+        let err = run
+            .export_tar(&mut out)
+            .expect_err("a swapped entry is refused");
+        assert!(err.to_string().contains("changed while exporting"), "{err}");
+        assert!(err.to_string().contains("swap.txt"), "{err}");
+    }
+
+    /// The checksum is the header's bytes with its own field as spaces, written last.
+    #[test]
+    fn every_header_checksum_adds_up() {
+        let block = tar_header(b"x/y", b'0', 5, 0o644, 1_756_860_007, b"").expect("a header");
+        let sum: u64 = block
+            .iter()
+            .enumerate()
+            .map(|(i, b)| u64::from(if (148..156).contains(&i) { b' ' } else { *b }))
+            .sum();
+        assert_eq!(sum, parse_octal(&block[148..156]));
+        assert_eq!(block[156], b'0');
+        assert_eq!(&block[257..263], b"ustar\0");
+    }
+
+    /// A file past what eleven octal digits carry is refused with its path, nothing read.
+    #[test]
+    fn an_entry_too_big_for_ustar_is_refused() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-big");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-big");
+        let run = store.create(&record).expect("created");
+        let f = std::fs::File::create(run.results().join("big.bin")).expect("created");
+        f.set_len(MAX_ENTRY + 1).expect("a sparse 8 GiB length");
+        let mut sink = Vec::new();
+        let err = run.export_tar(&mut sink).expect_err("too big to carry");
+        assert!(err.to_string().contains("big.bin"), "{err}");
+    }
+
+    /// A name no split fits, and a link target past the linkname field, are refused by path.
+    #[test]
+    fn an_unencodable_name_or_linkname_is_refused_with_its_path() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-name");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-name");
+        let run = store.create(&record).expect("created");
+        let long = "n".repeat(120);
+        std::fs::write(run.results().join(&long), b"x").expect("a file");
+        let mut sink = Vec::new();
+        let err = run.export_tar(&mut sink).expect_err("no split fits");
+        assert!(err.to_string().contains("does not fit"), "{err}");
+        assert!(err.to_string().contains(&long), "{err}");
+        std::fs::remove_file(run.results().join(&long)).expect("removed");
+
+        std::os::unix::fs::symlink("t".repeat(150), run.results().join("longlink"))
+            .expect("a symlink");
+        let mut sink = Vec::new();
+        let err = run
+            .export_tar(&mut sink)
+            .expect_err("the target is too long");
+        assert!(err.to_string().contains("link target"), "{err}");
+        assert!(err.to_string().contains("longlink"), "{err}");
+    }
+
+    /// `Store::export` names the file by the id, replaces an earlier export, honours an exact
+    /// path, refuses an unknown id, and leaves no temporary behind.
+    #[test]
+    fn the_store_exports_beside_and_replaces() {
+        let dir = bsx_test_support::ScratchDir::created("record-tar-store");
+        let store = Store::at(dir.path().join("runs")).expect("a store");
+        let record = record_with_id("1756860007123-exp");
+        let run = store.create(&record).expect("created");
+        std::fs::write(run.stdout(), b"out").expect("stdout");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir(&dest).expect("a dest dir");
+
+        let written = store.export(&record.id, &dest).expect("exported");
+        assert_eq!(written, dest.join("bsx-1756860007123-exp.tar"));
+        assert!(!read_tar(&std::fs::read(&written).expect("read")).is_empty());
+        let again = store.export(&record.id, &dest).expect("re-exported");
+        assert_eq!(again, written, "replaced in place");
+
+        let exact = dir.path().join("exact.tar");
+        assert_eq!(
+            store.export(&record.id, &exact).expect("to a file path"),
+            exact
+        );
+        assert!(exact.is_file());
+
+        let missing = store.export("1756860007999-none", &dest);
+        assert!(
+            matches!(missing, Err(e) if e.kind() == io::ErrorKind::NotFound),
+            "an unknown id is not found"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&dest)
+            .expect("listed")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temporary file stays");
     }
 }
