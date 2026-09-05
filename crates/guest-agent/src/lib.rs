@@ -76,6 +76,7 @@ const TIMED_OUT_CODE: i32 = 137;
 
 /// Everything running one command over the channel can fail with, as a typed value.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AgentError {
     /// The channel handshake, request read, or response write failed.
     Channel(ChannelError),
@@ -359,10 +360,12 @@ where
     let status = match waited.map_err(AgentError::Wait)? {
         Waited::Exited(status) => status,
         Waited::TimedOut => {
-            let elapsed_ms = started.elapsed().as_millis() as u32;
+            // Saturating, not `as`: a wrapped duration would report a wrong number as a right
+            // one. The budget is capped well below `u32::MAX` ms, so this is a guard, not a path.
+            let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
             guard.send_response(&Response::TimedOut { elapsed_ms })?;
             tracing::info!(
-                budget_ms = budget.as_millis() as u64,
+                budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX),
                 elapsed_ms,
                 "command timed out and killed"
             );
@@ -396,7 +399,7 @@ where
     tracing::info!(
         exit_code = code,
         artifacts = artifacts.len(),
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "command finished"
     );
     Ok(code)
@@ -611,11 +614,36 @@ impl RunDir {
         Ok(self.path.join(rel))
     }
 
+    /// The canonical form of `path` when it resolves inside this run dir, else `None`.
+    ///
+    /// Both sides are canonicalized, so a symlink is followed *before* the comparison rather than
+    /// after it. A path that cannot be canonicalized at all is not inside.
+    fn inside(&self, path: &Path) -> Option<PathBuf> {
+        let (real, root) = match (path.canonicalize(), self.path.canonicalize()) {
+            (Ok(real), Ok(root)) => (real, root),
+            _ => return None,
+        };
+        real.starts_with(&root).then_some(real)
+    }
+
     /// Writes an injected file, creating parent dirs.
+    ///
+    /// [`resolve`](Self::resolve) stops `..`, not a symlink an earlier exec of a session left in
+    /// the directory, and a write follows one. So where the bytes would actually land is checked
+    /// first: the file itself when something is already there, its parent when nothing is.
     fn put(&self, rel: &str, data: &[u8]) -> Result<(), AgentError> {
         let dest = self.resolve(rel)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(AgentError::WorkDir)?;
+        }
+        // `symlink_metadata`, so a dangling symlink counts as present and is judged as itself.
+        let followed = if dest.symlink_metadata().is_ok() {
+            dest.as_path()
+        } else {
+            dest.parent().unwrap_or(dest.as_path())
+        };
+        if self.inside(followed).is_none() {
+            return Err(AgentError::BadPath(rel.to_string()));
         }
         std::fs::write(&dest, data).map_err(AgentError::WorkDir)
     }
@@ -625,13 +653,10 @@ impl RunDir {
     /// The command may have planted a symlink out of the run dir, so the resolved path is checked.
     fn get(&self, rel: &str) -> Result<Option<Vec<u8>>, AgentError> {
         let src = self.resolve(rel)?;
-        let (real, root) = match (src.canonicalize(), self.path.canonicalize()) {
-            (Ok(real), Ok(root)) => (real, root),
-            _ => return Ok(None), // absent or dangling: no such artifact
-        };
-        if !real.starts_with(&root) {
+        // Absent, dangling, or out of the run dir: no such artifact, which is not a failure.
+        let Some(real) = self.inside(&src) else {
             return Ok(None);
-        }
+        };
         // Before the read: `fs::read` would slurp a multi-GiB file and OOM-kill the agent.
         match std::fs::metadata(&real) {
             Ok(md) if md.len() > bsx_channel::MAX_PAYLOAD as u64 => {
@@ -896,13 +921,54 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicU64, MAX_EXEC_TIMEOUT, budget_from, effective_path, resolve_program, unique_name,
+        AgentError, AtomicU64, MAX_EXEC_TIMEOUT, RunDir, budget_from, effective_path,
+        resolve_program, unique_name,
     };
     use bsx_test_support::ScratchDir;
     use std::num::NonZeroU32;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::time::Duration;
+
+    /// A session outlives one exec, so an earlier command can leave a symlink in the session dir
+    /// and a later `PutFile` follows it. The host asked for a path inside the directory it named,
+    /// so a write that would land elsewhere is refused rather than quietly redirected.
+    #[test]
+    fn a_put_that_would_follow_a_symlink_out_of_the_run_dir_is_refused() {
+        let scratch = ScratchDir::created("agent-put-escape");
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("a directory to escape to");
+        let dir = RunDir::at(&scratch.path().join("session")).expect("a session dir");
+
+        // Through a symlinked *directory*, the shape an earlier `mkdir`-and-link leaves.
+        std::os::unix::fs::symlink(&outside, dir.path().join("escape")).expect("plant a link");
+        let err = dir
+            .put("escape/staged", b"x")
+            .expect_err("a write through a symlinked directory");
+        assert!(matches!(err, AgentError::BadPath(_)), "{err:?}");
+        assert!(!outside.join("staged").exists(), "nothing landed outside");
+
+        // And as the file itself, including a dangling one, which `exists()` would call absent.
+        std::os::unix::fs::symlink(outside.join("file"), dir.path().join("direct"))
+            .expect("plant a dangling link");
+        assert!(
+            matches!(dir.put("direct", b"x"), Err(AgentError::BadPath(_))),
+            "a dangling symlink is judged as itself"
+        );
+        assert!(!outside.join("file").exists(), "nothing landed outside");
+
+        // An ordinary staged file, and one in a subdirectory, still land where they were asked to.
+        dir.put("ok.txt", b"y").expect("a plain put");
+        dir.put("sub/deep.txt", b"z").expect("a nested put");
+        assert_eq!(
+            std::fs::read(dir.path().join("ok.txt")).expect("read"),
+            b"y"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("sub/deep.txt")).expect("read"),
+            b"z"
+        );
+    }
 
     /// Writes an executable no-op at `path`, creating its parent.
     fn tool_at(path: &Path) {
