@@ -188,7 +188,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
 }
 
 /// The corner an action takes; a surface takes [`CARD_RADIUS`].
-const RADIUS: f32 = 6.0;
+const RADIUS: f32 = 0.0;
 const CARD_RADIUS: f32 = 8.0;
 
 /// The one call to action on a screen: solid in the palette's primary, dimmed under the pointer.

@@ -39,7 +39,7 @@ The desktop sandbox image adds graphical and terminal session support for `--dis
 ## Reproducibility and lockfiles
 
 To ensure deterministic builds across hosts, package closures are locked:
-- **Lockfiles**: `xtask/rootfs-packages.x86_64.lock` and `xtask/rootfs-packages.aarch64.lock` record the exact package versions and SHA-256 hashes.
+- **Lockfiles**: `xtask/rootfs-packages.x86_64.lock` records the exact package versions and SHA-256 hashes (with per-architecture lockfiles generated on build).
 - **Verification**: `cargo xtask build-rootfs --verify` builds the image twice, asserting that the staged trees match byte-for-byte and that package versions match the lockfile.
 - **Updating pins**: `cargo xtask build-rootfs --update-lock` re-pins the package closure when Alpine package versions update upstream.
 
