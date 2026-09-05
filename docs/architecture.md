@@ -28,8 +28,8 @@ posture before boot, export, a clear of the ended history behind a confirm, and 
 whose theme pick persists. On macOS ARM64 the tree signs (`cargo xtask sign`) and boots the same
 sandboxes under Hypervisor.framework; its libkrun builds neither the `--sound` nor the guest input
 backend, and the display helper's own window is compiled out there, so a display on macOS is
-viewed in `bsx-app`. What is not: GPU acceleration for the guest (see "What crosses the GPU
-boundary" below for what does and does not).
+viewed in `bsx-app`. `--gpu` offers a guest the 3D path behind `krun_has_feature`; measured
+acceleration exists nowhere yet (see "What crosses the GPU boundary" below).
 
 ### Design rules
 
@@ -161,9 +161,30 @@ guest `ResourceCreate2d` fail, leaves the same five capsets answered.
 Both guest-side results were taken against a throwaway image built by installing Mesa into a copy of
 the guest tree; that image is a spike and is not in the repo.
 
+### What `--gpu` changes, measured on this Mac
+
+Measured 2026-09-05 on one host: Apple M1 (MacBook Air), macOS 26.6.2, Homebrew libkrun 1.19.4,
+virglrenderer 1.3.0, a debug build. The guest is the pinned Alpine 3.24.1 aarch64 minirootfs. One
+host, one date; nothing here is claimed for any other, and the Linux rows are not yet measured.
+
+| What | Command | Result |
+|---|---|---|
+| Venus in the host renderer | `nm -gU $(brew --prefix virglrenderer)/lib/libvirglrenderer.dylib \| grep -c vkr_` | 0, and `otool -L` shows no Vulkan: built without Venus, the same wall the Arch box showed |
+| The feature probe | `cargo xtask setup` | the gpu feature answers yes |
+| Boot with `--gpu`, no display | `bsx run --gpu -- /bin/true` | exit 0: `krun_set_gpu_options2` with Venus in the flags is tolerated by a Venus-less renderer |
+| DRM nodes under `--gpu` | `bsx run --gpu -- sh -c 'ls /dev/dri'` | `card0`, `renderD128` |
+| No DRM nodes without it | `bsx run -- sh -c 'ls /dev/dri'` | `none`: the offer exists exactly when asked for |
+| The refusal, feature absent | `bsx run --gpu` on a gpu-less libkrun | not reproducible here (this libkrun answers the feature); the pinned text is "--gpu needs a libkrun built with the gpu feature, which this one lacks" |
+
+Not measured anywhere yet: any guest workload using the offer (`vulkaninfo`, llama.cpp's Vulkan
+backend, a Venus frame), because no measured host carries a Venus-built virglrenderer, and the ML
+guest image that would run them is a scaffold no host has built.
+
 ### What this settles
 
 GPU acceleration for the guest (phase 5) needs two things this host does not have, and neither is a
 BSX code change: a Mesa build carrying the virgl Gallium driver in the guest image, and a
-virglrenderer built with Venus on the host. Until both exist, `--display` is a 2D scanout and the
-guest's own rendering is software.
+virglrenderer built with Venus on the host. `--gpu` changed the mechanism, not the finding: it asks
+for Venus over `krun_set_gpu_options2` with an SHM window, and both prerequisites still gate any
+acceleration. Until both exist, a display is a 2D scanout and the guest's own rendering is
+software.

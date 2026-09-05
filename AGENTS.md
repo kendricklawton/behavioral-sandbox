@@ -55,7 +55,9 @@ through the app on this panel is measured (4.14). On macOS ARM64 (phase 6) the t
 (`cargo xtask sign`) and boots the same sandboxes under Hypervisor.framework; this platform's
 libkrun builds neither the `--sound` nor the guest input backend, the display helper's own window
 is compiled out (its event loop needs the main thread), so a display there is viewed in `bsx-app`,
-and the guest image build stays on Linux. GPU acceleration for the guest (phase 5) is not written.
+and the guest image build stays on Linux. `--gpu` (phase 5) offers a guest the 3D path (virgl +
+Venus) behind `krun_has_feature`; acceleration is unproven on every measured host, and the ML
+guest image is a scaffold no host has built.
 
 ## Design rules (every change holds to all six)
 
