@@ -71,6 +71,8 @@ enum Cmd {
     Stop(lifecycle::StopArgs),
     /// Show one run's record: what it could touch, what it printed, what it wrote.
     Show(lifecycle::ShowArgs),
+    /// Export one run's record, captured output and results as a tar file.
+    Export(lifecycle::ExportArgs),
     /// Remove one run's record and everything it captured.
     Rm(lifecycle::RmArgs),
     /// Become a virtual machine. Not a verb: the supervisor re-executes this binary with it.
@@ -95,6 +97,7 @@ fn main() -> ExitCode {
         Cmd::Exec(args) => lifecycle::exec(&args),
         Cmd::Stop(args) => lifecycle::stop(&args),
         Cmd::Show(args) => lifecycle::show(&args),
+        Cmd::Export(args) => lifecycle::export(&args),
         Cmd::Rm(args) => lifecycle::rm(&args),
         Cmd::Vmm(args) => vmm::run(&args),
         Cmd::Frames(args) => frames::run(&args),

@@ -19,7 +19,7 @@
 //!   record has no end as gone, which is the one bookkeeping a listing does.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,18 @@ pub(crate) struct ShowArgs {
     /// The run's id, or a VM name.
     #[arg(value_name = "ID|NAME")]
     pub(crate) key: String,
+}
+
+/// Export one run as a tar file.
+#[derive(Args, Debug)]
+pub(crate) struct ExportArgs {
+    /// The run's id, or a VM name (the newest run of that name).
+    #[arg(value_name = "ID|NAME")]
+    pub(crate) key: String,
+    /// Where to write: a directory (which gets `bsx-<ID>.tar` inside), or the file itself.
+    /// Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) to: Option<PathBuf>,
 }
 
 /// Remove one run's record and everything it captured.
@@ -121,6 +133,19 @@ pub(crate) fn show(args: &ShowArgs) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("bsx show: {msg}");
+            ExitCode::from(EXIT_OPERATIONAL)
+        }
+    }
+}
+
+pub(crate) fn export(args: &ExportArgs) -> ExitCode {
+    match export_run(&args.key, args.to.as_deref()) {
+        Ok(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("bsx export: {msg}");
             ExitCode::from(EXIT_OPERATIONAL)
         }
     }
@@ -281,6 +306,17 @@ fn describe(key: &str, out: &mut impl Write) -> Result<(), String> {
         writeln!(out, "result {} {size} bytes", file.display()).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn export_run(key: &str, to: Option<&Path>) -> Result<PathBuf, String> {
+    let store = Store::open().map_err(|e| e.to_string())?;
+    let record = store
+        .find(key)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no run named or numbered {key:?} (`bsx ls --all` lists them)"))?;
+    store
+        .export(&record.id, to.unwrap_or(Path::new(".")))
+        .map_err(|e| e.to_string())
 }
 
 fn forget(key: &str) -> Result<String, String> {
