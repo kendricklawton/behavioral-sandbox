@@ -140,8 +140,8 @@ exercises it end to end, and is not announced before that. The first supported r
 will pin the host↔guest wire framing and the supervisor API; until then everything, including the
 crate names, changes without notice.
 
-The project is **open to outside pull requests**, though this is a poor moment to send one: the
-surface is being rebuilt. A pull request signs its commits off (`git commit -s`). The terms are in
+The project is **open to outside pull requests**, though everything here is pre-`v0.1.0` and
+changes without notice. A pull request signs its commits off (`git commit -s`). The terms are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`AGENTS.md`](AGENTS.md) is the operating manual.
 
 ## License

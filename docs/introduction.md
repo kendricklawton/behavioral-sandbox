@@ -35,6 +35,8 @@ left to describe code nobody can run. They are in git history if you want them.
 
 ## Reading this book
 
+- **[Running a sandbox](./running.md)**, the verbs, the posture flags, what a run leaves behind,
+  and the notebook.
 - **[Architecture](./architecture.md)**, the six design rules with the mechanism serving each, and
   what is in the tree.
 - **[Security](./security.md)**, what is trusted, what counts as a security bug, and how to report

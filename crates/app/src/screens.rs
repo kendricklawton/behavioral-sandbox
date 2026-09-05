@@ -1,8 +1,8 @@
 //! The screens: the menu at the door, the notebook's list, one run, and the form for a new one.
 //!
 //! - **The posture is the layout.** A row shows what a run could touch before its name is read
-//!   twice; a run's pane spells it out; the form's sentence is the same words the CLI prints,
-//!   generated from the fields, so starting is confirming it (rule 3 as a screen).
+//!   twice; a run's pane spells it out; the form's sentence is `Posture::sentence`, generated
+//!   from the fields, so starting is confirming what the record will say (rule 3 as a screen).
 //! - **Nothing here is a verb.** Every button becomes a `bsx` call or a file read; the CLI does
 //!   the same thing with the same words.
 
