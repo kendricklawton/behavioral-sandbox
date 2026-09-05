@@ -12,7 +12,7 @@ Hypervisor.framework on macOS. It is a GUI application with a CLI beside it, bot
 
 ### Where this is, right now
 
-**The tree boots sandboxes on Linux, and nothing is released.** BSX was built on Firecracker with a
+**The tree boots sandboxes, and nothing is released.** BSX was built on Firecracker with a
 host-side eBPF observer; that design was abandoned, and the engine implementing it was deleted
 rather than carried alongside its replacement. The replacement runs on
 [libkrun](https://github.com/containers/libkrun), a library that makes the calling process the
@@ -20,11 +20,18 @@ virtual machine monitor.
 
 What is in the tree: the host/guest wire framing (`bsx-channel`), the in-guest agent
 (`bsx-guest-agent`), the safe libkrun wrapper (`bsx-krun`), the process supervisor
-(`bsx-supervisor`), the `bsx` CLI and its headless verbs, and the guest image build and the gate
-(`xtask`), and the display path: a virtio-gpu scanout landing in host RAM and shown in a window
-the VM's own process opens, with that window's keyboard and pointer going back as two virtio-input
-devices, a second guest image that boots a Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` is the notebook of those runs, with a live run's display and input in the window and a start form that shows the posture before boot. What is not: GPU acceleration for the guest (see
-"What crosses the GPU boundary" below for what does and does not), and macOS.
+(`bsx-supervisor`), the `bsx` CLI and its verbs, the run record and its ustar export
+(`bsx-record`), the guest image build and the gate (`xtask`), and the display path: a virtio-gpu
+scanout landing in host RAM and shown in a window the VM's own process opens, with that window's
+keyboard and pointer going back as two virtio-input devices, a second guest image that boots a
+Wayland compositor on it, and an opt-in virtio-snd card. `bsx-app` is the notebook of those runs:
+a menu, the list, a live run's display and input in the window, a start form that shows the
+posture before boot, export, a clear of the ended history behind a confirm, and a Settings screen
+whose theme pick persists. On macOS ARM64 the tree signs (`cargo xtask sign`) and boots the same
+sandboxes under Hypervisor.framework; its libkrun builds neither the `--sound` nor the guest input
+backend, and the display helper's own window is compiled out there, so a display on macOS is
+viewed in `bsx-app`. What is not: GPU acceleration for the guest (see "What crosses the GPU
+boundary" below for what does and does not).
 
 ### Design rules
 
@@ -49,8 +56,8 @@ verified outcome.
    An AI model is a caller, never a component: it drives the app from outside.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, or a helper that dies,
    should surface as a typed error. A leak here is a stranded VM holding somebody's laptop RAM, not
-   a server you can reboot. This is what the code is written against; it is an aim, not a proven
-   property, and the suite that exercised it went with the engine it tested.
+   a server you can reboot. This is what the code is written against and what the
+   confinement suite exercises; an aim, not a proven property.
 6. **Measure rather than assert.** Boot, memory, and frame timings are reported as nearest-rank
    percentiles with the host and date they were taken on. Where a number cannot be defended, it is
    withdrawn rather than published. libkrun has no snapshot surface, so every boot is a cold boot.
@@ -67,10 +74,10 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-krun` | `crates/krun` | The safe wrapper over libkrun, with the raw declarations private beneath it. The one crate that may use `unsafe`, because the library is C. |
 | `bsx-channel` | `crates/channel` | The host/guest wire protocol. Nearly dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by both ends. |
 | `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the guest image. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
-| `bsx-record` | `crates/record` | The run record: posture, captured output and the guest's `/results`, one directory per run under the local data dir, written by the CLI and read by both binaries. |
+| `bsx-record` | `crates/record` | The run record: posture, captured output and the guest's `/results`, one directory per run under the local data dir, written by the CLI, read by both binaries, and exported as one ustar file. |
 | `bsx-input` | `crates/input` | The guest's keyboard and pointer: device shapes, reports, and the line grammar the replay file and the control socket's `input` session feed. |
-| `bsx` | `crates/cli` | The `bsx` binary. No verbs today: the supervisor they call is not written. Package, binary, and command all share the name. |
-| `bsx-app` | `crates/app` | The GUI application, on iced: the notebook of runs from `bsx-record`, a run's record with its display (leased over the control socket, uploaded to a wgpu texture) and output, a start form, stop, re-run, delete, and a shell in the operator's terminal through `bsx`. |
+| `bsx` | `crates/cli` | The `bsx` binary and its verbs. Package, binary, and command all share the name. |
+| `bsx-app` | `crates/app` | The GUI application, on iced: the notebook of runs from `bsx-record` behind a menu, a run's record with its display (leased over the control socket, uploaded to a wgpu texture) and output, a start form, stop, re-run, delete, export, a clear of the ended history, a persisted theme, and a shell in the operator's terminal through `bsx`. |
 | `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
 

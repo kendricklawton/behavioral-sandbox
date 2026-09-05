@@ -34,9 +34,10 @@ A checkbox there means done **and** evidenced, never merely attempted.
 
 **The tree boots sandboxes, and there is no release.** The Firecracker engine was deleted rather
 than carried alongside its replacement; the libkrun supervisor (phase 2) and the headless verbs
-(phase 3) are in. On a host with `/dev/kvm` and a guest image the tree builds, `bsx run` runs one
-command in a sandbox, `bsx shell` opens a session on a guest pty, `bsx up` starts a sandbox that
-outlives the command, and `bsx ls`, `bsx exec` and `bsx stop` reach one this process did not start.
+(phase 3) are in. On a host whose hypervisor answers (`/dev/kvm` on Linux, Hypervisor.framework
+on macOS ARM64) and a guest image the tree builds, `bsx run` runs one command in a sandbox,
+`bsx shell` opens a session on a guest pty, `bsx up` starts a sandbox that outlives the command,
+and `bsx ls`, `bsx exec` and `bsx stop` reach one this process did not start.
 `--display` gives a guest a virtio-gpu display shown in a window, and the window's keyboard and
 pointer reach the guest as two virtio-input devices (4.2, 4.3), the desktop image boots to a
 terminal in a Wayland session under it (4.5), and `--sound` gives the guest a virtio-snd card
@@ -49,9 +50,12 @@ per run) read (4.12), and `bsx-app` is the notebook of those runs: a menu naming
 guest root it found, the list, one run's record with its display and output, a start form whose
 posture sentence is confirmed before anything boots, stop, re-run, delete, export, clearing the
 ended runs behind an inline confirm, a Settings screen whose theme pick persists beside the runs
-directory, and a shell through `bsx exec --tty` in the operator's terminal (4.13). Frame pacing through the app on this panel is
-measured (4.14). GPU acceleration and macOS (phases 5 and 6) are not written, and macOS is unbuilt and
-untested.
+directory, and a shell through `bsx exec --tty` in the operator's terminal (4.13). Frame pacing
+through the app on this panel is measured (4.14). On macOS ARM64 (phase 6) the tree builds, signs
+(`cargo xtask sign`) and boots the same sandboxes under Hypervisor.framework; this platform's
+libkrun builds neither the `--sound` nor the guest input backend, the display helper's own window
+is compiled out (its event loop needs the main thread), so a display there is viewed in `bsx-app`,
+and the guest image build stays on Linux. GPU acceleration for the guest (phase 5) is not written.
 
 ## Design rules (every change holds to all six)
 
@@ -116,13 +120,15 @@ is visible to the other. `scratch/ROADMAP.md` holds the reasoning.
 
 ## Building from source
 
-`cargo xtask setup` is the first command on a new machine. It checks `/dev/kvm` and the dev
-toolchain; it does not yet probe libkrun, because nothing links it (phase 2.1). libkrun and its
-guest-kernel payload install from the system package manager: they are a C library and a shared
-object holding a Linux kernel, so neither arrives through cargo.
+`cargo xtask setup` is the first command on a new machine. It asks whether a hypervisor answers
+and checks the dev toolchain, and on macOS whether `codesign` and libkrun's kernel payload are
+where the build expects them. libkrun and its guest-kernel payload install from the system package
+manager: they are a C library and a shared object holding a Linux kernel, so neither arrives
+through cargo.
 
 ```console
 sudo pacman -S libkrun libkrunfw          # Arch; Fedora and openSUSE package both too
+brew tap slp/krun && brew install libkrun libkrunfw   # macOS
 rustup target add x86_64-unknown-linux-musl   # the static in-guest agent
 cargo install cargo-deny                      # run by the gate
 ```

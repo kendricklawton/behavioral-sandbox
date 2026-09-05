@@ -9,7 +9,7 @@
 
   <p>
     <a href="https://github.com/kendricklawton/behavioral-sandbox/actions/workflows/ci.yml"><img src="https://github.com/kendricklawton/behavioral-sandbox/actions/workflows/ci.yml/badge.svg" alt="build status" /></a>
-    <img src="https://img.shields.io/badge/status-rebuilding-red.svg" alt="rebuilding" />
+    <img src="https://img.shields.io/badge/status-pre--release-orange.svg" alt="pre-release" />
     <img src="https://img.shields.io/badge/rustc-1.97%2B-green.svg" alt="supported rustc 1.97+" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache-2.0" /></a>
   </p>
@@ -30,19 +30,29 @@ observer. That design was abandoned in favour of a local-first desktop applicati
 and the engine implementing the old one was **deleted** rather than carried alongside a replacement
 that did not exist yet.
 
-What is here, on Linux with `/dev/kvm` and a guest image the tree builds: `bsx run` runs one command
-in a sandbox and exits with its status, `bsx shell` opens a session on a pty inside the guest,
-`bsx up` starts a sandbox that outlives the command that started it, `bsx ls`, `bsx exec` and
-`bsx stop` reach a sandbox this process did not start, `bsx show`, `bsx rm` and `bsx export` read,
-remove and package what a run left behind, and `--display WIDTHxHEIGHT` shows a guest's
-screen in a window whose keyboard and pointer go to the guest, and the desktop image boots to a
-terminal in a Wayland session there, with `--sound` for audio. `bsx-app` is the notebook: every run on the machine, live and past, with its posture, output and results; a live run's display in the window with your keyboard and pointer going in; a form that shows a sandbox's posture before it boots; a menu at the door, a theme choice that persists, a run exported to one tar file, and the ended history cleared behind a confirm. What is not here: GPU acceleration, and macOS. If you want
-the Firecracker engine, it is in git history.
+What is here, on a host whose hypervisor answers (`/dev/kvm` on Linux, Hypervisor.framework on
+macOS ARM64) and a guest image the tree builds: `bsx run` runs one command in a sandbox and exits
+with its status, `bsx shell` opens a session on a pty inside the guest, `bsx up` starts a sandbox
+that outlives the command that started it, `bsx ls`, `bsx exec` and `bsx stop` reach a sandbox this
+process did not start, `bsx show`, `bsx rm` and `bsx export` read, remove and package what a run
+left behind, and `--display WIDTHxHEIGHT` shows a guest's screen in a window whose keyboard and
+pointer go to the guest, and the desktop image boots to a terminal in a Wayland session there, with
+`--sound` for audio. `bsx-app` is the notebook: every run on the machine, live and past, with its
+posture, output and results; a live run's display in the window with your keyboard and pointer
+going in; a form that shows a sandbox's posture before it boots. It opens on a menu naming the
+`bsx` and guest root it found, exports a run to one tar file, clears the ended history behind a
+confirm, and keeps a theme pick across launches.
+
+On macOS ARM64 the same tree builds, signs (`cargo xtask sign`) and boots the same sandboxes under
+Hypervisor.framework. Its libkrun build carries no `--sound` and no guest keyboard or pointer
+backend, and the display helper's own window is compiled out there, so a guest's display on macOS
+is viewed in `bsx-app`. What is not here on any platform: GPU acceleration for the guest. If you
+want the Firecracker engine, it is in git history.
 
 There are no users, no installed base, and no release to install. Nothing below is an invitation to
 depend on this yet.
 
-## What it is, when it exists
+## What it is
 
 A desktop application for running untrusted code, on one person's machine, with a CLI beside it.
 Untrusted code runs inside a virtual machine, so the isolation boundary is the CPU's, enforced by
@@ -75,12 +85,22 @@ because the library is C; the gate asserts that list exactly, so a second one ca
 
 ## Building
 
-`/dev/kvm` must be readable and writable by your user, which usually means membership of the `kvm`
-group. No part of the build needs root.
+On Linux, `/dev/kvm` must be readable and writable by your user, which usually means membership of
+the `kvm` group. On macOS, Hypervisor.framework refuses a process without the
+`com.apple.security.hypervisor` entitlement: `cargo xtask sign` applies it ad hoc, and a signature
+does not reliably outlive the next cargo build, so re-sign after building. No part of the build or
+the run needs root on either platform.
+
+libkrun and its kernel payload install from the system package manager (`pacman -S libkrun
+libkrunfw` on Arch; `brew tap slp/krun && brew install libkrun libkrunfw` on macOS): a C library
+and a shared object holding a Linux kernel, so neither arrives through cargo. The guest image is
+built on Linux, for either architecture (`--arch aarch64`), because what executes during the build
+is `apk.static`, a Linux binary.
 
 ```console
 cargo xtask setup            # what this host can and cannot do
 cargo xtask ci               # the gate: fmt, prose drift, clippy, build, test, docs, deny
+cargo xtask sign             # macOS: re-entitle the built bsx after any other build
 cargo xtask build-rootfs     # the guest image (Alpine + runtimes + the static agent)
 cargo xtask build-rootfs --desktop   # the desktop image (+ a Wayland compositor and a terminal)
 ```
@@ -108,8 +128,10 @@ types. `cargo … -p` takes the package, a path takes the directory.
 ## Verified on
 
 The gate (`cargo xtask ci`: build, tests, lints, docs, dependency audit) runs in CI on Ubuntu 24.04
-`x86_64` on every change and needs no privilege. **No CI lane boots a VM, and neither does anything
-in this tree.** Development happens on Arch Linux `x86_64`.
+`x86_64` on every change and needs no privilege, and a smoke lane runs the wire-protocol fuzz
+targets from their committed seeds. **No CI lane boots a VM.** The suites that boot one run where a
+hypervisor answers, and skip saying so where none does. Development happens on Arch Linux `x86_64`
+and a MacBook Air M1 (macOS ARM64).
 
 ## Releases and scope
 
