@@ -88,10 +88,10 @@ does not reliably outlive the next cargo build, so re-sign after building. No pa
 the run needs root on either platform.
 
 libkrun and its kernel payload install from the system package manager (`pacman -S libkrun
-libkrunfw` on Arch; `brew tap slp/krun && brew install libkrun libkrunfw` on macOS): a C library
-and a shared object holding a Linux kernel, so neither arrives through cargo. The guest image is
-built on Linux, for either architecture (`--arch aarch64`), because what executes during the build
-is `apk.static`, a Linux binary.
+libkrunfw` on Arch; `brew tap slp/krun && brew trust slp/krun && brew install libkrun libkrunfw`
+on macOS): a C library and a shared object holding a Linux kernel, so neither arrives through
+cargo. The guest image is built on Linux, for either architecture (`--arch aarch64`), because
+what executes during the build is `apk.static`, a Linux binary.
 
 ```console
 cargo xtask setup            # what this host can and cannot do

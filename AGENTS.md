@@ -130,7 +130,7 @@ through cargo.
 
 ```console
 sudo pacman -S libkrun libkrunfw          # Arch; Fedora and openSUSE package both too
-brew tap slp/krun && brew install libkrun libkrunfw   # macOS
+brew tap slp/krun && brew trust slp/krun && brew install libkrun libkrunfw   # macOS
 rustup target add x86_64-unknown-linux-musl   # the static in-guest agent
 cargo install cargo-deny                      # run by the gate
 ```
