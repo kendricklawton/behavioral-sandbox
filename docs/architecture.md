@@ -79,6 +79,25 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `bsx-test-support` | `crates/test-support` | Test fixtures: a self-reclaiming scratch dir, a log sink, and the deterministic generator the in-gate fuzz suites use. |
 | `xtask` | `xtask` | Dev orchestration: the gate, the guest image build, the vendor mirror. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
 
+## What a sandbox costs on an M1
+
+Measured 2026-09-05 on one host: MacBook Air M1 (MacBookAir10,1), macOS 26.6.2, libkrun 1.19.4
+and libkrunfw 5.5.0 from Homebrew, a debug build. The guest is the aarch64 Alpine 3.24.1 spike
+tree, not `build-rootfs`'s product. One host, one date; nothing here is claimed for any other.
+
+Every boot is a cold boot, because libkrun has no snapshot surface, so the boot number is the
+whole verb: `bsx run --root <tree> -- /bin/true` from spawn to exit, record written, timed around
+the subprocess. Three warmups discarded, then one hundred runs, nearest-rank percentiles:
+
+| What | Number |
+|---|---|
+| Cold boot, wall clock, n=100 | p50 157 ms, p90 162 ms, p99 169 ms (min 150, max 170) |
+| An idle `bsx up` sandbox, 512 MiB configured | 102 MiB resident, steady over three samples |
+| `bsx-app` idling on the menu | 101 MiB resident |
+
+Resident is what was touched, not what was granted: the helper holds a 512 MiB guest with a
+102 MiB resident set.
+
 ## What crosses the GPU boundary
 
 Measured 2026-09-04 on one host: Intel Core i5-10310U with UHD Graphics (i915), Linux 7.2.2,
