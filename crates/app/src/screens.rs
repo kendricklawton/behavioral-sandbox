@@ -281,6 +281,7 @@ pub(crate) fn run<'a>(app: &'a App, id: &crate::RunId) -> Element<'a, Message> {
     ]
     .spacing(12)
     .align_y(iced::alignment::Vertical::Center);
+    bar = bar.push(button(text("Export")).on_press(Message::Export(crate::RunId::of(record))));
     if live {
         if record.verb == Verb::Up {
             bar = bar

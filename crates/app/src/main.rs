@@ -22,7 +22,7 @@ mod theme;
 mod timer;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -370,6 +370,8 @@ pub(crate) enum Message {
     Shell(RunName),
     Rerun(RunId),
     Delete(RunId),
+    /// Write the run's directory as a tar file where a person can pick it up.
+    Export(RunId),
     Show(Stream),
     /// A run's lease landed and its memfd is mapped.
     Mapped(RunName, Arc<SharedFrames>),
@@ -713,6 +715,20 @@ impl App {
                 self.refresh();
                 Task::none()
             }
+            Message::Export(id) => {
+                let store = self.store.clone();
+                Task::perform(
+                    async move {
+                        let home = std::env::var_os("HOME").map(PathBuf::from);
+                        let dest = export_destination(home, &store);
+                        store
+                            .export(id.as_str(), &dest)
+                            .map(|path| format!("exported to {}", path.display()))
+                            .map_err(|e| format!("exporting {id}: {e}"))
+                    },
+                    Message::Acted,
+                )
+            }
             Message::Show(stream) => {
                 self.output.stream = Some(stream);
                 if let Screen::Run(id) = &self.screen {
@@ -811,6 +827,24 @@ impl App {
     }
 }
 
+/// Where an export goes: `$HOME/Downloads` when it exists, else home, else beside the runs
+/// directory, which exists because the store opened.
+fn export_destination(home: Option<PathBuf>, store: &Store) -> PathBuf {
+    if let Some(home) = home {
+        let downloads = home.join("Downloads");
+        if downloads.is_dir() {
+            return downloads;
+        }
+        if home.is_dir() {
+            return home;
+        }
+    }
+    store
+        .dir()
+        .parent()
+        .map_or_else(|| store.dir().to_path_buf(), Path::to_path_buf)
+}
+
 /// The last `max` bytes of `path` as text, and the file's whole size.
 fn tail_of(path: &std::path::Path, max: u64) -> (String, u64) {
     use std::io::{Read, Seek, SeekFrom};
@@ -843,6 +877,23 @@ pub(crate) fn frame_program(app: &App, name: &RunName) -> Option<frame::Program>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The archive goes where a person looks first: Downloads, else home, else beside
+    /// the store.
+    #[test]
+    fn an_export_lands_in_downloads_then_home_then_beside_the_store() {
+        let dir = bsx_test_support::ScratchDir::created("app-export-dest");
+        let store = Store::at(dir.path().join("data/runs")).expect("a store");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("Downloads")).expect("a downloads dir");
+        assert_eq!(
+            export_destination(Some(home.clone()), &store),
+            home.join("Downloads")
+        );
+        std::fs::remove_dir(home.join("Downloads")).expect("removed");
+        assert_eq!(export_destination(Some(home.clone()), &store), home);
+        assert_eq!(export_destination(None, &store), dir.path().join("data"));
+    }
 
     /// The pane shows the tail of a file and its whole size, and an absent file is empty.
     #[test]
