@@ -676,6 +676,11 @@ fn setup() -> Result<()> {
         );
     }
 
+    check(
+        "libkrun gpu feature (what a `--gpu` guest needs; a probe, never a version)",
+        bsx_krun::has_feature(bsx_krun::KRUN_FEATURE_GPU).unwrap_or(false),
+    );
+
     // Verified, not announced: a row printing the pin while any version satisfied it is hollow.
     println!("\ndev toolchain (for building, not running):");
     check(
