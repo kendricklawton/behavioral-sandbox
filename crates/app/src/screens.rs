@@ -1259,22 +1259,34 @@ fn switch(theme: &iced::Theme, status: toggler::Status) -> toggler::Style {
 /// `every_control_takes_the_windows_own_corner` holds each of them to it.
 const CORNER: f32 = 0.0;
 
-/// The hairline every surface is held by: the palette's own text at a tenth, so it reads as an
-/// edge catching light on any theme.
+/// The hairline every surface is held by: a subtle edge scaled against the palette's text.
 fn hairline(theme: &iced::Theme) -> iced::Color {
     theme
         .extended_palette()
         .background
         .base
         .text
-        .scale_alpha(0.1)
+        .scale_alpha(if theme.extended_palette().is_dark {
+            0.18
+        } else {
+            0.20
+        })
 }
 
-/// A rule between two panes, or across a form: the same hairline a surface is held by, full
-/// length, so nothing on a page is parted by a heavier line than its edges are drawn in.
+/// A rule between two panes, or across a form: a visible divider line.
 fn divider(theme: &iced::Theme) -> rule::Style {
+    let alpha = if theme.extended_palette().is_dark {
+        0.20
+    } else {
+        0.25
+    };
     rule::Style {
-        color: hairline(theme),
+        color: theme
+            .extended_palette()
+            .background
+            .base
+            .text
+            .scale_alpha(alpha),
         radius: 0.0.into(),
         fill_mode: rule::FillMode::Full,
         snap: true,
@@ -3305,5 +3317,22 @@ mod tests {
         assert_eq!(tilde(Some("/Users/y"), path), "/Users/x/Desktop/tree");
         assert_eq!(tilde(None, path), "/Users/x/Desktop/tree");
         assert_eq!(tilde(Some(""), path), "/Users/x/Desktop/tree");
+    }
+
+    /// Dividers have sufficient opacity to be clearly visible against adjacent surfaces.
+    #[test]
+    fn dividers_have_visible_contrast() {
+        let light = crate::theme::theme(crate::theme::Mode::Light, iced::theme::Mode::Light);
+        let dark = crate::theme::theme(crate::theme::Mode::Dark, iced::theme::Mode::Dark);
+        assert!(
+            divider(&light).color.a >= 0.20,
+            "light divider alpha: {}",
+            divider(&light).color.a
+        );
+        assert!(
+            divider(&dark).color.a >= 0.20,
+            "dark divider alpha: {}",
+            divider(&dark).color.a
+        );
     }
 }

@@ -1449,6 +1449,12 @@ impl App {
         }
     }
 
+    /// Sets the status line and keeps `text` as a notice.
+    fn notify(&mut self, text: String) {
+        self.status = Some(text.clone());
+        self.note(text);
+    }
+
     /// What a pick does: previewed while a sheet is up, written down at once when one is not.
     ///
     /// **The band's theme toggle is the reason for the second half.** It is not part of the sheet,
@@ -1459,10 +1465,10 @@ impl App {
             self.status = None;
             return;
         }
-        self.status = match state::save(&self.saved()) {
-            Ok(()) => Some(said),
-            Err(e) => Some(format!("{said} for this window; not saved: {e}")),
-        };
+        match state::save(&self.saved()) {
+            Ok(()) => self.status = Some(said),
+            Err(e) => self.notify(format!("{said} for this window; not saved: {e}")),
+        }
     }
 
     fn saved(&self) -> state::Saved {
@@ -1488,20 +1494,9 @@ impl App {
         self.runs.iter().find(|r| r.name == name.as_str())
     }
 
-    /// Runs `message`, and keeps whatever it decided to say.
-    ///
-    /// **One place, so a message that reports something cannot forget to record it.** Thirty
-    /// handlers assign to the status line and the next one destroys what the last one wrote; this
-    /// notices the change instead of asking each of them to remember.
+    /// Runs `message`.
     fn update(&mut self, message: Message) -> Task<Message> {
-        let said = self.status.clone();
-        let task = self.act(message);
-        if self.status != said
-            && let Some(now) = self.status.clone()
-        {
-            self.note(now);
-        }
-        task
+        self.act(message)
     }
 
     fn act(&mut self, message: Message) -> Task<Message> {
@@ -1537,17 +1532,17 @@ impl App {
                 iced::clipboard::write(self.diagnostics())
             }
             Message::RevealData => {
-                self.status = match cli::reveal(&self.data_dirs()) {
-                    Ok(()) => Some("showed where everything is kept".to_string()),
-                    Err(e) => Some(e),
-                };
+                match cli::reveal(&self.data_dirs()) {
+                    Ok(()) => self.status = Some("showed where everything is kept".to_string()),
+                    Err(e) => self.notify(e),
+                }
                 Task::none()
             }
             Message::ReportProblem => {
-                self.status = match cli::browse(ISSUES) {
-                    Ok(()) => Some(format!("opened {ISSUES}")),
-                    Err(e) => Some(e),
-                };
+                match cli::browse(ISSUES) {
+                    Ok(()) => self.status = Some(format!("opened {ISSUES}")),
+                    Err(e) => self.notify(e),
+                }
                 Task::none()
             }
             Message::SweepEnded => {
@@ -1596,7 +1591,7 @@ impl App {
                     // Written down on release rather than on every move: a drag is one decision,
                     // not sixty.
                     if let Err(e) = state::save(&self.saved()) {
-                        self.status = Some(format!("the panel's width was not saved: {e}"));
+                        self.notify(format!("the panel's width was not saved: {e}"));
                     }
                 }
                 Task::none()
@@ -1612,10 +1607,12 @@ impl App {
             }
             Message::SettingsApplied => {
                 if self.settings.take().is_some() {
-                    self.status = match state::save(&self.saved()) {
-                        Ok(()) => Some("settings applied".to_string()),
-                        Err(e) => Some(format!("applied for this window; not saved: {e}")),
-                    };
+                    match state::save(&self.saved()) {
+                        Ok(()) => self.status = Some("settings applied".to_string()),
+                        Err(e) => {
+                            self.notify(format!("applied for this window; not saved: {e}"));
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -1758,11 +1755,11 @@ impl App {
                             .and_then(|store| store.save(&registry).map_err(|e| e.to_string()));
                         match saved {
                             Ok(()) => {
-                                self.status = Some(format!("added the registry {}", registry.name));
+                                self.notify(format!("added the registry {}", registry.name));
                                 self.refresh();
                                 self.set_screen(Screen::Registries);
                             }
-                            Err(said) => self.status = Some(said),
+                            Err(said) => self.notify(said),
                         }
                     }
                     Err(said) => self.status = Some(said),
@@ -1808,7 +1805,7 @@ impl App {
                 };
                 match made {
                     Ok(()) => {
-                        self.status = Some(format!("made the volume {name}"));
+                        self.notify(format!("made the volume {name}"));
                         self.refresh();
                         self.set_screen(Screen::Volumes);
                     }
@@ -1823,11 +1820,12 @@ impl App {
                 Task::none()
             }
             Message::ForgetRegistry(name) => {
-                match self.registries_store.as_ref().map(|s| s.remove(&name)) {
-                    Some(Ok(())) => self.status = Some(format!("removed the registry {name}")),
-                    Some(Err(e)) => self.status = Some(e.to_string()),
-                    None => self.status = Some("there is nowhere to keep registries".to_string()),
-                }
+                let said = match self.registries_store.as_ref().map(|s| s.remove(&name)) {
+                    Some(Ok(())) => format!("removed the registry {name}"),
+                    Some(Err(e)) => e.to_string(),
+                    None => "there is nowhere to keep registries".to_string(),
+                };
+                self.notify(said);
                 self.refresh();
                 Task::none()
             }
@@ -1840,7 +1838,7 @@ impl App {
                     // The list is a tick old, so a snapshot removed at a terminal since then is
                     // gone rather than broken: say so and show what is actually there.
                     None => {
-                        self.status = Some(format!("the snapshot {name} is no longer here"));
+                        self.notify(format!("the snapshot {name} is no longer here"));
                         self.refresh();
                     }
                 }
@@ -1855,19 +1853,20 @@ impl App {
                 }
                 match cli::save_snapshot(&cli::boxdesk_path(), &self.form, &name) {
                     Ok(said) => {
-                        self.status = Some(said);
+                        self.notify(said);
                         self.refresh();
                     }
-                    Err(said) => self.status = Some(said),
+                    Err(said) => self.notify(said),
                 }
                 Task::none()
             }
             Message::ForgetSnapshot(name) => {
-                match self.snapshots_store.as_ref().map(|s| s.remove(&name)) {
-                    Some(Ok(())) => self.status = Some(format!("removed the snapshot {name}")),
-                    Some(Err(e)) => self.status = Some(e.to_string()),
-                    None => self.status = Some("there is nowhere to keep snapshots".to_string()),
-                }
+                let said = match self.snapshots_store.as_ref().map(|s| s.remove(&name)) {
+                    Some(Ok(())) => format!("removed the snapshot {name}"),
+                    Some(Err(e)) => e.to_string(),
+                    None => "there is nowhere to keep snapshots".to_string(),
+                };
+                self.notify(said);
                 self.refresh();
                 Task::none()
             }
@@ -1879,7 +1878,7 @@ impl App {
                 )
             }
             Message::Started(Ok(name)) => {
-                self.status = Some(format!("started {name}"));
+                self.notify(format!("started {name}"));
                 self.refresh();
                 match self.runs.iter().find(|r| r.name == name.as_str()) {
                     Some(record) => {
@@ -1891,11 +1890,11 @@ impl App {
                 Task::none()
             }
             Message::Started(Err(why)) | Message::Acted(Err(why)) => {
-                self.status = Some(why);
+                self.notify(why);
                 Task::none()
             }
             Message::Acted(Ok(what)) => {
-                self.status = Some(what);
+                self.notify(what);
                 self.refresh();
                 Task::none()
             }
@@ -1967,22 +1966,24 @@ impl App {
                     None => return Task::none(),
                     Some(Confirm::One(id)) => {
                         self.leave();
-                        self.status = match self.store.remove(id.as_str()) {
-                            Ok(()) => Some(format!("removed {id}")),
-                            Err(e) => Some(format!("removing {id}: {e}")),
+                        let said = match self.store.remove(id.as_str()) {
+                            Ok(()) => format!("removed {id}"),
+                            Err(e) => format!("removing {id}: {e}"),
                         };
+                        self.notify(said);
                         self.set_screen(Screen::List);
                     }
                     // `force`, because the question has already been asked: the card said what
                     // would go, and this is the answer.
                     Some(Confirm::Volume(name)) => {
-                        self.status = match self.volumes_store.as_ref() {
-                            None => Some("there is nowhere to keep volumes".to_string()),
+                        let said = match self.volumes_store.as_ref() {
+                            None => "there is nowhere to keep volumes".to_string(),
                             Some(store) => match store.remove(&name, true) {
-                                Ok(()) => Some(format!("removed the volume {name}")),
-                                Err(e) => Some(format!("removing {name}: {e}")),
+                                Ok(()) => format!("removed the volume {name}"),
+                                Err(e) => format!("removing {name}: {e}"),
                             },
                         };
+                        self.notify(said);
                         self.set_screen(Screen::Volumes);
                     }
                     Some(Confirm::Swept(_)) => {
@@ -1999,12 +2000,13 @@ impl App {
                                 gone += 1;
                             }
                         }
-                        self.status = Some(format!("swept {}", ended_runs(gone)));
+                        self.notify(format!("swept {}", ended_runs(gone)));
                         self.set_screen(Screen::List);
                     }
                     Some(Confirm::Everything) => {
                         self.leave();
-                        self.status = Some(self.wipe());
+                        let said = self.wipe();
+                        self.notify(said);
                         self.set_screen(Screen::List);
                     }
                     Some(Confirm::Selected(ids)) => {
@@ -2022,10 +2024,11 @@ impl App {
                                 }
                             }
                         }
-                        self.status = Some(match failed {
+                        let said = match failed {
                             Some(why) => format!("removed {}, then {why}", ended_runs(removed)),
                             None => format!("removed {}", ended_runs(removed)),
-                        });
+                        };
+                        self.notify(said);
                     }
                 }
                 self.refresh();
@@ -2104,7 +2107,7 @@ impl App {
                 Task::none()
             }
             Message::Note(what) => {
-                self.status = Some(what);
+                self.notify(what);
                 Task::none()
             }
             Message::Ended(name, why) => {
@@ -2753,28 +2756,41 @@ mod tests {
         assert_eq!(app.runs.len(), 1, "nothing went on the press");
     }
 
-    /// **The status line holds one thing and the next thing destroys it.** Every one of them is
-    /// kept, newest first, which is the whole reason the panel exists: a run that ended while you
-    /// were reading another page used to be a sentence you missed.
+    /// Theme and local UI changes only update the status line; they are not kept as notices.
     #[test]
-    fn everything_the_window_says_is_kept_newest_first() {
+    fn theme_changes_are_not_recorded_as_notices() {
         let mut app = app_with(Vec::new(), &[]);
         let _ = app.update(Message::SetTheme(theme::Mode::Dark));
-        let _ = app.update(Message::SetTheme(theme::Mode::Light));
+        let _ = app.update(Message::SetScale(Scale(125)));
+        let _ = app.update(Message::CopyDiagnostics);
+        assert!(
+            app.notices().is_empty(),
+            "local UI preferences are not notices"
+        );
+        assert_eq!(app.unread(), 0, "local UI preferences do not mark the bell");
+
+        let _ = app.update(Message::Started(Ok(RunName::started("demo".to_string()))));
+        assert_eq!(app.notices().len(), 1, "sandbox start is kept as a notice");
+        assert_eq!(app.notices()[0].text, "started demo");
+        assert_eq!(app.unread(), 1, "and marks the bell");
+    }
+
+    /// Every notice is kept, newest first, and opening the panel marks them read.
+    #[test]
+    fn notices_are_kept_newest_first() {
+        let mut app = app_with(Vec::new(), &[]);
+        let _ = app.update(Message::Note("first notice".to_string()));
+        let _ = app.update(Message::Note("second notice".to_string()));
 
         assert_eq!(app.notices().len(), 2, "both were kept");
-        assert!(
-            app.notices()[0].text.contains("Light"),
-            "newest first: {:?}",
-            app.notices()[0].text
-        );
+        assert_eq!(app.notices()[0].text, "second notice", "newest first");
         assert_eq!(app.unread(), 2, "and the bell says so");
 
         // Opening the panel reads them; the count does not come back.
         let _ = app.update(Message::Notifications);
         assert!(app.notices_open());
         assert_eq!(app.unread(), 0);
-        let _ = app.update(Message::SetTheme(theme::Mode::Dark));
+        let _ = app.update(Message::Note("third notice".to_string()));
         assert_eq!(
             app.unread(),
             0,
